@@ -8,19 +8,23 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
-  Button,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
-  View
+  View,
+  type ViewStyle
 } from 'react-native';
 
 import type { MacBridgeApiClient } from '../api/client';
 import type { BridgeWsEvent, Thread, ThreadMessage, ThreadSummary } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
+import { ActionButton, Panel, ScreenSurface } from '../ui/primitives';
+import { fonts, palette, radii, spacing } from '../ui/theme';
 
 interface ThreadsScreenProps {
   api: MacBridgeApiClient;
@@ -123,115 +127,163 @@ export function ThreadsScreen({ api, ws }: ThreadsScreenProps) {
     }
   }, [api, replyDraft, selectedThreadId]);
 
-  const selectedThreadDetails = useMemo(() => {
+  const heroMeta = useMemo(() => {
     if (!selectedThread) {
-      return 'Tap a thread to load details.';
+      return `${String(threads.length)} threads available`;
     }
 
-    const lines = [
-      selectedThread.title,
-      `Status: ${selectedThread.status}${selectedThread.lastRunDurationMs ? ` (${String(selectedThread.lastRunDurationMs)}ms)` : ''}`
-    ];
-
-    if (selectedThread.lastError) {
-      lines.push(`Last error: ${selectedThread.lastError}`);
-    }
-
-    lines.push('');
-
-    for (const message of selectedThread.messages) {
-      lines.push(`[${message.role}] ${message.content || '(streaming...)'}`);
-      lines.push('');
-    }
-
-    if (runEvents.length > 0) {
-      lines.push('Run events:');
-      for (const event of runEvents) {
-        lines.push(event);
-      }
-    }
-
-    return lines.join('\n');
-  }, [runEvents, selectedThread]);
+    return `Focused on ${selectedThread.title}`;
+  }, [selectedThread, threads.length]);
 
   return (
-    <View style={styles.container}>
-      <View style={styles.row}>
-        <TextInput
-          value={draft}
-          onChangeText={setDraft}
-          placeholder="New thread prompt"
-          style={styles.input}
-          autoCapitalize="none"
-        />
-        <Button
-          title={creating ? 'Creating...' : 'Create'}
-          onPress={() => void createThread()}
-          disabled={creating || !draft.trim()}
-        />
-      </View>
+    <ScreenSurface>
+      <KeyboardAvoidingView
+        style={styles.container}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View style={styles.hero}>
+          <Text style={styles.heroLabel}>THREAD STUDIO</Text>
+          <Text style={styles.heroTitle}>Codex Conversations</Text>
+          <Text style={styles.heroMeta}>{heroMeta}</Text>
+        </View>
 
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Threads</Text>
-        <Button title="Refresh" onPress={() => void loadThreads()} />
-      </View>
+        <Panel>
+          <Text style={styles.blockTitle}>Start New Thread</Text>
+          <TextInput
+            value={draft}
+            onChangeText={setDraft}
+            placeholder="Describe what you want Codex to do"
+            placeholderTextColor={palette.inkMuted}
+            style={styles.composeInput}
+            multiline
+            autoCapitalize="sentences"
+          />
+          <View style={styles.rowEnd}>
+            <ActionButton
+              label={creating ? 'Creating...' : 'Create Thread'}
+              onPress={() => void createThread()}
+              disabled={creating || !draft.trim()}
+            />
+          </View>
+        </Panel>
 
-      {loading ? (
-        <ActivityIndicator />
-      ) : (
-        <FlatList
-          data={threads}
-          keyExtractor={(item: ThreadSummary) => item.id}
-          contentContainerStyle={threads.length === 0 ? styles.emptyList : undefined}
-          ListEmptyComponent={<Text style={styles.subtle}>No threads yet.</Text>}
-          renderItem={({ item }: { item: ThreadSummary }) => (
-            <Pressable
-              style={[
-                styles.card,
-                item.id === selectedThreadId ? styles.selectedCard : undefined
-              ]}
-              onPress={() => void openThread(item.id)}
-            >
-              <Text style={styles.cardTitle}>{item.title}</Text>
-              <Text style={[styles.subtle, statusTextStyle(item.status)]}>
-                Status: {item.status}
-              </Text>
-              <Text numberOfLines={2} style={styles.preview}>
-                {item.lastMessagePreview || 'No messages'}
-              </Text>
-              {item.sourceKind || item.cwd ? (
-                <Text numberOfLines={1} style={styles.subtle}>
-                  {item.sourceKind ?? 'unknown source'}{item.cwd ? ` • ${item.cwd}` : ''}
-                </Text>
-              ) : null}
-            </Pressable>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Recent Threads</Text>
+          <ActionButton
+            label="Refresh"
+            variant="ghost"
+            compact
+            onPress={() => void loadThreads()}
+          />
+        </View>
+
+        <Panel style={styles.listPanel}>
+          {loading ? (
+            <View style={styles.loaderWrap}>
+              <ActivityIndicator color={palette.accent} />
+            </View>
+          ) : (
+            <FlatList
+              data={threads}
+              keyExtractor={(item: ThreadSummary) => item.id}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={threads.length === 0 ? styles.emptyList : styles.listContent}
+              ListEmptyComponent={<Text style={styles.emptyText}>No threads yet.</Text>}
+              renderItem={({ item }: { item: ThreadSummary }) => (
+                <Pressable
+                  onPress={() => void openThread(item.id)}
+                  style={({ pressed }) => [
+                    styles.threadCard,
+                    item.id === selectedThreadId ? styles.threadCardSelected : undefined,
+                    pressed ? styles.threadCardPressed : undefined
+                  ]}
+                >
+                  <View style={styles.threadHeader}>
+                    <Text numberOfLines={1} style={styles.threadTitle}>
+                      {item.title}
+                    </Text>
+                    <View style={[styles.statusDot, statusDotStyle(item.status)]} />
+                  </View>
+                  <Text numberOfLines={2} style={styles.threadPreview}>
+                    {item.lastMessagePreview || 'No messages yet'}
+                  </Text>
+                  <Text style={styles.threadMeta}>{formatThreadMeta(item)}</Text>
+                </Pressable>
+              )}
+            />
           )}
-        />
-      )}
+        </Panel>
 
-      <Text style={styles.sectionTitle}>Selected Thread</Text>
-      <ScrollView style={styles.detailsBox} contentContainerStyle={styles.detailsContent}>
-        <Text style={styles.detailsText}>{selectedThreadDetails}</Text>
-      </ScrollView>
+        <Panel style={styles.focusPanel}>
+          <View style={styles.focusHeader}>
+            <Text numberOfLines={1} style={styles.focusTitle}>
+              {selectedThread?.title ?? 'Select a thread'}
+            </Text>
+            <View style={[styles.statusPill, statusPillStyle(selectedThread?.status ?? 'idle')]}>
+              <Text style={styles.statusPillText}>{selectedThread?.status ?? 'idle'}</Text>
+            </View>
+          </View>
 
-      <View style={styles.row}>
-        <TextInput
-          value={replyDraft}
-          onChangeText={setReplyDraft}
-          placeholder="Reply to selected thread"
-          style={styles.input}
-          autoCapitalize="none"
-          editable={selectedThreadId !== null}
-        />
-        <Button
-          title={sending ? 'Sending...' : 'Send'}
-          onPress={() => void sendMessage()}
-          disabled={sending || !selectedThreadId || !replyDraft.trim()}
-        />
-      </View>
+          <ScrollView
+            style={styles.messagesBox}
+            contentContainerStyle={styles.messagesContent}
+            nestedScrollEnabled
+          >
+            {selectedThread ? (
+              selectedThread.messages.length > 0 ? (
+                selectedThread.messages.map((message) => (
+                  <View
+                    key={message.id}
+                    style={[styles.messageBubble, messageRoleBubbleStyle(message.role)]}
+                  >
+                    <Text style={[styles.messageRole, messageRoleTextStyle(message.role)]}>
+                      {message.role}
+                    </Text>
+                    <Text style={styles.messageText}>{message.content || '(streaming...)'}</Text>
+                    <Text style={styles.messageTime}>{formatTime(message.createdAt)}</Text>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.placeholderText}>No messages in this thread yet.</Text>
+              )
+            ) : (
+              <Text style={styles.placeholderText}>Tap a thread to inspect and continue the conversation.</Text>
+            )}
+          </ScrollView>
 
-      {error ? <Text style={styles.error}>Error: {error}</Text> : null}
-    </View>
+          {runEvents.length > 0 ? (
+            <View style={styles.eventsPanel}>
+              <Text style={styles.eventsTitle}>Recent Run Events</Text>
+              {runEvents.slice(0, 5).map((event) => (
+                <Text key={event} numberOfLines={1} style={styles.eventLine}>
+                  {event}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+
+          <View style={styles.replyRow}>
+            <TextInput
+              value={replyDraft}
+              onChangeText={setReplyDraft}
+              placeholder="Reply to selected thread"
+              placeholderTextColor={palette.inkMuted}
+              style={styles.replyInput}
+              autoCapitalize="sentences"
+              multiline
+              editable={selectedThreadId !== null}
+            />
+            <ActionButton
+              label={sending ? 'Sending...' : 'Send'}
+              onPress={() => void sendMessage()}
+              disabled={sending || !selectedThreadId || !replyDraft.trim()}
+            />
+          </View>
+        </Panel>
+
+        {error ? <Text style={styles.error}>Error: {error}</Text> : null}
+      </KeyboardAvoidingView>
+    </ScreenSurface>
   );
 }
 
@@ -287,9 +339,7 @@ function applyWsEvent(
         ...previous,
         messages: upsertThreadMessage(previous.messages, message),
         updatedAt: message.createdAt,
-        lastMessagePreview: message.content.trim()
-          ? message.content
-          : previous.lastMessagePreview
+        lastMessagePreview: message.content.trim() ? message.content : previous.lastMessagePreview
       };
     });
 
@@ -315,9 +365,7 @@ function applyWsEvent(
         return previous;
       }
 
-      const existing = previous.messages.find(
-        (message) => message.id === event.payload.messageId
-      );
+      const existing = previous.messages.find((message) => message.id === event.payload.messageId);
       const streamedMessage: ThreadMessage = {
         id: event.payload.messageId,
         role: 'assistant',
@@ -405,42 +453,148 @@ function threadToSummary(thread: Thread): ThreadSummary {
   };
 }
 
-function statusTextStyle(status: ThreadSummary['status']): {
-  color: string;
-} {
+function formatThreadMeta(item: ThreadSummary): string {
+  const source = item.sourceKind ?? 'unknown source';
+  const when = formatTime(item.updatedAt);
+  return `${source} • updated ${when}`;
+}
+
+function formatTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+
+  return parsed.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function statusDotStyle(status: ThreadSummary['status']) {
   if (status === 'running') {
-    return { color: '#0369a1' };
+    return { backgroundColor: palette.info };
   }
 
   if (status === 'complete') {
-    return { color: '#166534' };
+    return { backgroundColor: palette.positive };
   }
 
   if (status === 'error') {
-    return { color: '#b91c1c' };
+    return { backgroundColor: palette.danger };
   }
 
-  return { color: '#64748b' };
+  return { backgroundColor: palette.warning };
+}
+
+function statusPillStyle(status: ThreadSummary['status']) {
+  if (status === 'running') {
+    return {
+      backgroundColor: '#DDEBFA'
+    };
+  }
+
+  if (status === 'complete') {
+    return {
+      backgroundColor: '#DCEFE5'
+    };
+  }
+
+  if (status === 'error') {
+    return {
+      backgroundColor: '#F9DEDA'
+    };
+  }
+
+  return {
+    backgroundColor: '#F3E7D6'
+  };
+}
+
+function messageRoleBubbleStyle(role: ThreadMessage['role']): ViewStyle {
+  if (role === 'user') {
+    return {
+      alignSelf: 'flex-end',
+      backgroundColor: palette.accentSoft,
+      borderColor: '#E6BFA8'
+    };
+  }
+
+  if (role === 'assistant') {
+    return {
+      alignSelf: 'flex-start',
+      backgroundColor: palette.panelMuted,
+      borderColor: palette.border
+    };
+  }
+
+  return {
+    alignSelf: 'center',
+    backgroundColor: '#E2EAF2',
+    borderColor: '#CDD7E3'
+  };
+}
+
+function messageRoleTextStyle(role: ThreadMessage['role']) {
+  if (role === 'user') {
+    return { color: '#7F2F17' };
+  }
+
+  if (role === 'assistant') {
+    return { color: '#51483D' };
+  }
+
+  return { color: '#274A70' };
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 16,
-    gap: 12
+    gap: spacing.sm,
+    paddingTop: spacing.sm
   },
-  row: {
-    flexDirection: 'row',
-    gap: 8,
-    alignItems: 'center'
+  hero: {
+    marginBottom: spacing.xs
   },
-  input: {
-    flex: 1,
+  heroLabel: {
+    fontFamily: fonts.heading,
+    fontSize: 12,
+    letterSpacing: 1.3,
+    color: palette.accent
+  },
+  heroTitle: {
+    marginTop: 2,
+    fontFamily: fonts.heading,
+    fontSize: 28,
+    color: palette.ink
+  },
+  heroMeta: {
+    marginTop: 2,
+    fontFamily: fonts.body,
+    color: palette.inkMuted
+  },
+  blockTitle: {
+    fontFamily: fonts.heading,
+    fontSize: 16,
+    color: palette.ink,
+    marginBottom: spacing.sm
+  },
+  composeInput: {
+    minHeight: 72,
     borderWidth: 1,
-    borderColor: '#cbd5e1',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    backgroundColor: palette.canvas,
+    fontFamily: fonts.body,
+    color: palette.ink,
+    textAlignVertical: 'top'
+  },
+  rowEnd: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    justifyContent: 'flex-end'
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -448,51 +602,184 @@ const styles = StyleSheet.create({
     alignItems: 'center'
   },
   sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600'
+    fontFamily: fonts.heading,
+    fontSize: 17,
+    color: palette.ink
   },
-  card: {
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 10,
-    marginBottom: 8,
-    backgroundColor: '#f8fafc'
+  listPanel: {
+    minHeight: 146,
+    maxHeight: 210,
+    padding: spacing.sm
   },
-  selectedCard: {
-    borderColor: '#0f172a',
-    borderWidth: 1.5
+  loaderWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center'
   },
-  cardTitle: {
-    fontWeight: '600',
-    marginBottom: 4
-  },
-  preview: {
-    marginTop: 4
-  },
-  detailsBox: {
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 8,
-    backgroundColor: '#f8fafc',
-    minHeight: 140,
-    maxHeight: 210
-  },
-  detailsContent: {
-    padding: 10
-  },
-  detailsText: {
-    color: '#0f172a'
-  },
-  subtle: {
-    color: '#64748b'
+  listContent: {
+    gap: spacing.xs,
+    paddingBottom: 2
   },
   emptyList: {
     flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center'
   },
+  emptyText: {
+    fontFamily: fonts.body,
+    color: palette.inkMuted
+  },
+  threadCard: {
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    padding: spacing.sm,
+    backgroundColor: palette.canvas
+  },
+  threadCardSelected: {
+    borderColor: palette.accent,
+    backgroundColor: '#FBEDE5'
+  },
+  threadCardPressed: {
+    transform: [{ scale: 0.995 }],
+    opacity: 0.95
+  },
+  threadHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm
+  },
+  threadTitle: {
+    flex: 1,
+    fontFamily: fonts.heading,
+    color: palette.ink,
+    fontSize: 15
+  },
+  statusDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999
+  },
+  threadPreview: {
+    marginTop: 5,
+    color: palette.ink,
+    fontFamily: fonts.body
+  },
+  threadMeta: {
+    marginTop: 6,
+    color: palette.inkMuted,
+    fontFamily: fonts.body,
+    fontSize: 12
+  },
+  focusPanel: {
+    flex: 1,
+    padding: spacing.sm,
+    gap: spacing.sm
+  },
+  focusHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm
+  },
+  focusTitle: {
+    flex: 1,
+    fontFamily: fonts.heading,
+    color: palette.ink,
+    fontSize: 16
+  },
+  statusPill: {
+    borderRadius: 999,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4
+  },
+  statusPillText: {
+    fontFamily: fonts.heading,
+    fontSize: 12,
+    textTransform: 'uppercase',
+    color: palette.ink
+  },
+  messagesBox: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    backgroundColor: palette.canvas
+  },
+  messagesContent: {
+    padding: spacing.sm,
+    gap: spacing.sm
+  },
+  messageBubble: {
+    width: '90%',
+    borderWidth: 1,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    gap: 4
+  },
+  messageRole: {
+    fontFamily: fonts.heading,
+    fontSize: 11,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6
+  },
+  messageText: {
+    fontFamily: fonts.body,
+    color: palette.ink,
+    fontSize: 14,
+    lineHeight: 19
+  },
+  messageTime: {
+    fontFamily: fonts.body,
+    color: palette.inkMuted,
+    fontSize: 11,
+    textAlign: 'right'
+  },
+  placeholderText: {
+    fontFamily: fonts.body,
+    color: palette.inkMuted
+  },
+  eventsPanel: {
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    backgroundColor: '#F7EFE4',
+    padding: spacing.sm,
+    gap: 4
+  },
+  eventsTitle: {
+    fontFamily: fonts.heading,
+    color: palette.ink,
+    fontSize: 13
+  },
+  eventLine: {
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    color: '#4A4137'
+  },
+  replyRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: spacing.sm
+  },
+  replyInput: {
+    flex: 1,
+    maxHeight: 96,
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    backgroundColor: palette.canvas,
+    fontFamily: fonts.body,
+    color: palette.ink,
+    textAlignVertical: 'top'
+  },
   error: {
-    color: '#b91c1c'
+    color: palette.danger,
+    fontFamily: fonts.body,
+    paddingHorizontal: 2
   }
 });

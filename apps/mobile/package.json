@@ -7,11 +7,12 @@
     "start": "expo start",
     "ios": "expo start --ios",
     "android": "expo start --android",
-    "lint": "ESLINT_USE_FLAT_CONFIG=false eslint App.tsx src --ext .ts,.tsx",
+    "lint": "eslint App.tsx src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
     "build": "expo export --platform all --output-dir dist"
   },
   "dependencies": {
+    "@expo/vector-icons": "^15.0.3",
     "@react-navigation/bottom-tabs": "^7.1.0",
     "@react-navigation/native": "^7.0.15",
     "babel-preset-expo": "~54.0.10",
@@ -27,7 +28,8 @@
     "@types/react": "~19.1.10",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
     "@typescript-eslint/parser": "^8.18.1",
-    "eslint": "^9.16.0",
+    "eslint": "^10.0.0",
+    "globals": "^16.5.0",
     "typescript": "^5.7.2"
   }
 }
