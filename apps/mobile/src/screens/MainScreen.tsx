@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import type { DrawerNavigationProp } from '@react-navigation/drawer';
 import {
   forwardRef,
   useCallback,
@@ -34,7 +33,7 @@ export interface MainScreenHandle {
 interface MainScreenProps {
   api: MacBridgeApiClient;
   ws: MacBridgeWsClient;
-  navigation: DrawerNavigationProp<Record<string, undefined>>;
+  onOpenDrawer: () => void;
 }
 
 const SUGGESTIONS = [
@@ -43,7 +42,7 @@ const SUGGESTIONS = [
 ];
 
 export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
-  function MainScreen({ api, ws, navigation }, ref) {
+  function MainScreen({ api, ws, onOpenDrawer }, ref) {
     const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
     const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
     const [draft, setDraft] = useState('');
@@ -153,7 +152,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       <SafeAreaView style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
-          <Pressable onPress={() => navigation.openDrawer()} hitSlop={8} style={styles.menuBtn}>
+          <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
             <Ionicons name="menu" size={22} color={colors.textMuted} />
           </Pressable>
           {selectedThread ? (

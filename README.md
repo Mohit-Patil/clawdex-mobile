@@ -35,6 +35,7 @@ Bridge env notes:
 - `BRIDGE_WORKDIR`: absolute path to the repo/directory where Codex CLI should run.
   - `npm run bridge` now sets this automatically to the repo root (`$(pwd)`), so Codex edits your project files instead of the `services/mac-bridge` subfolder.
 - `CODEX_CLI_BIN`: Codex CLI executable path/name (defaults to `codex`).
+- `BRIDGE_AUTH_TOKEN`: bearer token for bridge REST/WS auth. If unset, bridge runs without auth (not recommended).
 
 3. Start mac-bridge:
 
@@ -58,6 +59,7 @@ npm run android
 ```
 
 Note: for physical devices, set `EXPO_PUBLIC_MAC_BRIDGE_URL` to your Mac's LAN IP (for example `http://192.168.1.10:8787`) instead of `localhost`.
+If bridge auth is enabled, set `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` to match `BRIDGE_AUTH_TOKEN`.
 
 ## Scripts
 
@@ -76,6 +78,8 @@ Note: for physical devices, set `EXPO_PUBLIC_MAC_BRIDGE_URL` to your Mac's LAN I
 - `POST /threads`
 - `GET /threads/:id`
 - `POST /threads/:id/message`
+- `GET /approvals`
+- `POST /approvals/:id/decision`
 - `POST /terminal/exec`
 - `GET /git/status`
 - `GET /git/diff`

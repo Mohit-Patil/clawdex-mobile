@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
+import type { ApprovalDecision, ApprovalKind, PendingApproval } from '../types';
+
 export interface AppServerNotification {
   method: string;
   params: Record<string, unknown> | null;
@@ -33,6 +35,7 @@ interface CodexAppServerClientOptions {
   cliBin: string;
   timeoutMs: number;
   onStderr?: (chunk: string) => void;
+  onApprovalRequested?: (approval: PendingApproval) => void;
 }
 
 export interface ThreadListParams {
@@ -41,10 +44,16 @@ export interface ThreadListParams {
   cwd?: string | null;
 }
 
+interface PendingApprovalRequest {
+  requestId: string | number;
+  approval: PendingApproval;
+}
+
 export class CodexAppServerClient {
   private readonly cliBin: string;
   private readonly timeoutMs: number;
   private readonly onStderr?: (chunk: string) => void;
+  private readonly onApprovalRequested?: (approval: PendingApproval) => void;
 
   private child: ChildProcessWithoutNullStreams | null = null;
   private stdoutBuffer = '';
@@ -53,11 +62,14 @@ export class CodexAppServerClient {
   private requestCounter = 0;
   private pending = new Map<string | number, PendingRequest>();
   private listeners = new Set<(notification: AppServerNotification) => void>();
+  private approvalCounter = 0;
+  private pendingApprovals = new Map<string, PendingApprovalRequest>();
 
   constructor(options: CodexAppServerClientOptions) {
     this.cliBin = options.cliBin;
     this.timeoutMs = options.timeoutMs;
     this.onStderr = options.onStderr;
+    this.onApprovalRequested = options.onApprovalRequested;
   }
 
   onNotification(listener: (notification: AppServerNotification) => void): () => void {
@@ -65,6 +77,37 @@ export class CodexAppServerClient {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  listPendingApprovals(): PendingApproval[] {
+    return [...this.pendingApprovals.values()]
+      .map((entry) => structuredClone(entry.approval))
+      .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+  }
+
+  async resolveApproval(
+    approvalId: string,
+    decision: ApprovalDecision
+  ): Promise<PendingApproval | null> {
+    const pendingApproval = this.pendingApprovals.get(approvalId);
+    if (!pendingApproval) {
+      return null;
+    }
+
+    this.pendingApprovals.delete(approvalId);
+
+    try {
+      await this.writeJson({
+        jsonrpc: '2.0',
+        id: pendingApproval.requestId,
+        result: { decision }
+      });
+    } catch (error) {
+      this.pendingApprovals.set(approvalId, pendingApproval);
+      throw error;
+    }
+
+    return structuredClone(pendingApproval.approval);
   }
 
   async threadList(params: ThreadListParams = {}): Promise<Record<string, unknown>> {
@@ -95,7 +138,7 @@ export class CodexAppServerClient {
       model: null,
       modelProvider: null,
       cwd: params.cwd ?? null,
-      approvalPolicy: params.approvalPolicy ?? 'never',
+      approvalPolicy: params.approvalPolicy ?? 'on-request',
       sandbox: params.sandbox ?? 'workspace-write',
       config: null,
       baseInstructions: null,
@@ -115,7 +158,7 @@ export class CodexAppServerClient {
       model: null,
       modelProvider: null,
       cwd: null,
-      approvalPolicy: 'never',
+      approvalPolicy: 'on-request',
       sandbox: 'workspace-write',
       config: null,
       baseInstructions: null,
@@ -236,6 +279,7 @@ export class CodexAppServerClient {
 
     child.on('error', (error) => {
       this.failAllPending(error);
+      this.pendingApprovals.clear();
       this.started = false;
     });
 
@@ -245,6 +289,7 @@ export class CodexAppServerClient {
           `codex app-server closed (code=${String(code)} signal=${String(signal)})`
         )
       );
+      this.pendingApprovals.clear();
       this.started = false;
       this.child = null;
     });
@@ -355,24 +400,12 @@ export class CodexAppServerClient {
     const method = request.method;
 
     if (method === 'item/commandExecution/requestApproval') {
-      void this.writeJson({
-        jsonrpc: '2.0',
-        id: request.id,
-        result: {
-          decision: 'accept'
-        }
-      });
+      this.queueApprovalRequest('commandExecution', request);
       return;
     }
 
     if (method === 'item/fileChange/requestApproval') {
-      void this.writeJson({
-        jsonrpc: '2.0',
-        id: request.id,
-        result: {
-          decision: 'accept'
-        }
-      });
+      this.queueApprovalRequest('fileChange', request);
       return;
     }
 
@@ -384,6 +417,33 @@ export class CodexAppServerClient {
         message: `Unsupported server request method: ${method}`
       }
     });
+  }
+
+  private queueApprovalRequest(kind: ApprovalKind, request: JsonRpcRequest): void {
+    const params = this.isRecord(request.params) ? request.params : {};
+    const threadId = this.readString(params.threadId) ?? 'unknown-thread';
+    const turnId = this.readString(params.turnId) ?? 'unknown-turn';
+    const itemId = this.readString(params.itemId) ?? 'unknown-item';
+
+    const approval: PendingApproval = {
+      id: `${Date.now()}-${++this.approvalCounter}`,
+      kind,
+      threadId,
+      turnId,
+      itemId,
+      requestedAt: new Date().toISOString(),
+      reason: this.readString(params.reason) ?? undefined,
+      command: this.readString(params.command) ?? undefined,
+      cwd: this.readString(params.cwd) ?? undefined,
+      grantRoot: this.readString(params.grantRoot) ?? undefined
+    };
+
+    this.pendingApprovals.set(approval.id, {
+      requestId: request.id,
+      approval
+    });
+
+    this.onApprovalRequested?.(structuredClone(approval));
   }
 
   private emitNotification(notification: AppServerNotification): void {
@@ -420,5 +480,9 @@ export class CodexAppServerClient {
 
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null;
+  }
+
+  private readString(value: unknown): string | null {
+    return typeof value === 'string' ? value : null;
   }
 }

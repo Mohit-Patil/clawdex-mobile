@@ -6,6 +6,16 @@
 
 The foundation is solid. The Codex integration protocol, the bridge architecture, and the real-time streaming pipeline are all correctly implemented. What we have is a working prototype that needs hardening and polish to become production-ready.
 
+## Delivery Order (Working Plan)
+
+1. **Phase 1 (in progress)**: Security + approvals
+   - [x] Bridge token auth (REST + WS)
+   - [x] Replace auto-accept with explicit approval queue and decision API
+   - [x] Mobile approval surface for allow/decline decisions
+2. **Phase 2 (next)**: Thread UX polish (drawer navigation, smoother mobile interactions)
+3. **Phase 3**: Worktree/mode metadata and archive/filter flows
+4. **Phase 4**: Reliability (WS reconnect, app-server recovery) + production hardening
+
 ## Architecture
 
 ```
@@ -17,7 +27,7 @@ Two-layer design — the phone talks to the bridge over the network, and the bri
 ## What's Working
 
 - **Full end-to-end loop** — list threads, create threads, send messages, stream responses via WebSocket deltas
-- **Codex `app-server` integration** — proper JSON-RPC 2.0 handshake, request correlation, notification dispatch, approval auto-accept
+- **Codex `app-server` integration** — proper JSON-RPC 2.0 handshake, request correlation, notification dispatch, explicit approval routing
 - **Real-time streaming** — `thread.message.delta` events flow from Codex → bridge → WS → mobile UI
 - **4 functional screens** — Threads, Terminal, Git, Settings with state management, loading states, error handling
 - **Zod validation** on the bridge API, proper error codes (409 for busy threads), typed clients on both sides
@@ -40,7 +50,8 @@ Two-layer design — the phone talks to the bridge over the network, and the bri
 
 ### P0 — Security
 
-- [ ] **No auth on the bridge** — anyone on the LAN can execute arbitrary shell commands via `/terminal/exec` and write files via Codex. Add at minimum a shared secret/bearer token before using on any network.
+- [x] **Bridge auth token support added** — REST + WS now support bearer token auth (`BRIDGE_AUTH_TOKEN` / `EXPO_PUBLIC_MAC_BRIDGE_TOKEN`).
+- [ ] **Pairing flow not added yet** — auth still depends on manual token setup rather than QR/one-time pairing.
 
 ### P1 — Reliability
 
@@ -64,9 +75,9 @@ Two-layer design — the phone talks to the bridge over the network, and the bri
 
 ## Design Decisions Worth Noting
 
-- **Auto-accept all Codex approvals** — the bridge uses `approvalPolicy: 'never'` and `sandbox: 'workspace-write'`, auto-accepting all command execution and file change requests. Codex has full write access to `BRIDGE_WORKDIR`. This is intentional for a remote-control use case but should be documented/configurable.
+- **Explicit approval flow** — thread runs now use `approvalPolicy: 'on-request'` and surface command/file approvals to the mobile client (`/approvals` + `/approvals/:id/decision`) rather than auto-accepting.
 - **In-memory thread cache** — the `CodexCliAdapter` caches threads in a `Map`. If the bridge restarts, it re-fetches from Codex's persisted sessions on next access.
-- **Bridge binds to 0.0.0.0** — accessible from the LAN by default, which is required for physical device testing but is a security concern without auth.
+- **Bridge binds to 0.0.0.0** — accessible from the LAN by default, which is required for physical device testing; keep auth enabled for non-local use.
 
 ## File Map
 

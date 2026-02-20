@@ -12,6 +12,7 @@ import { GitService } from './services/gitService';
 import { RealtimeHub } from './services/realtimeHub';
 import { TerminalService } from './services/terminalService';
 import type {
+  ApprovalDecision,
   BridgeWsEvent,
   CreateThreadInput,
   SendThreadMessageInput
@@ -37,6 +38,10 @@ const gitCommitSchema = z.object({
   message: z.string().trim().min(1).max(500)
 });
 
+const approvalDecisionSchema = z.object({
+  decision: z.enum(['accept', 'acceptForSession', 'decline', 'cancel'])
+});
+
 interface IdParams {
   id: string;
 }
@@ -51,6 +56,11 @@ type TerminalExecBody = z.infer<typeof terminalExecSchema>;
 type TerminalRequest = FastifyRequest<{ Body: TerminalExecBody }>;
 type GitCommitBody = z.infer<typeof gitCommitSchema>;
 type GitCommitRequest = FastifyRequest<{ Body: GitCommitBody }>;
+type ApprovalDecisionBody = z.infer<typeof approvalDecisionSchema>;
+type ApprovalDecisionRequest = FastifyRequest<{
+  Params: IdParams;
+  Body: ApprovalDecisionBody;
+}>;
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -59,6 +69,8 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   const startupAt = Date.now();
   const bridgeWorkdir = process.env.BRIDGE_WORKDIR ?? process.cwd();
+  const bridgeAuthToken = process.env.BRIDGE_AUTH_TOKEN?.trim() ?? '';
+  const authEnabled = bridgeAuthToken.length > 0;
   const realtime = new RealtimeHub();
 
   const codex = new CodexCliAdapter({
@@ -77,6 +89,31 @@ export async function buildServer(): Promise<FastifyInstance> {
   });
 
   await app.register(websocket);
+
+  if (!authEnabled) {
+    app.log.warn(
+      'bridge auth is disabled: set BRIDGE_AUTH_TOKEN to require Authorization on REST/WS routes'
+    );
+  }
+
+  app.addHook('onRequest', async (request, reply) => {
+    if (!authEnabled) {
+      return;
+    }
+
+    if (request.url === '/health' || request.url.startsWith('/health?')) {
+      return;
+    }
+
+    if (isAuthorized(request, bridgeAuthToken)) {
+      return;
+    }
+
+    return reply.code(401).send({
+      error: 'unauthorized',
+      message: 'Missing or invalid bridge token'
+    });
+  });
 
   app.get('/ws', { websocket: true }, (socket) => {
     realtime.addClient(socket);
@@ -154,6 +191,34 @@ export async function buildServer(): Promise<FastifyInstance> {
           message: (error as Error).message
         });
       }
+    }
+  );
+
+  app.get('/approvals', async () => {
+    return codex.listPendingApprovals();
+  });
+
+  app.post(
+    '/approvals/:id/decision',
+    async (request: ApprovalDecisionRequest, reply: FastifyReply) => {
+      const parsed = approvalDecisionSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send({ error: parsed.error.flatten() });
+      }
+
+      const resolved = await codex.resolveApproval(
+        request.params.id,
+        parsed.data.decision as ApprovalDecision
+      );
+      if (!resolved) {
+        return reply.code(404).send({ error: 'approval_not_found' });
+      }
+
+      return {
+        ok: true as const,
+        approval: resolved,
+        decision: parsed.data.decision
+      };
     }
   );
 
@@ -236,4 +301,29 @@ function parseTimeoutMs(value: string | undefined): number | undefined {
   }
 
   return Math.floor(parsed);
+}
+
+function isAuthorized(request: FastifyRequest, token: string): boolean {
+  const authHeader = request.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const bearer = authHeader.slice('Bearer '.length).trim();
+    if (bearer === token) {
+      return true;
+    }
+  }
+
+  const queryToken = (() => {
+    try {
+      const parsedUrl = new URL(request.url, 'http://localhost');
+      return parsedUrl.searchParams.get('token');
+    } catch {
+      return null;
+    }
+  })();
+
+  if (queryToken && queryToken === token) {
+    return true;
+  }
+
+  return false;
 }

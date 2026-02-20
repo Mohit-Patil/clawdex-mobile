@@ -69,6 +69,23 @@ export interface GitCommitResponse {
   committed: boolean;
 }
 
+export type ApprovalKind = 'commandExecution' | 'fileChange';
+
+export type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
+
+export interface PendingApproval {
+  id: string;
+  kind: ApprovalKind;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  requestedAt: string;
+  reason?: string;
+  command?: string;
+  cwd?: string;
+  grantRoot?: string;
+}
+
 export type BridgeWsEvent =
   | {
       type: 'thread.created';
@@ -111,6 +128,19 @@ export type BridgeWsEvent =
   | {
       type: 'git.updated';
       payload: GitStatusResponse;
+    }
+  | {
+      type: 'approval.requested';
+      payload: PendingApproval;
+    }
+  | {
+      type: 'approval.resolved';
+      payload: {
+        id: string;
+        decision: ApprovalDecision;
+        resolvedAt: string;
+        threadId: string;
+      };
     }
   | {
       type: 'health';

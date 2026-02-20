@@ -5,17 +5,17 @@ import {
   toPreview,
   toRecord,
   readString,
-  readNumber,
   unixSecondsToIso,
   mapRawStatus,
   extractLastError,
-  toRawThread,
-  toRawTurn
+  toRawThread
 } from '../utils/threadMapping';
-import type { RawThread, RawTurn } from '../utils/threadMapping';
+import type { RawThread } from '../utils/threadMapping';
 import type {
+  ApprovalDecision,
   BridgeWsEvent,
   CreateThreadInput,
+  PendingApproval,
   SendThreadMessageInput,
   Thread,
   ThreadMessage,
@@ -65,6 +65,17 @@ export class CodexCliAdapter {
         if (detail) {
           this.emitThreadRunEvent('global', 'stderr', detail.slice(0, 500));
         }
+      },
+      onApprovalRequested: (approval) => {
+        this.emit({
+          type: 'approval.requested',
+          payload: approval
+        });
+        this.emitThreadRunEvent(
+          approval.threadId,
+          'approval.requested',
+          `${approval.kind}${approval.command ? ` | ${approval.command}` : ''}`
+        );
       }
     });
   }
@@ -85,10 +96,36 @@ export class CodexCliAdapter {
     return this.readAndCacheThread(id);
   }
 
+  listPendingApprovals(): PendingApproval[] {
+    return this.client.listPendingApprovals();
+  }
+
+  async resolveApproval(
+    approvalId: string,
+    decision: ApprovalDecision
+  ): Promise<PendingApproval | null> {
+    const resolved = await this.client.resolveApproval(approvalId, decision);
+    if (!resolved) {
+      return null;
+    }
+
+    this.emit({
+      type: 'approval.resolved',
+      payload: {
+        id: resolved.id,
+        decision,
+        resolvedAt: new Date().toISOString(),
+        threadId: resolved.threadId
+      }
+    });
+    this.emitThreadRunEvent(resolved.threadId, 'approval.resolved', decision);
+    return resolved;
+  }
+
   async createThread(input: CreateThreadInput): Promise<Thread> {
     const started = await this.client.threadStart({
       cwd: this.workdir,
-      approvalPolicy: 'never',
+      approvalPolicy: 'on-request',
       sandbox: 'workspace-write'
     });
 

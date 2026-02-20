@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import type { DrawerContentComponentProps } from '@react-navigation/drawer';
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -16,21 +15,24 @@ import type { BridgeWsEvent, ThreadSummary } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
 import { colors, spacing, typography } from '../theme';
 
-interface DrawerContentProps extends DrawerContentComponentProps {
+type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings';
+
+interface DrawerContentProps {
   api: MacBridgeApiClient;
   ws: MacBridgeWsClient;
   selectedThreadId: string | null;
   onSelectThread: (id: string) => void;
   onNewThread: () => void;
+  onNavigate: (screen: Screen) => void;
 }
 
 export function DrawerContent({
-  navigation,
   api,
   ws,
   selectedThreadId,
   onSelectThread,
   onNewThread,
+  onNavigate,
 }: DrawerContentProps) {
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,7 +42,7 @@ export function DrawerContent({
       const data = await api.listThreads();
       setThreads(sortThreads(data));
     } catch {
-      // silently fail - user will see empty list
+      // silently fail
     } finally {
       setLoading(false);
     }
@@ -59,7 +61,11 @@ export function DrawerContent({
         setThreads((prev) =>
           prev.map((t) =>
             t.id === event.payload.threadId
-              ? { ...t, lastMessagePreview: event.payload.content, updatedAt: event.payload.updatedAt }
+              ? {
+                  ...t,
+                  lastMessagePreview: event.payload.content,
+                  updatedAt: event.payload.updatedAt,
+                }
               : t
           )
         );
@@ -67,26 +73,13 @@ export function DrawerContent({
     });
   }, [ws]);
 
-  const handleSelectThread = useCallback(
-    (id: string) => {
-      onSelectThread(id);
-      navigation.closeDrawer();
-    },
-    [onSelectThread, navigation]
-  );
-
-  const handleNewThread = useCallback(() => {
-    onNewThread();
-    navigation.closeDrawer();
-  }, [onNewThread, navigation]);
-
   return (
     <SafeAreaView style={styles.container}>
       {/* New Thread button */}
       <View style={styles.header}>
         <Pressable
           style={({ pressed }) => [styles.newThreadBtn, pressed && styles.newThreadBtnPressed]}
-          onPress={handleNewThread}
+          onPress={onNewThread}
         >
           <Ionicons name="add" size={16} color={colors.white} />
           <Text style={styles.newThreadText}>New thread</Text>
@@ -94,16 +87,8 @@ export function DrawerContent({
       </View>
 
       {/* Nav items */}
-      <NavItem
-        icon="terminal-outline"
-        label="Terminal"
-        onPress={() => { navigation.navigate('Terminal'); }}
-      />
-      <NavItem
-        icon="git-branch-outline"
-        label="Git"
-        onPress={() => { navigation.navigate('Git'); }}
-      />
+      <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
+      <NavItem icon="git-branch-outline" label="Git" onPress={() => onNavigate('Git')} />
 
       {/* Threads section */}
       <View style={styles.sectionHeader}>
@@ -118,9 +103,7 @@ export function DrawerContent({
           keyExtractor={(item) => item.id}
           style={styles.list}
           showsVerticalScrollIndicator={false}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>No threads yet</Text>
-          }
+          ListEmptyComponent={<Text style={styles.emptyText}>No threads yet</Text>}
           renderItem={({ item }) => (
             <Pressable
               style={({ pressed }) => [
@@ -128,14 +111,12 @@ export function DrawerContent({
                 item.id === selectedThreadId && styles.threadItemSelected,
                 pressed && styles.threadItemPressed,
               ]}
-              onPress={() => handleSelectThread(item.id)}
+              onPress={() => onSelectThread(item.id)}
             >
               <Text style={styles.threadTitle} numberOfLines={1}>
                 {item.title || 'Untitled'}
               </Text>
-              <Text style={styles.threadAge}>
-                {relativeTime(item.updatedAt)}
-              </Text>
+              <Text style={styles.threadAge}>{relativeTime(item.updatedAt)}</Text>
             </Pressable>
           )}
         />
@@ -145,7 +126,7 @@ export function DrawerContent({
       <NavItem
         icon="settings-outline"
         label="Settings"
-        onPress={() => { navigation.navigate('Settings'); }}
+        onPress={() => onNavigate('Settings')}
         style={styles.settingsItem}
       />
     </SafeAreaView>
@@ -180,7 +161,8 @@ function sortThreads(threads: ThreadSummary[]): ThreadSummary[] {
 
 function upsertThread(threads: ThreadSummary[], summary: ThreadSummary): ThreadSummary[] {
   const idx = threads.findIndex((t) => t.id === summary.id);
-  const next = idx === -1 ? [...threads, summary] : threads.map((t, i) => (i === idx ? summary : t));
+  const next =
+    idx === -1 ? [...threads, summary] : threads.map((t, i) => (i === idx ? summary : t));
   return sortThreads(next);
 }
 

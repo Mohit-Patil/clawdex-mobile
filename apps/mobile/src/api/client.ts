@@ -1,9 +1,12 @@
 import type {
+  ApprovalDecision,
   CreateThreadRequest,
   GitCommitRequest,
   GitCommitResponse,
   GitDiffResponse,
   GitStatusResponse,
+  PendingApproval,
+  ResolveApprovalResponse,
   SendThreadMessageRequest,
   TerminalExecRequest,
   TerminalExecResponse,
@@ -20,23 +23,29 @@ interface HealthResponse {
 interface ApiClientOptions {
   baseUrl: string;
   timeoutMs?: number;
+  authToken?: string | null;
 }
 
 export class MacBridgeApiClient {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly authToken: string | null;
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, '');
     this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.authToken = options.authToken?.trim() || null;
   }
 
   wsUrl(): string {
     const wsBase = this.baseUrl.startsWith('https://')
       ? this.baseUrl.replace('https://', 'wss://')
       : this.baseUrl.replace('http://', 'ws://');
+    if (!this.authToken) {
+      return `${wsBase}/ws`;
+    }
 
-    return `${wsBase}/ws`;
+    return `${wsBase}/ws?token=${encodeURIComponent(this.authToken)}`;
   }
 
   health(): Promise<HealthResponse> {
@@ -62,6 +71,17 @@ export class MacBridgeApiClient {
     return this.request<Thread>(`/threads/${encodeURIComponent(id)}/message`, {
       method: 'POST',
       body: JSON.stringify(body)
+    });
+  }
+
+  listApprovals(): Promise<PendingApproval[]> {
+    return this.request<PendingApproval[]>('/approvals');
+  }
+
+  resolveApproval(id: string, decision: ApprovalDecision): Promise<ResolveApprovalResponse> {
+    return this.request<ResolveApprovalResponse>(`/approvals/${encodeURIComponent(id)}/decision`, {
+      method: 'POST',
+      body: JSON.stringify({ decision })
     });
   }
 
@@ -97,6 +117,7 @@ export class MacBridgeApiClient {
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/json',
+          ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
           ...(init.headers ?? {})
         },
         signal: controller.signal
