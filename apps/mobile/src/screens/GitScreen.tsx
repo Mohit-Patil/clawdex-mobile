@@ -17,9 +17,10 @@ import { colors, radius, spacing, typography } from '../theme';
 
 interface GitScreenProps {
   api: MacBridgeApiClient;
+  onOpenDrawer: () => void;
 }
 
-export function GitScreen({ api }: GitScreenProps) {
+export function GitScreen({ api, onOpenDrawer }: GitScreenProps) {
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
   const [diff, setDiff] = useState('');
   const [commitMessage, setCommitMessage] = useState('chore: checkpoint');
@@ -62,6 +63,9 @@ export function GitScreen({ api }: GitScreenProps) {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
+        <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
+          <Ionicons name="menu" size={22} color={colors.textMuted} />
+        </Pressable>
         <Ionicons name="git-branch" size={16} color={colors.textMuted} />
         <Text style={styles.headerTitle}>Git</Text>
         <Pressable onPress={() => void refresh()} hitSlop={8} style={styles.refreshBtn}>
@@ -135,6 +139,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  menuBtn: { padding: spacing.xs },
   headerTitle: { ...typography.headline, flex: 1 },
   refreshBtn: { marginLeft: 'auto' },
   loader: { marginTop: spacing.xxl },

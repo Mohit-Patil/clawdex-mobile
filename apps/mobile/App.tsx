@@ -101,11 +101,11 @@ export default function App() {
   const renderScreen = () => {
     switch (currentScreen) {
       case 'Terminal':
-        return <TerminalScreen api={api} ws={ws} />;
+        return <TerminalScreen api={api} ws={ws} onOpenDrawer={openDrawer} />;
       case 'Git':
-        return <GitScreen api={api} />;
+        return <GitScreen api={api} onOpenDrawer={openDrawer} />;
       case 'Settings':
-        return <SettingsScreen api={api} ws={ws} bridgeUrl={env.macBridgeUrl} />;
+        return <SettingsScreen api={api} ws={ws} bridgeUrl={env.macBridgeUrl} onOpenDrawer={openDrawer} />;
       default:
         return (
           <MainScreen

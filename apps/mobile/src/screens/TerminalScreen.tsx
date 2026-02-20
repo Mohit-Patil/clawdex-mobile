@@ -19,9 +19,10 @@ import { colors, radius, spacing, typography } from '../theme';
 interface TerminalScreenProps {
   api: MacBridgeApiClient;
   ws: MacBridgeWsClient;
+  onOpenDrawer: () => void;
 }
 
-export function TerminalScreen({ api, ws }: TerminalScreenProps) {
+export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
   const [command, setCommand] = useState('pwd');
   const [output, setOutput] = useState('');
   const [running, setRunning] = useState(false);
@@ -61,6 +62,9 @@ export function TerminalScreen({ api, ws }: TerminalScreenProps) {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
+        <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
+          <Ionicons name="menu" size={22} color={colors.textMuted} />
+        </Pressable>
         <Ionicons name="terminal" size={16} color={colors.textMuted} />
         <Text style={styles.headerTitle}>Terminal</Text>
       </View>
@@ -118,6 +122,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  menuBtn: { padding: spacing.xs },
   headerTitle: { ...typography.headline },
   body: { flex: 1 },
   output: { flex: 1 },

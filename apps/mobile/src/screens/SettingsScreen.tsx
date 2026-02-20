@@ -10,9 +10,10 @@ interface SettingsScreenProps {
   api: MacBridgeApiClient;
   ws: MacBridgeWsClient;
   bridgeUrl: string;
+  onOpenDrawer: () => void;
 }
 
-export function SettingsScreen({ api, ws, bridgeUrl }: SettingsScreenProps) {
+export function SettingsScreen({ api, ws, bridgeUrl, onOpenDrawer }: SettingsScreenProps) {
   const [healthyAt, setHealthyAt] = useState<string | null>(null);
   const [uptimeSec, setUptimeSec] = useState<number | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
@@ -39,6 +40,9 @@ export function SettingsScreen({ api, ws, bridgeUrl }: SettingsScreenProps) {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
+        <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
+          <Ionicons name="menu" size={22} color={colors.textMuted} />
+        </Pressable>
         <Ionicons name="settings" size={16} color={colors.textMuted} />
         <Text style={styles.headerTitle}>Settings</Text>
       </View>
@@ -107,6 +111,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
+  menuBtn: { padding: spacing.xs },
   headerTitle: { ...typography.headline },
   body: { padding: spacing.lg, gap: spacing.sm },
   sectionLabel: {
