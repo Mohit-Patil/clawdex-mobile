@@ -13,7 +13,8 @@
     "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "build": "npm run --workspaces build",
     "typecheck": "npm run --workspaces typecheck",
-    "lint": "npm run --workspaces lint"
+    "lint": "npm run --workspaces lint",
+    "test": "npm run test -w @codex/mac-bridge && npm run test -w @codex/mobile"
   },
   "dependencies": {
     "@types/react": "^19.1.10",
