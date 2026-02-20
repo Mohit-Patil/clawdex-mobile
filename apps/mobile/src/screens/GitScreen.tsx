@@ -1,10 +1,19 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 
 import type { MacBridgeApiClient } from '../api/client';
 import type { GitStatusResponse } from '../api/types';
-import { ActionButton, Panel, ScreenSurface } from '../ui/primitives';
-import { fonts, palette, radii, spacing } from '../ui/theme';
+import { colors, radius, spacing, typography } from '../theme';
 
 interface GitScreenProps {
   api: MacBridgeApiClient;
@@ -21,10 +30,9 @@ export function GitScreen({ api }: GitScreenProps) {
   const refresh = useCallback(async () => {
     try {
       setLoading(true);
-      const [nextStatus, nextDiff] = await Promise.all([api.gitStatus(), api.gitDiff()]);
-
-      setStatus(nextStatus);
-      setDiff(nextDiff.diff);
+      const [s, d] = await Promise.all([api.gitStatus(), api.gitDiff()]);
+      setStatus(s);
+      setDiff(d.diff);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -41,11 +49,8 @@ export function GitScreen({ api }: GitScreenProps) {
     try {
       setCommitting(true);
       const result = await api.gitCommit({ message: commitMessage });
-      if (!result.committed) {
-        setError(result.stderr || 'Commit command failed.');
-      } else {
-        setError(null);
-      }
+      if (!result.committed) setError(result.stderr || 'Commit failed.');
+      else setError(null);
       await refresh();
     } catch (err) {
       setError((err as Error).message);
@@ -54,181 +59,133 @@ export function GitScreen({ api }: GitScreenProps) {
     }
   }, [api, commitMessage, refresh]);
 
-  if (loading) {
-    return (
-      <ScreenSurface>
-        <View style={styles.loadingWrap}>
-          <ActivityIndicator color={palette.accent} />
-        </View>
-      </ScreenSurface>
-    );
-  }
-
   return (
-    <ScreenSurface>
-      <View style={styles.container}>
-        <View style={styles.hero}>
-          <Text style={styles.heroLabel}>SOURCE CONTROL</Text>
-          <Text style={styles.heroTitle}>Repository Pulse</Text>
-          <Text style={styles.heroMeta}>Review diffs and commit without leaving mobile.</Text>
-        </View>
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Ionicons name="git-branch" size={16} color={colors.textMuted} />
+        <Text style={styles.headerTitle}>Git</Text>
+        <Pressable onPress={() => void refresh()} hitSlop={8} style={styles.refreshBtn}>
+          <Ionicons name="refresh" size={16} color={colors.textMuted} />
+        </Pressable>
+      </View>
 
-        <Panel>
-          <View style={styles.repoHeader}>
-            <View>
-              <Text style={styles.repoTitle}>{status?.branch ?? 'unknown branch'}</Text>
-              <Text style={styles.repoSubtitle}>Current branch</Text>
-            </View>
-            <View style={[styles.cleanBadge, status?.clean ? styles.cleanBadgeOk : styles.cleanBadgeDirty]}>
-              <Text style={styles.cleanBadgeText}>{status?.clean ? 'clean' : 'dirty'}</Text>
-            </View>
+      {loading ? (
+        <ActivityIndicator color={colors.textMuted} style={styles.loader} />
+      ) : (
+        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Branch</Text>
+            <Text style={styles.infoValue}>{status?.branch ?? '—'}</Text>
           </View>
-          <View style={styles.repoActionRow}>
-            <ActionButton label="Refresh" variant="ghost" compact onPress={() => void refresh()} />
+          <View style={[styles.infoRow, styles.infoRowBorder]}>
+            <Text style={styles.infoLabel}>Status</Text>
+            <Text style={[styles.infoValue, status?.clean ? styles.clean : styles.dirty]}>
+              {status?.clean ? 'clean' : 'changes'}
+            </Text>
           </View>
-        </Panel>
 
-        <Panel>
-          <Text style={styles.blockTitle}>Commit Message</Text>
+          <Text style={styles.sectionLabel}>Commit message</Text>
           <TextInput
+            style={styles.input}
             value={commitMessage}
             onChangeText={setCommitMessage}
-            style={styles.input}
-            placeholder="feat: update mobile UI"
-            placeholderTextColor={palette.inkMuted}
+            placeholder="Commit message..."
+            placeholderTextColor={colors.textMuted}
           />
-          <View style={styles.repoActionRow}>
-            <ActionButton
-              label={committing ? 'Committing...' : 'Create Commit'}
-              onPress={() => void commit()}
-              disabled={committing || !commitMessage.trim()}
-            />
-          </View>
-        </Panel>
+          <Pressable
+            onPress={() => void commit()}
+            disabled={committing || !commitMessage.trim()}
+            style={({ pressed }) => [
+              styles.commitBtn,
+              pressed && styles.commitBtnPressed,
+              (committing || !commitMessage.trim()) && styles.commitBtnDisabled,
+            ]}
+          >
+            <Text style={styles.commitBtnText}>
+              {committing ? 'Committing…' : 'Commit'}
+            </Text>
+          </Pressable>
 
-        <Panel style={styles.diffPanel}>
-          <Text style={styles.blockTitle}>Diff</Text>
-          <ScrollView style={styles.diffBox} contentContainerStyle={styles.diffContent}>
+          {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+          <Text style={styles.sectionLabel}>Diff</Text>
+          <ScrollView
+            style={styles.diffBox}
+            horizontal
+            showsHorizontalScrollIndicator={false}
+          >
             <Text selectable style={styles.diffText}>
-              {diff || 'No diff.'}
+              {diff || 'No changes.'}
             </Text>
           </ScrollView>
-        </Panel>
-
-        {error ? <Text style={styles.error}>Error: {error}</Text> : null}
-      </View>
-    </ScreenSurface>
+        </ScrollView>
+      )}
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  loadingWrap: {
-    flex: 1,
+  container: { flex: 1, backgroundColor: colors.bgMain },
+  header: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center'
-  },
-  container: {
-    flex: 1,
     gap: spacing.sm,
-    paddingTop: spacing.sm
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
   },
-  hero: {
-    marginBottom: spacing.xs
-  },
-  heroLabel: {
-    fontFamily: fonts.heading,
-    fontSize: 12,
-    letterSpacing: 1.3,
-    color: palette.accent
-  },
-  heroTitle: {
-    marginTop: 2,
-    fontFamily: fonts.heading,
-    fontSize: 28,
-    color: palette.ink
-  },
-  heroMeta: {
-    marginTop: 2,
-    fontFamily: fonts.body,
-    color: palette.inkMuted
-  },
-  repoHeader: {
+  headerTitle: { ...typography.headline, flex: 1 },
+  refreshBtn: { marginLeft: 'auto' },
+  loader: { marginTop: spacing.xxl },
+  body: { flex: 1 },
+  bodyContent: { padding: spacing.lg, gap: spacing.md },
+  infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: spacing.sm
+    paddingVertical: spacing.sm,
   },
-  repoTitle: {
-    fontFamily: fonts.heading,
-    color: palette.ink,
-    fontSize: 18
+  infoRowBorder: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
   },
-  repoSubtitle: {
-    fontFamily: fonts.body,
-    color: palette.inkMuted,
-    marginTop: 2
-  },
-  cleanBadge: {
-    borderRadius: 999,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 5
-  },
-  cleanBadgeOk: {
-    backgroundColor: '#DCEFE5'
-  },
-  cleanBadgeDirty: {
-    backgroundColor: '#F9DEDA'
-  },
-  cleanBadgeText: {
-    fontFamily: fonts.heading,
-    fontSize: 12,
+  infoLabel: { ...typography.body, color: colors.textMuted },
+  infoValue: { ...typography.body },
+  clean: { color: colors.statusComplete },
+  dirty: { color: colors.statusError },
+  sectionLabel: {
+    ...typography.caption,
     textTransform: 'uppercase',
-    color: palette.ink
-  },
-  repoActionRow: {
-    marginTop: spacing.sm,
-    flexDirection: 'row',
-    justifyContent: 'flex-end'
-  },
-  blockTitle: {
-    fontFamily: fonts.heading,
-    color: palette.ink,
-    fontSize: 16,
-    marginBottom: spacing.sm
+    letterSpacing: 0.6,
+    marginTop: spacing.md,
   },
   input: {
-    borderWidth: 1,
-    borderColor: palette.border,
-    borderRadius: radii.md,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
-    backgroundColor: palette.canvas,
-    fontFamily: fonts.body,
-    color: palette.ink
+    backgroundColor: colors.bgSidebar,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+    color: colors.textPrimary,
+    fontSize: 14,
   },
-  diffPanel: {
-    flex: 1,
-    padding: spacing.sm
+  commitBtn: {
+    backgroundColor: colors.accent,
+    borderRadius: radius.sm,
+    paddingVertical: spacing.sm + 2,
+    alignItems: 'center',
   },
+  commitBtnPressed: { backgroundColor: colors.accentPressed },
+  commitBtnDisabled: { backgroundColor: colors.bgItem },
+  commitBtnText: { ...typography.headline, color: colors.white, fontSize: 14 },
+  errorText: { ...typography.caption, color: colors.error },
   diffBox: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: '#1B3047',
-    borderRadius: radii.md,
-    backgroundColor: palette.nightSoft
+    backgroundColor: colors.bgSidebar,
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    padding: spacing.md,
+    maxHeight: 300,
   },
-  diffContent: {
-    padding: spacing.sm
-  },
-  diffText: {
-    color: '#EAF2FA',
-    fontFamily: fonts.mono,
-    fontSize: 13,
-    lineHeight: 19
-  },
-  error: {
-    color: palette.danger,
-    fontFamily: fonts.body,
-    paddingHorizontal: 2
-  }
+  diffText: { ...typography.mono },
 });
