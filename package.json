@@ -1,0 +1,23 @@
+{
+  "name": "codex-mobile-control",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "services/*"
+  ],
+  "scripts": {
+    "mobile": "npm run -w @codex/mobile start",
+    "ios": "npm run -w @codex/mobile ios",
+    "android": "npm run -w @codex/mobile android",
+    "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
+    "build": "npm run -ws build",
+    "typecheck": "npm run -ws typecheck",
+    "lint": "npm run -ws lint"
+  },
+  "dependencies": {
+    "@types/react": "^19.1.10",
+    "react": "^19.1.0",
+    "react-native": "^0.81.5"
+  }
+}

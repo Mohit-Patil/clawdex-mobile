@@ -1,0 +1,33 @@
+{
+  "name": "@codex/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "ios": "expo start --ios",
+    "android": "expo start --android",
+    "lint": "ESLINT_USE_FLAT_CONFIG=false eslint App.tsx src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit",
+    "build": "expo export --platform all --output-dir dist"
+  },
+  "dependencies": {
+    "@react-navigation/bottom-tabs": "^7.1.0",
+    "@react-navigation/native": "^7.0.15",
+    "babel-preset-expo": "~54.0.10",
+    "expo": "^54.0.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-gesture-handler": "~2.28.0",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-screens": "~4.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "~19.1.10",
+    "@typescript-eslint/eslint-plugin": "^8.18.1",
+    "@typescript-eslint/parser": "^8.18.1",
+    "eslint": "^9.16.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,19 @@
+node_modules
+npm-debug.log*
+.yarn-integrity
+
+# Expo / React Native
+.expo
+.expo-shared
+apps/mobile/.expo
+apps/mobile/dist
+
+# TypeScript build artifacts
+services/mac-bridge/dist
+*.tsbuildinfo
+
+# Env files
+.env
+.env.local
+apps/mobile/.env
+services/mac-bridge/.env

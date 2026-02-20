@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "Codex Mobile Control",
+    "slug": "codex-mobile-control",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "platforms": ["ios", "android"],
+    "jsEngine": "hermes"
+  }
+}
