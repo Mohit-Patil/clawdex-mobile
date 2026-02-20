@@ -1,6 +1,18 @@
 import { randomUUID } from 'node:crypto';
 
 import { CodexAppServerClient } from './codexAppServerClient';
+import {
+  toPreview,
+  toRecord,
+  readString,
+  readNumber,
+  unixSecondsToIso,
+  mapRawStatus,
+  extractLastError,
+  toRawThread,
+  toRawTurn
+} from '../utils/threadMapping';
+import type { RawThread, RawTurn } from '../utils/threadMapping';
 import type {
   BridgeWsEvent,
   CreateThreadInput,
@@ -15,52 +27,6 @@ interface CodexCliAdapterOptions {
   cliBin?: string;
   cliTimeoutMs?: number;
   emitEvent?: (event: BridgeWsEvent) => void;
-}
-
-type RawThreadStatus =
-  | { type?: string }
-  | string
-  | null
-  | undefined;
-
-interface RawTurn {
-  id?: string;
-  status?: string;
-  error?: {
-    message?: string;
-  } | null;
-  items?: RawThreadItem[];
-}
-
-type RawThreadItem =
-  | {
-      type?: 'userMessage';
-      id?: string;
-      content?: Array<{ type?: string; text?: string; path?: string; url?: string }>;
-    }
-  | {
-      type?: 'agentMessage';
-      id?: string;
-      text?: string;
-    }
-  | {
-      type?: string;
-      id?: string;
-      text?: string;
-    };
-
-interface RawThread {
-  id?: string;
-  preview?: string;
-  modelProvider?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  status?: RawThreadStatus;
-  cwd?: string;
-  source?: {
-    kind?: string;
-  };
-  turns?: RawTurn[];
 }
 
 const DEFAULT_CLI_BIN = 'codex';
@@ -108,7 +74,7 @@ export class CodexCliAdapter {
     const listRaw = Array.isArray(response.data) ? response.data : [];
 
     const summaries = listRaw
-      .map((item) => this.mapThreadSummary(this.toRawThread(item)))
+      .map((item) => this.mapThreadSummary(toRawThread(item)))
       .filter((item): item is ThreadSummary => item !== null)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
@@ -126,7 +92,7 @@ export class CodexCliAdapter {
       sandbox: 'workspace-write'
     });
 
-    const raw = this.toRawThread(started.thread);
+    const raw = toRawThread(started.thread);
     const threadId = raw.id;
     if (!threadId) {
       throw new Error('app-server did not return a thread id');
@@ -212,8 +178,8 @@ export class CodexCliAdapter {
     try {
       await this.client.threadResume(thread.id);
       const turnResponse = await this.client.turnStart(thread.id, content);
-      const turn = this.toRecord(turnResponse.turn);
-      const turnId = this.readString(turn?.id);
+      const turn = toRecord(turnResponse.turn);
+      const turnId = readString(turn?.id);
       if (!turnId) {
         throw new Error('turn/start did not return turn id');
       }
@@ -265,10 +231,10 @@ export class CodexCliAdapter {
         try {
           if (
             notification.method === 'item/agentMessage/delta' &&
-            this.readString(notification.params?.threadId) === threadId &&
-            this.readString(notification.params?.turnId) === turnId
+            readString(notification.params?.threadId) === threadId &&
+            readString(notification.params?.turnId) === turnId
           ) {
-            const delta = this.readString(notification.params?.delta);
+            const delta = readString(notification.params?.delta);
             if (delta) {
               this.appendAssistantDelta(threadId, assistantMessageId, delta);
             }
@@ -277,9 +243,9 @@ export class CodexCliAdapter {
 
           if (
             notification.method === 'thread/status/changed' &&
-            this.readString(notification.params?.threadId) === threadId
+            readString(notification.params?.threadId) === threadId
           ) {
-            const status = this.mapRawStatus(notification.params?.status, undefined);
+            const status = mapRawStatus(notification.params?.status, undefined);
             const thread = this.threadCache.get(threadId);
             if (thread) {
               this.setThreadStatus(thread, status);
@@ -291,17 +257,17 @@ export class CodexCliAdapter {
 
           if (
             notification.method === 'turn/completed' &&
-            this.readString(notification.params?.threadId) === threadId
+            readString(notification.params?.threadId) === threadId
           ) {
-            const turn = this.toRecord(notification.params?.turn);
-            const completedTurnId = this.readString(turn?.id);
+            const turn = toRecord(notification.params?.turn);
+            const completedTurnId = readString(turn?.id);
             if (completedTurnId !== turnId) {
               return;
             }
 
-            const turnStatus = this.readString(turn?.status);
-            const turnError = this.toRecord(turn?.error);
-            const turnErrorMessage = this.readString(turnError?.message);
+            const turnStatus = readString(turn?.status);
+            const turnError = toRecord(turn?.error);
+            const turnErrorMessage = readString(turnError?.message);
 
             const thread = this.threadCache.get(threadId);
             if (thread) {
@@ -326,13 +292,13 @@ export class CodexCliAdapter {
 
           if (
             notification.method === 'item/completed' &&
-            this.readString(notification.params?.threadId) === threadId
+            readString(notification.params?.threadId) === threadId
           ) {
-            const item = this.toRecord(notification.params?.item);
-            const itemType = this.readString(item?.type);
+            const item = toRecord(notification.params?.item);
+            const itemType = readString(item?.type);
             if (itemType === 'commandExecution') {
-              const command = this.readString(item?.command);
-              const status = this.readString(item?.status);
+              const command = readString(item?.command);
+              const status = readString(item?.status);
               this.emitThreadRunEvent(
                 threadId,
                 'command.completed',
@@ -351,7 +317,7 @@ export class CodexCliAdapter {
 
   private async readAndCacheThread(id: string): Promise<Thread | null> {
     const read = await this.client.threadRead(id, true);
-    const raw = this.toRawThread(read.thread);
+    const raw = toRawThread(read.thread);
     if (!raw.id) {
       return null;
     }
@@ -366,27 +332,27 @@ export class CodexCliAdapter {
       return null;
     }
 
-    const createdAt = this.unixSecondsToIso(raw.createdAt);
-    const updatedAt = this.unixSecondsToIso(raw.updatedAt);
+    const createdAt = unixSecondsToIso(raw.createdAt);
+    const updatedAt = unixSecondsToIso(raw.updatedAt);
     const turns = Array.isArray(raw.turns) ? raw.turns : [];
 
     const title =
       this.titleOverrides.get(raw.id) ??
-      this.toPreview(raw.preview || `Thread ${raw.id.slice(0, 8)}`);
+      toPreview(raw.preview || `Thread ${raw.id.slice(0, 8)}`);
 
-    const lastError = this.extractLastError(turns);
+    const lastError = extractLastError(turns);
 
     return {
       id: raw.id,
       title,
-      status: this.mapRawStatus(raw.status, turns),
+      status: mapRawStatus(raw.status, turns),
       createdAt,
       updatedAt,
       statusUpdatedAt: updatedAt,
-      lastMessagePreview: this.toPreview(raw.preview || ''),
-      cwd: this.readString(raw.cwd) ?? undefined,
-      modelProvider: this.readString(raw.modelProvider) ?? undefined,
-      sourceKind: this.readString(this.toRecord(raw.source)?.kind) ?? undefined,
+      lastMessagePreview: toPreview(raw.preview || ''),
+      cwd: readString(raw.cwd) ?? undefined,
+      modelProvider: readString(raw.modelProvider) ?? undefined,
+      sourceKind: readString(toRecord(raw.source)?.kind) ?? undefined,
       lastError: lastError ?? undefined
     };
   }
@@ -401,7 +367,7 @@ export class CodexCliAdapter {
 
     const lastPreview =
       messages.length > 0
-        ? this.toPreview(messages[messages.length - 1].content)
+        ? toPreview(messages[messages.length - 1].content)
         : summary.lastMessagePreview;
 
     return {
@@ -423,33 +389,33 @@ export class CodexCliAdapter {
     for (const turn of turns) {
       const items = Array.isArray(turn.items) ? turn.items : [];
       for (const item of items) {
-        const itemRecord = this.toRecord(item);
+        const itemRecord = toRecord(item);
         if (!itemRecord) {
           continue;
         }
 
-        const itemType = this.readString(itemRecord.type);
+        const itemType = readString(itemRecord.type);
 
         if (itemType === 'userMessage') {
           const contentItems = Array.isArray(itemRecord.content) ? itemRecord.content : [];
           const text = contentItems
             .map((entry: unknown) => {
-              const entryRecord = this.toRecord(entry);
+              const entryRecord = toRecord(entry);
               if (!entryRecord) {
                 return '';
               }
 
-              const entryType = this.readString(entryRecord.type);
+              const entryType = readString(entryRecord.type);
               if (entryType === 'text') {
-                return this.readString(entryRecord.text) ?? '';
+                return readString(entryRecord.text) ?? '';
               }
 
               if (entryType === 'image') {
-                return `[image: ${this.readString(entryRecord.url) ?? 'unknown'}]`;
+                return `[image: ${readString(entryRecord.url) ?? 'unknown'}]`;
               }
 
               if (entryType === 'localImage') {
-                return `[local image: ${this.readString(entryRecord.path) ?? 'unknown'}]`;
+                return `[local image: ${readString(entryRecord.path) ?? 'unknown'}]`;
               }
 
               return '';
@@ -462,7 +428,7 @@ export class CodexCliAdapter {
           }
 
           messages.push({
-            id: this.readString(itemRecord.id) ?? randomUUID(),
+            id: readString(itemRecord.id) ?? randomUUID(),
             role: 'user',
             content: text,
             createdAt: new Date(baseTs + messages.length * 1000).toISOString()
@@ -471,13 +437,13 @@ export class CodexCliAdapter {
         }
 
         if (itemType === 'agentMessage') {
-          const text = this.readString(itemRecord.text) ?? '';
+          const text = readString(itemRecord.text) ?? '';
           if (!text.trim()) {
             continue;
           }
 
           messages.push({
-            id: this.readString(itemRecord.id) ?? randomUUID(),
+            id: readString(itemRecord.id) ?? randomUUID(),
             role: 'assistant',
             content: text,
             createdAt: new Date(baseTs + messages.length * 1000).toISOString()
@@ -503,7 +469,7 @@ export class CodexCliAdapter {
     existing.content += delta;
     const updatedAt = new Date().toISOString();
     thread.updatedAt = updatedAt;
-    thread.lastMessagePreview = this.toPreview(existing.content);
+    thread.lastMessagePreview = toPreview(existing.content);
 
     this.threadCache.set(thread.id, thread);
 
@@ -534,7 +500,7 @@ export class CodexCliAdapter {
 
     const preview = message.content.trim();
     if (preview) {
-      thread.lastMessagePreview = this.toPreview(preview);
+      thread.lastMessagePreview = toPreview(preview);
     }
 
     this.threadCache.set(thread.id, thread);
@@ -604,126 +570,5 @@ export class CodexCliAdapter {
 
   private emit(event: BridgeWsEvent): void {
     this.emitWsEvent?.(event);
-  }
-
-  private mapRawStatus(status: unknown, turns: RawTurn[] | undefined): Thread['status'] {
-    const statusRecord = this.toRecord(status);
-    const statusType = this.readString(statusRecord?.type);
-
-    if (statusType === 'active') {
-      return 'running';
-    }
-
-    if (statusType === 'systemError') {
-      return 'error';
-    }
-
-    const lastTurn = Array.isArray(turns) && turns.length > 0 ? turns[turns.length - 1] : null;
-    const lastTurnStatus = this.readString(lastTurn?.status);
-
-    if (lastTurnStatus === 'inProgress') {
-      return 'running';
-    }
-
-    if (lastTurnStatus === 'failed' || lastTurnStatus === 'interrupted') {
-      return 'error';
-    }
-
-    if (lastTurnStatus === 'completed') {
-      return 'complete';
-    }
-
-    if (statusType === 'idle' || statusType === 'notLoaded') {
-      return Array.isArray(turns) && turns.length > 0 ? 'complete' : 'idle';
-    }
-
-    return 'idle';
-  }
-
-  private extractLastError(turns: RawTurn[]): string | null {
-    for (let i = turns.length - 1; i >= 0; i -= 1) {
-      const turn = turns[i];
-      const turnStatus = this.readString(turn.status);
-      if (turnStatus !== 'failed' && turnStatus !== 'interrupted') {
-        continue;
-      }
-
-      const message = this.readString(turn.error?.message);
-      if (message) {
-        return message;
-      }
-
-      return `turn ${turnStatus}`;
-    }
-
-    return null;
-  }
-
-  private toRawThread(value: unknown): RawThread {
-    const record = this.toRecord(value) ?? {};
-    return {
-      id: this.readString(record.id) ?? undefined,
-      preview: this.readString(record.preview) ?? undefined,
-      modelProvider: this.readString(record.modelProvider) ?? undefined,
-      createdAt: this.readNumber(record.createdAt) ?? undefined,
-      updatedAt: this.readNumber(record.updatedAt) ?? undefined,
-      status: (record.status as RawThreadStatus) ?? undefined,
-      cwd: this.readString(record.cwd) ?? undefined,
-      source: this.toRecord(record.source) as { kind?: string } | undefined,
-      turns: Array.isArray(record.turns)
-        ? (record.turns.map((turn) => this.toRawTurn(turn)).filter(Boolean) as RawTurn[])
-        : undefined
-    };
-  }
-
-  private toRawTurn(value: unknown): RawTurn | null {
-    const record = this.toRecord(value);
-    if (!record) {
-      return null;
-    }
-
-    const items = Array.isArray(record.items)
-      ? (record.items
-          .map((item) => this.toRecord(item))
-          .filter((item): item is RawThreadItem => item !== null) as RawThreadItem[])
-      : undefined;
-
-    return {
-      id: this.readString(record.id) ?? undefined,
-      status: this.readString(record.status) ?? undefined,
-      error: this.toRecord(record.error) as { message?: string } | null,
-      items
-    };
-  }
-
-  private unixSecondsToIso(value: number | undefined): string {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      return new Date().toISOString();
-    }
-
-    return new Date(value * 1000).toISOString();
-  }
-
-  private toPreview(value: string): string {
-    const collapsed = value.replace(/\s+/g, ' ').trim();
-    if (collapsed.length <= 180) {
-      return collapsed;
-    }
-
-    return `${collapsed.slice(0, 177)}...`;
-  }
-
-  private toRecord(value: unknown): Record<string, unknown> | null {
-    return typeof value === 'object' && value !== null
-      ? (value as Record<string, unknown>)
-      : null;
-  }
-
-  private readString(value: unknown): string | null {
-    return typeof value === 'string' ? value : null;
-  }
-
-  private readNumber(value: unknown): number | null {
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
   }
 }
