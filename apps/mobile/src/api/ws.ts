@@ -155,6 +155,27 @@ export class MacBridgeWsClient {
       }, timeoutMs);
 
       const unsubscribe = this.onEvent((event) => {
+        if (event.method.startsWith('codex/event/')) {
+          const codexEvent = toCodexEventSnapshot(event.method, event.params);
+          if (!codexEvent || codexEvent.threadId !== threadId) {
+            return;
+          }
+
+          if (codexEvent.type === 'turn_aborted' || codexEvent.type === 'turnaborted') {
+            clearTimeout(timeout);
+            unsubscribe();
+            reject(new Error('turn aborted'));
+            return;
+          }
+
+          if (codexEvent.type === 'task_complete' || codexEvent.type === 'taskcomplete') {
+            clearTimeout(timeout);
+            unsubscribe();
+            resolve();
+            return;
+          }
+        }
+
         if (event.method !== 'turn/completed') {
           return;
         }
@@ -462,4 +483,43 @@ function toTurnCompletionSnapshot(value: unknown): TurnCompletionSnapshot | null
     errorMessage: readString(turnError?.message),
     completedAt: Date.now(),
   };
+}
+
+function toCodexEventSnapshot(
+  method: string,
+  value: unknown
+): { type: string; threadId: string | null } | null {
+  if (!method.startsWith('codex/event/')) {
+    return null;
+  }
+
+  const params = toRecord(value);
+  const msg = toRecord(params?.msg);
+  const rawType = readString(msg?.type) ?? method.replace('codex/event/', '');
+  const type = normalizeCodexEventType(rawType);
+  if (!type) {
+    return null;
+  }
+
+  const threadId =
+    readString(msg?.thread_id) ??
+    readString(msg?.threadId) ??
+    readString(params?.threadId) ??
+    readString(params?.thread_id) ??
+    readString(params?.conversationId) ??
+    readString(msg?.conversation_id);
+
+  return {
+    type,
+    threadId,
+  };
+}
+
+function normalizeCodexEventType(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
 }

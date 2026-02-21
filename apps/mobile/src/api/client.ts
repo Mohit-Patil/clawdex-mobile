@@ -337,7 +337,7 @@ export class MacBridgeApiClient {
     }
 
     await this.ws.waitForTurnCompletion(id, turnId);
-    return this.getChat(id);
+    return this.getChatWithUserMessage(id, content);
   }
 
   async listModels(includeHidden = false): Promise<ModelOption[]> {
@@ -544,6 +544,25 @@ export class MacBridgeApiClient {
       await this.ws.request<AppServerThreadSetNameResponse>('thread/name/set', fallbackPayload);
     }
   }
+
+  private async getChatWithUserMessage(id: string, content: string): Promise<Chat> {
+    const normalizedContent = content.trim();
+    let latest = await this.getChat(id);
+    if (!normalizedContent || chatHasUserMessage(latest, normalizedContent)) {
+      return latest;
+    }
+
+    const retryDelaysMs = [150, 300, 500, 800];
+    for (const delayMs of retryDelaysMs) {
+      await sleep(delayMs);
+      latest = await this.getChat(id);
+      if (chatHasUserMessage(latest, normalizedContent)) {
+        return latest;
+      }
+    }
+
+    return latest;
+  }
 }
 
 function isSubAgentSource(sourceKind: string | undefined): boolean {
@@ -651,4 +670,19 @@ function toReasoningEffortOptions(raw: unknown): ModelReasoningEffortOption[] {
   }
 
   return options;
+}
+
+function chatHasUserMessage(chat: Chat, content: string): boolean {
+  const normalized = content.trim();
+  if (!normalized) {
+    return true;
+  }
+
+  return chat.messages.some(
+    (message) => message.role === 'user' && message.content.trim() === normalized
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

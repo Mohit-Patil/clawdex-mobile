@@ -201,4 +201,24 @@ describe('MacBridgeWsClient', () => {
 
     await expect(waitPromise).resolves.toBeUndefined();
   });
+
+  it('waitForTurnCompletion resolves from codex task_complete event', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    client.connect();
+
+    const waitPromise = client.waitForTurnCompletion('thr_4', 'turn_4', 100);
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'codex/event/task_complete',
+        params: {
+          msg: {
+            type: 'task_complete',
+            thread_id: 'thr_4',
+          },
+        },
+      })
+    );
+
+    await expect(waitPromise).resolves.toBeUndefined();
+  });
 });

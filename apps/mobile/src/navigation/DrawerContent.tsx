@@ -180,7 +180,7 @@ export function DrawerContent({
         const msg = toRecord(params?.msg);
         const codexEventType =
           readString(msg?.type) ?? event.method.replace('codex/event/', '');
-        const scopedThreadId = threadIdFromEvent ?? selectedChatId;
+        const scopedThreadId = threadIdFromEvent;
 
         if (RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType)) {
           markThreadRunning(scopedThreadId);
@@ -199,7 +199,7 @@ export function DrawerContent({
         void loadChats();
       }
     });
-  }, [ws, loadChats, selectedChatId]);
+  }, [ws, loadChats]);
 
   useEffect(() => {
     const timer = setInterval(() => {

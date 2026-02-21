@@ -169,6 +169,63 @@ describe('MacBridgeApiClient', () => {
     expect(chat.messages.length).toBeGreaterThan(0);
   });
 
+  it('sendChatMessage() retries thread/read until sent user message is materialized', async () => {
+    jest.useFakeTimers();
+    try {
+      const ws = createWsMock();
+      ws.request
+        .mockResolvedValueOnce({}) // thread/resume
+        .mockResolvedValueOnce({ turn: { id: 'turn_retry' } }) // turn/start
+        .mockResolvedValueOnce({
+          thread: {
+            id: 'thr_retry',
+            preview: 'stale',
+            createdAt: 1700000000,
+            updatedAt: 1700000001,
+            status: { type: 'idle' },
+            turns: [],
+          },
+        }) // stale thread/read (missing latest user item)
+        .mockResolvedValueOnce({
+          thread: {
+            id: 'thr_retry',
+            preview: 'Hello',
+            createdAt: 1700000000,
+            updatedAt: 1700000002,
+            status: { type: 'idle' },
+            turns: [
+              {
+                items: [
+                  {
+                    type: 'userMessage',
+                    id: 'u_retry',
+                    content: [{ type: 'text', text: 'Hello' }],
+                  },
+                ],
+              },
+            ],
+          },
+        }); // retried thread/read
+
+      const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+      const chatPromise = client.sendChatMessage('thr_retry', { content: 'Hello' });
+
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(200);
+      const chat = await chatPromise;
+
+      expect(chat.messages.some((message) => message.role === 'user' && message.content === 'Hello')).toBe(true);
+      expect(ws.request).toHaveBeenCalledWith(
+        'turn/start',
+        expect.objectContaining({
+          threadId: 'thr_retry',
+        })
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('createChat() forwards selected model to thread/start', async () => {
     const ws = createWsMock();
     ws.request
@@ -301,7 +358,17 @@ describe('MacBridgeApiClient', () => {
           createdAt: 1700000000,
           updatedAt: 1700000002,
           status: { type: 'idle' },
-          turns: [],
+          turns: [
+            {
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_plan',
+                  content: [{ type: 'text', text: 'hello' }],
+                },
+              ],
+            },
+          ],
         },
       });
 
@@ -352,7 +419,17 @@ describe('MacBridgeApiClient', () => {
           createdAt: 1700000000,
           updatedAt: 1700000002,
           status: { type: 'idle' },
-          turns: [],
+          turns: [
+            {
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_plan_fallback',
+                  content: [{ type: 'text', text: 'hello' }],
+                },
+              ],
+            },
+          ],
         },
       });
 
