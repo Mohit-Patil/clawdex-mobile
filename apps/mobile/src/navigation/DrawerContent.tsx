@@ -9,8 +9,6 @@ import {
   Text,
   View,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
-
 import type { MacBridgeApiClient } from '../api/client';
 import type { BridgeWsEvent, ThreadSummary } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
@@ -76,7 +74,6 @@ export function DrawerContent({
 
   return (
     <View style={styles.container}>
-      <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
       <SafeAreaView style={styles.safeArea}>
         {/* New Thread button */}
         <View style={styles.header}>
@@ -196,7 +193,7 @@ function relativeTime(iso: string): string {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: 'transparent',
+    backgroundColor: colors.bgSidebar,
   },
   safeArea: {
     flex: 1,
@@ -273,9 +270,9 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xs,
   },
   threadItemSelected: {
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    backgroundColor: 'rgba(200, 169, 70, 0.1)',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(59, 130, 246, 0.2)',
+    borderColor: 'rgba(200, 169, 70, 0.2)',
   },
   threadItemPressed: {
     backgroundColor: colors.bgItem,

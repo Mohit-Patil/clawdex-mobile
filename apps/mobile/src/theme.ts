@@ -2,36 +2,39 @@ import { Platform, StyleSheet } from 'react-native';
 
 export const colors = {
   // Backgrounds
-  bgMain: '#05050A', // Pure black context for liquid glass
-  bgSidebar: 'rgba(24, 24, 27, 0.4)', // Frost for drawer
-  bgItem: 'rgba(39, 39, 42, 0.35)', // Frost for cards
-  bgInput: 'rgba(24, 24, 27, 0.55)', // Frost for input
+  bgMain: '#0D0D0D',
+  bgSidebar: '#1A1A1A',
+  bgItem: '#1A1A1A',
+  bgInput: 'rgba(255, 255, 255, 0.06)',
 
   // Borders
   border: 'rgba(255, 255, 255, 0.1)',
   borderLight: 'rgba(255, 255, 255, 0.05)',
-  borderHighlight: 'rgba(255, 255, 255, 0.15)',
+  borderHighlight: 'rgba(255, 255, 255, 0.12)',
 
   // Text
-  textPrimary: '#FFFFFF',
-  textSecondary: 'rgba(255, 255, 255, 0.85)',
-  textMuted: 'rgba(255, 255, 255, 0.5)',
+  textPrimary: '#E8E8E8',
+  textSecondary: '#999999',
+  textMuted: 'rgba(255, 255, 255, 0.4)',
 
-  // Accent
-  accent: '#6366F1', // Indigo 500
-  accentPressed: '#4F46E5', // Indigo 600
+  // Accent — gold/amber
+  accent: '#C8A946',
+  accentPressed: '#B89A3A',
 
-  // Gradients
-  userBubbleStart: '#8B5CF6', // Violet 500
-  userBubbleEnd: '#3B82F6', // Blue 500
+  // User bubble
+  userBubble: '#1E1E1E',
+  userBubbleBorder: 'rgba(255, 255, 255, 0.1)',
 
-  // Message bubbles
-  userBubble: '#8B5CF6', // Fallback
-  assistantBubbleBg: 'rgba(39, 39, 42, 0.45)',
-  assistantBubbleBorder: 'rgba(255, 255, 255, 0.15)',
+  // Assistant — no bubble
+  assistantBubbleBg: 'transparent',
+  assistantBubbleBorder: 'transparent',
+
+  // Tool block
+  toolBlockBg: 'rgba(255, 255, 255, 0.04)',
+  toolBlockBorder: '#C8A946',
 
   // Status
-  statusRunning: '#3B82F6',
+  statusRunning: '#C8A946',
   statusComplete: '#10B981',
   statusError: '#EF4444',
   statusIdle: 'rgba(255, 255, 255, 0.4)',

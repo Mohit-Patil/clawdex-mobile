@@ -21,11 +21,45 @@
 2. Copy env examples:
    - `cp apps/mobile/.env.example apps/mobile/.env`
    - `cp services/mac-bridge/.env.example services/mac-bridge/.env`
-3. Start bridge:
-   - `npm run bridge`
-4. Start mobile:
-   - `npm run mobile`
-   - optionally `npm run ios` or `npm run android`
+
+### Starting the Bridge
+
+The bridge does **not** auto-load `.env` files. All environment variables must be passed inline.
+
+```bash
+BRIDGE_HOST=0.0.0.0 \
+BRIDGE_PORT=8787 \
+BRIDGE_ALLOW_INSECURE_NO_AUTH=true \
+CODEX_CLI_BIN=codex \
+BRIDGE_WORKDIR="$(pwd)" \
+npm run -w @codex/mac-bridge dev
+```
+
+- `BRIDGE_HOST=0.0.0.0` binds to all interfaces so the phone on the same LAN can reach it. Without this it defaults to `127.0.0.1` (localhost only).
+- `BRIDGE_ALLOW_INSECURE_NO_AUTH=true` disables auth for local development. Without it the bridge will throw `BRIDGE_AUTH_TOKEN is required`.
+- `CODEX_CLI_BIN=codex` tells the bridge which Codex binary to use. Make sure `codex` is in your PATH.
+- `BRIDGE_WORKDIR` sets the root directory for git/terminal operations.
+
+The shorthand `npm run bridge` only sets `BRIDGE_WORKDIR` — it will fail unless the other vars are already exported in your shell.
+
+### Starting Expo
+
+```bash
+npm run mobile
+```
+
+This runs `expo start` in the `apps/mobile` workspace. It loads `apps/mobile/.env` automatically.
+
+Make sure `EXPO_PUBLIC_MAC_BRIDGE_URL` in `apps/mobile/.env` points to your Mac's LAN IP and the bridge port:
+```
+EXPO_PUBLIC_MAC_BRIDGE_URL=http://<YOUR_LAN_IP>:8787
+```
+
+Find your LAN IP with `ifconfig en0 | grep inet` (macOS). The phone and the Mac must be on the same network.
+
+Optionally run on a specific platform:
+- `npm run ios`
+- `npm run android`
 
 ## Core Commands
 - `npm run lint` (all workspaces)

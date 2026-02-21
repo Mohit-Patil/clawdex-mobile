@@ -1,6 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 
 import type { ApprovalDecision, ApprovalKind, PendingApproval } from '../types';
+
+const LOG_FILE = '/tmp/codex-app-server.log';
+
+function logRpc(direction: 'SEND' | 'RECV' | 'STDERR' | 'INFO', data: string): void {
+  const ts = new Date().toISOString();
+  try {
+    appendFileSync(LOG_FILE, `[${ts}] ${direction}: ${data}\n`);
+  } catch {
+    // ignore write errors
+  }
+}
 
 export interface AppServerNotification {
   method: string;
@@ -274,16 +286,19 @@ export class CodexAppServerClient {
     });
 
     child.stderr.on('data', (chunk: string) => {
+      logRpc('STDERR', chunk.trimEnd());
       this.onStderr?.(chunk);
     });
 
     child.on('error', (error) => {
+      logRpc('INFO', `process error: ${error.message}`);
       this.failAllPending(error);
       this.pendingApprovals.clear();
       this.started = false;
     });
 
     child.on('close', (code, signal) => {
+      logRpc('INFO', `process closed (code=${String(code)} signal=${String(signal)})`);
       this.failAllPending(
         new Error(
           `codex app-server closed (code=${String(code)} signal=${String(signal)})`
@@ -323,6 +338,8 @@ export class CodexAppServerClient {
     if (!line) {
       return;
     }
+
+    logRpc('RECV', line);
 
     let parsed: unknown;
     try {
@@ -459,6 +476,7 @@ export class CodexAppServerClient {
     }
 
     const line = JSON.stringify(payload);
+    logRpc('SEND', line);
     await new Promise<void>((resolve, reject) => {
       this.child?.stdin.write(`${line}\n`, (error) => {
         if (error) {

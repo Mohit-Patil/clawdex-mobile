@@ -8,26 +8,32 @@ import {
   useState,
 } from 'react';
 import {
-  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
-import { LinearGradient } from 'expo-linear-gradient';
-import Markdown from 'react-native-markdown-display';
-import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
 
 import type { MacBridgeApiClient } from '../api/client';
-import type { BridgeWsEvent, Thread, ThreadMessage } from '../api/types';
+import type {
+  ApprovalDecision,
+  BridgeWsEvent,
+  PendingApproval,
+  RunEvent,
+  Thread,
+  ThreadMessage,
+} from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
-import { colors, radius, spacing, typography } from '../theme';
+import { ApprovalBanner } from '../components/ApprovalBanner';
+import { ChatHeader } from '../components/ChatHeader';
+import { ChatInput } from '../components/ChatInput';
+import { ChatMessage } from '../components/ChatMessage';
+import { ToolBlock } from '../components/ToolBlock';
+import { TypingIndicator } from '../components/TypingIndicator';
+import { colors, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
   openThread: (id: string) => void;
@@ -53,7 +59,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [activeCommands, setActiveCommands] = useState<RunEvent[]>([]);
+    const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+    const [streamingText, setStreamingText] = useState<string | null>(null);
     const scrollRef = useRef<ScrollView>(null);
+
+    // Ref so the WS handler always reads the latest thread ID without
+    // needing to re-subscribe on every change.
+    const threadIdRef = useRef<string | null>(null);
+    threadIdRef.current = selectedThreadId;
+
+    // Track whether a command arrived since the last delta — used to
+    // know when a new thinking segment starts so we can replace the old one.
+    const hadCommandRef = useRef(false);
 
     useImperativeHandle(ref, () => ({
       openThread: (id: string) => {
@@ -64,8 +82,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setSelectedThreadId(null);
         setDraft('');
         setError(null);
+        setActiveCommands([]);
+        setPendingApproval(null);
+        setStreamingText(null);
+        hadCommandRef.current = false;
       },
     }));
+
+    const startNewThread = useCallback(() => {
+      setSelectedThread(null);
+      setSelectedThreadId(null);
+      setDraft('');
+      setError(null);
+      setActiveCommands([]);
+      setPendingApproval(null);
+      setStreamingText(null);
+      hadCommandRef.current = false;
+    }, []);
 
     const loadThread = useCallback(
       async (threadId: string) => {
@@ -74,6 +107,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setSelectedThreadId(threadId);
           setSelectedThread(thread);
           setError(null);
+          setActiveCommands([]);
+          setPendingApproval(null);
+          setStreamingText(null);
+          hadCommandRef.current = false;
         } catch (err) {
           setError((err as Error).message);
         }
@@ -116,7 +153,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setError(null);
       } catch (err) {
         setError((err as Error).message);
-        // Optionally revert optimistic state here if needed
       } finally {
         setCreating(false);
       }
@@ -156,14 +192,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [api, draft, selectedThreadId]);
 
     useEffect(() => {
+      const pendingApprovalId = pendingApproval?.id;
+
       return ws.onEvent((event: BridgeWsEvent) => {
+        const currentId = threadIdRef.current;
+
+        // ── Adopt real thread ID during optimistic creation ──
+        if (event.type === 'thread.created' && currentId?.startsWith('temp-')) {
+          setSelectedThreadId(event.payload.id);
+          setSelectedThread((prev) =>
+            prev ? { ...prev, id: event.payload.id } : prev
+          );
+          return;
+        }
+
+        // ── Full message (user echo, initial assistant stub) ──
         if (event.type === 'thread.message') {
           setSelectedThread((prev) => {
             if (!prev || prev.id !== event.payload.threadId) return prev;
 
             const incoming = event.payload.message;
-            // Deduplicate if we have an optimistic message with the exact same content
-            // and the optimistic message ID starts with 'msg-'
             const existingOptimisticIdx = prev.messages.findIndex(
               (m) => m.id.startsWith('msg-') && m.role === incoming.role && m.content === incoming.content
             );
@@ -181,117 +229,117 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             };
           });
         }
+
+        // ── Streaming delta → transient thinking text ──
         if (event.type === 'thread.message.delta') {
-          setSelectedThread((prev) => {
-            if (!prev || prev.id !== event.payload.threadId) return prev;
-            const exists = prev.messages.find((m) => m.id === event.payload.messageId);
-            const streamed: ThreadMessage = {
-              id: event.payload.messageId,
-              role: 'assistant',
-              content: event.payload.content,
-              createdAt: event.payload.updatedAt,
-            };
-            const messages = exists
-              ? prev.messages.map((m) =>
-                m.id === event.payload.messageId ? { ...m, content: event.payload.content } : m
-              )
-              : [...prev.messages, streamed];
-            return { ...prev, messages };
-          });
+          if (currentId !== event.payload.threadId) return;
+          if (hadCommandRef.current) {
+            // New thinking segment — replace previous thinking + commands
+            setStreamingText(event.payload.delta);
+            setActiveCommands([]);
+            hadCommandRef.current = false;
+          } else {
+            // Continue current thinking segment
+            setStreamingText((prev) => (prev ?? '') + event.payload.delta);
+          }
           setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
         }
-        if (event.type === 'thread.updated' && selectedThreadId === event.payload.id) {
+
+        // ── Thread status changes ──
+        if (event.type === 'thread.updated' && currentId === event.payload.id) {
+          const nowDone = event.payload.status !== 'running';
+          if (nowDone) {
+            setStreamingText(null);
+            setActiveCommands([]);
+            hadCommandRef.current = false;
+            void loadThread(event.payload.id);
+          }
           setSelectedThread((prev) => (prev ? { ...prev, ...event.payload } : prev));
         }
+
+        // ── Run events (commands, completion) ──
+        if (event.type === 'thread.run.event' && currentId === event.payload.threadId) {
+          const { eventType } = event.payload;
+          if (eventType === 'command.completed') {
+            // Add tool block below the current thinking text
+            hadCommandRef.current = true;
+            setActiveCommands((prev) => [
+              ...prev,
+              { id: `re-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, ...event.payload },
+            ]);
+          }
+          if (eventType === 'run.completed' || eventType === 'run.failed') {
+            setActiveCommands([]);
+            setStreamingText(null);
+            hadCommandRef.current = false;
+          }
+        }
+
+        // ── Approvals ──
+        if (event.type === 'approval.requested' && currentId === event.payload.threadId) {
+          setPendingApproval(event.payload);
+        }
+        if (event.type === 'approval.resolved' && pendingApprovalId === event.payload.id) {
+          setPendingApproval(null);
+        }
       });
-    }, [ws, selectedThreadId]);
+    }, [ws, pendingApproval?.id, loadThread]);
+
+    const handleResolveApproval = useCallback(
+      async (id: string, decision: ApprovalDecision) => {
+        try {
+          await api.resolveApproval(id, decision);
+          setPendingApproval(null);
+        } catch (err) {
+          setError((err as Error).message);
+        }
+      },
+      [api]
+    );
 
     const handleSubmit = selectedThread ? sendMessage : createThread;
     const isLoading = sending || creating;
+    const isStreaming = selectedThread?.status === 'running';
 
     return (
       <View style={styles.container}>
-        {/* Liquid Glass Background */}
-        <LinearGradient
-          colors={['#0F0C29', '#302B63', '#05050A']}
-          style={StyleSheet.absoluteFill}
-        />
-        <SafeAreaView style={styles.safeArea}>
+        <ChatHeader onOpenDrawer={onOpenDrawer} />
 
-          {/* Body */}
-          <View style={styles.bodyContainer}>
-            {selectedThread ? (
-              <ChatView thread={selectedThread} scrollRef={scrollRef} />
-            ) : (
-              <ComposeView onSuggestion={(s) => setDraft(s)} />
-            )}
+        <View style={styles.bodyContainer}>
+          {selectedThread ? (
+            <ChatView
+              thread={selectedThread}
+              activeCommands={activeCommands}
+              streamingText={streamingText}
+              scrollRef={scrollRef}
+              isStreaming={isStreaming}
+            />
+          ) : (
+            <ComposeView onSuggestion={(s) => setDraft(s)} />
+          )}
 
-            {/* Input bar */}
-            <KeyboardAvoidingView
-              behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-              keyboardVerticalOffset={0}
-              style={styles.keyboardAvoiding}
-            >
-              {error ? <Text style={styles.errorText}>{error}</Text> : null}
-              <BlurView intensity={70} tint="dark" style={styles.inputBarWrapper}>
-                <View style={styles.inputBar}>
-                  <TextInput
-                    style={styles.input}
-                    value={draft}
-                    onChangeText={setDraft}
-                    placeholder={
-                      selectedThread
-                        ? 'Reply...'
-                        : 'Ask Codex anything...'
-                    }
-                    placeholderTextColor={colors.textMuted}
-                    multiline
-                    onKeyPress={(e: any) => {
-                      if (Platform.OS === 'web' && e.nativeEvent.key === 'Enter' && !e.nativeEvent.shiftKey) {
-                        e.preventDefault();
-                        if (!isLoading && draft.trim()) {
-                          void handleSubmit();
-                        }
-                      }
-                    }}
-                  />
-                  <Pressable
-                    onPress={() => void handleSubmit()}
-                    disabled={isLoading || !draft.trim()}
-                    style={({ pressed }) => [
-                      styles.sendBtn,
-                      (!draft.trim() || isLoading) && styles.sendBtnDisabled,
-                      pressed && styles.sendBtnPressed,
-                    ]}
-                  >
-                    {isLoading ? (
-                      <ActivityIndicator size="small" color={colors.white} />
-                    ) : (
-                      <Ionicons name="arrow-up" size={16} color={colors.white} />
-                    )}
-                  </Pressable>
-                </View>
-              </BlurView>
-            </KeyboardAvoidingView>
-
-          </View>
-
-          {/* Floating Header */}
-          <BlurView intensity={80} tint="dark" style={styles.headerBlur}>
-            <SafeAreaView>
-              <View style={styles.header}>
-                <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
-                  <Ionicons name="menu" size={22} color={colors.textPrimary} />
-                </Pressable>
-                {selectedThread ? (
-                  <Text style={styles.headerTitle} numberOfLines={1}>
-                    {selectedThread.title || 'Thread'}
-                  </Text>
-                ) : null}
-              </View>
-            </SafeAreaView>
-          </BlurView>
-        </SafeAreaView>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            keyboardVerticalOffset={0}
+            style={styles.keyboardAvoiding}
+          >
+            {error ? <Text style={styles.errorText}>{error}</Text> : null}
+            {pendingApproval ? (
+              <ApprovalBanner
+                approval={pendingApproval}
+                onResolve={handleResolveApproval}
+              />
+            ) : null}
+            <ChatInput
+              value={draft}
+              onChangeText={setDraft}
+              onSubmit={() => void handleSubmit()}
+              onNewThread={startNewThread}
+              isLoading={isLoading}
+              placeholder={selectedThread ? 'Reply...' : 'Message Codex...'}
+            />
+          </KeyboardAvoidingView>
+        </View>
       </View>
     );
   }
@@ -327,17 +375,32 @@ function ComposeView({ onSuggestion }: { onSuggestion: (s: string) => void }) {
 
 function ChatView({
   thread,
+  activeCommands,
+  streamingText,
   scrollRef,
+  isStreaming,
 }: {
   thread: Thread;
+  activeCommands: RunEvent[];
+  streamingText: string | null;
   scrollRef: React.RefObject<ScrollView | null>;
+  isStreaming: boolean;
 }) {
-  const visibleMessages = thread.messages.filter((msg) => {
+  const filtered = thread.messages.filter((msg) => {
     const text = msg.content || '';
     if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
     if (text.includes('Current working directory is:')) return false;
     if (text.includes('You are operating in task worktree')) return false;
+    if (msg.role === 'assistant' && !text.trim()) return false;
     return true;
+  });
+
+  // For each consecutive run of assistant messages, only keep the last
+  // one (the final answer). Earlier ones are intermediate thinking.
+  const visibleMessages = filtered.filter((msg, i) => {
+    if (msg.role !== 'assistant') return true;
+    const next = filtered[i + 1];
+    return !next || next.role !== 'assistant';
   });
 
   return (
@@ -349,95 +412,24 @@ function ChatView({
       onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
     >
       {visibleMessages.map((msg) => (
-        <MessageBubble key={msg.id} message={msg} />
+        <ChatMessage key={msg.id} message={msg} />
       ))}
+      {streamingText ? (
+        <Text style={styles.streamingText} numberOfLines={4}>
+          {streamingText}
+        </Text>
+      ) : null}
+      {activeCommands.map((cmd) => {
+        if (!cmd.detail) return null;
+        const parts = cmd.detail.split('|').map((s) => s.trim());
+        const command = parts[0] || cmd.detail;
+        const status = parts[1] === 'error' ? ('error' as const) : ('complete' as const);
+        return <ToolBlock key={cmd.id} command={command} status={status} />;
+      })}
+      {isStreaming && !streamingText && activeCommands.length === 0 ? <TypingIndicator /> : null}
     </ScrollView>
   );
 }
-
-function MessageBubble({ message }: { message: ThreadMessage }) {
-  const isUser = message.role === 'user';
-
-  if (isUser) {
-    return (
-      <Animated.View
-        entering={FadeInUp.duration(400)}
-        layout={Layout.springify()}
-        style={[styles.messageWrapper, styles.messageWrapperUser]}
-      >
-        <LinearGradient
-          colors={[colors.userBubbleStart, colors.userBubbleEnd]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={[styles.bubble, styles.userBubble]}
-        >
-          <Text style={styles.userMessageText}>{message.content}</Text>
-        </LinearGradient>
-      </Animated.View>
-    );
-  }
-
-  return (
-    <Animated.View
-      entering={FadeInUp.duration(400).delay(50)}
-      layout={Layout.springify()}
-      style={[styles.messageWrapper, styles.messageWrapperAssistant]}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs }}>
-        <View style={styles.assistantAvatar}>
-          <Ionicons name="terminal" size={12} color={colors.accent} />
-        </View>
-        <Text style={styles.roleLabel}>CODEX</Text>
-      </View>
-      <BlurView intensity={60} tint="dark" style={[styles.bubble, styles.assistantBubble]}>
-        <Markdown style={markdownStyles}>
-          {message.content || '▍'}
-        </Markdown>
-      </BlurView>
-    </Animated.View>
-  );
-}
-
-const markdownStyles = StyleSheet.create({
-  body: {
-    ...typography.body,
-    color: colors.textPrimary,
-  },
-  code_inline: {
-    ...typography.mono,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    color: colors.accent,
-    borderRadius: radius.sm,
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-  },
-  code_block: {
-    ...typography.mono,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    color: colors.textPrimary,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginTop: spacing.sm,
-    marginBottom: spacing.sm,
-  },
-  fence: {
-    ...typography.mono,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    color: colors.textPrimary,
-    borderRadius: radius.md,
-    padding: spacing.md,
-    marginTop: spacing.sm,
-    marginBottom: spacing.sm,
-  },
-  link: {
-    color: colors.accent,
-    textDecorationLine: 'underline',
-  },
-  paragraph: {
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
-  },
-});
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -453,33 +445,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.bgMain,
-  },
-  safeArea: {
-    flex: 1,
-  },
-  headerBlur: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderHighlight,
-    zIndex: 10,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-  },
-  menuBtn: {
-    padding: spacing.xs,
-  },
-  headerTitle: {
-    ...typography.headline,
-    flex: 1,
-    color: colors.textPrimary,
   },
 
   bodyContainer: {
@@ -523,13 +488,13 @@ const styles = StyleSheet.create({
   suggestionCard: {
     flex: 1,
     backgroundColor: colors.bgItem,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.md,
+    borderRadius: 12,
     padding: spacing.md,
   },
   suggestionCardPressed: {
-    backgroundColor: colors.bgSidebar,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
   },
   suggestionText: {
     ...typography.caption,
@@ -543,100 +508,17 @@ const styles = StyleSheet.create({
   },
   messageListContent: {
     padding: spacing.lg,
-    paddingTop: 100, // accommodate floating header
-    paddingBottom: spacing.xxl * 5, // Extra padding for floating input
+    paddingTop: 100,
+    paddingBottom: spacing.xxl * 5,
     gap: spacing.xl,
   },
-  messageWrapper: {
-    maxWidth: '92%',
-  },
-  messageWrapperUser: {
-    alignSelf: 'flex-end',
-  },
-  messageWrapperAssistant: {
-    alignSelf: 'flex-start',
-  },
-  roleLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.textMuted,
-    letterSpacing: 0.8,
-  },
-  assistantAvatar: {
-    width: 20,
-    height: 20,
-    borderRadius: 6,
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(59, 130, 246, 0.2)',
-  },
-  bubble: {
-    borderRadius: radius.md,
-    padding: spacing.md,
-  },
-  userBubble: {
-    borderBottomRightRadius: 4,
-    shadowColor: colors.userBubbleStart,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  assistantBubble: {
-    backgroundColor: colors.assistantBubbleBg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.assistantBubbleBorder,
-    borderTopLeftRadius: 4,
-  },
-  userMessageText: {
-    ...typography.body,
-    color: colors.white,
-  },
-  messageText: {
-    ...typography.body,
-  },
 
-  // Input bar
-  inputBarWrapper: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
-    overflow: 'hidden',
-  },
-  inputBar: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    paddingBottom: Platform.OS === 'ios' ? spacing.xxl : spacing.md,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: colors.bgSidebar,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
-    color: colors.textPrimary,
-    fontSize: 14,
-    maxHeight: 120,
-  },
-  sendBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: colors.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendBtnDisabled: {
-    backgroundColor: colors.bgItem,
-  },
-  sendBtnPressed: {
-    backgroundColor: colors.accentPressed,
+  // Streaming thinking text
+  streamingText: {
+    ...typography.body,
+    fontStyle: 'italic',
+    color: colors.textMuted,
+    lineHeight: 20,
   },
 
   // Error

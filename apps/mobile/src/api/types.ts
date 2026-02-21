@@ -106,6 +106,14 @@ export interface ResolveApprovalResponse {
   decision: ApprovalDecision;
 }
 
+export interface RunEvent {
+  id: string;
+  threadId: string;
+  eventType: string;
+  at: string;
+  detail?: string;
+}
+
 export type BridgeWsEvent =
   | {
       type: 'thread.created';
