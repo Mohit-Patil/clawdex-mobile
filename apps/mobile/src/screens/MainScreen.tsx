@@ -110,6 +110,8 @@ const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 8;
 const RUN_WATCHDOG_MS = 15_000;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 120_000;
+const ANDROID_KEYBOARD_EXTRA_OFFSET = 12;
+const IOS_KEYBOARD_EXTRA_OFFSET = 12;
 const INLINE_OPTION_LINE_PATTERN =
   /^(?:[-*+]\s*)?(?:\d{1,2}\s*[.):-]|\(\d{1,2}\)\s*[.):-]?|\[\d{1,2}\]\s*|[A-Ca-c]\s*[.):-]|\([A-Ca-c]\)\s*[.):-]?|option\s+\d{1,2}\s*[.):-]?)\s*(.+)$/i;
 const INLINE_CHOICE_CUE_PHRASES = [
@@ -376,9 +378,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     });
     const [activityPhrases, setActivityPhrases] = useState<string[]>([]);
     const scrollRef = useRef<ScrollView>(null);
-    const sendingRef = useRef(false);
-    const creatingRef = useRef(false);
-    const selectedChatStatusRef = useRef<Chat['status']>('idle');
     const loadChatRequestRef = useRef(0);
 
     // Ref so the WS handler always reads the latest chat ID without
@@ -462,29 +461,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
 
     useEffect(() => {
-      sendingRef.current = sending;
-    }, [sending]);
-
-    useEffect(() => {
-      creatingRef.current = creating;
-    }, [creating]);
-
-    useEffect(() => {
-      selectedChatStatusRef.current = selectedChat?.status ?? 'idle';
-    }, [selectedChat?.status]);
-
-    useEffect(() => {
       onChatContextChange?.(selectedChat);
     }, [onChatContextChange, selectedChat]);
-
-    const isRunContextActive = useCallback(() => {
-      return (
-        runWatchdogUntilRef.current > Date.now() ||
-        sendingRef.current ||
-        creatingRef.current ||
-        selectedChatStatusRef.current === 'running'
-      );
-    }, []);
 
     const defaultModelId = modelOptions.find((model) => model.isDefault)?.id ?? null;
     const activeModelId = selectedModelId ?? defaultModelId;
@@ -1738,7 +1716,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const isUnscopedRunEvent =
             !threadId &&
             isCodexRunHeartbeatEvent(codexEventType) &&
-            isRunContextActive();
+            Boolean(currentId);
 
           if (!isMatchingThread && !isUnscopedRunEvent) {
             return;
@@ -2411,15 +2389,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         // Turn completion/failure
         if (event.method === 'turn/completed') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const turn = toRecord(params?.turn);
+          const threadId =
+            readString(params?.threadId) ??
+            readString(params?.thread_id) ??
+            readString(turn?.threadId) ??
+            readString(turn?.thread_id);
           if (!threadId || currentId !== threadId) {
             return;
           }
           clearRunWatchdog();
 
-          const turn = toRecord(params?.turn);
-          const status = readString(turn?.status);
-          const turnError = toRecord(turn?.error);
+          const status = readString(turn?.status) ?? readString(params?.status);
+          const turnError = toRecord(turn?.error) ?? toRecord(params?.error);
           const turnErrorMessage = readString(turnError?.message);
 
           setActiveCommands([]);
@@ -2549,7 +2531,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       bumpRunWatchdog,
       clearRunWatchdog,
       pushActiveCommand,
-      isRunContextActive,
     ]);
 
     useEffect(() => {
@@ -2594,23 +2575,32 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             );
           } else if (!hasPendingApproval && !hasPendingUserInput) {
             clearRunWatchdog();
-            setActivity(
-              latest.status === 'complete'
-                ? {
-                    tone: 'complete',
-                    title: 'Turn completed',
-                  }
-                : latest.status === 'error'
+            setActivity((prev) => {
+              if (latest.status === 'error') {
+                return {
+                  tone: 'error',
+                  title: 'Turn failed',
+                  detail: latest.lastError ?? undefined,
+                };
+              }
+
+              if (latest.status === 'complete') {
+                return prev.tone === 'running'
                   ? {
-                      tone: 'error',
-                      title: 'Turn failed',
-                      detail: latest.lastError ?? undefined,
+                      tone: 'complete',
+                      title: 'Turn completed',
                     }
                   : {
                       tone: 'idle',
                       title: 'Ready',
-                    }
-            );
+                    };
+              }
+
+              return {
+                tone: 'idle',
+                title: 'Ready',
+              };
+            });
             setActivityPhrases([]);
           }
         } catch {
@@ -2709,7 +2699,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       if (Platform.OS === 'ios') {
         const onFrameChange = (endScreenY: number) => {
           const overlap = Math.max(0, Math.round(windowHeight - endScreenY));
-          const clamped = Math.min(maxKeyboardInset, overlap);
+          const adjustedOverlap =
+            overlap > 0 ? overlap + IOS_KEYBOARD_EXTRA_OFFSET : 0;
+          const clamped = Math.min(maxKeyboardInset, adjustedOverlap);
           setKeyboardInset((prev) => (prev === clamped ? prev : clamped));
         };
 
@@ -2728,7 +2720,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       const onDidShow = Keyboard.addListener('keyboardDidShow', (event) => {
         const height = Math.max(0, Math.round(event.endCoordinates.height));
-        const clamped = Math.min(maxKeyboardInset, height);
+        const adjustedHeight = height + ANDROID_KEYBOARD_EXTRA_OFFSET;
+        const clamped = Math.min(maxKeyboardInset, adjustedHeight);
         setKeyboardInset((prev) => (prev === clamped ? prev : clamped));
       });
       const onDidHide = Keyboard.addListener('keyboardDidHide', () => {
@@ -3216,7 +3209,16 @@ function ComposeView({
   onOpenCollaborationModePicker: () => void;
 }) {
   return (
-    <View style={styles.composeContainer}>
+    <ScrollView
+      style={styles.composeScroll}
+      contentContainerStyle={styles.composeContainer}
+      showsVerticalScrollIndicator={false}
+      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+      keyboardShouldPersistTaps="handled"
+      onScrollBeginDrag={Keyboard.dismiss}
+      alwaysBounceVertical
+      overScrollMode="always"
+    >
       <View style={styles.composeIcon}>
         <BrandMark size={52} />
       </View>
@@ -3275,7 +3277,7 @@ function ComposeView({
           </Pressable>
         ))}
       </View>
-    </View>
+    </ScrollView>
   );
 }
 
@@ -3358,6 +3360,9 @@ function ChatView({
       style={styles.messageList}
       contentContainerStyle={styles.messageListContent}
       showsVerticalScrollIndicator={false}
+      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+      keyboardShouldPersistTaps="handled"
+      onScrollBeginDrag={Keyboard.dismiss}
       onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
     >
       {activePlan ? <PlanCard plan={activePlan} /> : null}
@@ -4591,8 +4596,11 @@ const styles = StyleSheet.create({
   },
 
   // Compose
-  composeContainer: {
+  composeScroll: {
     flex: 1,
+  },
+  composeContainer: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: spacing.xl,

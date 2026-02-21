@@ -39,6 +39,24 @@ interface ChatWorkspaceSection {
   data: ChatSummary[];
 }
 
+const RUN_HEARTBEAT_STALE_MS = 20_000;
+const RUN_HEARTBEAT_EVENT_TYPES = new Set([
+  'task_started',
+  'agent_reasoning_delta',
+  'reasoning_content_delta',
+  'reasoning_raw_content_delta',
+  'agent_reasoning_raw_content_delta',
+  'agent_reasoning_section_break',
+  'agent_message_delta',
+  'agent_message_content_delta',
+  'exec_command_begin',
+  'exec_command_end',
+  'mcp_startup_update',
+  'mcp_tool_call_begin',
+  'web_search_begin',
+  'background_event',
+]);
+
 export function DrawerContent({
   api,
   ws,
@@ -54,6 +72,7 @@ export function DrawerContent({
   const [refreshing, setRefreshing] = useState(false);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
+  const [runHeartbeatAtByThread, setRunHeartbeatAtByThread] = useState<Record<string, number>>({});
   const hasAppliedInitialCollapseRef = useRef(false);
   const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
   const workspaceOptions = useMemo(() => listWorkspaces(chats), [chats]);
@@ -81,6 +100,21 @@ export function DrawerContent({
     try {
       const data = await api.listChats();
       setChats(sortChats(data));
+      const activeChatIds = new Set(data.map((chat) => chat.id));
+      setRunHeartbeatAtByThread((prev) => {
+        const now = Date.now();
+        const next: Record<string, number> = {};
+        for (const [threadId, ts] of Object.entries(prev)) {
+          if (!activeChatIds.has(threadId)) {
+            continue;
+          }
+          if (now - ts >= RUN_HEARTBEAT_STALE_MS) {
+            continue;
+          }
+          next[threadId] = ts;
+        }
+        return next;
+      });
     } catch {
       // silently fail
     } finally {
@@ -97,8 +131,67 @@ export function DrawerContent({
 
   useEffect(() => {
     return ws.onEvent((event: RpcNotification) => {
+      const threadIdFromEvent = extractThreadId(event);
+      const markThreadRunning = (threadId: string | null) => {
+        if (!threadId) {
+          return;
+        }
+        setRunHeartbeatAtByThread((prev) => ({
+          ...prev,
+          [threadId]: Date.now(),
+        }));
+      };
+      const clearThreadRunning = (threadId: string | null) => {
+        if (!threadId) {
+          return;
+        }
+        setRunHeartbeatAtByThread((prev) => {
+          if (!(threadId in prev)) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[threadId];
+          return next;
+        });
+      };
+
+      if (
+        event.method === 'turn/started' ||
+        event.method === 'item/started' ||
+        event.method === 'item/agentMessage/delta' ||
+        event.method === 'item/plan/delta' ||
+        event.method === 'item/reasoning/summaryPartAdded' ||
+        event.method === 'item/reasoning/summaryTextDelta' ||
+        event.method === 'item/reasoning/textDelta' ||
+        event.method === 'item/commandExecution/outputDelta' ||
+        event.method === 'item/mcpToolCall/progress' ||
+        event.method === 'turn/plan/updated' ||
+        event.method === 'turn/diff/updated'
+      ) {
+        markThreadRunning(threadIdFromEvent);
+      }
+
+      if (event.method === 'turn/completed') {
+        clearThreadRunning(threadIdFromEvent);
+      }
+
+      if (event.method.startsWith('codex/event/')) {
+        const params = toRecord(event.params);
+        const msg = toRecord(params?.msg);
+        const codexEventType =
+          readString(msg?.type) ?? event.method.replace('codex/event/', '');
+        const scopedThreadId = threadIdFromEvent ?? selectedChatId;
+
+        if (RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType)) {
+          markThreadRunning(scopedThreadId);
+        } else if (codexEventType === 'task_complete' || codexEventType === 'turn_aborted') {
+          clearThreadRunning(scopedThreadId);
+        }
+      }
+
       if (
         event.method === 'thread/started' ||
+        event.method === 'turn/started' ||
         event.method === 'thread/name/updated' ||
         event.method === 'turn/completed' ||
         event.method === 'thread/status/changed'
@@ -106,7 +199,24 @@ export function DrawerContent({
         void loadChats();
       }
     });
-  }, [ws, loadChats]);
+  }, [ws, loadChats, selectedChatId]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setRunHeartbeatAtByThread((prev) => {
+        const now = Date.now();
+        const next: Record<string, number> = {};
+        for (const [threadId, ts] of Object.entries(prev)) {
+          if (now - ts < RUN_HEARTBEAT_STALE_MS) {
+            next[threadId] = ts;
+          }
+        }
+        return next;
+      });
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -260,6 +370,9 @@ export function DrawerContent({
               renderItem={({ item, index, section }) => {
                 const isSelected = item.id === selectedChatId;
                 const isLast = index === section.data.length - 1;
+                const isRunningFromHeartbeat =
+                  (runHeartbeatAtByThread[item.id] ?? 0) > Date.now() - RUN_HEARTBEAT_STALE_MS;
+                const isRunning = item.status === 'running' || isRunningFromHeartbeat;
                 return (
                   <Pressable
                     style={({ pressed }) => [
@@ -273,7 +386,16 @@ export function DrawerContent({
                     <Text style={[styles.chatTitle, isSelected && styles.chatTitleSelected]} numberOfLines={1}>
                       {item.title || 'Untitled'}
                     </Text>
-                    <Text style={styles.chatAge}>{relativeTime(item.updatedAt)}</Text>
+                    <View style={styles.chatMeta}>
+                      {isRunning ? (
+                        <ActivityIndicator
+                          size="small"
+                          color={colors.statusRunning}
+                          style={styles.chatSpinner}
+                        />
+                      ) : null}
+                      <Text style={styles.chatAge}>{relativeTime(item.updatedAt)}</Text>
+                    </View>
                   </Pressable>
                 );
               }}
@@ -514,6 +636,29 @@ function relativeTime(iso: string): string {
   return `${days}d`;
 }
 
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function extractThreadId(event: RpcNotification): string | null {
+  const params = toRecord(event.params);
+  const msg = toRecord(params?.msg);
+  return (
+    readString(params?.threadId) ??
+    readString(params?.thread_id) ??
+    readString(msg?.thread_id) ??
+    readString(msg?.threadId) ??
+    readString(params?.conversationId) ??
+    readString(msg?.conversation_id)
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -659,6 +804,15 @@ const styles = StyleSheet.create({
   chatAge: {
     ...typography.caption,
     flexShrink: 0,
+  },
+  chatMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    flexShrink: 0,
+  },
+  chatSpinner: {
+    marginRight: 2,
   },
   workspaceGroupHeader: {
     marginHorizontal: spacing.md,
