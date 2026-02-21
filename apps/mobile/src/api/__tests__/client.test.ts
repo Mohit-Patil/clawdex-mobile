@@ -168,4 +168,129 @@ describe('MacBridgeApiClient', () => {
     expect(chat.id).toBe('thr_1');
     expect(chat.messages.length).toBeGreaterThan(0);
   });
+
+  it('createChat() forwards selected model to thread/start', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_model',
+          preview: '',
+          createdAt: 1700000000,
+          updatedAt: 1700000000,
+          status: { type: 'idle' },
+          turns: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_model',
+          preview: '',
+          createdAt: 1700000000,
+          updatedAt: 1700000000,
+          status: { type: 'idle' },
+          turns: [],
+        },
+      });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.createChat({ model: 'gpt-5.3-codex' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        model: 'gpt-5.3-codex',
+      })
+    );
+  });
+
+  it('sendChatMessage() forwards selected model/effort to turn/start', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_model' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_model',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u1',
+                  content: [{ type: 'text', text: 'hello' }],
+                },
+                {
+                  type: 'agentMessage',
+                  id: 'a1',
+                  text: 'ok',
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.sendChatMessage('thr_model', {
+      content: 'hello',
+      model: 'gpt-5.3-codex',
+      effort: 'high',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/resume', expect.any(Object));
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        model: 'gpt-5.3-codex',
+        effort: 'high',
+      })
+    );
+  });
+
+  it('listModels() maps model/list response', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      data: [
+        {
+          id: 'gpt-5.3-codex',
+          displayName: 'GPT-5.3 Codex',
+          description: 'Default coding model',
+          hidden: false,
+          supportsPersonality: true,
+          isDefault: true,
+          defaultReasoningEffort: 'medium',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: 'Lower latency' },
+            { reasoningEffort: 'medium', description: 'Balanced' },
+            { reasoningEffort: 'high', description: 'Higher depth' },
+          ],
+        },
+      ],
+    });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const models = await client.listModels();
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'model/list',
+      expect.objectContaining({
+        includeHidden: false,
+      })
+    );
+    expect(models).toHaveLength(1);
+    expect(models[0].id).toBe('gpt-5.3-codex');
+    expect(models[0].isDefault).toBe(true);
+    expect(models[0].defaultReasoningEffort).toBe('medium');
+    expect(models[0].reasoningEffort?.map((option) => option.effort)).toEqual([
+      'low',
+      'medium',
+      'high',
+    ]);
+  });
 });

@@ -10,9 +10,13 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 
 - Chat with Codex from mobile
 - Choose a default start directory for new chats (from existing chat workspaces)
+- Sidebar chats grouped by workspace as collapsible cards (latest workspace first; first group expanded by default)
+- Use slash commands in chat input (`/model`, `/new`, `/status`, `/rename`, `/compact`, `/review`, `/fork`, `/diff`, `/help`)
+- Select active model from an in-app model picker
 - Chat-scoped Git controls (status, commit, push)
 - Terminal command execution through bridge
 - Live thread/run updates over WebSocket
+- Immediate in-app loading feedback when opening a chat
 - Guided setup wizard for first-time onboarding
 
 ## Project Layout
@@ -201,6 +205,25 @@ Behavior:
 - This selection is used when creating a new chat.
 - Existing chats keep their own workspace unless you change them from chat Git/workspace controls.
 - If you choose `Bridge default workspace`, chat creation falls back to bridge-level `BRIDGE_WORKDIR`.
+
+## Model Selection and Slash Commands
+
+- Open model picker from:
+  - home compose screen (model row), or
+  - active chat metadata row (model chip)
+- Selected model applies to new chats and subsequent turns started from mobile.
+
+Supported mobile slash commands:
+
+- `/help`
+- `/new`
+- `/model [model-id]`
+- `/status`
+- `/rename <new-name>`
+- `/compact`
+- `/review`
+- `/fork`
+- `/diff`
 
 ## Standalone App Install (Without Expo Go)
 

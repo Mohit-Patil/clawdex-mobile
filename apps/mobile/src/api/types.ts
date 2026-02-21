@@ -36,12 +36,40 @@ export interface CreateChatRequest {
   title?: string;
   message?: string;
   cwd?: string;
+  model?: string;
+  effort?: ReasoningEffort;
 }
 
 export interface SendChatMessageRequest {
   content: string;
   role?: ChatMessageRole;
   cwd?: string;
+  model?: string;
+  effort?: ReasoningEffort;
+}
+
+export type ReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh';
+
+export interface ModelReasoningEffortOption {
+  effort: ReasoningEffort;
+  description?: string;
+}
+
+export interface ModelOption {
+  id: string;
+  displayName: string;
+  description?: string;
+  hidden?: boolean;
+  supportsPersonality?: boolean;
+  isDefault?: boolean;
+  defaultReasoningEffort?: ReasoningEffort;
+  reasoningEffort?: ModelReasoningEffortOption[];
 }
 
 export interface TerminalExecRequest {

@@ -1,11 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  FlatList,
+  AppState,
   Modal,
   Pressable,
   SafeAreaView,
+  SectionList,
   ScrollView,
   StyleSheet,
   Text,
@@ -30,6 +31,13 @@ interface DrawerContentProps {
   onNavigate: (screen: Screen) => void;
 }
 
+interface ChatWorkspaceSection {
+  key: string;
+  title: string;
+  subtitle?: string;
+  data: ChatSummary[];
+}
+
 export function DrawerContent({
   api,
   ws,
@@ -43,7 +51,23 @@ export function DrawerContent({
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
+  const hasAppliedInitialCollapseRef = useRef(false);
+  const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
   const workspaceOptions = useMemo(() => listWorkspaces(chats), [chats]);
+  const chatSections = useMemo(() => buildWorkspaceSections(chats), [chats]);
+  const visibleChatSections = useMemo(
+    () =>
+      chatSections.map((section) =>
+        collapsedWorkspaceKeys.has(section.key)
+          ? {
+              ...section,
+              data: [],
+            }
+          : section
+      ),
+    [chatSections, collapsedWorkspaceKeys]
+  );
   const defaultWorkspaceLabel =
     normalizeCwd(selectedDefaultCwd) ?? 'Bridge default workspace';
 
@@ -82,6 +106,44 @@ export function DrawerContent({
 
     return () => clearInterval(timer);
   }, [loadChats]);
+
+  useEffect(() => {
+    chatSectionsRef.current = chatSections;
+  }, [chatSections]);
+
+  useEffect(() => {
+    if (chatSections.length === 0 || hasAppliedInitialCollapseRef.current) {
+      return;
+    }
+
+    setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(chatSections));
+    hasAppliedInitialCollapseRef.current = true;
+  }, [chatSections]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(chatSectionsRef.current));
+        hasAppliedInitialCollapseRef.current = true;
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  const toggleWorkspaceSection = useCallback((sectionKey: string) => {
+    setCollapsedWorkspaceKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(sectionKey)) {
+        next.delete(sectionKey);
+      } else {
+        next.add(sectionKey);
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <View style={styles.container}>
@@ -126,16 +188,6 @@ export function DrawerContent({
 
           {/* Nav items */}
           <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
-          <NavItem
-            icon="shield-checkmark-outline"
-            label="Privacy"
-            onPress={() => onNavigate('Privacy')}
-          />
-          <NavItem
-            icon="document-text-outline"
-            label="Terms"
-            onPress={() => onNavigate('Terms')}
-          />
 
           {/* Chats section */}
           <View style={styles.sectionHeader}>
@@ -144,19 +196,57 @@ export function DrawerContent({
 
           {loading ? (
             <ActivityIndicator color={colors.textMuted} style={styles.loader} />
+          ) : chatSections.length === 0 ? (
+            <Text style={styles.emptyText}>No chats yet</Text>
           ) : (
-            <FlatList
-              data={chats}
+            <SectionList
+              sections={visibleChatSections}
               keyExtractor={(item) => item.id}
               style={styles.list}
+              contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
-              ListEmptyComponent={<Text style={styles.emptyText}>No chats yet</Text>}
-              renderItem={({ item }) => {
+              stickySectionHeadersEnabled={false}
+              renderSectionHeader={({ section }) => {
+                const collapsed = collapsedWorkspaceKeys.has(section.key);
+                return (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.workspaceGroupHeader,
+                      collapsed ? styles.workspaceGroupHeaderCollapsed : styles.workspaceGroupHeaderExpanded,
+                      pressed && styles.workspaceGroupHeaderPressed,
+                    ]}
+                    onPress={() => toggleWorkspaceSection(section.key)}
+                  >
+                    <View style={styles.workspaceGroupHeaderRow}>
+                      <View style={styles.workspaceGroupTitleBlock}>
+                        <Text style={styles.workspaceGroupTitle} numberOfLines={1}>
+                          {section.title}
+                        </Text>
+                        {section.subtitle ? (
+                          <Text style={styles.workspaceGroupSubtitle} numberOfLines={1}>
+                            {section.subtitle}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <View style={styles.workspaceGroupHeaderMeta}>
+                        <Ionicons
+                          name={collapsed ? 'chevron-forward' : 'chevron-down'}
+                          size={14}
+                          color={colors.textMuted}
+                        />
+                      </View>
+                    </View>
+                  </Pressable>
+                );
+              }}
+              renderItem={({ item, index, section }) => {
                 const isSelected = item.id === selectedChatId;
+                const isLast = index === section.data.length - 1;
                 return (
                   <Pressable
                     style={({ pressed }) => [
                       styles.chatItem,
+                      isLast && styles.chatItemLast,
                       isSelected && styles.chatItemSelected,
                       pressed && styles.chatItemPressed,
                     ]}
@@ -315,6 +405,89 @@ function listWorkspaces(chats: ChatSummary[]): string[] {
   return result;
 }
 
+const DEFAULT_WORKSPACE_KEY = '__bridge_default_workspace__';
+
+function workspaceKey(cwd: string | null): string {
+  return cwd ?? DEFAULT_WORKSPACE_KEY;
+}
+
+function workspaceTitle(cwd: string | null): string {
+  if (!cwd) {
+    return 'Bridge default workspace';
+  }
+
+  const normalized = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!normalized) {
+    return cwd;
+  }
+
+  const lastSlash = normalized.lastIndexOf('/');
+  if (lastSlash === -1) {
+    return normalized;
+  }
+
+  return normalized.slice(lastSlash + 1) || normalized;
+}
+
+function workspaceSubtitle(cwd: string | null): string | undefined {
+  if (!cwd) {
+    return undefined;
+  }
+
+  return cwd;
+}
+
+function buildWorkspaceSections(chats: ChatSummary[]): ChatWorkspaceSection[] {
+  if (chats.length === 0) {
+    return [];
+  }
+
+  const sorted = sortChats(chats);
+  const byWorkspace = new Map<
+    string,
+    {
+      cwd: string | null;
+      chats: ChatSummary[];
+    }
+  >();
+
+  for (const chat of sorted) {
+    const cwd = normalizeCwd(chat.cwd);
+    const key = workspaceKey(cwd);
+    const bucket = byWorkspace.get(key);
+    if (bucket) {
+      bucket.chats.push(chat);
+      continue;
+    }
+
+    byWorkspace.set(key, {
+      cwd,
+      chats: [chat],
+    });
+  }
+
+  return Array.from(byWorkspace.entries())
+    .sort(([, a], [, b]) => {
+      const aUpdatedAt = a.chats[0]?.updatedAt ?? '';
+      const bUpdatedAt = b.chats[0]?.updatedAt ?? '';
+      return bUpdatedAt.localeCompare(aUpdatedAt);
+    })
+    .map(([key, bucket]) => ({
+      key,
+      title: workspaceTitle(bucket.cwd),
+      subtitle: workspaceSubtitle(bucket.cwd),
+      data: bucket.chats,
+    }));
+}
+
+function getDefaultCollapsedWorkspaceKeys(sections: ChatWorkspaceSection[]): Set<string> {
+  const collapsed = new Set<string>();
+  for (let i = 1; i < sections.length; i += 1) {
+    collapsed.add(sections[i].key);
+  }
+  return collapsed;
+}
+
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
   const days = Math.floor(diff / 86400000);
@@ -420,6 +593,9 @@ const styles = StyleSheet.create({
   list: {
     flex: 1,
   },
+  listContent: {
+    paddingBottom: spacing.md,
+  },
   loader: {
     marginTop: spacing.xl,
   },
@@ -435,16 +611,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
     marginHorizontal: spacing.md,
-    borderRadius: 10,
-    marginBottom: spacing.xs,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgItem,
+  },
+  chatItemLast: {
+    borderBottomLeftRadius: 12,
+    borderBottomRightRadius: 12,
+    marginBottom: spacing.sm,
   },
   chatItemSelected: {
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
   },
   chatItemPressed: {
-    backgroundColor: colors.bgItem,
+    opacity: 0.88,
   },
   chatTitle: {
     ...typography.body,
@@ -458,6 +640,52 @@ const styles = StyleSheet.create({
   },
   chatAge: {
     ...typography.caption,
+    flexShrink: 0,
+  },
+  workspaceGroupHeader: {
+    marginHorizontal: spacing.md,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 3,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: '#15181D',
+  },
+  workspaceGroupHeaderExpanded: {
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+  },
+  workspaceGroupHeaderCollapsed: {
+    borderRadius: 12,
+    marginBottom: spacing.sm,
+  },
+  workspaceGroupHeaderPressed: {
+    opacity: 0.8,
+  },
+  workspaceGroupHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  workspaceGroupTitleBlock: {
+    flex: 1,
+  },
+  workspaceGroupTitle: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  workspaceGroupSubtitle: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  workspaceGroupHeaderMeta: {
+    alignItems: 'center',
+    justifyContent: 'center',
     flexShrink: 0,
   },
   settingsItem: {

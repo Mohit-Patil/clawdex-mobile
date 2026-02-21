@@ -9,6 +9,7 @@ import {
 } from 'react';
 import {
   ActionSheetIOS,
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Modal,
@@ -18,6 +19,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 
@@ -29,6 +31,8 @@ import type {
   RunEvent,
   Chat,
   ChatSummary,
+  ModelOption,
+  ReasoningEffort,
   ChatMessage as ChatTranscriptMessage,
 } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
@@ -68,6 +72,15 @@ interface ActivityState {
   detail?: string;
 }
 
+interface SlashCommandDefinition {
+  name: string;
+  summary: string;
+  argsHint?: string;
+  mobileSupported: boolean;
+  aliases?: string[];
+  availabilityNote?: string;
+}
+
 const DEFAULT_ACTIVITY_PHRASES = [
   'Analyzing text',
   'Inspecting workspace',
@@ -96,6 +109,176 @@ const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'background_event',
 ]);
 
+const SLASH_COMMANDS: SlashCommandDefinition[] = [
+  {
+    name: 'permissions',
+    summary: 'Set approvals and sandbox permissions',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'sandbox-add-read-dir',
+    summary: 'Grant sandbox read access to extra directory',
+    argsHint: '<absolute-path>',
+    mobileSupported: false,
+    availabilityNote: 'Windows Codex CLI only.',
+  },
+  {
+    name: 'agent',
+    summary: 'Switch the active sub-agent thread',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'apps',
+    summary: 'Browse and insert apps/connectors',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'compact',
+    summary: 'Compact current thread history',
+    mobileSupported: true,
+  },
+  {
+    name: 'diff',
+    summary: 'Open Git view for current chat',
+    mobileSupported: true,
+  },
+  {
+    name: 'exit',
+    summary: 'Exit Codex CLI',
+    mobileSupported: false,
+    availabilityNote: 'Not applicable on mobile.',
+  },
+  {
+    name: 'experimental',
+    summary: 'Toggle experimental features',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'feedback',
+    summary: 'Send feedback diagnostics',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'init',
+    summary: 'Generate AGENTS.md scaffold',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'logout',
+    summary: 'Sign out from Codex',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'mcp',
+    summary: 'List configured MCP tools',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'mention',
+    summary: 'Attach file/folder context to prompt',
+    argsHint: '<path>',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'model',
+    summary: 'Open model picker or set model by id',
+    argsHint: '<model-id>',
+    mobileSupported: true,
+  },
+  {
+    name: 'plan',
+    summary: 'Switch to plan mode',
+    argsHint: '[prompt]',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'personality',
+    summary: 'Set response personality',
+    argsHint: '<friendly|pragmatic|none>',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'ps',
+    summary: 'Show background terminal jobs',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'fork',
+    summary: 'Fork current conversation into a new chat',
+    mobileSupported: true,
+  },
+  {
+    name: 'resume',
+    summary: 'Resume a saved conversation',
+    mobileSupported: false,
+    availabilityNote: 'Use chat list on mobile for now.',
+  },
+  {
+    name: 'new',
+    summary: 'Start a new conversation',
+    mobileSupported: true,
+  },
+  {
+    name: 'quit',
+    summary: 'Exit Codex CLI',
+    mobileSupported: false,
+    aliases: ['exit'],
+    availabilityNote: 'Not applicable on mobile.',
+  },
+  {
+    name: 'review',
+    summary: 'Run review on uncommitted changes',
+    mobileSupported: true,
+  },
+  {
+    name: 'status',
+    summary: 'Show current session status',
+    mobileSupported: true,
+  },
+  {
+    name: 'debug-config',
+    summary: 'Inspect config layers and diagnostics',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'statusline',
+    summary: 'Configure footer status-line fields',
+    mobileSupported: false,
+    availabilityNote: 'Available in Codex CLI only right now.',
+  },
+  {
+    name: 'approvals',
+    summary: 'Alias for /permissions',
+    mobileSupported: false,
+    aliases: ['permissions'],
+    availabilityNote: 'Alias supported in CLI; use /permissions there.',
+  },
+  {
+    name: 'help',
+    summary: 'List slash commands',
+    mobileSupported: true,
+  },
+  {
+    name: 'rename',
+    summary: 'Rename current chat',
+    argsHint: '<new-name>',
+    mobileSupported: true,
+  },
+];
+
 export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
   function MainScreen(
     {
@@ -109,8 +292,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     },
     ref
   ) {
+    const { height: windowHeight } = useWindowDimensions();
     const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
     const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+    const [openingChatId, setOpeningChatId] = useState<string | null>(null);
     const [draft, setDraft] = useState('');
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -124,6 +309,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [workspaceModalVisible, setWorkspaceModalVisible] = useState(false);
     const [workspaceOptions, setWorkspaceOptions] = useState<string[]>([]);
     const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
+    const [modelModalVisible, setModelModalVisible] = useState(false);
+    const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+    const [loadingModels, setLoadingModels] = useState(false);
+    const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+    const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
+    const [effortModalVisible, setEffortModalVisible] = useState(false);
+    const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
     const [activity, setActivity] = useState<ActivityState>({
       tone: 'idle',
       title: 'Ready',
@@ -133,6 +325,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const sendingRef = useRef(false);
     const creatingRef = useRef(false);
     const selectedChatStatusRef = useRef<Chat['status']>('idle');
+    const loadChatRequestRef = useRef(0);
 
     // Ref so the WS handler always reads the latest chat ID without
     // needing to re-subscribe on every change.
@@ -146,6 +339,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const codexReasoningBufferRef = useRef('');
     const runWatchdogUntilRef = useRef(0);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
+    const slashQuery = parseSlashQuery(draft);
+    const slashSuggestions =
+      slashQuery !== null
+        ? filterSlashCommands(slashQuery)
+        : [];
+    const slashSuggestionsMaxHeight = Math.max(
+      148,
+      Math.min(300, Math.floor(windowHeight * 0.34))
+    );
 
     const bumpRunWatchdog = useCallback((durationMs = RUN_WATCHDOG_MS) => {
       runWatchdogUntilRef.current = Math.max(
@@ -207,6 +409,38 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       );
     }, []);
 
+    const defaultModelId = modelOptions.find((model) => model.isDefault)?.id ?? null;
+    const activeModelId = selectedModelId ?? defaultModelId;
+    const activeModel = activeModelId
+      ? modelOptions.find((model) => model.id === activeModelId) ?? null
+      : null;
+    const effortPickerModel = effortPickerModelId
+      ? modelOptions.find((model) => model.id === effortPickerModelId) ?? null
+      : activeModel;
+    const effortPickerOptions = effortPickerModel?.reasoningEffort ?? [];
+    const effortPickerDefault = effortPickerModel?.defaultReasoningEffort ?? null;
+    const activeModelEffortOptions = activeModel?.reasoningEffort ?? [];
+    const activeModelDefaultEffort = activeModel?.defaultReasoningEffort ?? null;
+    const activeEffort =
+      selectedEffort && activeModelEffortOptions.some((option) => option.effort === selectedEffort)
+        ? selectedEffort
+        : activeModelDefaultEffort;
+    const activeModelLabel =
+      selectedModelId && activeModel
+        ? activeModel.displayName
+        : activeModel
+          ? `Default (${activeModel.displayName})`
+          : 'Default model';
+    const activeEffortLabel =
+      selectedEffort && activeEffort
+        ? formatReasoningEffort(activeEffort)
+        : activeModelDefaultEffort
+          ? `Default (${formatReasoningEffort(activeModelDefaultEffort)})`
+          : activeEffort
+            ? formatReasoningEffort(activeEffort)
+            : 'Model default';
+    const modelReasoningLabel = `${activeModelLabel} · ${activeEffortLabel}`;
+
     useEffect(() => {
       if (activity.tone !== 'running') {
         setActivityPhrases([]);
@@ -216,9 +450,29 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       appendActivityPhrase(toActivityPhrase(activity.title, activity.detail), true);
     }, [activity.tone, activity.title, activity.detail, appendActivityPhrase]);
 
+    useEffect(() => {
+      if (!selectedEffort) {
+        return;
+      }
+
+      if (!activeModel) {
+        setSelectedEffort(null);
+        return;
+      }
+
+      const supportsSelectedEffort =
+        activeModel.reasoningEffort?.some((option) => option.effort === selectedEffort) ??
+        false;
+      if (!supportsSelectedEffort) {
+        setSelectedEffort(null);
+      }
+    }, [activeModel, selectedEffort]);
+
     const resetComposerState = useCallback(() => {
+      loadChatRequestRef.current += 1;
       setSelectedChat(null);
       setSelectedChatId(null);
+      setOpeningChatId(null);
       setDraft('');
       setError(null);
       setActiveCommands([]);
@@ -275,6 +529,78 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [onDefaultStartCwdChange]
     );
 
+    const refreshModelOptions = useCallback(async () => {
+      setLoadingModels(true);
+      try {
+        const models = await api.listModels(false);
+        setModelOptions(models);
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setLoadingModels(false);
+      }
+    }, [api]);
+
+    const openModelModal = useCallback(() => {
+      setModelModalVisible(true);
+      void refreshModelOptions();
+    }, [refreshModelOptions]);
+
+    const closeModelModal = useCallback(() => {
+      if (loadingModels) {
+        return;
+      }
+      setModelModalVisible(false);
+    }, [loadingModels]);
+
+    const openEffortModal = useCallback(
+      (modelId?: string | null) => {
+        const resolvedModelId = normalizeModelId(modelId ?? activeModelId);
+        if (!resolvedModelId) {
+          setError('Select a model first');
+          return;
+        }
+
+        setEffortPickerModelId(resolvedModelId);
+        setEffortModalVisible(true);
+        setError(null);
+      },
+      [activeModelId]
+    );
+
+    const closeEffortModal = useCallback(() => {
+      setEffortModalVisible(false);
+    }, []);
+
+    const selectEffort = useCallback((effort: ReasoningEffort | null) => {
+      setSelectedEffort(effort);
+      setEffortModalVisible(false);
+      setError(null);
+    }, []);
+
+    const selectModel = useCallback(
+      (modelId: string | null) => {
+        const normalizedModelId = normalizeModelId(modelId);
+        setSelectedModelId(normalizedModelId);
+        setSelectedEffort(null);
+        setModelModalVisible(false);
+        setError(null);
+
+        if (normalizedModelId) {
+          const model = modelOptions.find((entry) => entry.id === normalizedModelId) ?? null;
+          if ((model?.reasoningEffort?.length ?? 0) > 0) {
+            setEffortPickerModelId(normalizedModelId);
+            setEffortModalVisible(true);
+          }
+        }
+      },
+      [modelOptions]
+    );
+
+    useEffect(() => {
+      void refreshModelOptions();
+    }, [refreshModelOptions]);
+
     const openRenameModal = useCallback(() => {
       if (!selectedChat) {
         return;
@@ -316,6 +642,44 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       ]);
     }, [openRenameModal, selectedChat]);
 
+    const openModelReasoningMenu = useCallback(() => {
+      const menuTitle = modelReasoningLabel;
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            title: menuTitle,
+            options: ['Change model', 'Change reasoning level', 'Cancel'],
+            cancelButtonIndex: 2,
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 0) {
+              openModelModal();
+              return;
+            }
+            if (buttonIndex === 1) {
+              openEffortModal();
+            }
+          }
+        );
+        return;
+      }
+
+      Alert.alert('Model settings', menuTitle, [
+        {
+          text: 'Change model',
+          onPress: openModelModal,
+        },
+        {
+          text: 'Change reasoning level',
+          onPress: () => openEffortModal(),
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ]);
+    }, [modelReasoningLabel, openEffortModal, openModelModal]);
+
     const closeRenameModal = useCallback(() => {
       if (renaming) {
         return;
@@ -350,8 +714,290 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       }
     }, [api, renameDraft, renaming, selectedChatId]);
 
+    const appendLocalAssistantMessage = useCallback(
+      (content: string) => {
+        const normalized = content.trim();
+        if (!normalized) {
+          return;
+        }
+
+        if (!selectedChatId) {
+          setError(normalized);
+          return;
+        }
+
+        const createdAt = new Date().toISOString();
+        setSelectedChat((prev) => {
+          if (!prev || prev.id !== selectedChatId) {
+            return prev;
+          }
+
+          return {
+            ...prev,
+            updatedAt: createdAt,
+            statusUpdatedAt: createdAt,
+            lastMessagePreview: normalized.slice(0, 120),
+            messages: [
+              ...prev.messages,
+              {
+                id: `local-assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                role: 'assistant',
+                content: normalized,
+                createdAt,
+              },
+            ],
+          };
+        });
+        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+      },
+      [selectedChatId]
+    );
+
+    const handleSlashCommand = useCallback(
+      async (input: string): Promise<boolean> => {
+        const parsed = parseSlashCommand(input);
+        if (!parsed) {
+          return false;
+        }
+
+        const { name: rawName, args } = parsed;
+        const commandDef = findSlashCommandDefinition(rawName);
+        const name = commandDef?.name ?? rawName;
+        const argText = args.trim();
+
+        if (!commandDef) {
+          setError(`Unknown slash command: /${rawName}`);
+          return true;
+        }
+
+        if (!commandDef.mobileSupported) {
+          setError(commandDef.availabilityNote ?? `/${name} is available in Codex CLI only.`);
+          return true;
+        }
+
+        if (name === 'help') {
+          const lines = SLASH_COMMANDS.map((command) => {
+            const suffix = command.argsHint ? ` ${command.argsHint}` : '';
+            const scope = command.mobileSupported ? 'mobile' : 'CLI only';
+            return `/${command.name}${suffix} — ${command.summary} (${scope})`;
+          });
+          appendLocalAssistantMessage(`Supported slash commands:\n${lines.join('\n')}`);
+          return true;
+        }
+
+        if (name === 'new') {
+          startNewChat();
+          return true;
+        }
+
+        if (name === 'model') {
+          if (!argText) {
+            openModelModal();
+            return true;
+          }
+
+          const models = modelOptions.length > 0 ? modelOptions : await api.listModels(false);
+          if (modelOptions.length === 0) {
+            setModelOptions(models);
+          }
+          const lowered = argText.toLowerCase();
+          const match = models.find(
+            (model) =>
+              model.id.toLowerCase() === lowered ||
+              model.displayName.toLowerCase() === lowered
+          );
+
+          if (!match) {
+            setError(`Unknown model: ${argText}`);
+            return true;
+          }
+
+          setSelectedModelId(match.id);
+          setSelectedEffort(null);
+          if ((match.reasoningEffort?.length ?? 0) > 0) {
+            setEffortPickerModelId(match.id);
+            setEffortModalVisible(true);
+          }
+          setActivity({
+            tone: 'complete',
+            title: 'Model updated',
+            detail: match.displayName,
+          });
+          setError(null);
+          return true;
+        }
+
+        if (name === 'status') {
+          const lines = [
+            `Model: ${activeModelLabel}`,
+            `Reasoning: ${activeEffortLabel}`,
+            `Default workspace: ${preferredStartCwd ?? 'Bridge default workspace'}`,
+          ];
+          if (selectedChat) {
+            lines.push(`Chat: ${selectedChat.title || selectedChat.id}`);
+            lines.push(`Chat workspace: ${selectedChat.cwd ?? 'Not set'}`);
+            lines.push(`Chat status: ${selectedChat.status}`);
+          }
+          appendLocalAssistantMessage(lines.join('\n'));
+          return true;
+        }
+
+        if (name === 'rename') {
+          if (!selectedChatId) {
+            setError('/rename requires an open chat');
+            return true;
+          }
+
+          if (!argText) {
+            openRenameModal();
+            return true;
+          }
+
+          try {
+            setRenaming(true);
+            const updated = await api.renameChat(selectedChatId, argText);
+            setSelectedChat(updated);
+            setActivity({
+              tone: 'complete',
+              title: 'Chat renamed',
+              detail: updated.title,
+            });
+            setError(null);
+          } catch (err) {
+            setError((err as Error).message);
+          } finally {
+            setRenaming(false);
+          }
+          return true;
+        }
+
+        if (name === 'compact') {
+          if (!selectedChatId) {
+            setError('/compact requires an open chat');
+            return true;
+          }
+
+          try {
+            setActivity({
+              tone: 'running',
+              title: 'Compacting thread',
+            });
+            await api.compactChat(selectedChatId);
+            bumpRunWatchdog();
+            setError(null);
+          } catch (err) {
+            setError((err as Error).message);
+            setActivity({
+              tone: 'error',
+              title: 'Compact failed',
+              detail: (err as Error).message,
+            });
+          }
+          return true;
+        }
+
+        if (name === 'review') {
+          if (!selectedChatId) {
+            setError('/review requires an open chat');
+            return true;
+          }
+
+          try {
+            setActivity({
+              tone: 'running',
+              title: 'Starting review',
+            });
+            await api.reviewChat(selectedChatId);
+            bumpRunWatchdog();
+            setError(null);
+          } catch (err) {
+            setError((err as Error).message);
+            setActivity({
+              tone: 'error',
+              title: 'Review failed',
+              detail: (err as Error).message,
+            });
+          }
+          return true;
+        }
+
+        if (name === 'fork') {
+          if (!selectedChatId) {
+            setError('/fork requires an open chat');
+            return true;
+          }
+
+          try {
+            setCreating(true);
+            setActivity({
+              tone: 'running',
+              title: 'Forking chat',
+            });
+            const forked = await api.forkChat(selectedChatId, {
+              cwd: selectedChat?.cwd,
+              model: activeModelId ?? undefined,
+            });
+            setSelectedChatId(forked.id);
+            setSelectedChat(forked);
+            setError(null);
+            setActivity({
+              tone: 'complete',
+              title: 'Chat forked',
+            });
+          } catch (err) {
+            setError((err as Error).message);
+            setActivity({
+              tone: 'error',
+              title: 'Fork failed',
+              detail: (err as Error).message,
+            });
+          } finally {
+            setCreating(false);
+          }
+          return true;
+        }
+
+        if (name === 'diff') {
+          if (!selectedChat) {
+            setError('/diff requires an open chat');
+            return true;
+          }
+
+          onOpenGit(selectedChat);
+          return true;
+        }
+
+        setError(`Unsupported slash command on mobile: /${name}`);
+        return true;
+      },
+      [
+        activeModelId,
+        activeEffortLabel,
+        activeModelLabel,
+        api,
+        appendLocalAssistantMessage,
+        bumpRunWatchdog,
+        modelOptions,
+        onOpenGit,
+        openModelModal,
+        openRenameModal,
+        preferredStartCwd,
+        selectedChat,
+        selectedChatId,
+        startNewChat,
+      ]
+    );
+
     useImperativeHandle(ref, () => ({
       openChat: (id: string) => {
+        setSelectedChatId(id);
+        setOpeningChatId(id);
+        setError(null);
+        setActivity({
+          tone: 'running',
+          title: 'Opening chat',
+        });
+        appendActivityPhrase('Opening chat', true);
         void loadChat(id);
       },
       startNewChat: () => {
@@ -361,9 +1007,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const loadChat = useCallback(
       async (chatId: string) => {
+        const requestId = loadChatRequestRef.current + 1;
+        loadChatRequestRef.current = requestId;
         try {
           clearRunWatchdog();
           const chat = await api.getChat(chatId);
+          if (requestId !== loadChatRequestRef.current) {
+            return;
+          }
           setSelectedChatId(chatId);
           setSelectedChat(chat);
           setError(null);
@@ -401,12 +1052,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           codexReasoningBufferRef.current = '';
           hadCommandRef.current = false;
         } catch (err) {
+          if (requestId !== loadChatRequestRef.current) {
+            return;
+          }
           setError((err as Error).message);
           setActivity({
             tone: 'error',
             title: 'Failed to load chat',
             detail: (err as Error).message,
           });
+        } finally {
+          if (requestId === loadChatRequestRef.current) {
+            setOpeningChatId(null);
+          }
         }
       },
       [api, appendActivityPhrase, bumpRunWatchdog, clearRunWatchdog]
@@ -415,6 +1073,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const createChat = useCallback(async () => {
       const content = draft.trim();
       if (!content) return;
+
+      if (await handleSlashCommand(content)) {
+        setDraft('');
+        return;
+      }
 
       const optimisticMessage: ChatTranscriptMessage = {
         id: `msg-${Date.now()}`,
@@ -433,6 +1096,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         });
         const created = await api.createChat({
           cwd: preferredStartCwd ?? undefined,
+          model: activeModelId ?? undefined,
+          effort: activeEffort ?? undefined,
         });
 
         setSelectedChatId(created.id);
@@ -455,6 +1120,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const updated = await api.sendChatMessage(created.id, {
           content,
           cwd: created.cwd ?? preferredStartCwd ?? undefined,
+          model: activeModelId ?? undefined,
+          effort: activeEffort ?? undefined,
         });
         setSelectedChat(updated);
         setError(null);
@@ -477,6 +1144,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [
       api,
       draft,
+      activeEffort,
+      activeModelId,
+      handleSlashCommand,
       preferredStartCwd,
       appendActivityPhrase,
       bumpRunWatchdog,
@@ -486,6 +1156,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const sendMessage = useCallback(async () => {
       const content = draft.trim();
       if (!selectedChatId || !content) return;
+
+      if (await handleSlashCommand(content)) {
+        setDraft('');
+        return;
+      }
 
       const optimisticMessage: ChatTranscriptMessage = {
         id: `msg-${Date.now()}`,
@@ -514,6 +1189,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const updated = await api.sendChatMessage(selectedChatId, {
           content,
           cwd: selectedChat?.cwd,
+          model: activeModelId ?? undefined,
+          effort: activeEffort ?? undefined,
         });
         setSelectedChat(updated);
         setError(null);
@@ -533,7 +1210,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       } finally {
         setSending(false);
       }
-    }, [api, draft, selectedChat?.cwd, selectedChatId, bumpRunWatchdog, clearRunWatchdog]);
+    }, [
+      activeEffort,
+      activeModelId,
+      api,
+      draft,
+      handleSlashCommand,
+      selectedChat?.cwd,
+      selectedChatId,
+      bumpRunWatchdog,
+      clearRunWatchdog,
+    ]);
 
     useEffect(() => {
       const pendingApprovalId = pendingApproval?.id;
@@ -1392,11 +2079,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const handleSubmit = selectedChat ? sendMessage : createChat;
     const isLoading = sending || creating;
     const isStreaming = sending || creating || Boolean(streamingText);
-    const showActivity = Boolean(selectedChatId) || isLoading || activity.tone !== 'idle';
-    const headerTitle = selectedChat?.title?.trim() || 'New chat';
+    const isOpeningChat = Boolean(openingChatId);
+    const isOpeningDifferentChat =
+      Boolean(openingChatId) && selectedChat?.id !== openingChatId;
+    const showActivity =
+      Boolean(selectedChatId) || isLoading || isOpeningChat || activity.tone !== 'idle';
+    const headerTitle = isOpeningDifferentChat
+      ? 'Opening chat'
+      : selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
+    const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
 
     return (
       <View style={styles.container}>
@@ -1409,12 +2103,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         />
 
         {selectedChat ? (
-          <Pressable style={styles.workspaceBar} onPress={handleOpenGit}>
-            <Ionicons name="folder-open-outline" size={14} color={colors.textMuted} />
-            <Text style={styles.workspaceText} numberOfLines={1}>
-              {workspaceLabel}
-            </Text>
-          </Pressable>
+          <View style={styles.sessionMetaRow}>
+            <Pressable style={styles.workspaceBar} onPress={handleOpenGit}>
+              <Ionicons name="folder-open-outline" size={14} color={colors.textMuted} />
+              <Text style={styles.workspaceText} numberOfLines={1}>
+                {workspaceLabel}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.modelChip,
+                pressed && styles.modelChipPressed,
+              ]}
+              onPress={openModelReasoningMenu}
+            >
+              <Ionicons name="sparkles-outline" size={13} color={colors.textMuted} />
+              <Text style={styles.modelChipText} numberOfLines={1}>
+                {modelReasoningLabel}
+              </Text>
+            </Pressable>
+          </View>
         ) : null}
 
         <KeyboardAvoidingView
@@ -1422,7 +2130,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           keyboardVerticalOffset={0}
           style={styles.keyboardAvoiding}
         >
-          {selectedChat ? (
+          {selectedChat && !isOpeningDifferentChat ? (
             <ChatView
               chat={selectedChat}
               activeCommands={activeCommands}
@@ -1430,11 +2138,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               scrollRef={scrollRef}
               isStreaming={isStreaming}
             />
+          ) : isOpeningChat ? (
+            <View style={styles.chatLoadingContainer}>
+              <ActivityIndicator size="small" color={colors.textMuted} />
+              <Text style={styles.chatLoadingText}>Opening chat...</Text>
+            </View>
           ) : (
             <ComposeView
               startWorkspaceLabel={defaultStartWorkspaceLabel}
+              modelReasoningLabel={modelReasoningLabel}
               onSuggestion={(s) => setDraft(s)}
               onOpenWorkspacePicker={openWorkspaceModal}
+              onOpenModelReasoningPicker={openModelReasoningMenu}
             />
           )}
 
@@ -1453,6 +2168,40 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 tone={activity.tone}
                 runningPhrases={activityPhrases}
               />
+            ) : null}
+            {showSlashSuggestions ? (
+              <ScrollView
+                style={[
+                  styles.slashSuggestions,
+                  { maxHeight: slashSuggestionsMaxHeight },
+                ]}
+                contentContainerStyle={styles.slashSuggestionsContent}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled
+              >
+                {slashSuggestions.map((command, index) => {
+                  const suffix = command.argsHint ? ` ${command.argsHint}` : '';
+                  return (
+                    <Pressable
+                      key={command.name}
+                      onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
+                      style={({ pressed }) => [
+                        styles.slashSuggestionItem,
+                        index === slashSuggestions.length - 1 &&
+                          styles.slashSuggestionItemLast,
+                        pressed && styles.slashSuggestionItemPressed,
+                      ]}
+                    >
+                      <Text style={styles.slashSuggestionTitle}>{`/${command.name}${suffix}`}</Text>
+                      <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
+                        {command.mobileSupported
+                          ? command.summary
+                          : `${command.summary} · CLI only`}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
             ) : null}
             <ChatInput
               value={draft}
@@ -1501,6 +2250,110 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 )}
                 <Pressable
                   onPress={closeWorkspaceModal}
+                  style={({ pressed }) => [
+                    styles.workspaceModalCloseBtn,
+                    pressed && styles.workspaceModalCloseBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.workspaceModalCloseText}>Close</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={modelModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeModelModal}
+        >
+          <View style={styles.workspaceModalBackdrop}>
+            <View style={styles.workspaceModalCard}>
+              <Text style={styles.workspaceModalTitle}>Select model</Text>
+              <ScrollView
+                style={styles.workspaceModalList}
+                contentContainerStyle={styles.workspaceModalListContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <WorkspaceOption
+                  label="Default model"
+                  selected={selectedModelId === null}
+                  onPress={() => selectModel(null)}
+                />
+                {modelOptions.map((model) => (
+                  <WorkspaceOption
+                    key={model.id}
+                    label={`${model.displayName} (${model.id})`}
+                    selected={model.id === selectedModelId}
+                    onPress={() => selectModel(model.id)}
+                  />
+                ))}
+              </ScrollView>
+              <View style={styles.workspaceModalActions}>
+                {loadingModels ? (
+                  <Text style={styles.workspaceModalLoading}>Refreshing…</Text>
+                ) : (
+                  <View />
+                )}
+                <Pressable
+                  onPress={closeModelModal}
+                  style={({ pressed }) => [
+                    styles.workspaceModalCloseBtn,
+                    pressed && styles.workspaceModalCloseBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.workspaceModalCloseText}>Close</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={effortModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeEffortModal}
+        >
+          <View style={styles.workspaceModalBackdrop}>
+            <View style={styles.workspaceModalCard}>
+              <Text style={styles.workspaceModalTitle}>Select reasoning level</Text>
+              <ScrollView
+                style={styles.workspaceModalList}
+                contentContainerStyle={styles.workspaceModalListContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <WorkspaceOption
+                  label={
+                    effortPickerDefault
+                      ? `Default (${formatReasoningEffort(effortPickerDefault)})`
+                      : 'Model default reasoning'
+                  }
+                  selected={selectedEffort === null}
+                  onPress={() => selectEffort(null)}
+                />
+                {effortPickerOptions.map((option) => (
+                  <WorkspaceOption
+                    key={option.effort}
+                    label={
+                      option.description
+                        ? `${formatReasoningEffort(option.effort)} — ${option.description}`
+                        : formatReasoningEffort(option.effort)
+                    }
+                    selected={option.effort === selectedEffort}
+                    onPress={() => selectEffort(option.effort)}
+                  />
+                ))}
+              </ScrollView>
+              <View style={styles.workspaceModalActions}>
+                <Text style={styles.workspaceModalLoading} numberOfLines={1}>
+                  {effortPickerModel
+                    ? `Model: ${effortPickerModel.displayName}`
+                    : 'Select a model to configure reasoning'}
+                </Text>
+                <Pressable
+                  onPress={closeEffortModal}
                   style={({ pressed }) => [
                     styles.workspaceModalCloseBtn,
                     pressed && styles.workspaceModalCloseBtnPressed,
@@ -1571,12 +2424,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
 function ComposeView({
   startWorkspaceLabel,
+  modelReasoningLabel,
   onSuggestion,
   onOpenWorkspacePicker,
+  onOpenModelReasoningPicker,
 }: {
   startWorkspaceLabel: string;
+  modelReasoningLabel: string;
   onSuggestion: (s: string) => void;
   onOpenWorkspacePicker: () => void;
+  onOpenModelReasoningPicker: () => void;
 }) {
   return (
     <View style={styles.composeContainer}>
@@ -1595,6 +2452,19 @@ function ComposeView({
         <Ionicons name="folder-open-outline" size={16} color={colors.textMuted} />
         <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
           {startWorkspaceLabel}
+        </Text>
+        <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+      </Pressable>
+      <Pressable
+        style={({ pressed }) => [
+          styles.workspaceSelectBtn,
+          pressed && styles.workspaceSelectBtnPressed,
+        ]}
+        onPress={onOpenModelReasoningPicker}
+      >
+        <Ionicons name="sparkles-outline" size={16} color={colors.textMuted} />
+        <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
+          {modelReasoningLabel}
         </Text>
         <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
       </Pressable>
@@ -1743,6 +2613,104 @@ function extractWorkspaceOptions(chats: ChatSummary[]): string[] {
   }
 
   return result;
+}
+
+function normalizeModelId(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatReasoningEffort(effort: ReasoningEffort): string {
+  if (effort === 'xhigh') {
+    return 'X-High';
+  }
+
+  if (effort === 'none') {
+    return 'None';
+  }
+
+  if (effort === 'minimal') {
+    return 'Minimal';
+  }
+
+  return effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
+function parseSlashCommand(input: string): { name: string; args: string } | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith('/')) {
+    return null;
+  }
+
+  if (trimmed === '/') {
+    return {
+      name: 'help',
+      args: '',
+    };
+  }
+
+  const match = trimmed.match(/^\/([a-zA-Z0-9_-]+)\s*(.*)$/);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    name: match[1].toLowerCase(),
+    args: match[2] ?? '',
+  };
+}
+
+function parseSlashQuery(input: string): string | null {
+  const trimmed = input.trimStart();
+  if (!trimmed.startsWith('/')) {
+    return null;
+  }
+
+  if (trimmed === '/') {
+    return '';
+  }
+
+  const afterSlash = trimmed.slice(1);
+  const token = afterSlash.split(/\s+/)[0] ?? '';
+  return token.toLowerCase();
+}
+
+function findSlashCommandDefinition(name: string): SlashCommandDefinition | null {
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  return (
+    SLASH_COMMANDS.find((command) => {
+      if (command.name.toLowerCase() === normalized) {
+        return true;
+      }
+
+      return (
+        command.aliases?.some((alias) => alias.toLowerCase() === normalized) ?? false
+      );
+    }) ?? null
+  );
+}
+
+function filterSlashCommands(query: string): SlashCommandDefinition[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return SLASH_COMMANDS;
+  }
+
+  return SLASH_COMMANDS.filter((command) => {
+    const byName = command.name.toLowerCase().includes(normalized);
+    const bySummary = command.summary.toLowerCase().includes(normalized);
+    const byAlias =
+      command.aliases?.some((alias) => alias.toLowerCase().includes(normalized)) ?? false;
+    return byName || bySummary || byAlias;
+  });
 }
 
 function stripMarkdownInline(value: string): string {
@@ -1911,7 +2879,7 @@ const styles = StyleSheet.create({
   composerContainer: {
     backgroundColor: colors.bgMain,
   },
-  workspaceBar: {
+  sessionMetaRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
@@ -1921,10 +2889,36 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.borderLight,
   },
+  workspaceBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    flex: 1,
+    minHeight: 20,
+  },
   workspaceText: {
     ...typography.caption,
     color: colors.textSecondary,
     flex: 1,
+  },
+  modelChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgItem,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    maxWidth: '58%',
+  },
+  modelChipPressed: {
+    opacity: 0.86,
+  },
+  modelChipText: {
+    ...typography.caption,
+    color: colors.textSecondary,
   },
   renameModalBackdrop: {
     flex: 1,
@@ -2008,6 +3002,40 @@ const styles = StyleSheet.create({
   workspaceModalCloseText: {
     ...typography.body,
     color: colors.textPrimary,
+  },
+  slashSuggestions: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.xs,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgItem,
+    overflow: 'hidden',
+  },
+  slashSuggestionsContent: {
+    paddingVertical: 0,
+  },
+  slashSuggestionItem: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.borderLight,
+  },
+  slashSuggestionItemLast: {
+    borderBottomWidth: 0,
+  },
+  slashSuggestionItemPressed: {
+    backgroundColor: colors.bgInput,
+  },
+  slashSuggestionTitle: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  slashSuggestionSummary: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 2,
   },
   renameModalCard: {
     backgroundColor: colors.bgItem,
@@ -2144,6 +3172,17 @@ const styles = StyleSheet.create({
     paddingTop: spacing.lg,
     paddingBottom: spacing.xl,
     gap: spacing.xl,
+  },
+  chatLoadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.xl,
+  },
+  chatLoadingText: {
+    ...typography.caption,
+    color: colors.textMuted,
   },
 
   // Streaming thinking text

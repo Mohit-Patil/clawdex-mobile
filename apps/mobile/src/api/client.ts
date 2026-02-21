@@ -1,6 +1,8 @@
 import {
   mapChat,
   mapChatSummary,
+  readString,
+  toRecord,
   toRawThread,
 } from './chatMapping';
 import type {
@@ -16,6 +18,9 @@ import type {
   PendingApproval,
   ResolveApprovalResponse,
   SendChatMessageRequest,
+  ModelOption,
+  ReasoningEffort,
+  ModelReasoningEffortOption,
   TerminalExecRequest,
   TerminalExecResponse,
 } from './types';
@@ -49,6 +54,14 @@ interface AppServerStartResponse {
   thread?: {
     id?: string;
   };
+}
+
+interface AppServerForkResponse {
+  thread?: unknown;
+}
+
+interface AppServerModelListResponse {
+  data?: unknown[];
 }
 
 type AppServerThreadSetNameResponse = Record<string, never>;
@@ -88,8 +101,10 @@ export class MacBridgeApiClient {
 
   async createChat(body: CreateChatRequest): Promise<Chat> {
     const requestedCwd = normalizeCwd(body.cwd);
+    const requestedModel = normalizeModel(body.model);
+    const requestedEffort = normalizeEffort(body.effort);
     const started = await this.ws.request<AppServerStartResponse>('thread/start', {
-      model: null,
+      model: requestedModel ?? null,
       modelProvider: null,
       cwd: requestedCwd ?? null,
       approvalPolicy: 'on-request',
@@ -114,6 +129,8 @@ export class MacBridgeApiClient {
         content: initialPrompt,
         role: 'user',
         cwd: requestedCwd ?? undefined,
+        model: requestedModel ?? undefined,
+        effort: requestedEffort ?? undefined,
       });
     }
 
@@ -216,13 +233,15 @@ export class MacBridgeApiClient {
     }
 
     const normalizedCwd = normalizeCwd(body.cwd);
+    const normalizedModel = normalizeModel(body.model);
+    const normalizedEffort = normalizeEffort(body.effort);
 
     try {
       await this.ws.request('thread/resume', {
         threadId: id,
         history: null,
         path: null,
-        model: null,
+        model: normalizedModel ?? null,
         modelProvider: null,
         cwd: normalizedCwd ?? null,
         approvalPolicy: 'on-request',
@@ -249,8 +268,8 @@ export class MacBridgeApiClient {
       cwd: normalizedCwd ?? null,
       approvalPolicy: null,
       sandboxPolicy: null,
-      model: null,
-      effort: null,
+      model: normalizedModel ?? null,
+      effort: normalizedEffort ?? null,
       summary: null,
       personality: null,
       outputSchema: null,
@@ -264,6 +283,102 @@ export class MacBridgeApiClient {
 
     await this.ws.waitForTurnCompletion(id, turnId);
     return this.getChat(id);
+  }
+
+  async listModels(includeHidden = false): Promise<ModelOption[]> {
+    const response = await this.ws.request<AppServerModelListResponse>('model/list', {
+      cursor: null,
+      limit: 200,
+      includeHidden,
+    });
+
+    const rawList = Array.isArray(response.data) ? response.data : [];
+    const models: ModelOption[] = [];
+
+    for (const item of rawList) {
+      const record = toRecord(item);
+      if (!record) {
+        continue;
+      }
+
+      const id = readString(record.id) ?? readString(record.model);
+      if (!id) {
+        continue;
+      }
+
+      const displayName = readString(record.displayName) ?? id;
+      const description = readString(record.description) ?? undefined;
+      const hidden = typeof record.hidden === 'boolean' ? record.hidden : undefined;
+      const supportsPersonality =
+        typeof record.supportsPersonality === 'boolean'
+          ? record.supportsPersonality
+          : undefined;
+      const isDefault =
+        typeof record.isDefault === 'boolean' ? record.isDefault : undefined;
+      const defaultReasoningEffort = normalizeEffort(
+        readString(record.defaultReasoningEffort) ?? readString(record.reasoningEffort)
+      );
+      const reasoningEffort = toReasoningEffortOptions(
+        record.supportedReasoningEfforts ?? record.reasoningEffort
+      );
+
+      models.push({
+        id,
+        displayName,
+        description,
+        hidden,
+        supportsPersonality,
+        isDefault,
+        defaultReasoningEffort: defaultReasoningEffort ?? undefined,
+        reasoningEffort: reasoningEffort.length > 0 ? reasoningEffort : undefined,
+      });
+    }
+
+    return models;
+  }
+
+  async compactChat(id: string): Promise<void> {
+    await this.ws.request('thread/compact/start', {
+      threadId: id,
+    });
+  }
+
+  async reviewChat(id: string): Promise<void> {
+    await this.ws.request('review/start', {
+      threadId: id,
+      target: {
+        type: 'uncommittedChanges',
+      },
+      delivery: 'inline',
+    });
+  }
+
+  async forkChat(
+    id: string,
+    options?: {
+      cwd?: string;
+      model?: string;
+    }
+  ): Promise<Chat> {
+    const response = await this.ws.request<AppServerForkResponse>('thread/fork', {
+      threadId: id,
+      path: null,
+      model: normalizeModel(options?.model) ?? null,
+      modelProvider: null,
+      cwd: normalizeCwd(options?.cwd) ?? null,
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-write',
+      config: null,
+      baseInstructions: null,
+      developerInstructions: null,
+      persistExtendedHistory: true,
+    });
+
+    if (response.thread) {
+      return mapChat(toRawThread(response.thread));
+    }
+
+    throw new Error('thread/fork did not return a chat payload');
   }
 
   listApprovals(): Promise<PendingApproval[]> {
@@ -320,4 +435,71 @@ function normalizeCwd(cwd: string | null | undefined): string | null {
   }
   const trimmed = cwd.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeModel(model: string | null | undefined): string | null {
+  if (typeof model !== 'string') {
+    return null;
+  }
+
+  const trimmed = model.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeEffort(effort: string | null | undefined): ReasoningEffort | null {
+  if (typeof effort !== 'string') {
+    return null;
+  }
+
+  const normalized = effort.trim().toLowerCase();
+  if (
+    normalized === 'none' ||
+    normalized === 'minimal' ||
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh'
+  ) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function toReasoningEffortOptions(raw: unknown): ModelReasoningEffortOption[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const options: ModelReasoningEffortOption[] = [];
+  for (const entry of raw) {
+    if (typeof entry === 'string') {
+      const directEffort = normalizeEffort(entry);
+      if (directEffort) {
+        options.push({
+          effort: directEffort,
+        });
+      }
+      continue;
+    }
+
+    const record = toRecord(entry);
+    if (!record) {
+      continue;
+    }
+
+    const effort = normalizeEffort(
+      readString(record.reasoningEffort) ?? readString(record.effort)
+    );
+    if (!effort) {
+      continue;
+    }
+
+    options.push({
+      effort,
+      description: readString(record.description) ?? undefined,
+    });
+  }
+
+  return options;
 }
