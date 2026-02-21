@@ -2894,7 +2894,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   const suffix = command.argsHint ? ` ${command.argsHint}` : '';
                   return (
                     <Pressable
-                      key={command.name}
+                      key={`${command.name}-${String(index)}`}
                       onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
                       style={({ pressed }) => [
                         styles.slashSuggestionItem,
@@ -3143,20 +3143,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 contentContainerStyle={styles.userInputQuestionsListContent}
                 showsVerticalScrollIndicator={false}
               >
-                {(pendingUserInputRequest?.questions ?? []).map((question) => {
+                {(pendingUserInputRequest?.questions ?? []).map((question, questionIndex) => {
                   const answer = userInputDrafts[question.id] ?? '';
                   const hasPresetOptions =
                     Array.isArray(question.options) && question.options.length > 0;
                   const needsFreeformInput = !hasPresetOptions || question.isOther;
                   return (
-                    <View key={question.id} style={styles.userInputQuestionCard}>
+                    <View
+                      key={`${question.id}-${String(questionIndex)}`}
+                      style={styles.userInputQuestionCard}
+                    >
                       <Text style={styles.userInputQuestionHeader}>{question.header}</Text>
                       <Text style={styles.userInputQuestionText}>{question.question}</Text>
                       {hasPresetOptions ? (
                         <View style={styles.userInputOptionsColumn}>
                           {question.options?.map((option, index) => (
                             <Pressable
-                              key={`${question.id}-${option.label}`}
+                              key={`${question.id}-${String(index)}-${option.label}`}
                               style={({ pressed }) => [
                                 styles.userInputOptionButton,
                                 answer.trim() === option.label.trim() &&
@@ -3302,9 +3305,9 @@ function ComposeView({
         <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
       </Pressable>
       <View style={styles.suggestions}>
-        {SUGGESTIONS.map((s) => (
+        {SUGGESTIONS.map((s, index) => (
           <Pressable
-            key={s}
+            key={`${s}-${String(index)}`}
             style={({ pressed }) => [
               styles.suggestionCard,
               pressed && styles.suggestionCardPressed,
@@ -3372,6 +3375,7 @@ function ChatView({
   const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
   const toolPanelMaxHeight = Math.floor(windowHeight * 0.5);
   const liveTimelineText = toLiveTimelineText(activeCommands);
+  const shouldShowToolPanel = visibleToolBlocks.length > 0 && !liveTimelineText;
 
   const filtered = chat.messages.filter((msg) => {
     const text = msg.content || '';
@@ -3405,10 +3409,10 @@ function ChatView({
       onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
     >
       {activePlan ? <PlanCard plan={activePlan} /> : null}
-      {visibleMessages.map((msg) => {
+      {visibleMessages.map((msg, messageIndex) => {
         const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
         return (
-          <View key={msg.id} style={styles.chatMessageBlock}>
+          <View key={`${msg.id}-${String(messageIndex)}`} style={styles.chatMessageBlock}>
             <ChatMessage message={msg} />
             {showInlineChoices ? (
               <View style={styles.inlineChoiceOptions}>
@@ -3457,7 +3461,7 @@ function ChatView({
           {streamingText}
         </Text>
       ) : null}
-      {visibleToolBlocks.length > 0 ? (
+      {shouldShowToolPanel ? (
         <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
           <ScrollView
             nestedScrollEnabled
@@ -4015,17 +4019,36 @@ function findSlashCommandDefinition(name: string): SlashCommandDefinition | null
 
 function filterSlashCommands(query: string): SlashCommandDefinition[] {
   const normalized = query.trim().toLowerCase();
+  const dedupedCommands = dedupeSlashCommandsByName(SLASH_COMMANDS);
   if (!normalized) {
-    return SLASH_COMMANDS;
+    return dedupedCommands;
   }
 
-  return SLASH_COMMANDS.filter((command) => {
+  return dedupedCommands.filter((command) => {
     const byName = command.name.toLowerCase().includes(normalized);
     const bySummary = command.summary.toLowerCase().includes(normalized);
     const byAlias =
       command.aliases?.some((alias) => alias.toLowerCase().includes(normalized)) ?? false;
     return byName || bySummary || byAlias;
   });
+}
+
+function dedupeSlashCommandsByName(
+  commands: SlashCommandDefinition[]
+): SlashCommandDefinition[] {
+  const seen = new Set<string>();
+  const result: SlashCommandDefinition[] = [];
+
+  for (const command of commands) {
+    const key = command.name.trim().toLowerCase();
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(command);
+  }
+
+  return result;
 }
 
 function stripMarkdownInline(value: string): string {

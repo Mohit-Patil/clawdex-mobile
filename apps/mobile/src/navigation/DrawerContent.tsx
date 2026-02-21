@@ -99,8 +99,9 @@ export function DrawerContent({
 
     try {
       const data = await api.listChats();
-      setChats(sortChats(data));
-      const activeChatIds = new Set(data.map((chat) => chat.id));
+      const dedupedChats = dedupeChatsById(data);
+      setChats(sortChats(dedupedChats));
+      const activeChatIds = new Set(dedupedChats.map((chat) => chat.id));
       setRunHeartbeatAtByThread((prev) => {
         const now = Date.now();
         const next: Record<string, number> = {};
@@ -517,6 +518,19 @@ function WorkspaceOption({
 
 function sortChats(chats: ChatSummary[]): ChatSummary[] {
   return [...chats].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function dedupeChatsById(chats: ChatSummary[]): ChatSummary[] {
+  const byId = new Map<string, ChatSummary>();
+
+  for (const chat of chats) {
+    const existing = byId.get(chat.id);
+    if (!existing || chat.updatedAt.localeCompare(existing.updatedAt) > 0) {
+      byId.set(chat.id, chat);
+    }
+  }
+
+  return Array.from(byId.values());
 }
 
 function normalizeCwd(value: string | null | undefined): string | null {
