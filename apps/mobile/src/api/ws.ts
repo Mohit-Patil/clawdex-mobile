@@ -53,6 +53,7 @@ export class MacBridgeWsClient {
   private readonly statusListeners = new Set<StatusListener>();
   private readonly pendingRequests = new Map<string | number, PendingRequest>();
   private readonly recentTurnCompletions = new Map<string, TurnCompletionSnapshot>();
+  private readonly pendingTurnWaits = new Set<string>();
   private readonly authToken: string | null;
   private readonly allowQueryTokenAuth: boolean;
   private readonly baseUrl: string;
@@ -148,75 +149,117 @@ export class MacBridgeWsClient {
       return;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        unsubscribe();
-        reject(new Error(`turn timed out after ${String(timeoutMs)}ms`));
-      }, timeoutMs);
-
-      const unsubscribe = this.onEvent((event) => {
-        if (event.method.startsWith('codex/event/')) {
-          const codexEvent = toCodexEventSnapshot(event.method, event.params);
-          if (!codexEvent || codexEvent.threadId !== threadId) {
-            return;
-          }
-
-          if (codexEvent.type === 'turn_aborted' || codexEvent.type === 'turnaborted') {
-            clearTimeout(timeout);
-            unsubscribe();
-            reject(new Error('turn aborted'));
-            return;
-          }
-
-          if (codexEvent.type === 'task_complete' || codexEvent.type === 'taskcomplete') {
-            clearTimeout(timeout);
-            unsubscribe();
+    const waitKey = turnCompletionKey(threadId, turnId);
+    this.pendingTurnWaits.add(waitKey);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const finish = (result: { ok: true } | { ok: false; error: Error }) => {
+          clearTimeout(timeout);
+          unsubscribe();
+          if (result.ok) {
             resolve();
             return;
           }
-        }
+          reject(result.error);
+        };
 
-        if (event.method !== 'turn/completed') {
-          return;
-        }
+        const timeout = setTimeout(() => {
+          finish({ ok: false, error: new Error(`turn timed out after ${String(timeoutMs)}ms`) });
+        }, timeoutMs);
 
-        const completion = toTurnCompletionSnapshot(event.params);
-        if (!completion || completion.threadId !== threadId) {
-          return;
-        }
+        const unsubscribe = this.onEvent((event) => {
+          const canUseUnscopedEvent = this.canUseUnscopedTurnEvent(waitKey);
 
-        const completedTurnId = completion.turnId;
-        if (completedTurnId && completedTurnId !== turnId) {
-          return;
-        }
+          if (event.method.startsWith('codex/event/')) {
+            const codexEvent = toCodexEventSnapshot(event.method, event.params);
+            if (!codexEvent) {
+              return;
+            }
 
-        const normalizedCompletion: TurnCompletionSnapshot = completedTurnId
-          ? completion
-          : {
-              ...completion,
-              turnId,
+            const isMatchingThread = codexEvent.threadId === threadId;
+            const isUnscopedMatch = codexEvent.threadId === null && canUseUnscopedEvent;
+            if (!isMatchingThread && !isUnscopedMatch) {
+              return;
+            }
+
+            if (CODEX_TURN_ABORT_EVENT_TYPES.has(codexEvent.type)) {
+              finish({ ok: false, error: new Error('turn aborted') });
+              return;
+            }
+
+            if (CODEX_TURN_FAILURE_EVENT_TYPES.has(codexEvent.type)) {
+              finish({ ok: false, error: new Error(`turn failed (${codexEvent.type})`) });
+              return;
+            }
+
+            if (CODEX_TURN_COMPLETE_EVENT_TYPES.has(codexEvent.type)) {
+              finish({ ok: true });
+              return;
+            }
+          }
+
+          if (event.method !== 'turn/completed') {
+            return;
+          }
+
+          let normalizedCompletion: TurnCompletionSnapshot | null = null;
+          const completion = toTurnCompletionSnapshot(event.params);
+          if (completion) {
+            if (completion.threadId !== threadId) {
+              return;
+            }
+
+            if (completion.turnId && completion.turnId !== turnId) {
+              return;
+            }
+
+            normalizedCompletion = completion.turnId
+              ? completion
+              : {
+                  ...completion,
+                  turnId,
+                };
+          } else if (canUseUnscopedEvent) {
+            const unscopedCompletion = toUnscopedTurnCompletionSnapshot(event.params);
+            if (!unscopedCompletion) {
+              return;
+            }
+
+            if (unscopedCompletion.turnId && unscopedCompletion.turnId !== turnId) {
+              return;
+            }
+
+            normalizedCompletion = {
+              threadId,
+              turnId: unscopedCompletion.turnId ?? turnId,
+              status: unscopedCompletion.status,
+              errorMessage: unscopedCompletion.errorMessage,
+              completedAt: unscopedCompletion.completedAt,
             };
-        this.rememberTurnCompletion(normalizedCompletion);
+          }
 
-        clearTimeout(timeout);
-        unsubscribe();
+          if (!normalizedCompletion) {
+            return;
+          }
 
-        if (
-          normalizedCompletion.status === 'failed' ||
-          normalizedCompletion.status === 'interrupted'
-        ) {
-          reject(
-            new Error(
-              normalizedCompletion.errorMessage ??
-                `turn ${normalizedCompletion.status ?? 'failed'}`
-            )
-          );
-          return;
-        }
+          this.rememberTurnCompletion(normalizedCompletion);
+          if (isFailedTurnStatus(normalizedCompletion.status)) {
+            finish({
+              ok: false,
+              error: new Error(
+                normalizedCompletion.errorMessage ??
+                  `turn ${normalizedCompletion.status ?? 'failed'}`
+              ),
+            });
+            return;
+          }
 
-        resolve();
+          finish({ ok: true });
+        });
       });
-    });
+    } finally {
+      this.pendingTurnWaits.delete(waitKey);
+    }
   }
 
   onEvent(listener: EventListener): () => void {
@@ -413,9 +456,13 @@ export class MacBridgeWsClient {
   }
 
   private assertTurnSucceeded(snapshot: TurnCompletionSnapshot): void {
-    if (snapshot.status === 'failed' || snapshot.status === 'interrupted') {
+    if (isFailedTurnStatus(snapshot.status)) {
       throw new Error(snapshot.errorMessage ?? `turn ${snapshot.status ?? 'failed'}`);
     }
+  }
+
+  private canUseUnscopedTurnEvent(waitKey: string): boolean {
+    return this.pendingTurnWaits.size === 1 && this.pendingTurnWaits.has(waitKey);
   }
 
   private emitEvent(event: RpcNotification): void {
@@ -485,6 +532,33 @@ function toTurnCompletionSnapshot(value: unknown): TurnCompletionSnapshot | null
   };
 }
 
+function toUnscopedTurnCompletionSnapshot(
+  value: unknown
+): Omit<TurnCompletionSnapshot, 'threadId'> | null {
+  const params = toRecord(value);
+  if (!params) {
+    return null;
+  }
+
+  const turn = toRecord(params.turn);
+  const turnId =
+    readString(turn?.id) ?? readString(params.turnId) ?? readString(params.turn_id);
+  const status = readString(turn?.status) ?? readString(params.status);
+  const turnError = toRecord(turn?.error) ?? toRecord(params.error);
+  const errorMessage = readString(turnError?.message);
+
+  if (!turnId && !status && !errorMessage) {
+    return null;
+  }
+
+  return {
+    turnId: turnId ?? null,
+    status: status ?? null,
+    errorMessage: errorMessage ?? null,
+    completedAt: Date.now(),
+  };
+}
+
 function toCodexEventSnapshot(
   method: string,
   value: unknown
@@ -522,4 +596,29 @@ function normalizeCodexEventType(value: string | null): string | null {
 
   const trimmed = value.trim().toLowerCase();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+const CODEX_TURN_COMPLETE_EVENT_TYPES = new Set(['task_complete', 'taskcomplete']);
+const CODEX_TURN_ABORT_EVENT_TYPES = new Set([
+  'turn_aborted',
+  'turnaborted',
+  'task_interrupted',
+  'taskinterrupted',
+]);
+const CODEX_TURN_FAILURE_EVENT_TYPES = new Set([
+  'task_failed',
+  'taskfailed',
+  'turn_failed',
+  'turnfailed',
+]);
+
+function isFailedTurnStatus(status: string | null): boolean {
+  return (
+    status === 'failed' ||
+    status === 'interrupted' ||
+    status === 'error' ||
+    status === 'aborted' ||
+    status === 'cancelled' ||
+    status === 'canceled'
+  );
 }

@@ -108,8 +108,8 @@ const DEFAULT_ACTIVITY_PHRASES = [
 const MAX_ACTIVITY_PHRASES = 8;
 const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 8;
-const RUN_WATCHDOG_MS = 15_000;
-const LIKELY_RUNNING_RECENT_UPDATE_MS = 120_000;
+const RUN_WATCHDOG_MS = 60_000;
+const LIKELY_RUNNING_RECENT_UPDATE_MS = 1_800_000;
 const ANDROID_KEYBOARD_EXTRA_OFFSET = 12;
 const IOS_KEYBOARD_EXTRA_OFFSET = 12;
 const INLINE_OPTION_LINE_PATTERN =
@@ -142,6 +142,13 @@ const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'mcp_tool_call_begin',
   'web_search_begin',
   'background_event',
+]);
+const CODEX_RUN_TERMINAL_EVENT_TYPES = new Set([
+  'task_complete',
+  'turn_aborted',
+  'task_failed',
+  'turn_failed',
+  'task_interrupted',
 ]);
 
 const SLASH_COMMANDS: SlashCommandDefinition[] = [
@@ -1494,21 +1501,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           collaborationMode: selectedCollaborationMode,
         });
         const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+        const shouldRemainRunning = isChatLikelyRunning(updated);
         if (autoEnabledPlan) {
           setSelectedCollaborationMode('plan');
           appendActivityPhrase('Plan mode enabled', true);
         }
         setSelectedChat(updated);
         setError(null);
-        setActivity({
-          tone: 'complete',
-          title: 'Turn completed',
-          detail:
-            autoEnabledPlan && selectedCollaborationMode !== 'plan'
-              ? 'Plan mode enabled for the next turn'
-              : undefined,
-        });
-        clearRunWatchdog();
+        if (shouldRemainRunning) {
+          setActivity({
+            tone: 'running',
+            title: 'Working',
+          });
+          bumpRunWatchdog();
+        } else {
+          setActivity({
+            tone: 'complete',
+            title: 'Turn completed',
+            detail:
+              autoEnabledPlan && selectedCollaborationMode !== 'plan'
+                ? 'Plan mode enabled for the next turn'
+                : undefined,
+          });
+          clearRunWatchdog();
+        }
       } catch (err) {
         setError((err as Error).message);
         setActivity({
@@ -1590,21 +1606,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             collaborationMode: resolvedCollaborationMode,
           });
           const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+          const shouldRemainRunning = isChatLikelyRunning(updated);
           if (autoEnabledPlan) {
             setSelectedCollaborationMode('plan');
             appendActivityPhrase('Plan mode enabled', true);
           }
           setSelectedChat(updated);
           setError(null);
-          setActivity({
-            tone: 'complete',
-            title: 'Turn completed',
-            detail:
-              autoEnabledPlan && resolvedCollaborationMode !== 'plan'
-                ? 'Plan mode enabled for the next turn'
-                : undefined,
-          });
-          clearRunWatchdog();
+          if (shouldRemainRunning) {
+            setActivity({
+              tone: 'running',
+              title: 'Working',
+            });
+            bumpRunWatchdog();
+          } else {
+            setActivity({
+              tone: 'complete',
+              title: 'Turn completed',
+              detail:
+                autoEnabledPlan && resolvedCollaborationMode !== 'plan'
+                  ? 'Plan mode enabled for the next turn'
+                  : undefined,
+            });
+            clearRunWatchdog();
+          }
         } catch (err) {
           setError((err as Error).message);
           setActivity({
@@ -1952,6 +1977,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             void loadChat(activeThreadId);
             return;
           }
+
+          if (isCodexRunHeartbeatEvent(codexEventType)) {
+            setActivity((prev) =>
+              prev.tone === 'running'
+                ? prev
+                : {
+                    tone: 'running',
+                    title: 'Working',
+                  }
+            );
+            appendActivityPhrase('Working', true);
+          }
+          return;
         }
 
         // Streaming delta -> transient thinking text
@@ -3333,6 +3371,7 @@ function ChatView({
   const { height: windowHeight } = useWindowDimensions();
   const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
   const toolPanelMaxHeight = Math.floor(windowHeight * 0.5);
+  const liveTimelineText = toLiveTimelineText(activeCommands);
 
   const filtered = chat.messages.filter((msg) => {
     const text = msg.content || '';
@@ -3401,6 +3440,18 @@ function ChatView({
           </View>
         );
       })}
+      {liveTimelineText ? (
+        <View style={styles.chatMessageBlock}>
+          <ChatMessage
+            message={{
+              id: `live-timeline-${chat.id}`,
+              role: 'system',
+              content: liveTimelineText,
+              createdAt: new Date().toISOString(),
+            }}
+          />
+        </View>
+      ) : null}
       {streamingText ? (
         <Text style={styles.streamingText} numberOfLines={4}>
           {streamingText}
@@ -4074,6 +4125,67 @@ function toToolBlockState(
   };
 }
 
+function toLiveTimelineText(events: RunEvent[]): string | null {
+  if (!Array.isArray(events) || events.length === 0) {
+    return null;
+  }
+
+  const lines = events
+    .slice(-MAX_VISIBLE_TOOL_BLOCKS)
+    .map((event) => toLiveTimelineLine(event))
+    .filter((line): line is string => Boolean(line));
+
+  if (lines.length === 0) {
+    return null;
+  }
+
+  return lines.join('\n');
+}
+
+function toLiveTimelineLine(event: RunEvent): string | null {
+  const detail = (event.detail ?? '').trim();
+  if (!detail) {
+    return null;
+  }
+
+  const [rawLabel, rawState] = detail.split('|').map((value) => value.trim());
+  const label = rawLabel || 'Task';
+  const state = (rawState ?? '').toLowerCase();
+  const isRunning = state === 'running';
+  const isError = state === 'error' || state === 'failed';
+
+  const basePrefix =
+    event.eventType.startsWith('command.')
+      ? isError
+        ? '• Command failed'
+        : isRunning
+          ? '• Running command'
+          : '• Ran'
+      : event.eventType.startsWith('tool.')
+        ? isError
+          ? '• Tool failed'
+          : isRunning
+            ? '• Running tool'
+            : '• Called tool'
+        : event.eventType.startsWith('web_search.')
+          ? isRunning
+            ? '• Searching web'
+            : '• Searched web'
+          : event.eventType.startsWith('file_change.')
+            ? isError
+              ? '• File changes failed'
+              : isRunning
+                ? '• Applying file changes'
+                : '• Applied file changes'
+            : isError
+              ? '• Step failed'
+              : isRunning
+                ? '• Working'
+                : '• Completed';
+
+  return `${basePrefix} \`${label}\``;
+}
+
 function toActivityPhrase(title: string, detail?: string): string | null {
   const compactTitle = toTickerSnippet(title, 36);
   const compactDetail = toTickerSnippet(detail ?? null, 64);
@@ -4086,7 +4198,11 @@ function toActivityPhrase(title: string, detail?: string): string | null {
 }
 
 function isCodexRunHeartbeatEvent(codexEventType: string): boolean {
-  return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType);
+  if (CODEX_RUN_TERMINAL_EVENT_TYPES.has(codexEventType)) {
+    return false;
+  }
+
+  return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType) || codexEventType.length > 0;
 }
 
 function isChatLikelyRunning(chat: Chat): boolean {

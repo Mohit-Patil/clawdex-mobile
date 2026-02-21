@@ -81,6 +81,7 @@ type AppServerThreadSetNameResponse = Record<string, never>;
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
 const MOBILE_DEVELOPER_INSTRUCTIONS =
   'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
+const TURN_COMPLETION_SOFT_TIMEOUT_MS = 45_000;
 
 export class MacBridgeApiClient {
   private readonly ws: MacBridgeWsClient;
@@ -336,7 +337,15 @@ export class MacBridgeApiClient {
       throw new Error('turn/start did not return turn id');
     }
 
-    await this.ws.waitForTurnCompletion(id, turnId);
+    try {
+      await this.ws.waitForTurnCompletion(id, turnId, TURN_COMPLETION_SOFT_TIMEOUT_MS);
+    } catch (error) {
+      const message = String((error as Error).message ?? error);
+      const isTurnTimeout = message.toLowerCase().includes('turn timed out');
+      if (!isTurnTimeout) {
+        throw error;
+      }
+    }
     return this.getChatWithUserMessage(id, content);
   }
 
@@ -548,7 +557,7 @@ export class MacBridgeApiClient {
   private async getChatWithUserMessage(id: string, content: string): Promise<Chat> {
     const normalizedContent = content.trim();
     let latest = await this.getChat(id);
-    if (!normalizedContent || chatHasUserMessage(latest, normalizedContent)) {
+    if (!normalizedContent || chatHasRecentUserMessage(latest, normalizedContent)) {
       return latest;
     }
 
@@ -556,12 +565,12 @@ export class MacBridgeApiClient {
     for (const delayMs of retryDelaysMs) {
       await sleep(delayMs);
       latest = await this.getChat(id);
-      if (chatHasUserMessage(latest, normalizedContent)) {
+      if (chatHasRecentUserMessage(latest, normalizedContent)) {
         return latest;
       }
     }
 
-    return latest;
+    return appendSyntheticUserMessage(latest, normalizedContent);
   }
 }
 
@@ -672,15 +681,39 @@ function toReasoningEffortOptions(raw: unknown): ModelReasoningEffortOption[] {
   return options;
 }
 
-function chatHasUserMessage(chat: Chat, content: string): boolean {
+function chatHasRecentUserMessage(chat: Chat, content: string, tailSize = 8): boolean {
   const normalized = content.trim();
   if (!normalized) {
     return true;
   }
 
-  return chat.messages.some(
+  const tail = chat.messages.slice(-tailSize);
+  return tail.some(
     (message) => message.role === 'user' && message.content.trim() === normalized
   );
+}
+
+function appendSyntheticUserMessage(chat: Chat, content: string): Chat {
+  const normalized = content.trim();
+  if (!normalized || chatHasRecentUserMessage(chat, normalized)) {
+    return chat;
+  }
+
+  const createdAt = new Date().toISOString();
+  return {
+    ...chat,
+    updatedAt: createdAt,
+    lastMessagePreview: normalized.slice(0, 120),
+    messages: [
+      ...chat.messages,
+      {
+        id: `local-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role: 'user',
+        content: normalized,
+        createdAt,
+      },
+    ],
+  };
 }
 
 function sleep(ms: number): Promise<void> {
