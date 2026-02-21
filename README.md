@@ -24,6 +24,28 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 - Immediate in-app loading feedback when opening a chat
 - Guided setup wizard for first-time onboarding
 
+## Install (Quick Start)
+
+If you want to install and run immediately, start here:
+
+```bash
+npm install
+npm run setup:wizard
+```
+
+Prerequisites are listed in `Prerequisites` below.
+
+`setup:wizard` walks through:
+
+1. codex CLI check
+2. Tailscale install check (offers Homebrew install)
+3. Tailscale login/connectivity check (opens browser flow if needed)
+4. Expo Go readiness check
+5. Secure env generation
+6. Optional one-terminal run (bridge in background + Expo QR in foreground)
+
+For manual setup, see `Manual Secure Setup (No Wizard)` below.
+
 ## Project Layout
 
 - `apps/mobile`: Expo client (UI + API client)
@@ -65,22 +87,6 @@ Optional for local simulator/emulator workflows:
 
 - Xcode + iOS Simulator
 - Android Studio + Android Emulator
-
-## Fastest Start (Recommended)
-
-```bash
-npm install
-npm run setup:wizard
-```
-
-`setup:wizard` walks through:
-
-1. codex CLI check
-2. Tailscale install check (offers Homebrew install)
-3. Tailscale login/connectivity check (opens browser flow if needed)
-4. Expo Go readiness check
-5. Secure env generation
-6. Optional one-terminal run (bridge in background + Expo QR in foreground)
 
 ## Manual Secure Setup (No Wizard)
 
