@@ -22,6 +22,14 @@
     "react-native": "^0.81.5"
   },
   "overrides": {
-    "minimatch": "10.2.2"
+    "minimatch": "10.2.2",
+    "@react-navigation/drawer": {
+      "react-native-reanimated": "4.1.1"
+    },
+    "react-native-drawer-layout": {
+      "react-native-reanimated": "4.1.1"
+    },
+    "react-native-reanimated": "4.1.1",
+    "react-native-worklets": "0.5.1"
   }
 }

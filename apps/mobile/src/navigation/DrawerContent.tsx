@@ -9,13 +9,14 @@ import {
   Text,
   View,
 } from 'react-native';
+import { BlurView } from 'expo-blur';
 
 import type { MacBridgeApiClient } from '../api/client';
 import type { BridgeWsEvent, ThreadSummary } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
 import { colors, spacing, typography } from '../theme';
 
-type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings';
+type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings' | 'Privacy' | 'Terms';
 
 interface DrawerContentProps {
   api: MacBridgeApiClient;
@@ -62,10 +63,10 @@ export function DrawerContent({
           prev.map((t) =>
             t.id === event.payload.threadId
               ? {
-                  ...t,
-                  lastMessagePreview: event.payload.content,
-                  updatedAt: event.payload.updatedAt,
-                }
+                ...t,
+                lastMessagePreview: event.payload.content,
+                updatedAt: event.payload.updatedAt,
+              }
               : t
           )
         );
@@ -74,62 +75,78 @@ export function DrawerContent({
   }, [ws]);
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* New Thread button */}
-      <View style={styles.header}>
-        <Pressable
-          style={({ pressed }) => [styles.newThreadBtn, pressed && styles.newThreadBtnPressed]}
-          onPress={onNewThread}
-        >
-          <Ionicons name="add" size={16} color={colors.white} />
-          <Text style={styles.newThreadText}>New thread</Text>
-        </Pressable>
-      </View>
+    <View style={styles.container}>
+      <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+      <SafeAreaView style={styles.safeArea}>
+        {/* New Thread button */}
+        <View style={styles.header}>
+          <Pressable
+            style={({ pressed }) => [styles.newThreadBtn, pressed && styles.newThreadBtnPressed]}
+            onPress={onNewThread}
+          >
+            <Ionicons name="add" size={16} color={colors.white} />
+            <Text style={styles.newThreadText}>New thread</Text>
+          </Pressable>
+        </View>
 
-      {/* Nav items */}
-      <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
-      <NavItem icon="git-branch-outline" label="Git" onPress={() => onNavigate('Git')} />
-
-      {/* Threads section */}
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Threads</Text>
-      </View>
-
-      {loading ? (
-        <ActivityIndicator color={colors.textMuted} style={styles.loader} />
-      ) : (
-        <FlatList
-          data={threads}
-          keyExtractor={(item) => item.id}
-          style={styles.list}
-          showsVerticalScrollIndicator={false}
-          ListEmptyComponent={<Text style={styles.emptyText}>No threads yet</Text>}
-          renderItem={({ item }) => (
-            <Pressable
-              style={({ pressed }) => [
-                styles.threadItem,
-                item.id === selectedThreadId && styles.threadItemSelected,
-                pressed && styles.threadItemPressed,
-              ]}
-              onPress={() => onSelectThread(item.id)}
-            >
-              <Text style={styles.threadTitle} numberOfLines={1}>
-                {item.title || 'Untitled'}
-              </Text>
-              <Text style={styles.threadAge}>{relativeTime(item.updatedAt)}</Text>
-            </Pressable>
-          )}
+        {/* Nav items */}
+        <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
+        <NavItem icon="git-branch-outline" label="Git" onPress={() => onNavigate('Git')} />
+        <NavItem
+          icon="shield-checkmark-outline"
+          label="Privacy"
+          onPress={() => onNavigate('Privacy')}
         />
-      )}
+        <NavItem
+          icon="document-text-outline"
+          label="Terms"
+          onPress={() => onNavigate('Terms')}
+        />
 
-      {/* Settings pinned at bottom */}
-      <NavItem
-        icon="settings-outline"
-        label="Settings"
-        onPress={() => onNavigate('Settings')}
-        style={styles.settingsItem}
-      />
-    </SafeAreaView>
+        {/* Threads section */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Threads</Text>
+        </View>
+
+        {loading ? (
+          <ActivityIndicator color={colors.textMuted} style={styles.loader} />
+        ) : (
+          <FlatList
+            data={threads}
+            keyExtractor={(item) => item.id}
+            style={styles.list}
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={<Text style={styles.emptyText}>No threads yet</Text>}
+            renderItem={({ item }) => {
+              const isSelected = item.id === selectedThreadId;
+              return (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.threadItem,
+                    isSelected && styles.threadItemSelected,
+                    pressed && styles.threadItemPressed,
+                  ]}
+                  onPress={() => onSelectThread(item.id)}
+                >
+                  <Text style={[styles.threadTitle, isSelected && styles.threadTitleSelected]} numberOfLines={1}>
+                    {item.title || 'Untitled'}
+                  </Text>
+                  <Text style={styles.threadAge}>{relativeTime(item.updatedAt)}</Text>
+                </Pressable>
+              );
+            }}
+          />
+        )}
+
+        {/* Settings pinned at bottom */}
+        <NavItem
+          icon="settings-outline"
+          label="Settings"
+          onPress={() => onNavigate('Settings')}
+          style={styles.settingsItem}
+        />
+      </SafeAreaView>
+    </View>
   );
 }
 
@@ -145,13 +162,15 @@ function NavItem({
   style?: object;
 }) {
   return (
-    <Pressable
-      style={({ pressed }) => [styles.navItem, pressed && styles.navItemPressed, style]}
-      onPress={onPress}
-    >
-      <Ionicons name={icon} size={16} color={colors.textMuted} />
-      <Text style={styles.navLabel}>{label}</Text>
-    </Pressable>
+    <View style={style}>
+      <Pressable
+        style={({ pressed }) => [styles.navItem, pressed && styles.navItemPressed]}
+        onPress={onPress}
+      >
+        <Ionicons name={icon} size={18} color={colors.textPrimary} />
+        <Text style={styles.navLabel}>{label}</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -177,7 +196,10 @@ function relativeTime(iso: string): string {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bgSidebar,
+    backgroundColor: 'transparent',
+  },
+  safeArea: {
+    flex: 1,
   },
   header: {
     paddingHorizontal: spacing.lg,
@@ -205,15 +227,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm + 2,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    marginHorizontal: spacing.md,
+    borderRadius: 10,
+    marginBottom: spacing.xs,
   },
   navItemPressed: {
     backgroundColor: colors.bgItem,
   },
   navLabel: {
     ...typography.body,
-    color: colors.textMuted,
+    fontWeight: '500',
+    color: colors.textPrimary,
   },
   sectionHeader: {
     paddingHorizontal: spacing.lg,
@@ -240,21 +266,29 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm + 2,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    marginHorizontal: spacing.md,
+    borderRadius: 10,
+    marginBottom: spacing.xs,
   },
   threadItemSelected: {
-    backgroundColor: colors.bgItem,
-    borderLeftWidth: 3,
-    borderLeftColor: colors.accent,
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(59, 130, 246, 0.2)',
   },
   threadItemPressed: {
     backgroundColor: colors.bgItem,
   },
   threadTitle: {
     ...typography.body,
+    color: colors.textMuted,
     flex: 1,
     marginRight: spacing.sm,
+  },
+  threadTitleSelected: {
+    color: colors.textPrimary,
+    fontWeight: '600',
   },
   threadAge: {
     ...typography.caption,
@@ -262,8 +296,8 @@ const styles = StyleSheet.create({
   },
   settingsItem: {
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-    marginTop: spacing.sm,
+    borderTopColor: colors.borderLight,
     paddingTop: spacing.md,
+    paddingBottom: spacing.xxl,
   },
 });

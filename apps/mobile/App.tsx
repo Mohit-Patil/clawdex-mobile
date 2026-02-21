@@ -15,17 +15,33 @@ import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
 import { GitScreen } from './src/screens/GitScreen';
 import { MainScreen, type MainScreenHandle } from './src/screens/MainScreen';
+import { PrivacyScreen } from './src/screens/PrivacyScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TerminalScreen } from './src/screens/TerminalScreen';
+import { TermsScreen } from './src/screens/TermsScreen';
 import { colors } from './src/theme';
 
-type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings';
+type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings' | 'Privacy' | 'Terms';
 
 const DRAWER_WIDTH = 280;
 
 export default function App() {
-  const api = useMemo(() => new MacBridgeApiClient({ baseUrl: env.macBridgeUrl }), []);
-  const ws = useMemo(() => new MacBridgeWsClient(api.wsUrl()), [api]);
+  const api = useMemo(
+    () =>
+      new MacBridgeApiClient({
+        baseUrl: env.macBridgeUrl,
+        authToken: env.macBridgeToken
+      }),
+    []
+  );
+  const ws = useMemo(
+    () =>
+      new MacBridgeWsClient(api.wsUrl(), {
+        authToken: env.macBridgeToken,
+        allowQueryTokenAuth: env.allowWsQueryTokenAuth
+      }),
+    [api]
+  );
   const mainRef = useRef<MainScreenHandle>(null);
   const [currentScreen, setCurrentScreen] = useState<Screen>('Main');
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -98,6 +114,14 @@ export default function App() {
     closeDrawer();
   }, [closeDrawer]);
 
+  const openPrivacy = useCallback(() => {
+    setCurrentScreen('Privacy');
+  }, []);
+
+  const openTerms = useCallback(() => {
+    setCurrentScreen('Terms');
+  }, []);
+
   const renderScreen = () => {
     switch (currentScreen) {
       case 'Terminal':
@@ -105,7 +129,30 @@ export default function App() {
       case 'Git':
         return <GitScreen api={api} onOpenDrawer={openDrawer} />;
       case 'Settings':
-        return <SettingsScreen api={api} ws={ws} bridgeUrl={env.macBridgeUrl} onOpenDrawer={openDrawer} />;
+        return (
+          <SettingsScreen
+            api={api}
+            ws={ws}
+            bridgeUrl={env.macBridgeUrl}
+            onOpenDrawer={openDrawer}
+            onOpenPrivacy={openPrivacy}
+            onOpenTerms={openTerms}
+          />
+        );
+      case 'Privacy':
+        return (
+          <PrivacyScreen
+            policyUrl={env.privacyPolicyUrl}
+            onOpenDrawer={openDrawer}
+          />
+        );
+      case 'Terms':
+        return (
+          <TermsScreen
+            termsUrl={env.termsOfServiceUrl}
+            onOpenDrawer={openDrawer}
+          />
+        );
       default:
         return (
           <MainScreen

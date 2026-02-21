@@ -35,7 +35,12 @@ Bridge env notes:
 - `BRIDGE_WORKDIR`: absolute path to the repo/directory where Codex CLI should run.
   - `npm run bridge` now sets this automatically to the repo root (`$(pwd)`), so Codex edits your project files instead of the `services/mac-bridge` subfolder.
 - `CODEX_CLI_BIN`: Codex CLI executable path/name (defaults to `codex`).
-- `BRIDGE_AUTH_TOKEN`: bearer token for bridge REST/WS auth. If unset, bridge runs without auth (not recommended).
+- `BRIDGE_AUTH_TOKEN`: bearer token for bridge REST/WS auth. Required by default.
+- `BRIDGE_ALLOW_INSECURE_NO_AUTH=true`: local-dev-only escape hatch to run bridge without auth.
+- `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true`: optional fallback for browser WebSocket clients that cannot set `Authorization` headers.
+- `BRIDGE_CORS_ORIGINS`: comma-separated origin allowlist for browser access. If unset, CORS response headers are disabled.
+- `BRIDGE_TERMINAL_ALLOWED_COMMANDS`: comma-separated allowlist for `/terminal/exec` (default: `pwd,ls,cat,git`).
+- `BRIDGE_DISABLE_TERMINAL_EXEC=true`: disable `/terminal/exec` entirely.
 
 3. Start mac-bridge:
 
@@ -59,7 +64,12 @@ npm run android
 ```
 
 Note: for physical devices, set `EXPO_PUBLIC_MAC_BRIDGE_URL` to your Mac's LAN IP (for example `http://192.168.1.10:8787`) instead of `localhost`.
-If bridge auth is enabled, set `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` to match `BRIDGE_AUTH_TOKEN`.
+Always set `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` to match `BRIDGE_AUTH_TOKEN`.
+For non-local deployments, prefer `https://` bridge URLs and `wss://` websockets.
+Set `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH=true` only when you explicitly need browser WebSocket auth fallback.
+`EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE=true` suppresses the mobile warning for non-local `http://` URLs.
+Set `EXPO_PUBLIC_PRIVACY_POLICY_URL` to populate the in-app Privacy screen policy link.
+Set `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` to populate the in-app Terms screen link.
 
 ## Scripts
 

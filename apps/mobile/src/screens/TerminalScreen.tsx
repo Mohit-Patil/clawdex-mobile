@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -28,7 +29,7 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const runCommand = useCallback(async () => {
+  const executeCommand = useCallback(async () => {
     try {
       setRunning(true);
       const result = await api.execTerminal({ command });
@@ -48,6 +49,26 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
       setRunning(false);
     }
   }, [api, command]);
+
+  const runCommand = useCallback(() => {
+    const trimmed = command.trim();
+    if (!trimmed || running) {
+      return;
+    }
+
+    Alert.alert('Run command?', trimmed, [
+      {
+        text: 'Cancel',
+        style: 'cancel'
+      },
+      {
+        text: 'Run',
+        onPress: () => {
+          void executeCommand();
+        }
+      }
+    ]);
+  }, [command, executeCommand, running]);
 
   useEffect(() => {
     return ws.onEvent((event) => {
@@ -73,11 +94,24 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
         style={styles.body}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        <ScrollView style={styles.output} contentContainerStyle={styles.outputContent}>
-          <Text selectable style={styles.outputText}>
-            {output || 'Run a command to see output.'}
-          </Text>
-        </ScrollView>
+        <View style={styles.terminalWindow}>
+          {/* macOS-style window header */}
+          <View style={styles.windowHeader}>
+            <View style={styles.trafficLights}>
+              <View style={[styles.trafficLight, { backgroundColor: '#FF5F56' }]} />
+              <View style={[styles.trafficLight, { backgroundColor: '#FFBD2E' }]} />
+              <View style={[styles.trafficLight, { backgroundColor: '#27C93F' }]} />
+            </View>
+            <Text style={styles.windowTitle}>bash — 80x24</Text>
+            <View style={styles.trafficLightsPlaceholder} />
+          </View>
+
+          <ScrollView style={styles.output} contentContainerStyle={styles.outputContent}>
+            <Text selectable style={styles.outputText}>
+              {output || 'Run a command to see output.'}
+            </Text>
+          </ScrollView>
+        </View>
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
@@ -90,12 +124,12 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="send"
-            onSubmitEditing={() => void runCommand()}
+            onSubmitEditing={runCommand}
             placeholder="command"
             placeholderTextColor={colors.textMuted}
           />
           <Pressable
-            onPress={() => void runCommand()}
+            onPress={runCommand}
             disabled={running || !command.trim()}
             style={({ pressed }) => [
               styles.runBtn,
@@ -112,22 +146,67 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bgMain },
+  container: { flex: 1, backgroundColor: '#000000' }, // Pure black context for terminal
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
+    backgroundColor: colors.bgMain,
   },
   menuBtn: { padding: spacing.xs },
-  headerTitle: { ...typography.headline },
-  body: { flex: 1 },
+  headerTitle: { ...typography.headline, color: colors.textPrimary },
+  body: { flex: 1, padding: spacing.md },
+  terminalWindow: {
+    flex: 1,
+    backgroundColor: '#1E1E1E', // standard dark term bg
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.1)',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+    elevation: 8,
+  },
+  windowHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: '#323233',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#111',
+  },
+  trafficLights: {
+    flexDirection: 'row',
+    gap: 6,
+    width: 50,
+  },
+  trafficLightsPlaceholder: {
+    width: 50,
+  },
+  trafficLight: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  windowTitle: {
+    ...typography.caption,
+    color: '#9E9E9E',
+    fontWeight: '600',
+  },
   output: { flex: 1 },
-  outputContent: { padding: spacing.lg },
-  outputText: { ...typography.mono },
+  outputContent: { padding: spacing.md },
+  outputText: {
+    ...typography.mono,
+    color: '#10B981', // Hacker green
+    fontSize: 13,
+    lineHeight: 20,
+  },
   errorText: {
     ...typography.caption,
     color: colors.error,
@@ -138,22 +217,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
+    paddingTop: spacing.md,
+    paddingBottom: Platform.OS === 'ios' ? spacing.xl : spacing.md,
   },
-  prompt: { ...typography.mono, color: colors.accent },
+  prompt: { ...typography.mono, color: '#10B981', fontWeight: '700' },
   input: {
     flex: 1,
     ...typography.mono,
     color: colors.textPrimary,
-    backgroundColor: colors.bgSidebar,
+    backgroundColor: '#1E1E1E',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    borderRadius: radius.sm,
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: radius.md,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingVertical: 10,
   },
   runBtn: {
     width: 30,

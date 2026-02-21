@@ -33,7 +33,7 @@ export class MacBridgeApiClient {
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, '');
-    this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.timeoutMs = options.timeoutMs ?? 180_000; // Increased to 3 minutes to match backend
     this.authToken = options.authToken?.trim() || null;
   }
 
@@ -41,11 +41,7 @@ export class MacBridgeApiClient {
     const wsBase = this.baseUrl.startsWith('https://')
       ? this.baseUrl.replace('https://', 'wss://')
       : this.baseUrl.replace('http://', 'ws://');
-    if (!this.authToken) {
-      return `${wsBase}/ws`;
-    }
-
-    return `${wsBase}/ws?token=${encodeURIComponent(this.authToken)}`;
+    return `${wsBase}/ws`;
   }
 
   health(): Promise<HealthResponse> {

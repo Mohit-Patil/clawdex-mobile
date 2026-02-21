@@ -14,7 +14,8 @@
       "DOM"
     ],
     "types": [
-      "node"
+      "node",
+      "jest"
     ],
     "paths": {
       "@/*": [

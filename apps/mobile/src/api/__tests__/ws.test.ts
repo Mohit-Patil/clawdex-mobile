@@ -1,4 +1,5 @@
 import { MacBridgeWsClient } from '../ws';
+import { Platform } from 'react-native';
 
 // ---------------------------------------------------------------------------
 // Mock WebSocket
@@ -43,6 +44,7 @@ function latestMockSocket(): MockWebSocket {
 
 beforeEach(() => {
   mockInstances = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (global as any).WebSocket = jest.fn(() => {
     const ws = new MockWebSocket();
     mockInstances.push(ws);
@@ -51,6 +53,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   delete (global as any).WebSocket;
 });
 
@@ -79,6 +82,34 @@ describe('MacBridgeWsClient', () => {
 
       expect(global.WebSocket).toHaveBeenCalledTimes(1);
       expect(mockInstances).toHaveLength(1);
+    });
+
+    it('sends Authorization header options when auth token is set on native', () => {
+      const client = new MacBridgeWsClient(TEST_URL, { authToken: 'token-abc' });
+      client.connect();
+
+      if (Platform.OS === 'web') {
+        expect(global.WebSocket).toHaveBeenCalledWith(TEST_URL);
+        return;
+      }
+
+      expect(global.WebSocket).toHaveBeenCalledWith(TEST_URL, undefined, {
+        headers: { Authorization: 'Bearer token-abc' },
+      });
+    });
+
+    it('supports web query-token fallback when explicitly enabled', () => {
+      if (Platform.OS !== 'web') {
+        return;
+      }
+
+      const client = new MacBridgeWsClient(TEST_URL, {
+        authToken: 'token-xyz',
+        allowQueryTokenAuth: true,
+      });
+      client.connect();
+
+      expect(global.WebSocket).toHaveBeenCalledWith(`${TEST_URL}?token=token-xyz`);
     });
   });
 

@@ -1,22 +1,62 @@
+import { Platform } from 'react-native';
+
 import type { BridgeWsEvent } from './types';
 
 type EventListener = (event: BridgeWsEvent) => void;
 
 type StatusListener = (connected: boolean) => void;
 
+interface MacBridgeWsClientOptions {
+  authToken?: string | null;
+  allowQueryTokenAuth?: boolean;
+}
+
+interface ReactNativeWebSocketConstructor {
+  new (
+    url: string,
+    protocols?: string | string[],
+    options?: {
+      headers?: Record<string, string>;
+    }
+  ): WebSocket;
+}
+
 export class MacBridgeWsClient {
   private socket: WebSocket | null = null;
+  private connected = false;
   private readonly eventListeners = new Set<EventListener>();
   private readonly statusListeners = new Set<StatusListener>();
+  private readonly authToken: string | null;
+  private readonly allowQueryTokenAuth: boolean;
 
-  constructor(private readonly url: string) {}
+  constructor(
+    private readonly url: string,
+    options: MacBridgeWsClientOptions = {}
+  ) {
+    this.authToken = options.authToken?.trim() || null;
+    this.allowQueryTokenAuth = options.allowQueryTokenAuth ?? false;
+  }
+
+  public get isConnected(): boolean {
+    return this.connected;
+  }
 
   connect(): void {
     if (this.socket) {
       return;
     }
 
-    const socket = new WebSocket(this.url);
+    const WebSocketCtor =
+      globalThis.WebSocket as unknown as ReactNativeWebSocketConstructor;
+    const socketUrl = this.socketUrl();
+    const socket =
+      this.authToken && Platform.OS !== 'web'
+        ? new WebSocketCtor(socketUrl, undefined, {
+            headers: {
+              Authorization: `Bearer ${this.authToken}`
+            }
+          })
+        : new WebSocketCtor(socketUrl);
 
     socket.onopen = () => {
       this.emitStatus(true);
@@ -78,8 +118,18 @@ export class MacBridgeWsClient {
   }
 
   private emitStatus(connected: boolean): void {
+    this.connected = connected;
     for (const listener of this.statusListeners) {
       listener(connected);
     }
+  }
+
+  private socketUrl(): string {
+    if (!this.authToken || Platform.OS !== 'web' || !this.allowQueryTokenAuth) {
+      return this.url;
+    }
+
+    const separator = this.url.includes('?') ? '&' : '?';
+    return `${this.url}${separator}token=${encodeURIComponent(this.authToken)}`;
   }
 }

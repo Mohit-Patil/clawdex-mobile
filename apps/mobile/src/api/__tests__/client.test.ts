@@ -61,6 +61,14 @@ describe('MacBridgeApiClient - wsUrl()', () => {
     const client = new MacBridgeApiClient({ baseUrl: 'http://192.168.1.30:8787' });
     expect(client.wsUrl()).toBe('ws://192.168.1.30:8787/ws');
   });
+
+  it('does not append auth token to websocket query params', () => {
+    const client = new MacBridgeApiClient({
+      baseUrl: 'http://localhost:8787',
+      authToken: 'super-secret-token',
+    });
+    expect(client.wsUrl()).toBe('ws://localhost:8787/ws');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -138,5 +146,22 @@ describe('MacBridgeApiClient - request methods', () => {
 
     const result = await client.health();
     expect(result).toEqual(data);
+  });
+
+  it('adds Authorization header when auth token is configured', async () => {
+    const authClient = new MacBridgeApiClient({
+      baseUrl: BASE,
+      authToken: 'token-123',
+    });
+    global.fetch = mockFetchResponse({ status: 'ok', at: '2025-01-01T00:00:00Z', uptimeSec: 1 });
+
+    await authClient.health();
+
+    const [, init] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(init.headers).toEqual(
+      expect.objectContaining({
+        Authorization: 'Bearer token-123',
+      })
+    );
   });
 });

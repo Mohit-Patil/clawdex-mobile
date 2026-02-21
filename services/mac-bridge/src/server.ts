@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
+import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -10,7 +11,10 @@ import { z } from 'zod';
 import { CodexCliAdapter, ThreadBusyError } from './services/codexCliAdapter';
 import { GitService } from './services/gitService';
 import { RealtimeHub } from './services/realtimeHub';
-import { TerminalService } from './services/terminalService';
+import {
+  TerminalCommandRejectedError,
+  TerminalService
+} from './services/terminalService';
 import type {
   ApprovalDecision,
   BridgeWsEvent,
@@ -68,8 +72,25 @@ export async function buildServer(): Promise<FastifyInstance> {
   });
 
   const startupAt = Date.now();
-  const bridgeWorkdir = process.env.BRIDGE_WORKDIR ?? process.cwd();
+  const bridgeWorkdir = resolvePath(process.env.BRIDGE_WORKDIR ?? process.cwd());
   const bridgeAuthToken = process.env.BRIDGE_AUTH_TOKEN?.trim() ?? '';
+  const allowInsecureNoAuth = parseBoolean(process.env.BRIDGE_ALLOW_INSECURE_NO_AUTH);
+  const allowQueryTokenAuth = parseBoolean(process.env.BRIDGE_ALLOW_QUERY_TOKEN_AUTH);
+  const terminalEnabled = !parseBoolean(process.env.BRIDGE_DISABLE_TERMINAL_EXEC);
+  const terminalAllowedCommands = parseCsvList(process.env.BRIDGE_TERMINAL_ALLOWED_COMMANDS, [
+    'pwd',
+    'ls',
+    'cat',
+    'git'
+  ]);
+  const corsOrigins = parseCsvList(process.env.BRIDGE_CORS_ORIGINS);
+
+  if (!bridgeAuthToken && !allowInsecureNoAuth) {
+    throw new Error(
+      'BRIDGE_AUTH_TOKEN is required. Set BRIDGE_ALLOW_INSECURE_NO_AUTH=true only for local development.'
+    );
+  }
+
   const authEnabled = bridgeAuthToken.length > 0;
   const realtime = new RealtimeHub();
 
@@ -81,18 +102,37 @@ export async function buildServer(): Promise<FastifyInstance> {
       realtime.broadcast(event);
     }
   });
-  const terminal = new TerminalService();
+  const terminal = new TerminalService({
+    allowedCommands: terminalAllowedCommands
+  });
   const git = new GitService(terminal, bridgeWorkdir);
 
   await app.register(cors, {
-    origin: true
+    origin: corsOrigins.length > 0 ? corsOrigins : false
   });
 
   await app.register(websocket);
 
-  if (!authEnabled) {
+  if (!authEnabled && allowInsecureNoAuth) {
     app.log.warn(
-      'bridge auth is disabled: set BRIDGE_AUTH_TOKEN to require Authorization on REST/WS routes'
+      'bridge auth is disabled by BRIDGE_ALLOW_INSECURE_NO_AUTH=true (local development only)'
+    );
+  }
+  if (allowQueryTokenAuth) {
+    app.log.warn(
+      'query-token auth is enabled (BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true); prefer Authorization headers instead'
+    );
+  }
+  if (corsOrigins.length === 0) {
+    app.log.info(
+      'CORS response headers are disabled. Set BRIDGE_CORS_ORIGINS to allow browser origins.'
+    );
+  }
+  if (!terminalEnabled) {
+    app.log.warn('terminal exec endpoint is disabled by BRIDGE_DISABLE_TERMINAL_EXEC=true');
+  } else if (terminalAllowedCommands.length === 0) {
+    app.log.warn(
+      'terminal allowlist is empty; all commands are currently permitted. Set BRIDGE_TERMINAL_ALLOWED_COMMANDS to restrict.'
     );
   }
 
@@ -105,7 +145,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       return;
     }
 
-    if (isAuthorized(request, bridgeAuthToken)) {
+    if (isAuthorized(request, bridgeAuthToken, allowQueryTokenAuth)) {
       return;
     }
 
@@ -228,17 +268,46 @@ export async function buildServer(): Promise<FastifyInstance> {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
-    const result = await terminal.executeShell(parsed.data.command, {
-      cwd: parsed.data.cwd ?? bridgeWorkdir,
-      timeoutMs: parsed.data.timeoutMs
-    });
+    if (!terminalEnabled) {
+      return reply.code(403).send({
+        error: 'terminal_exec_disabled',
+        message: 'Terminal execution is disabled on this bridge.'
+      });
+    }
 
-    realtime.broadcast({
-      type: 'terminal.executed',
-      payload: result
-    });
+    const resolvedCwd = resolveCwdWithinRoot(parsed.data.cwd, bridgeWorkdir);
+    if (!resolvedCwd) {
+      return reply.code(400).send({
+        error: 'invalid_cwd',
+        message: 'cwd must stay within BRIDGE_WORKDIR'
+      });
+    }
 
-    return result;
+    try {
+      const result = await terminal.executeShell(parsed.data.command, {
+        cwd: resolvedCwd,
+        timeoutMs: parsed.data.timeoutMs
+      });
+
+      realtime.broadcast({
+        type: 'terminal.executed',
+        payload: result
+      });
+
+      return result;
+    } catch (error) {
+      if (error instanceof TerminalCommandRejectedError) {
+        return reply.code(400).send({
+          error: error.code,
+          message: error.message
+        });
+      }
+
+      return reply.code(500).send({
+        error: 'terminal_exec_failed',
+        message: (error as Error).message
+      });
+    }
   });
 
   app.get('/git/status', async (_request: FastifyRequest, reply: FastifyReply) => {
@@ -303,7 +372,11 @@ function parseTimeoutMs(value: string | undefined): number | undefined {
   return Math.floor(parsed);
 }
 
-function isAuthorized(request: FastifyRequest, token: string): boolean {
+function isAuthorized(
+  request: FastifyRequest,
+  token: string,
+  allowQueryTokenAuth: boolean
+): boolean {
   const authHeader = request.headers.authorization;
   if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
     const bearer = authHeader.slice('Bearer '.length).trim();
@@ -312,18 +385,50 @@ function isAuthorized(request: FastifyRequest, token: string): boolean {
     }
   }
 
-  const queryToken = (() => {
-    try {
-      const parsedUrl = new URL(request.url, 'http://localhost');
-      return parsedUrl.searchParams.get('token');
-    } catch {
-      return null;
-    }
-  })();
+  if (allowQueryTokenAuth) {
+    const queryToken = (() => {
+      try {
+        const parsedUrl = new URL(request.url, 'http://localhost');
+        return parsedUrl.searchParams.get('token');
+      } catch {
+        return null;
+      }
+    })();
 
-  if (queryToken && queryToken === token) {
-    return true;
+    if (queryToken && queryToken === token) {
+      return true;
+    }
   }
 
   return false;
+}
+
+function parseBoolean(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  return value.trim().toLowerCase() === 'true';
+}
+
+function parseCsvList(value: string | undefined, fallback: string[] = []): string[] {
+  if (!value) {
+    return [...fallback];
+  }
+
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function resolveCwdWithinRoot(rawCwd: string | undefined, root: string): string | null {
+  const normalizedRoot = resolvePath(root);
+  const requested = resolvePath(rawCwd ?? normalizedRoot);
+  const rel = relative(normalizedRoot, requested);
+  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
+    return requested;
+  }
+
+  return null;
 }

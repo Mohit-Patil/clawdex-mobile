@@ -213,7 +213,18 @@ export class CodexCliAdapter {
     const startedAtMs = Date.now();
 
     try {
-      await this.client.threadResume(thread.id);
+      try {
+        await this.client.threadResume(thread.id);
+      } catch (resumeErr) {
+        // Ignored. If the thread was just started, it's already "active" and
+        // the app-server may throw a -32600 "no rollout found" error if we
+        // try to explicitly resume it. If there's a real issue, turnStart will catch it.
+        const message = String((resumeErr as Error).message || '');
+        if (!message.includes('-32600')) {
+          console.warn(`[CliAdapter] threadResume failed but continuing: ${message}`);
+        }
+      }
+
       const turnResponse = await this.client.turnStart(thread.id, content);
       const turn = toRecord(turnResponse.turn);
       const turnId = readString(turn?.id);

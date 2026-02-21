@@ -361,10 +361,10 @@ export class CodexAppServerClient {
         result: parsed.result,
         error: this.isRecord(parsed.error)
           ? {
-              code: Number(parsed.error.code),
-              message: String(parsed.error.message),
-              data: parsed.error.data
-            }
+            code: Number(parsed.error.code),
+            message: String(parsed.error.message),
+            data: parsed.error.data
+          }
           : undefined
       });
     }
@@ -385,6 +385,7 @@ export class CodexAppServerClient {
     this.pending.delete(requestId);
 
     if (response.error) {
+      console.error(`[RPC ERROR]`, JSON.stringify(response.error));
       pending.reject(
         new Error(
           `app-server error ${String(response.error.code)}: ${response.error.message}`

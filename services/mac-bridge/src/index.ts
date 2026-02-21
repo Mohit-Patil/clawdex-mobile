@@ -2,7 +2,7 @@ import { buildServer } from './server';
 
 async function main(): Promise<void> {
   const port = Number(process.env.BRIDGE_PORT ?? 8787);
-  const host = process.env.BRIDGE_HOST ?? '0.0.0.0';
+  const host = process.env.BRIDGE_HOST ?? '127.0.0.1';
 
   const server = await buildServer();
 
