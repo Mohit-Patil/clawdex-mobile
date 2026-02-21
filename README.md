@@ -26,6 +26,7 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 
 Follow the project-wide requirements in:
 
+- `LICENSE` (project open-source license text)
 - `docs/open-source-license-requirements.md`
 
 ## Branding Assets

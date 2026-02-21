@@ -28,6 +28,7 @@ import type {
   RpcNotification,
   RunEvent,
   Chat,
+  ChatSummary,
   ChatMessage as ChatTranscriptMessage,
 } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
@@ -52,6 +53,7 @@ interface MainScreenProps {
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
   defaultStartCwd?: string | null;
+  onDefaultStartCwdChange?: (cwd: string | null) => void;
   onChatContextChange?: (chat: Chat | null) => void;
 }
 
@@ -96,7 +98,15 @@ const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
 
 export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
   function MainScreen(
-    { api, ws, onOpenDrawer, onOpenGit, defaultStartCwd, onChatContextChange },
+    {
+      api,
+      ws,
+      onOpenDrawer,
+      onOpenGit,
+      defaultStartCwd,
+      onDefaultStartCwdChange,
+      onChatContextChange,
+    },
     ref
   ) {
     const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
@@ -111,6 +121,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [renameModalVisible, setRenameModalVisible] = useState(false);
     const [renameDraft, setRenameDraft] = useState('');
     const [renaming, setRenaming] = useState(false);
+    const [workspaceModalVisible, setWorkspaceModalVisible] = useState(false);
+    const [workspaceOptions, setWorkspaceOptions] = useState<string[]>([]);
+    const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
     const [activity, setActivity] = useState<ActivityState>({
       tone: 'idle',
       title: 'Ready',
@@ -225,35 +238,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       clearRunWatchdog();
     }, [clearRunWatchdog]);
 
-    const startNewChat = useCallback(async () => {
+    const startNewChat = useCallback(() => {
+      // New chat should land on compose/home so user can pick workspace first.
       resetComposerState();
+    }, [resetComposerState]);
+
+    const refreshWorkspaceOptions = useCallback(async () => {
+      setLoadingWorkspaces(true);
       try {
-        setCreating(true);
-        setActivity({
-          tone: 'running',
-          title: 'Creating chat',
-        });
-        const created = await api.createChat({
-          cwd: preferredStartCwd ?? undefined,
-        });
-        setSelectedChatId(created.id);
-        setSelectedChat(created);
-        setError(null);
-        setActivity({
-          tone: 'idle',
-          title: 'Chat ready',
-        });
-      } catch (err) {
-        setError((err as Error).message);
-        setActivity({
-          tone: 'error',
-          title: 'Failed to create chat',
-          detail: (err as Error).message,
-        });
+        const chats = await api.listChats();
+        setWorkspaceOptions(extractWorkspaceOptions(chats));
+      } catch {
+        // Keep existing options when list refresh fails.
       } finally {
-        setCreating(false);
+        setLoadingWorkspaces(false);
       }
-    }, [api, preferredStartCwd, resetComposerState]);
+    }, [api]);
+
+    const openWorkspaceModal = useCallback(() => {
+      setWorkspaceModalVisible(true);
+      void refreshWorkspaceOptions();
+    }, [refreshWorkspaceOptions]);
+
+    const closeWorkspaceModal = useCallback(() => {
+      if (loadingWorkspaces) {
+        return;
+      }
+      setWorkspaceModalVisible(false);
+    }, [loadingWorkspaces]);
+
+    const selectDefaultWorkspace = useCallback(
+      (cwd: string | null) => {
+        onDefaultStartCwdChange?.(normalizeWorkspacePath(cwd));
+        setWorkspaceModalVisible(false);
+      },
+      [onDefaultStartCwdChange]
+    );
 
     const openRenameModal = useCallback(() => {
       if (!selectedChat) {
@@ -335,7 +355,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         void loadChat(id);
       },
       startNewChat: () => {
-        void startNewChat();
+        startNewChat();
       },
     }));
 
@@ -1414,7 +1434,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             <ComposeView
               startWorkspaceLabel={defaultStartWorkspaceLabel}
               onSuggestion={(s) => setDraft(s)}
-              onOpenWorkspacePicker={onOpenDrawer}
+              onOpenWorkspacePicker={openWorkspaceModal}
             />
           )}
 
@@ -1444,6 +1464,54 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           </View>
         </KeyboardAvoidingView>
+
+        <Modal
+          visible={workspaceModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeWorkspaceModal}
+        >
+          <View style={styles.workspaceModalBackdrop}>
+            <View style={styles.workspaceModalCard}>
+              <Text style={styles.workspaceModalTitle}>Select start directory</Text>
+              <ScrollView
+                style={styles.workspaceModalList}
+                contentContainerStyle={styles.workspaceModalListContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <WorkspaceOption
+                  label="Bridge default workspace"
+                  selected={preferredStartCwd === null}
+                  onPress={() => selectDefaultWorkspace(null)}
+                />
+                {workspaceOptions.map((cwd) => (
+                  <WorkspaceOption
+                    key={cwd}
+                    label={cwd}
+                    selected={cwd === preferredStartCwd}
+                    onPress={() => selectDefaultWorkspace(cwd)}
+                  />
+                ))}
+              </ScrollView>
+              <View style={styles.workspaceModalActions}>
+                {loadingWorkspaces ? (
+                  <Text style={styles.workspaceModalLoading}>Refreshing…</Text>
+                ) : (
+                  <View />
+                )}
+                <Pressable
+                  onPress={closeWorkspaceModal}
+                  style={({ pressed }) => [
+                    styles.workspaceModalCloseBtn,
+                    pressed && styles.workspaceModalCloseBtnPressed,
+                  ]}
+                >
+                  <Text style={styles.workspaceModalCloseText}>Close</Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         <Modal
           visible={renameModalVisible}
@@ -1548,6 +1616,34 @@ function ComposeView({
   );
 }
 
+function WorkspaceOption({
+  label,
+  selected,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.workspaceOption,
+        selected && styles.workspaceOptionSelected,
+        pressed && styles.workspaceOptionPressed,
+      ]}
+      onPress={onPress}
+    >
+      <Text style={[styles.workspaceOptionText, selected && styles.workspaceOptionTextSelected]} numberOfLines={2}>
+        {label}
+      </Text>
+      {selected ? (
+        <Ionicons name="checkmark-circle" size={16} color={colors.textPrimary} />
+      ) : null}
+    </Pressable>
+  );
+}
+
 // ── Chat View ──────────────────────────────────────────────────────
 
 function ChatView({
@@ -1631,6 +1727,22 @@ function normalizeWorkspacePath(value: string | null | undefined): string | null
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function extractWorkspaceOptions(chats: ChatSummary[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const chat of chats) {
+    const cwd = normalizeWorkspacePath(chat.cwd);
+    if (!cwd || seen.has(cwd)) {
+      continue;
+    }
+    seen.add(cwd);
+    result.push(cwd);
+  }
+
+  return result;
 }
 
 function stripMarkdownInline(value: string): string {
@@ -1819,6 +1931,83 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.55)',
     justifyContent: 'center',
     paddingHorizontal: spacing.lg,
+  },
+  workspaceModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  workspaceModalCard: {
+    backgroundColor: colors.bgItem,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
+    gap: spacing.md,
+    maxHeight: '70%',
+  },
+  workspaceModalTitle: {
+    ...typography.headline,
+    color: colors.textPrimary,
+  },
+  workspaceModalList: {
+    maxHeight: 320,
+  },
+  workspaceModalListContent: {
+    gap: spacing.xs,
+  },
+  workspaceOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  workspaceOptionSelected: {
+    borderColor: colors.borderHighlight,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  workspaceOptionPressed: {
+    opacity: 0.88,
+  },
+  workspaceOptionText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    flex: 1,
+  },
+  workspaceOptionTextSelected: {
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  workspaceModalActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  workspaceModalLoading: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  workspaceModalCloseBtn: {
+    borderRadius: 10,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+  },
+  workspaceModalCloseBtnPressed: {
+    opacity: 0.85,
+  },
+  workspaceModalCloseText: {
+    ...typography.body,
+    color: colors.textPrimary,
   },
   renameModalCard: {
     backgroundColor: colors.bgItem,

@@ -235,6 +235,7 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
+            onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
           />
         );
@@ -272,6 +273,7 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
+            onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
           />
         );
