@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -10,82 +10,189 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { BlurView } from 'expo-blur';
-import { LinearGradient } from 'expo-linear-gradient';
 
 import type { MacBridgeApiClient } from '../api/client';
-import type { GitStatusResponse } from '../api/types';
+import type { Chat, GitStatusResponse } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface GitScreenProps {
   api: MacBridgeApiClient;
-  onOpenDrawer: () => void;
+  chat: Chat;
+  onBack: () => void;
+  onChatUpdated?: (chat: Chat) => void;
 }
 
-export function GitScreen({ api, onOpenDrawer }: GitScreenProps) {
+export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) {
+  const [activeChat, setActiveChat] = useState(chat);
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
-  const [diff, setDiff] = useState('');
   const [commitMessage, setCommitMessage] = useState('chore: checkpoint');
+  const [workspaceDraft, setWorkspaceDraft] = useState(chat.cwd ?? '');
   const [loading, setLoading] = useState(true);
+  const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    setActiveChat(chat);
+    setWorkspaceDraft(chat.cwd ?? '');
+    setError(null);
+  }, [chat]);
+
+  const workspaceCwd = useMemo(
+    () => activeChat.cwd?.trim() ?? '',
+    [activeChat.cwd]
+  );
+  const hasWorkspace = workspaceCwd.length > 0;
+
   const refresh = useCallback(async () => {
+    if (!hasWorkspace) {
+      setLoading(false);
+      setStatus(null);
+      return;
+    }
+
     try {
       setLoading(true);
-      const [s, d] = await Promise.all([api.gitStatus(), api.gitDiff()]);
-      setStatus(s);
-      setDiff(d.diff);
+      const nextStatus = await api.gitStatus(workspaceCwd);
+      setStatus(nextStatus);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, hasWorkspace, workspaceCwd]);
 
   useEffect(() => {
+    setLoading(true);
     void refresh();
   }, [refresh]);
 
+  const saveWorkspace = useCallback(async () => {
+    const nextWorkspace = workspaceDraft.trim();
+    if (!nextWorkspace || savingWorkspace) {
+      return;
+    }
+
+    try {
+      setSavingWorkspace(true);
+      const updated = await api.setChatWorkspace(activeChat.id, nextWorkspace);
+      setActiveChat(updated);
+      setWorkspaceDraft(updated.cwd ?? nextWorkspace);
+      setError(null);
+      onChatUpdated?.(updated);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSavingWorkspace(false);
+    }
+  }, [activeChat.id, api, onChatUpdated, savingWorkspace, workspaceDraft]);
+
   const commit = useCallback(async () => {
+    if (!hasWorkspace) {
+      setError('Set a workspace path before committing.');
+      return;
+    }
+
+    const trimmedMessage = commitMessage.trim();
+    if (!trimmedMessage) {
+      return;
+    }
+
     try {
       setCommitting(true);
-      const result = await api.gitCommit({ message: commitMessage });
-      if (!result.committed) setError(result.stderr || 'Commit failed.');
-      else setError(null);
+      const result = await api.gitCommit({
+        message: trimmedMessage,
+        cwd: workspaceCwd,
+      });
+      if (!result.committed) {
+        setError(result.stderr || 'Commit failed.');
+      } else {
+        setError(null);
+      }
       await refresh();
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setCommitting(false);
     }
-  }, [api, commitMessage, refresh]);
+  }, [api, commitMessage, hasWorkspace, refresh, workspaceCwd]);
+
+  const workspaceChanged = workspaceDraft.trim() !== workspaceCwd;
+  const commitWorkspaceIfChanged = useCallback(() => {
+    if (!workspaceChanged || !workspaceDraft.trim() || savingWorkspace) {
+      return;
+    }
+
+    void saveWorkspace();
+  }, [saveWorkspace, savingWorkspace, workspaceChanged, workspaceDraft]);
+
+  const changedFiles = useMemo(
+    () => parseChangedFiles(status?.raw ?? ''),
+    [status?.raw]
+  );
 
   return (
-    <View style={styles.container}>
-      <LinearGradient
-        colors={[colors.bgMain, colors.bgMain, colors.bgMain]}
-        style={StyleSheet.absoluteFill}
-      />
-      <SafeAreaView style={styles.safeArea}>
-        <BlurView intensity={80} tint="dark" style={styles.header}>
-          <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
-            <Ionicons name="menu" size={22} color={colors.textPrimary} />
-          </Pressable>
-          <Ionicons name="git-branch" size={16} color={colors.textPrimary} />
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Pressable onPress={onBack} hitSlop={8} style={styles.backBtn}>
+          <Ionicons name="chevron-back" size={22} color={colors.textPrimary} />
+        </Pressable>
+        <View style={styles.headerTitles}>
           <Text style={styles.headerTitle}>Git</Text>
-          <Pressable onPress={() => void refresh()} hitSlop={8} style={styles.refreshBtn}>
-            <Ionicons name="refresh" size={16} color={colors.textPrimary} />
-          </Pressable>
-        </BlurView>
+          <Text style={styles.headerSubtitle} numberOfLines={1}>
+            {activeChat.title || 'Untitled chat'}
+          </Text>
+        </View>
+        <Pressable
+          onPress={() => void refresh()}
+          hitSlop={8}
+          style={({ pressed }) => [
+            styles.refreshBtn,
+            pressed && styles.refreshBtnPressed,
+            (!hasWorkspace || loading) && styles.refreshBtnDisabled,
+          ]}
+          disabled={!hasWorkspace || loading}
+        >
+          <Ionicons name="refresh" size={16} color={colors.textMuted} />
+        </Pressable>
+      </View>
 
-        {
+      <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+        <View style={styles.card}>
+          <Text style={styles.sectionLabel}>Workspace</Text>
+          <TextInput
+            style={styles.input}
+            value={workspaceDraft}
+            onChangeText={setWorkspaceDraft}
+            onSubmitEditing={commitWorkspaceIfChanged}
+            onBlur={commitWorkspaceIfChanged}
+            placeholder="/path/to/project"
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="done"
+            editable={!savingWorkspace}
+          />
+
+          {hasWorkspace ? (
+            <Text style={styles.metaText}>{workspaceCwd}</Text>
+          ) : (
+            <Text style={styles.warningText}>
+              Set a workspace path to enable git for this chat.
+            </Text>
+          )}
+          {savingWorkspace ? (
+            <Text style={styles.metaText}>Saving workspace...</Text>
+          ) : null}
+        </View>
+
+        {hasWorkspace ? (
           loading ? (
             <ActivityIndicator color={colors.textPrimary} style={styles.loader} />
           ) : (
-            <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
-              <BlurView intensity={50} tint="dark" style={styles.card}>
+            <>
+              <View style={styles.card}>
                 <View style={styles.infoRow}>
                   <Text style={styles.infoLabel}>Branch</Text>
                   <Text style={styles.infoValue}>{status?.branch ?? '—'}</Text>
@@ -93,11 +200,13 @@ export function GitScreen({ api, onOpenDrawer }: GitScreenProps) {
                 <View style={styles.separator} />
                 <View style={styles.infoRow}>
                   <Text style={styles.infoLabel}>Status</Text>
-                  <Text style={[styles.infoValue, status?.clean ? styles.clean : styles.dirty]}>
+                  <Text
+                    style={[styles.infoValue, status?.clean ? styles.clean : styles.dirty]}
+                  >
                     {status?.clean ? 'clean' : 'changes'}
                   </Text>
                 </View>
-              </BlurView>
+              </View>
 
               <Text style={styles.sectionLabel}>Commit message</Text>
               <TextInput
@@ -107,43 +216,58 @@ export function GitScreen({ api, onOpenDrawer }: GitScreenProps) {
                 placeholder="Commit message..."
                 placeholderTextColor={colors.textMuted}
               />
+
               <Pressable
                 onPress={() => void commit()}
                 disabled={committing || !commitMessage.trim()}
                 style={({ pressed }) => [
-                  styles.commitBtn,
-                  pressed && styles.commitBtnPressed,
-                  (committing || !commitMessage.trim()) && styles.commitBtnDisabled,
+                  styles.actionBtn,
+                  pressed && styles.actionBtnPressed,
+                  (committing || !commitMessage.trim()) && styles.actionBtnDisabled,
                 ]}
               >
-                <Text style={styles.commitBtnText}>
-                  {committing ? 'Committing…' : 'Commit'}
+                <Text style={styles.actionBtnText}>
+                  {committing ? 'Committing...' : 'Commit'}
                 </Text>
               </Pressable>
 
-              {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
-              <Text style={styles.sectionLabel}>Diff</Text>
-              <ScrollView
-                style={styles.diffBox}
-                horizontal
-                showsHorizontalScrollIndicator={false}
-              >
-                <Text selectable style={styles.diffText}>
-                  {diff || 'No changes.'}
-                </Text>
-              </ScrollView>
-            </ScrollView>
+              <Text style={styles.sectionLabel}>Changed files</Text>
+              <View style={styles.filesCard}>
+                {changedFiles.length === 0 ? (
+                  <Text style={styles.emptyFilesText}>No changes.</Text>
+                ) : (
+                  <ScrollView
+                    style={styles.filesScroll}
+                    contentContainerStyle={styles.filesScrollContent}
+                    showsVerticalScrollIndicator
+                    nestedScrollEnabled
+                  >
+                    {changedFiles.map((entry) => (
+                      <View key={`${entry.code}:${entry.path}`} style={styles.fileRow}>
+                        <Text style={styles.fileCode}>{entry.code}</Text>
+                        <Text style={styles.filePath} numberOfLines={2}>
+                          {entry.path}
+                        </Text>
+                      </View>
+                    ))}
+                  </ScrollView>
+                )}
+              </View>
+            </>
           )
-        }
-      </SafeAreaView >
-    </View >
+        ) : null}
+
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bgMain },
-  safeArea: { flex: 1 },
+  container: {
+    flex: 1,
+    backgroundColor: colors.bgMain,
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -151,41 +275,54 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderHighlight,
+    borderBottomColor: colors.borderLight,
   },
-  menuBtn: { padding: spacing.xs },
-  headerTitle: { ...typography.headline, flex: 1, color: colors.textPrimary },
-  refreshBtn: { marginLeft: 'auto' },
-  loader: { marginTop: spacing.xxl },
-  body: { flex: 1 },
-  bodyContent: { padding: spacing.lg, gap: spacing.md },
+  backBtn: {
+    padding: spacing.xs,
+  },
+  headerTitles: {
+    flex: 1,
+  },
+  headerTitle: {
+    ...typography.headline,
+    color: colors.textPrimary,
+  },
+  headerSubtitle: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  refreshBtn: {
+    padding: spacing.xs,
+    borderRadius: radius.full,
+  },
+  refreshBtnPressed: {
+    backgroundColor: colors.bgItem,
+  },
+  refreshBtnDisabled: {
+    opacity: 0.4,
+  },
+  body: {
+    flex: 1,
+  },
+  bodyContent: {
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  loader: {
+    marginTop: spacing.lg,
+  },
   card: {
     borderRadius: radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    marginBottom: spacing.xs,
-    overflow: 'hidden',
+    borderColor: colors.borderLight,
+    padding: spacing.md,
+    backgroundColor: colors.bgItem,
+    gap: spacing.sm,
   },
-  separator: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.border,
-    marginVertical: spacing.xs,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-  },
-  infoLabel: { ...typography.body, color: colors.textMuted },
-  infoValue: { ...typography.body, fontWeight: '600', color: colors.textPrimary },
-  clean: { color: colors.statusComplete },
-  dirty: { color: colors.statusError },
   sectionLabel: {
     ...typography.caption,
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
+    letterSpacing: 0.7,
     marginTop: spacing.sm,
     marginBottom: spacing.xs,
   },
@@ -199,29 +336,138 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: 15,
   },
-  commitBtn: {
+  actionBtn: {
     backgroundColor: colors.accent,
     borderRadius: radius.md,
     paddingVertical: spacing.md,
     alignItems: 'center',
-    marginTop: spacing.md,
-    shadowColor: colors.accent,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
+    marginTop: spacing.sm,
   },
-  commitBtnPressed: { backgroundColor: colors.accentPressed },
-  commitBtnDisabled: { backgroundColor: colors.bgSidebar, shadowOpacity: 0 },
-  commitBtnText: { ...typography.headline, color: colors.white, fontSize: 15 },
-  errorText: { ...typography.caption, color: colors.error },
-  diffBox: {
-    backgroundColor: 'rgba(0,0,0,0.5)',
+  actionBtnPressed: {
+    backgroundColor: colors.accentPressed,
+  },
+  actionBtnDisabled: {
+    backgroundColor: colors.bgInput,
+    opacity: 0.6,
+  },
+  actionBtnText: {
+    ...typography.headline,
+    color: colors.black,
+    fontSize: 15,
+  },
+  metaText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  warningText: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+  },
+  separator: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.borderLight,
+  },
+  infoLabel: {
+    ...typography.body,
+    color: colors.textMuted,
+  },
+  infoValue: {
+    ...typography.body,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  clean: {
+    color: colors.statusComplete,
+  },
+  dirty: {
+    color: colors.statusError,
+  },
+  filesCard: {
+    backgroundColor: colors.bgItem,
     borderRadius: radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    padding: spacing.md,
-    maxHeight: 350,
+    borderColor: colors.borderLight,
+    overflow: 'hidden',
   },
-  diffText: { ...typography.mono, color: '#A1A1AA', fontSize: 13, lineHeight: 20 },
+  filesScroll: {
+    maxHeight: 240,
+  },
+  filesScrollContent: {
+    paddingVertical: spacing.xs,
+  },
+  fileRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.borderLight,
+  },
+  fileCode: {
+    ...typography.mono,
+    color: colors.textMuted,
+    width: 24,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  filePath: {
+    ...typography.body,
+    color: colors.textSecondary,
+    flex: 1,
+    lineHeight: 18,
+  },
+  emptyFilesText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  errorText: {
+    ...typography.caption,
+    color: colors.error,
+    marginTop: spacing.xs,
+  },
 });
+
+interface ChangedFileEntry {
+  code: string;
+  path: string;
+}
+
+function parseChangedFiles(rawStatus: string): ChangedFileEntry[] {
+  const lines = rawStatus
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+
+  const files: ChangedFileEntry[] = [];
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      continue;
+    }
+
+    if (line.length < 3) {
+      continue;
+    }
+
+    const code = line.slice(0, 2).trim() || line.slice(0, 2);
+    const path = line.slice(3).trim();
+    if (!path) {
+      continue;
+    }
+
+    files.push({
+      code,
+      path,
+    });
+  }
+
+  return files;
+}

@@ -14,7 +14,7 @@ import type { ChatSummary, RpcNotification } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
 import { colors, spacing, typography } from '../theme';
 
-type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = 'Main' | 'Terminal' | 'Settings' | 'Privacy' | 'Terms';
 
 interface DrawerContentProps {
   api: MacBridgeApiClient;
@@ -75,77 +75,79 @@ export function DrawerContent({
   return (
     <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        {/* New Chat button */}
-        <View style={styles.header}>
-          <Pressable
-            style={({ pressed }) => [
-              styles.navItem,
-              styles.newChatBtn,
-              pressed && styles.navItemPressed,
-            ]}
-            onPress={onNewChat}
-          >
-            <Ionicons name="add" size={16} color={colors.textPrimary} />
-            <Text style={styles.newChatText}>New chat</Text>
-          </Pressable>
-        </View>
+        <View style={styles.mainContent}>
+          {/* New Chat button */}
+          <View style={styles.header}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                styles.newChatBtn,
+                pressed && styles.navItemPressed,
+              ]}
+              onPress={onNewChat}
+            >
+              <Ionicons name="add" size={16} color={colors.textPrimary} />
+              <Text style={styles.newChatText}>New chat</Text>
+            </Pressable>
+          </View>
 
-        {/* Nav items */}
-        <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
-        <NavItem icon="git-branch-outline" label="Git" onPress={() => onNavigate('Git')} />
-        <NavItem
-          icon="shield-checkmark-outline"
-          label="Privacy"
-          onPress={() => onNavigate('Privacy')}
-        />
-        <NavItem
-          icon="document-text-outline"
-          label="Terms"
-          onPress={() => onNavigate('Terms')}
-        />
-
-        {/* Chats section */}
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Chats</Text>
-        </View>
-
-        {loading ? (
-          <ActivityIndicator color={colors.textMuted} style={styles.loader} />
-        ) : (
-          <FlatList
-            data={chats}
-            keyExtractor={(item) => item.id}
-            style={styles.list}
-            showsVerticalScrollIndicator={false}
-            ListEmptyComponent={<Text style={styles.emptyText}>No chats yet</Text>}
-            renderItem={({ item }) => {
-              const isSelected = item.id === selectedChatId;
-              return (
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.chatItem,
-                    isSelected && styles.chatItemSelected,
-                    pressed && styles.chatItemPressed,
-                  ]}
-                  onPress={() => onSelectChat(item.id)}
-                >
-                  <Text style={[styles.chatTitle, isSelected && styles.chatTitleSelected]} numberOfLines={1}>
-                    {item.title || 'Untitled'}
-                  </Text>
-                  <Text style={styles.chatAge}>{relativeTime(item.updatedAt)}</Text>
-                </Pressable>
-              );
-            }}
+          {/* Nav items */}
+          <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
+          <NavItem
+            icon="shield-checkmark-outline"
+            label="Privacy"
+            onPress={() => onNavigate('Privacy')}
           />
-        )}
+          <NavItem
+            icon="document-text-outline"
+            label="Terms"
+            onPress={() => onNavigate('Terms')}
+          />
 
-        {/* Settings pinned at bottom */}
-        <NavItem
-          icon="settings-outline"
-          label="Settings"
-          onPress={() => onNavigate('Settings')}
-          style={styles.settingsItem}
-        />
+          {/* Chats section */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Chats</Text>
+          </View>
+
+          {loading ? (
+            <ActivityIndicator color={colors.textMuted} style={styles.loader} />
+          ) : (
+            <FlatList
+              data={chats}
+              keyExtractor={(item) => item.id}
+              style={styles.list}
+              showsVerticalScrollIndicator={false}
+              ListEmptyComponent={<Text style={styles.emptyText}>No chats yet</Text>}
+              renderItem={({ item }) => {
+                const isSelected = item.id === selectedChatId;
+                return (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.chatItem,
+                      isSelected && styles.chatItemSelected,
+                      pressed && styles.chatItemPressed,
+                    ]}
+                    onPress={() => onSelectChat(item.id)}
+                  >
+                    <Text style={[styles.chatTitle, isSelected && styles.chatTitleSelected]} numberOfLines={1}>
+                      {item.title || 'Untitled'}
+                    </Text>
+                    <Text style={styles.chatAge}>{relativeTime(item.updatedAt)}</Text>
+                  </Pressable>
+                );
+              }}
+            />
+          )}
+        </View>
+
+        <View style={styles.footer}>
+          <NavItem
+            icon="settings-outline"
+            label="Settings"
+            onPress={() => onNavigate('Settings')}
+            style={styles.settingsItem}
+          />
+        </View>
       </SafeAreaView>
     </View>
   );
@@ -194,6 +196,10 @@ const styles = StyleSheet.create({
   },
   safeArea: {
     flex: 1,
+  },
+  mainContent: {
+    flex: 1,
+    minHeight: 0,
   },
   header: {
     paddingHorizontal: spacing.lg,
@@ -284,9 +290,12 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   settingsItem: {
+    marginBottom: 0,
+  },
+  footer: {
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.borderLight,
     paddingTop: spacing.md,
-    paddingBottom: spacing.xxl,
+    paddingBottom: spacing.md,
   },
 });

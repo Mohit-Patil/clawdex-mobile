@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 
 import { MacBridgeApiClient } from './src/api/client';
+import type { Chat } from './src/api/types';
 import { MacBridgeWsClient } from './src/api/ws';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
@@ -22,7 +23,7 @@ import { TerminalScreen } from './src/screens/TerminalScreen';
 import { TermsScreen } from './src/screens/TermsScreen';
 import { colors } from './src/theme';
 
-type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = 'Main' | 'ChatGit' | 'Terminal' | 'Settings' | 'Privacy' | 'Terms';
 
 const DRAWER_WIDTH = 280;
 const EDGE_SWIPE_WIDTH = 24;
@@ -50,6 +51,8 @@ export default function App() {
   const mainRef = useRef<MainScreenHandle>(null);
   const [currentScreen, setCurrentScreen] = useState<Screen>('Main');
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [activeChat, setActiveChat] = useState<Chat | null>(null);
+  const [gitChat, setGitChat] = useState<Chat | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
@@ -161,6 +164,7 @@ export default function App() {
   const handleSelectChat = useCallback(
     (id: string) => {
       setSelectedChatId(id);
+      setGitChat(null);
       setCurrentScreen('Main');
       mainRef.current?.openChat(id);
       closeDrawer();
@@ -170,10 +174,37 @@ export default function App() {
 
   const handleNewChat = useCallback(() => {
     setSelectedChatId(null);
+    setActiveChat(null);
+    setGitChat(null);
     setCurrentScreen('Main');
     mainRef.current?.startNewChat();
     closeDrawer();
   }, [closeDrawer]);
+
+  const handleOpenChatGit = useCallback((chat: Chat) => {
+    setGitChat(chat);
+    setSelectedChatId(chat.id);
+    setCurrentScreen('ChatGit');
+  }, []);
+
+  const handleChatContextChange = useCallback((chat: Chat | null) => {
+    setActiveChat(chat);
+    setSelectedChatId(chat?.id ?? null);
+  }, []);
+
+  const handleGitChatUpdated = useCallback((chat: Chat) => {
+    setGitChat(chat);
+    setActiveChat((prev) => (prev?.id === chat.id ? chat : prev));
+  }, []);
+
+  const handleCloseGit = useCallback(() => {
+    const chatId = gitChat?.id ?? activeChat?.id ?? selectedChatId;
+    setCurrentScreen('Main');
+    if (chatId) {
+      setSelectedChatId(chatId);
+      mainRef.current?.openChat(chatId);
+    }
+  }, [activeChat?.id, gitChat?.id, selectedChatId]);
 
   const openPrivacy = useCallback(() => {
     setCurrentScreen('Privacy');
@@ -187,8 +218,24 @@ export default function App() {
     switch (currentScreen) {
       case 'Terminal':
         return <TerminalScreen api={api} ws={ws} onOpenDrawer={openDrawer} />;
-      case 'Git':
-        return <GitScreen api={api} onOpenDrawer={openDrawer} />;
+      case 'ChatGit':
+        return gitChat ? (
+          <GitScreen
+            api={api}
+            chat={gitChat}
+            onBack={handleCloseGit}
+            onChatUpdated={handleGitChatUpdated}
+          />
+        ) : (
+          <MainScreen
+            ref={mainRef}
+            api={api}
+            ws={ws}
+            onOpenDrawer={openDrawer}
+            onOpenGit={handleOpenChatGit}
+            onChatContextChange={handleChatContextChange}
+          />
+        );
       case 'Settings':
         return (
           <SettingsScreen
@@ -221,6 +268,8 @@ export default function App() {
             api={api}
             ws={ws}
             onOpenDrawer={openDrawer}
+            onOpenGit={handleOpenChatGit}
+            onChatContextChange={handleChatContextChange}
           />
         );
     }

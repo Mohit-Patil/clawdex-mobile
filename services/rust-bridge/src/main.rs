@@ -817,28 +817,31 @@ impl TerminalService {
 #[derive(Clone)]
 struct GitService {
     terminal: Arc<TerminalService>,
-    repo_path: PathBuf,
+    root: PathBuf,
 }
 
 impl GitService {
-    fn new(terminal: Arc<TerminalService>, repo_path: PathBuf) -> Self {
-        Self {
-            terminal,
-            repo_path,
-        }
+    fn new(terminal: Arc<TerminalService>, root: PathBuf) -> Self {
+        Self { terminal, root }
     }
 
-    async fn get_status(&self) -> Result<GitStatusResponse, BridgeError> {
+    fn resolve_repo_path(&self, raw_cwd: Option<&str>) -> Result<PathBuf, BridgeError> {
+        resolve_cwd_within_root(raw_cwd, &self.root)
+            .ok_or_else(|| BridgeError::invalid_params("cwd must stay within BRIDGE_WORKDIR"))
+    }
+
+    async fn get_status(&self, raw_cwd: Option<&str>) -> Result<GitStatusResponse, BridgeError> {
+        let repo_path = self.resolve_repo_path(raw_cwd)?;
         let args = vec![
             "-C".to_string(),
-            self.repo_path.to_string_lossy().to_string(),
+            repo_path.to_string_lossy().to_string(),
             "status".to_string(),
             "--short".to_string(),
             "--branch".to_string(),
         ];
         let result = self
             .terminal
-            .execute_binary("git", &args, self.repo_path.clone(), None)
+            .execute_binary("git", &args, repo_path.clone(), None)
             .await?;
 
         if result.code != Some(0) {
@@ -877,19 +880,21 @@ impl GitService {
             branch,
             clean,
             raw: result.stdout,
+            cwd: repo_path.to_string_lossy().to_string(),
         })
     }
 
-    async fn get_diff(&self) -> Result<GitDiffResponse, BridgeError> {
+    async fn get_diff(&self, raw_cwd: Option<&str>) -> Result<GitDiffResponse, BridgeError> {
+        let repo_path = self.resolve_repo_path(raw_cwd)?;
         let args = vec![
             "-C".to_string(),
-            self.repo_path.to_string_lossy().to_string(),
+            repo_path.to_string_lossy().to_string(),
             "diff".to_string(),
         ];
 
         let result = self
             .terminal
-            .execute_binary("git", &args, self.repo_path.clone(), None)
+            .execute_binary("git", &args, repo_path.clone(), None)
             .await?;
 
         if result.code != Some(0) {
@@ -906,13 +911,19 @@ impl GitService {
 
         Ok(GitDiffResponse {
             diff: result.stdout,
+            cwd: repo_path.to_string_lossy().to_string(),
         })
     }
 
-    async fn commit(&self, message: String) -> Result<GitCommitResponse, BridgeError> {
+    async fn commit(
+        &self,
+        message: String,
+        raw_cwd: Option<&str>,
+    ) -> Result<GitCommitResponse, BridgeError> {
+        let repo_path = self.resolve_repo_path(raw_cwd)?;
         let args = vec![
             "-C".to_string(),
-            self.repo_path.to_string_lossy().to_string(),
+            repo_path.to_string_lossy().to_string(),
             "commit".to_string(),
             "-m".to_string(),
             message,
@@ -920,7 +931,7 @@ impl GitService {
 
         let result = self
             .terminal
-            .execute_binary("git", &args, self.repo_path.clone(), None)
+            .execute_binary("git", &args, repo_path.clone(), None)
             .await?;
 
         Ok(GitCommitResponse {
@@ -928,6 +939,7 @@ impl GitService {
             stdout: result.stdout,
             stderr: result.stderr,
             committed: result.code == Some(0),
+            cwd: repo_path.to_string_lossy().to_string(),
         })
     }
 }
@@ -998,11 +1010,13 @@ struct GitStatusResponse {
     branch: String,
     clean: bool,
     raw: String,
+    cwd: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitDiffResponse {
     diff: String,
+    cwd: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1011,12 +1025,20 @@ struct GitCommitResponse {
     stdout: String,
     stderr: String,
     committed: bool,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitQueryRequest {
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitCommitRequest {
     message: String,
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1332,27 +1354,38 @@ async fn handle_bridge_method(
             Ok(result_value)
         }
         "bridge/git/status" => {
-            let status = state.git.get_status().await?;
+            let request: GitQueryRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let status = state.git.get_status(request.cwd.as_deref()).await?;
             serde_json::to_value(status).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/git/diff" => {
-            let diff = state.git.get_diff().await?;
+            let request: GitQueryRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let diff = state.git.get_diff(request.cwd.as_deref()).await?;
             serde_json::to_value(diff).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/git/commit" => {
             let request: GitCommitRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
                     .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
-            if request.message.trim().is_empty() {
+            let GitCommitRequest { message, cwd } = request;
+
+            if message.trim().is_empty() {
                 return Err(BridgeError::invalid_params("message must not be empty"));
             }
 
-            let commit = state.git.commit(request.message).await?;
+            let commit = state
+                .git
+                .commit(message, cwd.as_deref())
+                .await?;
             let commit_value = serde_json::to_value(&commit)
                 .map_err(|error| BridgeError::server(&error.to_string()))?;
 
             if commit.committed {
-                if let Ok(status) = state.git.get_status().await {
+                if let Ok(status) = state.git.get_status(cwd.as_deref()).await {
                     let status_value = serde_json::to_value(status)
                         .map_err(|error| BridgeError::server(&error.to_string()))?;
                     state

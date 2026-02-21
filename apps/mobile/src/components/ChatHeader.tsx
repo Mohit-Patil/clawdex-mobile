@@ -6,9 +6,17 @@ interface ChatHeaderProps {
   onOpenDrawer: () => void;
   title: string;
   onOpenTitleMenu?: () => void;
+  rightIconName?: keyof typeof Ionicons.glyphMap;
+  onRightActionPress?: () => void;
 }
 
-export function ChatHeader({ onOpenDrawer, title, onOpenTitleMenu }: ChatHeaderProps) {
+export function ChatHeader({
+  onOpenDrawer,
+  title,
+  onOpenTitleMenu,
+  rightIconName = 'sparkles-outline',
+  onRightActionPress,
+}: ChatHeaderProps) {
   const titleDisplay = title.trim() || 'New chat';
 
   return (
@@ -37,7 +45,13 @@ export function ChatHeader({ onOpenDrawer, title, onOpenTitleMenu }: ChatHeaderP
             </View>
           )}
           <View style={{ flex: 1 }} />
-          <Ionicons name="sparkles-outline" size={20} color={colors.textMuted} />
+          {onRightActionPress ? (
+            <Pressable onPress={onRightActionPress} hitSlop={8} style={styles.rightBtn}>
+              <Ionicons name={rightIconName} size={20} color={colors.textMuted} />
+            </Pressable>
+          ) : (
+            <Ionicons name={rightIconName} size={20} color={colors.textMuted} />
+          )}
         </View>
       </SafeAreaView>
     </View>
@@ -58,6 +72,9 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
   },
   menuBtn: {
+    padding: spacing.xs,
+  },
+  rightBtn: {
     padding: spacing.xs,
   },
   modelNameRow: {

@@ -35,11 +35,13 @@ export interface Chat extends ChatSummary {
 export interface CreateChatRequest {
   title?: string;
   message?: string;
+  cwd?: string;
 }
 
 export interface SendChatMessageRequest {
   content: string;
   role?: ChatMessageRole;
+  cwd?: string;
 }
 
 export interface TerminalExecRequest {
@@ -62,14 +64,17 @@ export interface GitStatusResponse {
   branch: string;
   clean: boolean;
   raw: string;
+  cwd?: string;
 }
 
 export interface GitDiffResponse {
   diff: string;
+  cwd?: string;
 }
 
 export interface GitCommitRequest {
   message: string;
+  cwd?: string;
 }
 
 export interface GitCommitResponse {
@@ -77,6 +82,7 @@ export interface GitCommitResponse {
   stdout: string;
   stderr: string;
   committed: boolean;
+  cwd?: string;
 }
 
 export type ApprovalKind = 'commandExecution' | 'fileChange';

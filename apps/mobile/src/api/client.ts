@@ -86,10 +86,11 @@ export class MacBridgeApiClient {
   }
 
   async createChat(body: CreateChatRequest): Promise<Chat> {
+    const requestedCwd = normalizeCwd(body.cwd);
     const started = await this.ws.request<AppServerStartResponse>('thread/start', {
       model: null,
       modelProvider: null,
-      cwd: null,
+      cwd: requestedCwd ?? null,
       approvalPolicy: 'on-request',
       sandbox: 'workspace-write',
       config: null,
@@ -111,6 +112,7 @@ export class MacBridgeApiClient {
       return this.sendChatMessage(chatId, {
         content: initialPrompt,
         role: 'user',
+        cwd: requestedCwd ?? undefined,
       });
     }
 
@@ -169,6 +171,39 @@ export class MacBridgeApiClient {
     };
   }
 
+  async setChatWorkspace(id: string, cwd: string): Promise<Chat> {
+    const normalizedCwd = normalizeCwd(cwd);
+    if (!normalizedCwd) {
+      throw new Error('Workspace path cannot be empty');
+    }
+
+    await this.ws.request('thread/resume', {
+      threadId: id,
+      history: null,
+      path: null,
+      model: null,
+      modelProvider: null,
+      cwd: normalizedCwd,
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-write',
+      config: null,
+      baseInstructions: null,
+      developerInstructions: null,
+      personality: null,
+      persistExtendedHistory: true,
+    });
+
+    const updated = await this.getChat(id);
+    if (updated.cwd === normalizedCwd) {
+      return updated;
+    }
+
+    return {
+      ...updated,
+      cwd: normalizedCwd,
+    };
+  }
+
   async sendChatMessage(id: string, body: SendChatMessageRequest): Promise<Chat> {
     const content = body.content.trim();
     if (!content) {
@@ -179,6 +214,8 @@ export class MacBridgeApiClient {
       throw new Error('Only user role is supported in bridge/chat messaging');
     }
 
+    const normalizedCwd = normalizeCwd(body.cwd);
+
     try {
       await this.ws.request('thread/resume', {
         threadId: id,
@@ -186,7 +223,7 @@ export class MacBridgeApiClient {
         path: null,
         model: null,
         modelProvider: null,
-        cwd: null,
+        cwd: normalizedCwd ?? null,
         approvalPolicy: 'on-request',
         sandbox: 'workspace-write',
         config: null,
@@ -208,7 +245,7 @@ export class MacBridgeApiClient {
           text_elements: [],
         },
       ],
-      cwd: null,
+      cwd: normalizedCwd ?? null,
       approvalPolicy: null,
       sandboxPolicy: null,
       model: null,
@@ -243,19 +280,36 @@ export class MacBridgeApiClient {
     return this.ws.request<TerminalExecResponse>('bridge/terminal/exec', body);
   }
 
-  gitStatus(): Promise<GitStatusResponse> {
-    return this.ws.request<GitStatusResponse>('bridge/git/status');
+  gitStatus(cwd?: string): Promise<GitStatusResponse> {
+    const normalizedCwd = normalizeCwd(cwd);
+    return this.ws.request<GitStatusResponse>('bridge/git/status', {
+      cwd: normalizedCwd ?? null,
+    });
   }
 
-  gitDiff(): Promise<GitDiffResponse> {
-    return this.ws.request<GitDiffResponse>('bridge/git/diff');
+  gitDiff(cwd?: string): Promise<GitDiffResponse> {
+    const normalizedCwd = normalizeCwd(cwd);
+    return this.ws.request<GitDiffResponse>('bridge/git/diff', {
+      cwd: normalizedCwd ?? null,
+    });
   }
 
   gitCommit(body: GitCommitRequest): Promise<GitCommitResponse> {
-    return this.ws.request<GitCommitResponse>('bridge/git/commit', body);
+    return this.ws.request<GitCommitResponse>('bridge/git/commit', {
+      ...body,
+      cwd: normalizeCwd(body.cwd) ?? null,
+    });
   }
 }
 
 function isSubAgentSource(sourceKind: string | undefined): boolean {
   return typeof sourceKind === 'string' && sourceKind.startsWith('subAgent');
+}
+
+function normalizeCwd(cwd: string | null | undefined): string | null {
+  if (typeof cwd !== 'string') {
+    return null;
+  }
+  const trimmed = cwd.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }

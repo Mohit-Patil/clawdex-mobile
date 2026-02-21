@@ -49,6 +49,8 @@ interface MainScreenProps {
   api: MacBridgeApiClient;
   ws: MacBridgeWsClient;
   onOpenDrawer: () => void;
+  onOpenGit: (chat: Chat) => void;
+  onChatContextChange?: (chat: Chat | null) => void;
 }
 
 const SUGGESTIONS = [
@@ -91,7 +93,7 @@ const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
 ]);
 
 export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
-  function MainScreen({ api, ws, onOpenDrawer }, ref) {
+  function MainScreen({ api, ws, onOpenDrawer, onOpenGit, onChatContextChange }, ref) {
     const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
     const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
     const [draft, setDraft] = useState('');
@@ -172,6 +174,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     useEffect(() => {
       selectedChatStatusRef.current = selectedChat?.status ?? 'idle';
     }, [selectedChat?.status]);
+
+    useEffect(() => {
+      onChatContextChange?.(selectedChat);
+    }, [onChatContextChange, selectedChat]);
 
     const isRunContextActive = useCallback(() => {
       return (
@@ -416,7 +422,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         bumpRunWatchdog();
         appendActivityPhrase('Turn started', true);
 
-        const updated = await api.sendChatMessage(created.id, { content });
+        const updated = await api.sendChatMessage(created.id, {
+          content,
+          cwd: created.cwd,
+        });
         setSelectedChat(updated);
         setError(null);
         setActivity({
@@ -465,7 +474,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Sending message',
         });
         bumpRunWatchdog();
-        const updated = await api.sendChatMessage(selectedChatId, { content });
+        const updated = await api.sendChatMessage(selectedChatId, {
+          content,
+          cwd: selectedChat?.cwd,
+        });
         setSelectedChat(updated);
         setError(null);
         setActivity({
@@ -484,7 +496,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       } finally {
         setSending(false);
       }
-    }, [api, draft, selectedChatId, bumpRunWatchdog, clearRunWatchdog]);
+    }, [api, draft, selectedChat?.cwd, selectedChatId, bumpRunWatchdog, clearRunWatchdog]);
 
     useEffect(() => {
       const pendingApprovalId = pendingApproval?.id;
@@ -1333,11 +1345,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [api]
     );
 
+    const handleOpenGit = useCallback(() => {
+      if (!selectedChat) {
+        return;
+      }
+      onOpenGit(selectedChat);
+    }, [onOpenGit, selectedChat]);
+
     const handleSubmit = selectedChat ? sendMessage : createChat;
     const isLoading = sending || creating;
     const isStreaming = sending || creating || Boolean(streamingText);
     const showActivity = Boolean(selectedChatId) || isLoading || activity.tone !== 'idle';
     const headerTitle = selectedChat?.title?.trim() || 'New chat';
+    const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
 
     return (
       <View style={styles.container}>
@@ -1345,7 +1365,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onOpenDrawer={onOpenDrawer}
           title={headerTitle}
           onOpenTitleMenu={selectedChat ? openChatTitleMenu : undefined}
+          rightIconName="git-branch-outline"
+          onRightActionPress={selectedChat ? handleOpenGit : undefined}
         />
+
+        {selectedChat ? (
+          <Pressable style={styles.workspaceBar} onPress={handleOpenGit}>
+            <Ionicons name="folder-open-outline" size={14} color={colors.textMuted} />
+            <Text style={styles.workspaceText} numberOfLines={1}>
+              {workspaceLabel}
+            </Text>
+          </Pressable>
+        ) : null}
 
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -1712,6 +1743,21 @@ const styles = StyleSheet.create({
   },
   composerContainer: {
     backgroundColor: colors.bgMain,
+  },
+  workspaceBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+    backgroundColor: colors.bgMain,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.borderLight,
+  },
+  workspaceText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    flex: 1,
   },
   renameModalBackdrop: {
     flex: 1,
