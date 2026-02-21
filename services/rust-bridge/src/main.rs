@@ -33,6 +33,8 @@ use tokio::{
 
 const APPROVAL_COMMAND_METHOD: &str = "item/commandExecution/requestApproval";
 const APPROVAL_FILE_METHOD: &str = "item/fileChange/requestApproval";
+const REQUEST_USER_INPUT_METHOD: &str = "item/tool/requestUserInput";
+const REQUEST_USER_INPUT_METHOD_ALT: &str = "tool/requestUserInput";
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -208,8 +210,10 @@ struct AppServerBridge {
     pending_requests: Mutex<HashMap<u64, PendingRequest>>,
     internal_waiters: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     pending_approvals: Mutex<HashMap<String, PendingApprovalEntry>>,
+    pending_user_inputs: Mutex<HashMap<String, PendingUserInputEntry>>,
     next_request_id: AtomicU64,
     approval_counter: AtomicU64,
+    user_input_counter: AtomicU64,
     hub: Arc<ClientHub>,
 }
 
@@ -222,6 +226,12 @@ struct PendingRequest {
 struct PendingApprovalEntry {
     app_server_request_id: Value,
     approval: PendingApproval,
+}
+
+#[derive(Clone)]
+struct PendingUserInputEntry {
+    app_server_request_id: Value,
+    request: PendingUserInputRequest,
 }
 
 impl AppServerBridge {
@@ -255,8 +265,10 @@ impl AppServerBridge {
             pending_requests: Mutex::new(HashMap::new()),
             internal_waiters: Mutex::new(HashMap::new()),
             pending_approvals: Mutex::new(HashMap::new()),
+            pending_user_inputs: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
             approval_counter: AtomicU64::new(1),
+            user_input_counter: AtomicU64::new(1),
             hub,
         });
 
@@ -378,6 +390,7 @@ impl AppServerBridge {
 
             this.fail_all_pending("app-server closed").await;
             this.pending_approvals.lock().await.clear();
+            this.pending_user_inputs.lock().await.clear();
         });
     }
 
@@ -455,7 +468,7 @@ impl AppServerBridge {
     async fn resolve_approval(
         &self,
         approval_id: &str,
-        decision: &str,
+        decision: &Value,
     ) -> Result<Option<PendingApproval>, String> {
         let pending = self.pending_approvals.lock().await.remove(approval_id);
         let Some(pending) = pending else {
@@ -490,6 +503,46 @@ impl AppServerBridge {
             .await;
 
         Ok(Some(pending.approval))
+    }
+
+    async fn resolve_user_input(
+        &self,
+        request_id: &str,
+        answers: &HashMap<String, UserInputAnswerPayload>,
+    ) -> Result<Option<PendingUserInputRequest>, String> {
+        let pending = self.pending_user_inputs.lock().await.remove(request_id);
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+
+        let response = json!({
+            "id": pending.app_server_request_id,
+            "result": {
+                "answers": answers
+            }
+        });
+
+        if let Err(error) = self.write_json(response).await {
+            self.pending_user_inputs
+                .lock()
+                .await
+                .insert(request_id.to_string(), pending.clone());
+            return Err(format!("failed to send requestUserInput response: {error}"));
+        }
+
+        self.hub
+            .broadcast_notification(
+                "bridge/userInput.resolved",
+                json!({
+                    "id": pending.request.id,
+                    "threadId": pending.request.thread_id,
+                    "turnId": pending.request.turn_id,
+                    "resolvedAt": now_iso(),
+                }),
+            )
+            .await;
+
+        Ok(Some(pending.request))
     }
 
     async fn handle_incoming(&self, value: Value) {
@@ -546,6 +599,9 @@ impl AppServerBridge {
                 command: read_string(params_obj.and_then(|p| p.get("command"))),
                 cwd: read_string(params_obj.and_then(|p| p.get("cwd"))),
                 grant_root: read_string(params_obj.and_then(|p| p.get("grantRoot"))),
+                proposed_execpolicy_amendment: parse_execpolicy_amendment(
+                    params_obj.and_then(|p| p.get("proposedExecpolicyAmendment")),
+                ),
             };
 
             self.pending_approvals.lock().await.insert(
@@ -560,6 +616,43 @@ impl AppServerBridge {
                 .broadcast_notification(
                     "bridge/approval.requested",
                     serde_json::to_value(approval).unwrap_or(Value::Null),
+                )
+                .await;
+            return;
+        }
+
+        if method == REQUEST_USER_INPUT_METHOD || method == REQUEST_USER_INPUT_METHOD_ALT {
+            let params_obj = params.as_ref().and_then(Value::as_object);
+            let request_id = format!(
+                "request-user-input-{}-{}",
+                Utc::now().timestamp_millis(),
+                self.user_input_counter.fetch_add(1, Ordering::Relaxed)
+            );
+
+            let request = PendingUserInputRequest {
+                id: request_id.clone(),
+                thread_id: read_string(params_obj.and_then(|p| p.get("threadId")))
+                    .unwrap_or_else(|| "unknown-thread".to_string()),
+                turn_id: read_string(params_obj.and_then(|p| p.get("turnId")))
+                    .unwrap_or_else(|| "unknown-turn".to_string()),
+                item_id: read_string(params_obj.and_then(|p| p.get("itemId")))
+                    .unwrap_or_else(|| "unknown-item".to_string()),
+                requested_at: now_iso(),
+                questions: parse_user_input_questions(params_obj.and_then(|p| p.get("questions"))),
+            };
+
+            self.pending_user_inputs.lock().await.insert(
+                request_id,
+                PendingUserInputEntry {
+                    app_server_request_id: id,
+                    request: request.clone(),
+                },
+            );
+
+            self.hub
+                .broadcast_notification(
+                    "bridge/userInput.requested",
+                    serde_json::to_value(request).unwrap_or(Value::Null),
                 )
                 .await;
             return;
@@ -1109,13 +1202,56 @@ struct PendingApproval {
     command: Option<String>,
     cwd: Option<String>,
     grant_root: Option<String>,
+    proposed_execpolicy_amendment: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ResolveApprovalRequest {
     id: String,
-    decision: String,
+    decision: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserInputAnswerPayload {
+    answers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveUserInputRequest {
+    id: String,
+    answers: HashMap<String, UserInputAnswerPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingUserInputRequest {
+    id: String,
+    thread_id: String,
+    turn_id: String,
+    item_id: String,
+    requested_at: String,
+    questions: Vec<PendingUserInputQuestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingUserInputQuestion {
+    id: String,
+    header: String,
+    question: String,
+    is_other: bool,
+    is_secret: bool,
+    options: Option<Vec<PendingUserInputQuestionOption>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingUserInputQuestionOption {
+    label: String,
+    description: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1432,10 +1568,7 @@ async fn handle_bridge_method(
                 return Err(BridgeError::invalid_params("message must not be empty"));
             }
 
-            let commit = state
-                .git
-                .commit(message, cwd.as_deref())
-                .await?;
+            let commit = state.git.commit(message, cwd.as_deref()).await?;
             let commit_value = serde_json::to_value(&commit)
                 .map_err(|error| BridgeError::server(&error.to_string()))?;
 
@@ -1485,7 +1618,7 @@ async fn handle_bridge_method(
 
             if !is_valid_approval_decision(&request.decision) {
                 return Err(BridgeError::invalid_params(
-                    "decision must be one of: accept, acceptForSession, decline, cancel",
+                    "decision must be one of: accept, acceptForSession, decline, cancel, or acceptWithExecpolicyAmendment",
                 ));
             }
 
@@ -1507,6 +1640,42 @@ async fn handle_bridge_method(
                 "ok": true,
                 "approval": approval,
                 "decision": request.decision,
+            }))
+        }
+        "bridge/userInput/resolve" => {
+            let request: ResolveUserInputRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+
+            if request.answers.is_empty() {
+                return Err(BridgeError::invalid_params(
+                    "answers must contain at least one question response",
+                ));
+            }
+
+            if !is_valid_user_input_answers(&request.answers) {
+                return Err(BridgeError::invalid_params(
+                    "answers must map question ids to non-empty answers arrays",
+                ));
+            }
+
+            let resolved = state
+                .app_server
+                .resolve_user_input(&request.id, &request.answers)
+                .await
+                .map_err(|error| BridgeError::server(&error))?;
+
+            let Some(user_input_request) = resolved else {
+                return Err(BridgeError {
+                    code: -32004,
+                    message: "user_input_not_found".to_string(),
+                    data: Some(json!({ "error": "user_input_not_found" })),
+                });
+            };
+
+            Ok(json!({
+                "ok": true,
+                "request": user_input_request,
             }))
         }
         _ => Err(BridgeError::method_not_found(&format!(
@@ -1581,8 +1750,36 @@ fn is_forwarded_method(method: &str) -> bool {
     )
 }
 
-fn is_valid_approval_decision(value: &str) -> bool {
-    matches!(value, "accept" | "acceptForSession" | "decline" | "cancel")
+fn is_valid_approval_decision(value: &Value) -> bool {
+    if let Some(raw) = value.as_str() {
+        return matches!(raw, "accept" | "acceptForSession" | "decline" | "cancel");
+    }
+
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+
+    let Some(amendment) = object.get("acceptWithExecpolicyAmendment") else {
+        return false;
+    };
+
+    let Some(amendment_object) = amendment.as_object() else {
+        return false;
+    };
+
+    let Some(execpolicy_amendment) = amendment_object.get("execpolicy_amendment") else {
+        return false;
+    };
+
+    let Some(tokens) = execpolicy_amendment.as_array() else {
+        return false;
+    };
+
+    if tokens.is_empty() {
+        return false;
+    }
+
+    tokens.iter().all(|token| token.as_str().is_some())
 }
 
 fn parse_internal_id(value: Option<&Value>) -> Option<u64> {
@@ -1607,6 +1804,99 @@ fn parse_internal_id(value: Option<&Value>) -> Option<u64> {
 
 fn read_string(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_string)
+}
+
+fn read_bool(value: Option<&Value>) -> Option<bool> {
+    value.and_then(Value::as_bool)
+}
+
+fn parse_execpolicy_amendment(value: Option<&Value>) -> Option<Vec<String>> {
+    let array = if let Some(array) = value.and_then(Value::as_array) {
+        array
+    } else if let Some(object) = value.and_then(Value::as_object) {
+        object.get("execpolicy_amendment")?.as_array()?
+    } else {
+        return None;
+    };
+
+    let tokens = array
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens)
+    }
+}
+
+fn parse_user_input_questions(value: Option<&Value>) -> Vec<PendingUserInputQuestion> {
+    let Some(array) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut questions = Vec::new();
+    for raw_question in array {
+        let Some(question_object) = raw_question.as_object() else {
+            continue;
+        };
+
+        let Some(id) = read_string(question_object.get("id")) else {
+            continue;
+        };
+        let Some(header) = read_string(question_object.get("header")) else {
+            continue;
+        };
+        let Some(question) = read_string(question_object.get("question")) else {
+            continue;
+        };
+
+        let options = question_object
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|option_array| {
+                option_array
+                    .iter()
+                    .filter_map(Value::as_object)
+                    .filter_map(|option_object| {
+                        let label = read_string(option_object.get("label"))?;
+                        let description =
+                            read_string(option_object.get("description")).unwrap_or_default();
+                        Some(PendingUserInputQuestionOption { label, description })
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+        questions.push(PendingUserInputQuestion {
+            id,
+            header,
+            question,
+            is_other: read_bool(question_object.get("isOther")).unwrap_or(false),
+            is_secret: read_bool(question_object.get("isSecret")).unwrap_or(false),
+            options,
+        });
+    }
+
+    questions
+}
+
+fn is_valid_user_input_answers(answers: &HashMap<String, UserInputAnswerPayload>) -> bool {
+    answers.iter().all(|(question_id, answer_payload)| {
+        if question_id.trim().is_empty() {
+            return false;
+        }
+
+        if answer_payload.answers.is_empty() {
+            return false;
+        }
+
+        answer_payload
+            .answers
+            .iter()
+            .all(|answer| !answer.trim().is_empty())
+    })
 }
 
 fn contains_disallowed_control_chars(value: &str) -> bool {

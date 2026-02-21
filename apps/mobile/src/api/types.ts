@@ -40,12 +40,15 @@ export interface CreateChatRequest {
   effort?: ReasoningEffort;
 }
 
+export type CollaborationMode = 'default' | 'plan';
+
 export interface SendChatMessageRequest {
   content: string;
   role?: ChatMessageRole;
   cwd?: string;
   model?: string;
   effort?: ReasoningEffort;
+  collaborationMode?: CollaborationMode;
 }
 
 export type ReasoningEffort =
@@ -123,7 +126,18 @@ export interface GitPushResponse {
 
 export type ApprovalKind = 'commandExecution' | 'fileChange';
 
-export type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
+export interface ApprovalExecpolicyAmendmentDecision {
+  acceptWithExecpolicyAmendment: {
+    execpolicy_amendment: string[];
+  };
+}
+
+export type ApprovalDecision =
+  | 'accept'
+  | 'acceptForSession'
+  | 'decline'
+  | 'cancel'
+  | ApprovalExecpolicyAmendmentDecision;
 
 export interface PendingApproval {
   id: string;
@@ -136,6 +150,7 @@ export interface PendingApproval {
   command?: string;
   cwd?: string;
   grantRoot?: string;
+  proposedExecpolicyAmendment?: string[];
 }
 
 export interface ResolveApprovalRequest {
@@ -146,6 +161,56 @@ export interface ResolveApprovalResponse {
   ok: true;
   approval: PendingApproval;
   decision: ApprovalDecision;
+}
+
+export interface UserInputQuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface UserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: UserInputQuestionOption[] | null;
+}
+
+export interface PendingUserInputRequest {
+  id: string;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  requestedAt: string;
+  questions: UserInputQuestion[];
+}
+
+export interface UserInputAnswerPayload {
+  answers: string[];
+}
+
+export interface ResolveUserInputRequest {
+  answers: Record<string, UserInputAnswerPayload>;
+}
+
+export interface ResolveUserInputResponse {
+  ok: true;
+  request: PendingUserInputRequest;
+}
+
+export type TurnPlanStepStatus = 'pending' | 'inProgress' | 'completed';
+
+export interface TurnPlanStep {
+  step: string;
+  status: TurnPlanStepStatus;
+}
+
+export interface TurnPlanUpdate {
+  threadId: string;
+  turnId: string;
+  explanation: string | null;
+  plan: TurnPlanStep[];
 }
 
 export interface RunEvent {

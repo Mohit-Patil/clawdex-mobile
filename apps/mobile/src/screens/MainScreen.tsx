@@ -27,13 +27,16 @@ import {
 import type { MacBridgeApiClient } from '../api/client';
 import type {
   ApprovalDecision,
+  CollaborationMode,
   PendingApproval,
+  PendingUserInputRequest,
   RpcNotification,
   RunEvent,
   Chat,
   ChatSummary,
   ModelOption,
   ReasoningEffort,
+  TurnPlanStep,
   ChatMessage as ChatTranscriptMessage,
 } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
@@ -76,6 +79,15 @@ interface ActivityState {
   detail?: string;
 }
 
+interface ActivePlanState {
+  threadId: string;
+  turnId: string;
+  explanation: string | null;
+  steps: TurnPlanStep[];
+  deltaText: string;
+  updatedAt: string;
+}
+
 interface SlashCommandDefinition {
   name: string;
   summary: string;
@@ -98,6 +110,21 @@ const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 8;
 const RUN_WATCHDOG_MS = 15_000;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 120_000;
+const INLINE_OPTION_LINE_PATTERN =
+  /^(?:[-*+]\s*)?(?:\d{1,2}\s*[.):-]|\(\d{1,2}\)\s*[.):-]?|\[\d{1,2}\]\s*|[A-Ca-c]\s*[.):-]|\([A-Ca-c]\)\s*[.):-]?|option\s+\d{1,2}\s*[.):-]?)\s*(.+)$/i;
+const INLINE_CHOICE_CUE_PHRASES = [
+  'choose',
+  'select',
+  'pick',
+  'which',
+  'what',
+  'prefer',
+  'option',
+  'let me know',
+  'would you like',
+  'should i',
+  'confirm',
+];
 const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'task_started',
   'agent_reasoning_delta',
@@ -202,10 +229,9 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
   },
   {
     name: 'plan',
-    summary: 'Switch to plan mode',
+    summary: 'Toggle plan mode or run next prompt in plan mode',
     argsHint: '[prompt]',
-    mobileSupported: false,
-    availabilityNote: 'Available in Codex CLI only right now.',
+    mobileSupported: true,
   },
   {
     name: 'personality',
@@ -321,6 +347,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [error, setError] = useState<string | null>(null);
     const [activeCommands, setActiveCommands] = useState<RunEvent[]>([]);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+    const [pendingUserInputRequest, setPendingUserInputRequest] =
+      useState<PendingUserInputRequest | null>(null);
+    const [userInputDrafts, setUserInputDrafts] = useState<Record<string, string>>({});
+    const [userInputError, setUserInputError] = useState<string | null>(null);
+    const [resolvingUserInput, setResolvingUserInput] = useState(false);
+    const [activePlan, setActivePlan] = useState<ActivePlanState | null>(null);
     const [streamingText, setStreamingText] = useState<string | null>(null);
     const [renameModalVisible, setRenameModalVisible] = useState(false);
     const [renameDraft, setRenameDraft] = useState('');
@@ -333,6 +365,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [loadingModels, setLoadingModels] = useState(false);
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
+    const [selectedCollaborationMode, setSelectedCollaborationMode] =
+      useState<CollaborationMode>('default');
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
     const [keyboardInset, setKeyboardInset] = useState(0);
@@ -483,6 +517,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ? formatReasoningEffort(activeEffort)
             : 'Model default';
     const modelReasoningLabel = `${activeModelLabel} · ${activeEffortLabel}`;
+    const collaborationModeLabel = formatCollaborationModeLabel(selectedCollaborationMode);
 
     useEffect(() => {
       if (activity.tone !== 'running') {
@@ -520,6 +555,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setError(null);
       setActiveCommands([]);
       setPendingApproval(null);
+      setPendingUserInputRequest(null);
+      setUserInputDrafts({});
+      setUserInputError(null);
+      setResolvingUserInput(false);
+      setActivePlan(null);
       setStreamingText(null);
       setRenameModalVisible(false);
       setRenameDraft('');
@@ -685,14 +725,64 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       ]);
     }, [openRenameModal, selectedChat]);
 
+    const openCollaborationModeMenu = useCallback(() => {
+      const options = ['Default mode', 'Plan mode', 'Cancel'];
+      const selectedButtonIndex = selectedCollaborationMode === 'plan' ? 1 : 0;
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            title: 'Collaboration mode',
+            message: `Current: ${formatCollaborationModeLabel(selectedCollaborationMode)}`,
+            options,
+            cancelButtonIndex: 2,
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 0) {
+              setSelectedCollaborationMode('default');
+              setError(null);
+              return;
+            }
+            if (buttonIndex === 1) {
+              setSelectedCollaborationMode('plan');
+              setError(null);
+            }
+          }
+        );
+        return;
+      }
+
+      Alert.alert('Collaboration mode', `Current: ${formatCollaborationModeLabel(selectedCollaborationMode)}`, [
+        {
+          text: `${selectedButtonIndex === 0 ? '✓ ' : ''}Default mode`,
+          onPress: () => {
+            setSelectedCollaborationMode('default');
+            setError(null);
+          },
+        },
+        {
+          text: `${selectedButtonIndex === 1 ? '✓ ' : ''}Plan mode`,
+          onPress: () => {
+            setSelectedCollaborationMode('plan');
+            setError(null);
+          },
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ]);
+    }, [selectedCollaborationMode]);
+
     const openModelReasoningMenu = useCallback(() => {
       const menuTitle = modelReasoningLabel;
       if (Platform.OS === 'ios') {
         ActionSheetIOS.showActionSheetWithOptions(
           {
             title: menuTitle,
-            options: ['Change model', 'Change reasoning level', 'Cancel'],
-            cancelButtonIndex: 2,
+            message: `Mode: ${formatCollaborationModeLabel(selectedCollaborationMode)}`,
+            options: ['Change model', 'Change reasoning level', 'Change collaboration mode', 'Cancel'],
+            cancelButtonIndex: 3,
           },
           (buttonIndex) => {
             if (buttonIndex === 0) {
@@ -701,6 +791,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
             if (buttonIndex === 1) {
               openEffortModal();
+              return;
+            }
+            if (buttonIndex === 2) {
+              openCollaborationModeMenu();
             }
           }
         );
@@ -717,11 +811,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onPress: () => openEffortModal(),
         },
         {
+          text: `Change collaboration mode (${formatCollaborationModeLabel(selectedCollaborationMode)})`,
+          onPress: openCollaborationModeMenu,
+        },
+        {
           text: 'Cancel',
           style: 'cancel',
         },
       ]);
-    }, [modelReasoningLabel, openEffortModal, openModelModal]);
+    }, [
+      modelReasoningLabel,
+      openCollaborationModeMenu,
+      openEffortModal,
+      openModelModal,
+      selectedCollaborationMode,
+    ]);
 
     const closeRenameModal = useCallback(() => {
       if (renaming) {
@@ -871,10 +975,178 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return true;
         }
 
+        if (name === 'plan') {
+          const lowered = argText.toLowerCase();
+          if (!argText || lowered === 'on' || lowered === 'enable' || lowered === 'enabled') {
+            setSelectedCollaborationMode('plan');
+            setActivity({
+              tone: 'complete',
+              title: 'Plan mode enabled',
+            });
+            setError(null);
+            return true;
+          }
+
+          if (
+            lowered === 'off' ||
+            lowered === 'disable' ||
+            lowered === 'disabled' ||
+            lowered === 'default' ||
+            lowered === 'chat'
+          ) {
+            setSelectedCollaborationMode('default');
+            setActivity({
+              tone: 'complete',
+              title: 'Default mode enabled',
+            });
+            setError(null);
+            return true;
+          }
+
+          setSelectedCollaborationMode('plan');
+          if (!selectedChatId) {
+            const optimisticMessage: ChatTranscriptMessage = {
+              id: `msg-${Date.now()}`,
+              role: 'user',
+              content: argText,
+              createdAt: new Date().toISOString(),
+            };
+
+            setDraft('');
+            try {
+              setCreating(true);
+              setActivePlan(null);
+              setPendingUserInputRequest(null);
+              setUserInputDrafts({});
+              setUserInputError(null);
+              setResolvingUserInput(false);
+              setActivity({
+                tone: 'running',
+                title: 'Creating chat',
+              });
+              const created = await api.createChat({
+                cwd: preferredStartCwd ?? undefined,
+                model: activeModelId ?? undefined,
+                effort: activeEffort ?? undefined,
+              });
+
+              setSelectedChatId(created.id);
+              setSelectedChat({
+                ...created,
+                status: 'running',
+                updatedAt: new Date().toISOString(),
+                statusUpdatedAt: new Date().toISOString(),
+                lastMessagePreview: argText.slice(0, 50),
+                messages: [...created.messages, optimisticMessage],
+              });
+
+              setActivity({
+                tone: 'running',
+                title: 'Sending plan prompt',
+              });
+              bumpRunWatchdog();
+              appendActivityPhrase('Turn started', true);
+
+              const updated = await api.sendChatMessage(created.id, {
+                content: argText,
+                cwd: created.cwd ?? preferredStartCwd ?? undefined,
+                model: activeModelId ?? undefined,
+                effort: activeEffort ?? undefined,
+                collaborationMode: 'plan',
+              });
+              const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+              if (autoEnabledPlan) {
+                setSelectedCollaborationMode('plan');
+                appendActivityPhrase('Plan mode enabled', true);
+              }
+              setSelectedChat(updated);
+              setError(null);
+              setActivity({
+                tone: 'complete',
+                title: 'Turn completed',
+                detail:
+                  autoEnabledPlan
+                    ? 'Plan mode enabled for the next turn'
+                    : undefined,
+              });
+              clearRunWatchdog();
+            } catch (err) {
+              setError((err as Error).message);
+              setActivity({
+                tone: 'error',
+                title: 'Turn failed',
+                detail: (err as Error).message,
+              });
+              clearRunWatchdog();
+            } finally {
+              setCreating(false);
+            }
+            return true;
+          }
+
+          const optimisticMessage: ChatTranscriptMessage = {
+            id: `msg-${Date.now()}`,
+            role: 'user',
+            content: argText,
+            createdAt: new Date().toISOString(),
+          };
+
+          setDraft('');
+          setSelectedChat((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              messages: [...prev.messages, optimisticMessage],
+            };
+          });
+          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+
+          try {
+            setSending(true);
+            setActivePlan(null);
+            setPendingUserInputRequest(null);
+            setUserInputDrafts({});
+            setUserInputError(null);
+            setResolvingUserInput(false);
+            setActivity({
+              tone: 'running',
+              title: 'Sending plan prompt',
+            });
+            bumpRunWatchdog();
+            const updated = await api.sendChatMessage(selectedChatId, {
+              content: argText,
+              cwd: selectedChat?.cwd,
+              model: activeModelId ?? undefined,
+              effort: activeEffort ?? undefined,
+              collaborationMode: 'plan',
+            });
+            setSelectedChat(updated);
+            setError(null);
+            setActivity({
+              tone: 'complete',
+              title: 'Turn completed',
+            });
+            clearRunWatchdog();
+          } catch (err) {
+            setError((err as Error).message);
+            setActivity({
+              tone: 'error',
+              title: 'Turn failed',
+              detail: (err as Error).message,
+            });
+            clearRunWatchdog();
+          } finally {
+            setSending(false);
+          }
+
+          return true;
+        }
+
         if (name === 'status') {
           const lines = [
             `Model: ${activeModelLabel}`,
             `Reasoning: ${activeEffortLabel}`,
+            `Mode: ${formatCollaborationModeLabel(selectedCollaborationMode)}`,
             `Default workspace: ${preferredStartCwd ?? 'Bridge default workspace'}`,
           ];
           if (selectedChat) {
@@ -1016,12 +1288,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return true;
       },
       [
+        activeEffort,
         activeModelId,
         activeEffortLabel,
         activeModelLabel,
         api,
         appendLocalAssistantMessage,
         bumpRunWatchdog,
+        clearRunWatchdog,
         modelOptions,
         onOpenGit,
         openModelModal,
@@ -1029,6 +1303,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         preferredStartCwd,
         selectedChat,
         selectedChatId,
+        selectedCollaborationMode,
         startNewChat,
       ]
     );
@@ -1108,6 +1383,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         setSelectedChatId(id);
         setError(null);
+        setPendingUserInputRequest(null);
+        setUserInputDrafts({});
+        setUserInputError(null);
+        setResolvingUserInput(false);
+        setActivePlan(null);
 
         if (canReuseSnapshot && optimisticChat) {
           setSelectedChat(optimisticChat);
@@ -1196,6 +1476,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       try {
         setCreating(true);
+        setActivePlan(null);
+        setPendingUserInputRequest(null);
+        setUserInputDrafts({});
+        setUserInputError(null);
+        setResolvingUserInput(false);
         setActivity({
           tone: 'running',
           title: 'Creating chat',
@@ -1228,12 +1513,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           cwd: created.cwd ?? preferredStartCwd ?? undefined,
           model: activeModelId ?? undefined,
           effort: activeEffort ?? undefined,
+          collaborationMode: selectedCollaborationMode,
         });
+        const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+        if (autoEnabledPlan) {
+          setSelectedCollaborationMode('plan');
+          appendActivityPhrase('Plan mode enabled', true);
+        }
         setSelectedChat(updated);
         setError(null);
         setActivity({
           tone: 'complete',
           title: 'Turn completed',
+          detail:
+            autoEnabledPlan && selectedCollaborationMode !== 'plan'
+              ? 'Plan mode enabled for the next turn'
+              : undefined,
         });
         clearRunWatchdog();
       } catch (err) {
@@ -1254,82 +1549,147 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       activeModelId,
       handleSlashCommand,
       preferredStartCwd,
+      selectedCollaborationMode,
       appendActivityPhrase,
       bumpRunWatchdog,
       clearRunWatchdog,
     ]);
 
-    const sendMessage = useCallback(async () => {
-      const content = draft.trim();
-      if (!selectedChatId || !content) return;
+    const sendMessageContent = useCallback(
+      async (
+        rawContent: string,
+        options?: {
+          allowSlashCommands?: boolean;
+          collaborationMode?: CollaborationMode;
+        }
+      ) => {
+        const content = rawContent.trim();
+        if (!selectedChatId || !content) {
+          return;
+        }
 
-      if (await handleSlashCommand(content)) {
-        setDraft('');
-        return;
-      }
+        if (options?.allowSlashCommands && (await handleSlashCommand(content))) {
+          setDraft('');
+          return;
+        }
+        const resolvedCollaborationMode =
+          options?.collaborationMode ?? selectedCollaborationMode;
 
-      const optimisticMessage: ChatTranscriptMessage = {
-        id: `msg-${Date.now()}`,
-        role: 'user',
-        content,
-        createdAt: new Date().toISOString(),
-      };
-
-      setDraft('');
-      setSelectedChat((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          messages: [...prev.messages, optimisticMessage],
-        };
-      });
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
-
-      try {
-        setSending(true);
-        setActivity({
-          tone: 'running',
-          title: 'Sending message',
-        });
-        bumpRunWatchdog();
-        const updated = await api.sendChatMessage(selectedChatId, {
+        const optimisticMessage: ChatTranscriptMessage = {
+          id: `msg-${Date.now()}`,
+          role: 'user',
           content,
-          cwd: selectedChat?.cwd,
-          model: activeModelId ?? undefined,
-          effort: activeEffort ?? undefined,
+          createdAt: new Date().toISOString(),
+        };
+
+        setDraft('');
+        setSelectedChat((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            messages: [...prev.messages, optimisticMessage],
+          };
         });
-        setSelectedChat(updated);
-        setError(null);
-        setActivity({
-          tone: 'complete',
-          title: 'Turn completed',
-        });
-        clearRunWatchdog();
-      } catch (err) {
-        setError((err as Error).message);
-        setActivity({
-          tone: 'error',
-          title: 'Turn failed',
-          detail: (err as Error).message,
-        });
-        clearRunWatchdog();
-      } finally {
-        setSending(false);
-      }
-    }, [
-      activeEffort,
-      activeModelId,
-      api,
-      draft,
-      handleSlashCommand,
-      selectedChat?.cwd,
-      selectedChatId,
-      bumpRunWatchdog,
-      clearRunWatchdog,
-    ]);
+        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+
+        try {
+          setSending(true);
+          setActivePlan(null);
+          setPendingUserInputRequest(null);
+          setUserInputDrafts({});
+          setUserInputError(null);
+          setResolvingUserInput(false);
+          setActivity({
+            tone: 'running',
+            title: 'Sending message',
+          });
+          bumpRunWatchdog();
+          const updated = await api.sendChatMessage(selectedChatId, {
+            content,
+            cwd: selectedChat?.cwd,
+            model: activeModelId ?? undefined,
+            effort: activeEffort ?? undefined,
+            collaborationMode: resolvedCollaborationMode,
+          });
+          const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+          if (autoEnabledPlan) {
+            setSelectedCollaborationMode('plan');
+            appendActivityPhrase('Plan mode enabled', true);
+          }
+          setSelectedChat(updated);
+          setError(null);
+          setActivity({
+            tone: 'complete',
+            title: 'Turn completed',
+            detail:
+              autoEnabledPlan && resolvedCollaborationMode !== 'plan'
+                ? 'Plan mode enabled for the next turn'
+                : undefined,
+          });
+          clearRunWatchdog();
+        } catch (err) {
+          setError((err as Error).message);
+          setActivity({
+            tone: 'error',
+            title: 'Turn failed',
+            detail: (err as Error).message,
+          });
+          clearRunWatchdog();
+        } finally {
+          setSending(false);
+        }
+      },
+      [
+        activeEffort,
+        activeModelId,
+        api,
+        appendActivityPhrase,
+        handleSlashCommand,
+        selectedCollaborationMode,
+        selectedChat?.cwd,
+        selectedChatId,
+        bumpRunWatchdog,
+        clearRunWatchdog,
+      ]
+    );
+
+    const sendMessage = useCallback(async () => {
+      await sendMessageContent(draft, { allowSlashCommands: true });
+    }, [draft, sendMessageContent]);
+
+    const handleInlineOptionSelect = useCallback(
+      (value: string) => {
+        const option = value.trim();
+        if (!option) {
+          return;
+        }
+
+        const cannotAutoSend =
+          !selectedChatId ||
+          sending ||
+          creating ||
+          Boolean(pendingApproval?.id) ||
+          Boolean(pendingUserInputRequest?.id);
+        if (cannotAutoSend) {
+          setDraft(option);
+          return;
+        }
+
+        void sendMessageContent(option, { allowSlashCommands: false });
+      },
+      [
+        creating,
+        pendingApproval?.id,
+        pendingUserInputRequest?.id,
+        selectedChatId,
+        sendMessageContent,
+        sending,
+      ]
+    );
 
     useEffect(() => {
       const pendingApprovalId = pendingApproval?.id;
+      const pendingUserInputRequestId = pendingUserInputRequest?.id;
 
       return ws.onEvent((event: RpcNotification) => {
         const currentId = chatIdRef.current;
@@ -1715,6 +2075,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (itemType === 'plan') {
+            setSelectedCollaborationMode('plan');
             setActivity({
               tone: 'running',
               title: 'Planning',
@@ -1740,7 +2101,25 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          setSelectedCollaborationMode('plan');
           bumpRunWatchdog();
+          const turnId = readString(params?.turnId) ?? 'unknown-turn';
+          const rawDelta = readString(params?.delta) ?? '';
+          setActivePlan((prev) => {
+            const sameTurn =
+              prev && prev.threadId === threadId && prev.turnId === turnId;
+            const nextDelta = compactPlanDelta(
+              sameTurn ? `${prev.deltaText}\n${rawDelta}` : rawDelta
+            );
+            return {
+              threadId,
+              turnId,
+              explanation: sameTurn ? prev.explanation : null,
+              steps: sameTurn ? prev.steps : [],
+              deltaText: nextDelta,
+              updatedAt: new Date().toISOString(),
+            };
+          });
           const delta = toTickerSnippet(readString(params?.delta), 56);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Planning'
@@ -1924,12 +2303,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'turn/plan/updated') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? currentId;
           if (!threadId || threadId !== currentId) {
             return;
           }
 
+          setSelectedCollaborationMode('plan');
           bumpRunWatchdog();
+          const planUpdate = toTurnPlanUpdate(params, threadId);
+          if (planUpdate) {
+            setActivePlan((prev) => {
+              const sameTurn =
+                prev &&
+                prev.threadId === planUpdate.threadId &&
+                prev.turnId === planUpdate.turnId;
+              return {
+                threadId: planUpdate.threadId,
+                turnId: planUpdate.turnId,
+                explanation: planUpdate.explanation,
+                steps: planUpdate.plan,
+                deltaText: sameTurn ? prev.deltaText : '',
+                updatedAt: new Date().toISOString(),
+              };
+            });
+          }
           setActivity({
             tone: 'running',
             title: 'Plan updated',
@@ -2027,6 +2424,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           setActiveCommands([]);
           setStreamingText(null);
+          setPendingUserInputRequest(null);
+          setUserInputDrafts({});
+          setUserInputError(null);
+          setResolvingUserInput(false);
           hadCommandRef.current = false;
           setActivityPhrases([]);
           reasoningSummaryRef.current = {};
@@ -2059,6 +2460,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               title: 'Waiting for approval',
               detail: parsed.command ?? parsed.kind,
             });
+          }
+          return;
+        }
+
+        if (event.method === 'bridge/userInput.requested') {
+          const parsed = toPendingUserInputRequest(event.params);
+          if (parsed && parsed.threadId === currentId) {
+            setSelectedCollaborationMode('plan');
+            clearRunWatchdog();
+            setPendingUserInputRequest(parsed);
+            setUserInputDrafts(buildUserInputDrafts(parsed));
+            setUserInputError(null);
+            setResolvingUserInput(false);
+            setActivity({
+              tone: 'idle',
+              title: 'Clarification needed',
+              detail: parsed.questions[0]?.header ?? 'Answer required',
+            });
+          }
+          return;
+        }
+
+        if (event.method === 'bridge/userInput.resolved') {
+          const params = toRecord(event.params);
+          const resolvedId = readString(params?.id);
+          if (pendingUserInputRequestId && resolvedId === pendingUserInputRequestId) {
+            bumpRunWatchdog();
+            setPendingUserInputRequest(null);
+            setUserInputDrafts({});
+            setUserInputError(null);
+            setResolvingUserInput(false);
+            setActivity({
+              tone: 'running',
+              title: 'Input submitted',
+            });
+            appendActivityPhrase('Input submitted', true);
           }
           return;
         }
@@ -2106,6 +2543,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [
       ws,
       pendingApproval?.id,
+      pendingUserInputRequest?.id,
       loadChat,
       appendActivityPhrase,
       bumpRunWatchdog,
@@ -2119,6 +2557,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
       const hasPendingApproval = Boolean(pendingApproval?.id);
+      const hasPendingUserInput = Boolean(pendingUserInputRequest?.id);
 
       const syncChat = async () => {
         if (sending || creating) {
@@ -2143,7 +2582,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
 
-          if (shouldShowRunning && !hasPendingApproval) {
+          if (shouldShowRunning && !hasPendingApproval && !hasPendingUserInput) {
             bumpRunWatchdog();
             setActivity((prev) =>
               prev.tone === 'running'
@@ -2153,7 +2592,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Working',
                   }
             );
-          } else if (!hasPendingApproval) {
+          } else if (!hasPendingApproval && !hasPendingUserInput) {
             clearRunWatchdog();
             setActivity(
               latest.status === 'complete'
@@ -2191,6 +2630,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       creating,
       appendActivityPhrase,
       pendingApproval?.id,
+      pendingUserInputRequest?.id,
       bumpRunWatchdog,
       clearRunWatchdog,
     ]);
@@ -2206,6 +2646,57 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
       [api]
     );
+
+    const setUserInputDraft = useCallback((questionId: string, value: string) => {
+      setUserInputDrafts((prev) => ({
+        ...prev,
+        [questionId]: value,
+      }));
+      setUserInputError(null);
+    }, []);
+
+    const submitUserInputRequest = useCallback(async () => {
+      if (!pendingUserInputRequest || resolvingUserInput) {
+        return;
+      }
+
+      const answers: Record<string, { answers: string[] }> = {};
+      for (const question of pendingUserInputRequest.questions) {
+        const raw = (userInputDrafts[question.id] ?? '').trim();
+        const normalizedAnswers = normalizeQuestionAnswers(raw);
+        if (normalizedAnswers.length === 0) {
+          setUserInputError(`Please answer "${question.header}"`);
+          return;
+        }
+
+        answers[question.id] = { answers: normalizedAnswers };
+      }
+
+      setResolvingUserInput(true);
+      try {
+        await api.resolveUserInput(pendingUserInputRequest.id, { answers });
+        setPendingUserInputRequest(null);
+        setUserInputDrafts({});
+        setUserInputError(null);
+        setActivity({
+          tone: 'running',
+          title: 'Input submitted',
+        });
+        appendActivityPhrase('Input submitted', true);
+        bumpRunWatchdog();
+      } catch (err) {
+        setUserInputError((err as Error).message);
+      } finally {
+        setResolvingUserInput(false);
+      }
+    }, [
+      api,
+      appendActivityPhrase,
+      bumpRunWatchdog,
+      pendingUserInputRequest,
+      resolvingUserInput,
+      userInputDrafts,
+    ]);
 
     const handleOpenGit = useCallback(() => {
       if (!selectedChat) {
@@ -2296,6 +2787,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 {modelReasoningLabel}
               </Text>
             </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.modeChip,
+                pressed && styles.modelChipPressed,
+              ]}
+              onPress={openCollaborationModeMenu}
+            >
+              <Ionicons name="map-outline" size={13} color={colors.textMuted} />
+              <Text style={styles.modelChipText} numberOfLines={1}>
+                {collaborationModeLabel}
+              </Text>
+            </Pressable>
           </View>
         ) : null}
 
@@ -2305,10 +2808,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           {selectedChat && !isOpeningDifferentChat ? (
             <ChatView
               chat={selectedChat}
+              activePlan={activePlan?.threadId === selectedChat.id ? activePlan : null}
               activeCommands={activeCommands}
               streamingText={streamingText}
               scrollRef={scrollRef}
               isStreaming={isStreaming}
+              inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
+              onInlineOptionSelect={handleInlineOptionSelect}
             />
           ) : isOpeningChat ? (
             <View style={styles.chatLoadingContainer}>
@@ -2319,9 +2825,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             <ComposeView
               startWorkspaceLabel={defaultStartWorkspaceLabel}
               modelReasoningLabel={modelReasoningLabel}
+              collaborationModeLabel={collaborationModeLabel}
               onSuggestion={(s) => setDraft(s)}
               onOpenWorkspacePicker={openWorkspaceModal}
               onOpenModelReasoningPicker={openModelReasoningMenu}
+              onOpenCollaborationModePicker={openCollaborationModeMenu}
             />
           )}
 
@@ -2587,6 +3095,102 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             </View>
           </View>
         </Modal>
+
+        <Modal
+          visible={Boolean(pendingUserInputRequest)}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            // This prompt requires a reply; keep it visible until submitted.
+          }}
+        >
+          <View style={styles.userInputModalBackdrop}>
+            <View style={styles.userInputModalCard}>
+              <Text style={styles.userInputModalTitle}>Clarification needed</Text>
+              <ScrollView
+                style={styles.userInputQuestionsList}
+                contentContainerStyle={styles.userInputQuestionsListContent}
+                showsVerticalScrollIndicator={false}
+              >
+                {(pendingUserInputRequest?.questions ?? []).map((question) => {
+                  const answer = userInputDrafts[question.id] ?? '';
+                  const hasPresetOptions =
+                    Array.isArray(question.options) && question.options.length > 0;
+                  const needsFreeformInput = !hasPresetOptions || question.isOther;
+                  return (
+                    <View key={question.id} style={styles.userInputQuestionCard}>
+                      <Text style={styles.userInputQuestionHeader}>{question.header}</Text>
+                      <Text style={styles.userInputQuestionText}>{question.question}</Text>
+                      {hasPresetOptions ? (
+                        <View style={styles.userInputOptionsColumn}>
+                          {question.options?.map((option, index) => (
+                            <Pressable
+                              key={`${question.id}-${option.label}`}
+                              style={({ pressed }) => [
+                                styles.userInputOptionButton,
+                                answer.trim() === option.label.trim() &&
+                                  styles.userInputOptionButtonSelected,
+                                pressed && styles.userInputOptionButtonPressed,
+                              ]}
+                              onPress={() => setUserInputDraft(question.id, option.label)}
+                            >
+                              <View style={styles.userInputOptionHeaderRow}>
+                                <Text style={styles.userInputOptionIndex}>
+                                  {`${String(index + 1)}.`}
+                                </Text>
+                                <Text style={styles.userInputOptionLabel}>{option.label}</Text>
+                              </View>
+                              {option.description.trim() ? (
+                                <Text style={styles.userInputOptionDescription}>
+                                  {option.description}
+                                </Text>
+                              ) : null}
+                            </Pressable>
+                          ))}
+                        </View>
+                      ) : null}
+                      {needsFreeformInput ? (
+                        <TextInput
+                          value={answer}
+                          onChangeText={(value) => setUserInputDraft(question.id, value)}
+                          placeholder={
+                            question.isOther
+                              ? 'Or enter a custom answer…'
+                              : 'Type your answer…'
+                          }
+                          placeholderTextColor={colors.textMuted}
+                          secureTextEntry={question.isSecret}
+                          editable={!resolvingUserInput}
+                          multiline={!question.isSecret}
+                          style={[
+                            styles.userInputAnswerInput,
+                            question.isSecret && styles.userInputAnswerInputSecret,
+                          ]}
+                        />
+                      ) : null}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+              {userInputError ? (
+                <Text style={styles.userInputErrorText}>{userInputError}</Text>
+              ) : null}
+              <Pressable
+                onPress={() => void submitUserInputRequest()}
+                style={({ pressed }) => [
+                  styles.userInputSubmitButton,
+                  pressed && styles.userInputSubmitButtonPressed,
+                  resolvingUserInput && styles.userInputSubmitButtonDisabled,
+                ]}
+                disabled={resolvingUserInput}
+              >
+                <Text style={styles.userInputSubmitButtonText}>
+                  {resolvingUserInput ? 'Submitting…' : 'Submit answers'}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
       </View>
     );
   }
@@ -2597,15 +3201,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 function ComposeView({
   startWorkspaceLabel,
   modelReasoningLabel,
+  collaborationModeLabel,
   onSuggestion,
   onOpenWorkspacePicker,
   onOpenModelReasoningPicker,
+  onOpenCollaborationModePicker,
 }: {
   startWorkspaceLabel: string;
   modelReasoningLabel: string;
+  collaborationModeLabel: string;
   onSuggestion: (s: string) => void;
   onOpenWorkspacePicker: () => void;
   onOpenModelReasoningPicker: () => void;
+  onOpenCollaborationModePicker: () => void;
 }) {
   return (
     <View style={styles.composeContainer}>
@@ -2637,6 +3245,19 @@ function ComposeView({
         <Ionicons name="sparkles-outline" size={16} color={colors.textMuted} />
         <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
           {modelReasoningLabel}
+        </Text>
+        <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+      </Pressable>
+      <Pressable
+        style={({ pressed }) => [
+          styles.workspaceSelectBtn,
+          pressed && styles.workspaceSelectBtnPressed,
+        ]}
+        onPress={onOpenCollaborationModePicker}
+      >
+        <Ionicons name="map-outline" size={16} color={colors.textMuted} />
+        <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
+          {collaborationModeLabel}
         </Text>
         <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
       </Pressable>
@@ -2690,16 +3311,22 @@ function WorkspaceOption({
 
 function ChatView({
   chat,
+  activePlan,
   activeCommands,
   streamingText,
   scrollRef,
   isStreaming,
+  inlineChoicesEnabled,
+  onInlineOptionSelect,
 }: {
   chat: Chat;
+  activePlan: ActivePlanState | null;
   activeCommands: RunEvent[];
   streamingText: string | null;
   scrollRef: React.RefObject<ScrollView | null>;
   isStreaming: boolean;
+  inlineChoicesEnabled: boolean;
+  onInlineOptionSelect: (value: string) => void;
 }) {
   const { height: windowHeight } = useWindowDimensions();
   const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
@@ -2721,6 +3348,9 @@ function ChatView({
     const next = filtered[i + 1];
     return !next || next.role !== 'assistant';
   });
+  const inlineChoiceSet = inlineChoicesEnabled
+    ? findInlineChoiceSet(visibleMessages)
+    : null;
 
   return (
     <ScrollView
@@ -2730,9 +3360,42 @@ function ChatView({
       showsVerticalScrollIndicator={false}
       onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
     >
-      {visibleMessages.map((msg) => (
-        <ChatMessage key={msg.id} message={msg} />
-      ))}
+      {activePlan ? <PlanCard plan={activePlan} /> : null}
+      {visibleMessages.map((msg) => {
+        const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
+        return (
+          <View key={msg.id} style={styles.chatMessageBlock}>
+            <ChatMessage message={msg} />
+            {showInlineChoices ? (
+              <View style={styles.inlineChoiceOptions}>
+                {inlineChoiceSet.options.map((option, index) => (
+                  <Pressable
+                    key={`${msg.id}-${index}-${option.label}`}
+                    style={({ pressed }) => [
+                      styles.inlineChoiceOptionButton,
+                      pressed && styles.inlineChoiceOptionButtonPressed,
+                    ]}
+                    onPress={() => onInlineOptionSelect(option.label)}
+                  >
+                    <View style={styles.inlineChoiceOptionRow}>
+                      <Text style={styles.inlineChoiceOptionIndex}>{`${String(index + 1)}.`}</Text>
+                      <Text style={styles.inlineChoiceOptionLabel}>{option.label}</Text>
+                    </View>
+                    {option.description.trim() ? (
+                      <Text style={styles.inlineChoiceOptionDescription}>
+                        {option.description}
+                      </Text>
+                    ) : null}
+                  </Pressable>
+                ))}
+                <Text style={styles.inlineChoiceHint}>
+                  Tap an option to fill the reply box.
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
       {streamingText ? (
         <Text style={styles.streamingText} numberOfLines={4}>
           {streamingText}
@@ -2766,6 +3429,42 @@ function ChatView({
   );
 }
 
+function PlanCard({ plan }: { plan: ActivePlanState }) {
+  const hasSteps = plan.steps.length > 0;
+  const deltaPreview = toTickerSnippet(plan.deltaText, 260);
+  if (!hasSteps && !plan.explanation && !deltaPreview) {
+    return null;
+  }
+
+  return (
+    <View style={styles.planCard}>
+      <View style={styles.planCardHeader}>
+        <Ionicons name="map-outline" size={14} color={colors.textPrimary} />
+        <Text style={styles.planCardTitle}>Plan</Text>
+      </View>
+
+      {plan.explanation ? (
+        <Text style={styles.planExplanationText}>{plan.explanation}</Text>
+      ) : null}
+
+      {hasSteps ? (
+        <View style={styles.planStepsList}>
+          {plan.steps.map((step, index) => (
+            <View key={`${plan.turnId}-${index}-${step.step}`} style={styles.planStepRow}>
+              <Text style={styles.planStepStatus}>{renderPlanStatusGlyph(step.status)}</Text>
+              <Text style={styles.planStepText}>{step.step}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      {!hasSteps && deltaPreview ? (
+        <Text style={styles.planDeltaText}>{deltaPreview}</Text>
+      ) : null}
+    </View>
+  );
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -2778,8 +3477,354 @@ function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+function readStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const values = value.filter((entry): entry is string => typeof entry === 'string');
+  return values.length > 0 ? values : null;
+}
+
 function readNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function compactPlanDelta(value: string): string {
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join('\n')
+    .slice(-1200);
+}
+
+function renderPlanStatusGlyph(status: TurnPlanStep['status']): string {
+  if (status === 'completed') {
+    return '●';
+  }
+  if (status === 'inProgress') {
+    return '◐';
+  }
+  return '○';
+}
+
+function toTurnPlanUpdate(
+  value: unknown,
+  fallbackThreadId: string | null = null
+): {
+  threadId: string;
+  turnId: string;
+  explanation: string | null;
+  plan: TurnPlanStep[];
+} | null {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const threadId = readString(record.threadId) ?? fallbackThreadId;
+  const turnId = readString(record.turnId);
+  if (!threadId || !turnId) {
+    return null;
+  }
+
+  const rawPlan = Array.isArray(record.plan) ? record.plan : [];
+  const plan: TurnPlanStep[] = rawPlan
+    .map((item) => {
+      const itemRecord = toRecord(item);
+      if (!itemRecord) {
+        return null;
+      }
+
+      const step = readString(itemRecord.step);
+      const status = readString(itemRecord.status);
+      if (
+        !step ||
+        (status !== 'pending' && status !== 'inProgress' && status !== 'completed')
+      ) {
+        return null;
+      }
+
+      return {
+        step,
+        status,
+      } satisfies TurnPlanStep;
+    })
+    .filter((item): item is TurnPlanStep => item !== null);
+
+  return {
+    threadId,
+    turnId,
+    explanation: readString(record.explanation),
+    plan,
+  };
+}
+
+function toPendingUserInputRequest(value: unknown): PendingUserInputRequest | null {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const id = readString(record.id);
+  const threadId = readString(record.threadId);
+  const turnId = readString(record.turnId);
+  const itemId = readString(record.itemId);
+  const requestedAt = readString(record.requestedAt);
+  const rawQuestions = Array.isArray(record.questions) ? record.questions : [];
+  if (!id || !threadId || !turnId || !itemId || !requestedAt || rawQuestions.length === 0) {
+    return null;
+  }
+
+  const questions = rawQuestions
+    .map((item) => {
+      const itemRecord = toRecord(item);
+      if (!itemRecord) {
+        return null;
+      }
+
+      const questionId = readString(itemRecord.id);
+      const header = readString(itemRecord.header);
+      const question = readString(itemRecord.question);
+      if (!questionId || !header || !question) {
+        return null;
+      }
+
+      const parsedInlineOptions = parseInlineOptionsFromQuestionText(question);
+
+      const parsedOptions = Array.isArray(itemRecord.options)
+        ? itemRecord.options
+            .map((option) => {
+              const optionRecord = toRecord(option);
+              if (!optionRecord) {
+                return null;
+              }
+
+              const label =
+                readString(optionRecord.label) ??
+                readString(optionRecord.title) ??
+                readString(optionRecord.value) ??
+                readString(optionRecord.text);
+              const description =
+                readString(optionRecord.description) ??
+                readString(optionRecord.detail) ??
+                '';
+              if (!label) {
+                return null;
+              }
+              return {
+                label,
+                description,
+              };
+            })
+            .filter(
+              (option): option is { label: string; description: string } => option !== null
+            )
+        : null;
+      const options =
+        parsedOptions && parsedOptions.length > 0
+          ? parsedOptions
+          : parsedInlineOptions.options;
+
+      return {
+        id: questionId,
+        header,
+        question: parsedInlineOptions.question,
+        isOther: readBoolean(itemRecord.isOther) ?? false,
+        isSecret: readBoolean(itemRecord.isSecret) ?? false,
+        options,
+      } satisfies PendingUserInputRequest['questions'][number];
+    })
+    .filter(
+      (question): question is PendingUserInputRequest['questions'][number] =>
+        question !== null
+    );
+
+  if (questions.length === 0) {
+    return null;
+  }
+
+  return {
+    id,
+    threadId,
+    turnId,
+    itemId,
+    requestedAt,
+    questions,
+  };
+}
+
+function buildUserInputDrafts(request: PendingUserInputRequest): Record<string, string> {
+  const drafts: Record<string, string> = {};
+  for (const question of request.questions) {
+    drafts[question.id] = '';
+  }
+  return drafts;
+}
+
+function normalizeQuestionAnswers(value: string): string[] {
+  return value
+    .split('\n')
+    .flatMap((line) => line.split(','))
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function findInlineChoiceSet(messages: ChatTranscriptMessage[]): {
+  messageId: string;
+  options: Array<{ label: string; description: string }>;
+} | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'assistant') {
+      continue;
+    }
+
+    if (message.content.length > 1200) {
+      continue;
+    }
+
+    const parsed = parseInlineOptionsFromQuestionText(message.content);
+    if (!parsed.options || parsed.options.length < 2 || parsed.options.length > 5) {
+      continue;
+    }
+
+    const cueSource = `${parsed.question}\n${message.content}`.toLowerCase();
+    const hasCue =
+      cueSource.includes('?') ||
+      INLINE_CHOICE_CUE_PHRASES.some((phrase) => cueSource.includes(phrase));
+    if (!hasCue) {
+      continue;
+    }
+
+    return {
+      messageId: message.id,
+      options: parsed.options,
+    };
+  }
+
+  return null;
+}
+
+function stripOptionText(value: string): string {
+  return value
+    .replace(/^[`*_~]+/g, '')
+    .replace(/[`*_~]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitOptionLine(value: string): { label: string; description: string } {
+  const normalized = value.replace(/^[-*+\u2022]\s+/, '').trim();
+  if (!normalized) {
+    return {
+      label: '',
+      description: '',
+    };
+  }
+
+  const separators = [' \u2014 ', ' - ', ': '];
+  for (const separator of separators) {
+    const separatorIndex = normalized.indexOf(separator);
+    if (separatorIndex <= 0 || separatorIndex >= normalized.length - separator.length) {
+      continue;
+    }
+
+    const label = stripOptionText(normalized.slice(0, separatorIndex));
+    const description = stripOptionText(
+      normalized.slice(separatorIndex + separator.length)
+    );
+    if (!label) {
+      continue;
+    }
+
+    return {
+      label,
+      description,
+    };
+  }
+
+  return {
+    label: stripOptionText(normalized),
+    description: '',
+  };
+}
+
+function isLikelyOptionContinuationLine(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return (
+    /^[-*+\u2022]\s+/.test(trimmed) ||
+    /^(impact|trade[- ]?off|reason|because|benefit|cost|why)\b/i.test(trimmed)
+  );
+}
+
+function parseInlineOptionsFromQuestionText(value: string): {
+  question: string;
+  options: Array<{ label: string; description: string }> | null;
+} {
+  const lines = value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return {
+      question: value,
+      options: null,
+    };
+  }
+
+  const promptLines: string[] = [];
+  const options: Array<{ label: string; description: string }> = [];
+  let hasMatchedOptionLine = false;
+
+  for (const line of lines) {
+    const optionMatch = line.match(INLINE_OPTION_LINE_PATTERN);
+    if (optionMatch) {
+      const parsed = splitOptionLine(optionMatch[1] ?? '');
+      if (parsed.label) {
+        options.push(parsed);
+        hasMatchedOptionLine = true;
+        continue;
+      }
+    }
+
+    if (hasMatchedOptionLine && options.length > 0 && isLikelyOptionContinuationLine(line)) {
+      const continuation = stripOptionText(line.replace(/^[-*+\u2022]\s+/, ''));
+      if (continuation) {
+        const lastOption = options[options.length - 1];
+        lastOption.description = lastOption.description
+          ? `${lastOption.description} ${continuation}`
+          : continuation;
+      }
+      continue;
+    }
+
+    promptLines.push(line);
+  }
+
+  if (options.length < 2) {
+    return {
+      question: value,
+      options: null,
+    };
+  }
+
+  const question = promptLines.length > 0 ? promptLines.join('\n') : 'Select one option.';
+
+  return {
+    question,
+    options,
+  };
 }
 
 function normalizeWorkspacePath(value: string | null | undefined): string | null {
@@ -2816,6 +3861,10 @@ function normalizeModelId(value: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function formatCollaborationModeLabel(mode: CollaborationMode): string {
+  return mode === 'plan' ? 'Plan mode' : 'Default mode';
+}
+
 function formatReasoningEffort(effort: ReasoningEffort): string {
   if (effort === 'xhigh') {
     return 'X-High';
@@ -2830,6 +3879,24 @@ function formatReasoningEffort(effort: ReasoningEffort): string {
   }
 
   return effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
+function shouldAutoEnablePlanModeFromChat(chat: Chat): boolean {
+  const latestAssistantMessage = [...chat.messages]
+    .reverse()
+    .find((message) => message.role === 'assistant');
+  if (!latestAssistantMessage) {
+    return false;
+  }
+
+  const normalized = latestAssistantMessage.content.toLowerCase();
+  return (
+    normalized.includes('request_user_input is unavailable in default mode') ||
+    (normalized.includes('request_user_input') &&
+      normalized.includes('default mode') &&
+      normalized.includes('plan mode') &&
+      normalized.includes('unavailable'))
+  );
 }
 
 function parseSlashCommand(input: string): { name: string; args: string } | null {
@@ -3104,6 +4171,7 @@ function toPendingApproval(value: unknown): PendingApproval | null {
     command: readString(record.command) ?? undefined,
     cwd: readString(record.cwd) ?? undefined,
     grantRoot: readString(record.grantRoot) ?? undefined,
+    proposedExecpolicyAmendment: readStringArray(record.proposedExecpolicyAmendment) ?? undefined,
   };
 }
 
@@ -3158,12 +4226,71 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     maxWidth: '58%',
   },
+  modeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgItem,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    maxWidth: '38%',
+  },
   modelChipPressed: {
     opacity: 0.86,
   },
   modelChipText: {
     ...typography.caption,
     color: colors.textSecondary,
+  },
+  planCard: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    borderRadius: 12,
+    backgroundColor: colors.bgItem,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  planCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  planCardTitle: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  planExplanationText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginBottom: spacing.sm,
+  },
+  planStepsList: {
+    gap: spacing.xs,
+  },
+  planStepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  planStepStatus: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 1,
+  },
+  planStepText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    flex: 1,
+  },
+  planDeltaText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
   },
   renameModalBackdrop: {
     flex: 1,
@@ -3342,6 +4469,126 @@ const styles = StyleSheet.create({
     color: colors.black,
     fontWeight: '600',
   },
+  userInputModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  userInputModalCard: {
+    backgroundColor: colors.bgItem,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.borderHighlight,
+    padding: spacing.lg,
+    gap: spacing.md,
+    maxHeight: '80%',
+  },
+  userInputModalTitle: {
+    ...typography.headline,
+    color: colors.textPrimary,
+  },
+  userInputQuestionsList: {
+    maxHeight: 380,
+  },
+  userInputQuestionsListContent: {
+    gap: spacing.md,
+  },
+  userInputQuestionCard: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    borderRadius: 10,
+    backgroundColor: colors.bgMain,
+    padding: spacing.sm,
+    gap: spacing.xs,
+  },
+  userInputQuestionHeader: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  userInputQuestionText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  userInputOptionsColumn: {
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  userInputOptionButton: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgItem,
+    borderRadius: 10,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    gap: 2,
+  },
+  userInputOptionButtonSelected: {
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.bgInput,
+  },
+  userInputOptionButtonPressed: {
+    opacity: 0.85,
+  },
+  userInputOptionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  userInputOptionIndex: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontWeight: '700',
+    minWidth: 18,
+  },
+  userInputOptionLabel: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    flex: 1,
+    fontWeight: '600',
+  },
+  userInputOptionDescription: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  userInputAnswerInput: {
+    color: colors.textPrimary,
+    backgroundColor: colors.bgInput,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    minHeight: 42,
+    textAlignVertical: 'top',
+  },
+  userInputAnswerInputSecret: {
+    textAlignVertical: 'center',
+  },
+  userInputErrorText: {
+    ...typography.caption,
+    color: colors.error,
+  },
+  userInputSubmitButton: {
+    borderWidth: 1,
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.bgInput,
+    borderRadius: 10,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  userInputSubmitButtonPressed: {
+    opacity: 0.88,
+  },
+  userInputSubmitButtonDisabled: {
+    opacity: 0.45,
+  },
+  userInputSubmitButtonText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
 
   // Compose
   composeContainer: {
@@ -3417,6 +4664,53 @@ const styles = StyleSheet.create({
     paddingTop: spacing.lg,
     paddingBottom: spacing.xl,
     gap: spacing.xl,
+  },
+  chatMessageBlock: {
+    gap: spacing.sm,
+  },
+  inlineChoiceOptions: {
+    marginLeft: spacing.sm,
+    gap: spacing.xs,
+  },
+  inlineChoiceOptionButton: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgItem,
+    borderRadius: 10,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    gap: 2,
+  },
+  inlineChoiceOptionButtonPressed: {
+    backgroundColor: colors.bgInput,
+    borderColor: colors.borderHighlight,
+  },
+  inlineChoiceOptionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  inlineChoiceOptionIndex: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontWeight: '700',
+    minWidth: 18,
+  },
+  inlineChoiceOptionLabel: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
+    flex: 1,
+  },
+  inlineChoiceOptionDescription: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  inlineChoiceHint: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 2,
+    marginLeft: spacing.xs,
   },
   toolPanel: {
     borderRadius: 12,

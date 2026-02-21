@@ -289,6 +289,103 @@ describe('MacBridgeApiClient', () => {
     );
   });
 
+  it('sendChatMessage() sends structured collaborationMode for plan mode', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_plan' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_plan',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [],
+        },
+      });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.sendChatMessage('thr_plan', {
+      content: 'hello',
+      model: 'gpt-5.3-codex',
+      effort: 'high',
+      collaborationMode: 'plan',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        model: 'gpt-5.3-codex',
+        effort: 'high',
+        collaborationMode: {
+          mode: 'plan',
+          settings: {
+            model: 'gpt-5.3-codex',
+            reasoning_effort: 'high',
+            developer_instructions: null,
+          },
+        },
+      })
+    );
+  });
+
+  it('sendChatMessage() resolves default model before plan mode turn when model is unset', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'gpt-5.3-codex',
+            displayName: 'GPT-5.3 Codex',
+            isDefault: true,
+          },
+        ],
+      }) // model/list fallback
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_plan_fallback' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_plan_fallback',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [],
+        },
+      });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.sendChatMessage('thr_plan_fallback', {
+      content: 'hello',
+      collaborationMode: 'plan',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      1,
+      'model/list',
+      expect.objectContaining({
+        includeHidden: false,
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(
+      3,
+      'turn/start',
+      expect.objectContaining({
+        model: 'gpt-5.3-codex',
+        collaborationMode: {
+          mode: 'plan',
+          settings: {
+            model: 'gpt-5.3-codex',
+            reasoning_effort: null,
+            developer_instructions: null,
+          },
+        },
+      })
+    );
+  });
+
   it('listModels() maps model/list response', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({

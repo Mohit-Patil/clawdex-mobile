@@ -12,16 +12,20 @@ interface ApprovalBannerProps {
 }
 
 export function ApprovalBanner({ approval, onResolve }: ApprovalBannerProps) {
-  const [resolving, setResolving] = useState<ApprovalDecision | null>(null);
+  const [resolving, setResolving] = useState<string | null>(null);
 
   const handleResolve = (decision: ApprovalDecision) => {
-    setResolving(decision);
+    setResolving(decisionKey(decision));
     onResolve(approval.id, decision);
   };
 
   const label = approval.kind === 'commandExecution'
     ? approval.command ?? 'Run command'
     : 'File change';
+  const canAllowSimilar =
+    approval.kind === 'commandExecution' &&
+    Array.isArray(approval.proposedExecpolicyAmendment) &&
+    approval.proposedExecpolicyAmendment.length > 0;
 
   const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
@@ -66,13 +70,68 @@ export function ApprovalBanner({ approval, onResolve }: ApprovalBannerProps) {
           ) : (
             <>
               <Ionicons name="checkmark" size={14} color={colors.textPrimary} />
-              <Text style={[styles.btnText, { color: colors.textPrimary }]}>Accept</Text>
+              <Text style={[styles.btnText, { color: colors.textPrimary }]}>Allow once</Text>
             </>
           )}
         </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [styles.btn, styles.acceptBtn, pressed && styles.btnPressed]}
+          onPress={() => handleResolve('acceptForSession')}
+          disabled={resolving !== null}
+        >
+          {resolving === 'acceptForSession' ? (
+            <ActivityIndicator size="small" color={colors.textPrimary} />
+          ) : (
+            <>
+              <Ionicons name="time-outline" size={14} color={colors.textPrimary} />
+              <Text style={[styles.btnText, { color: colors.textPrimary }]}>Session</Text>
+            </>
+          )}
+        </Pressable>
+
+        {canAllowSimilar ? (
+          <Pressable
+            style={({ pressed }) => [
+              styles.btn,
+              styles.acceptBtn,
+              styles.allowSimilarBtn,
+              pressed && styles.btnPressed,
+            ]}
+            onPress={() =>
+              handleResolve({
+                acceptWithExecpolicyAmendment: {
+                  execpolicy_amendment: approval.proposedExecpolicyAmendment ?? [],
+                },
+              })
+            }
+            disabled={resolving !== null}
+          >
+            {resolving === 'acceptWithExecpolicyAmendment' ? (
+              <ActivityIndicator size="small" color={colors.textPrimary} />
+            ) : (
+              <>
+                <Ionicons name="flash-outline" size={14} color={colors.textPrimary} />
+                <Text style={[styles.btnText, { color: colors.textPrimary }]}>Allow similar</Text>
+              </>
+            )}
+          </Pressable>
+        ) : null}
       </View>
     </Animated.View>
   );
+}
+
+function decisionKey(decision: ApprovalDecision): string {
+  if (typeof decision === 'string') {
+    return decision;
+  }
+
+  if ('acceptWithExecpolicyAmendment' in decision) {
+    return 'acceptWithExecpolicyAmendment';
+  }
+
+  return 'unknown';
 }
 
 const styles = StyleSheet.create({
@@ -113,10 +172,12 @@ const styles = StyleSheet.create({
   },
   actions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
   },
   btn: {
-    flex: 1,
+    flexGrow: 1,
+    minWidth: 112,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -135,6 +196,9 @@ const styles = StyleSheet.create({
   acceptBtn: {
     borderColor: colors.borderHighlight,
     backgroundColor: colors.bgInput,
+  },
+  allowSimilarBtn: {
+    flexBasis: '100%',
   },
   btnText: {
     fontSize: 13,

@@ -7,6 +7,7 @@ import {
 } from './chatMapping';
 import type {
   ApprovalDecision,
+  CollaborationMode,
   CreateChatRequest,
   Chat,
   ChatSummary,
@@ -17,6 +18,8 @@ import type {
   GitStatusResponse,
   PendingApproval,
   ResolveApprovalResponse,
+  ResolveUserInputRequest,
+  ResolveUserInputResponse,
   SendChatMessageRequest,
   ModelOption,
   ReasoningEffort,
@@ -64,9 +67,20 @@ interface AppServerModelListResponse {
   data?: unknown[];
 }
 
+interface AppServerCollaborationMode {
+  mode: 'plan';
+  settings: {
+    model: string;
+    reasoning_effort: ReasoningEffort | null;
+    developer_instructions: string | null;
+  };
+}
+
 type AppServerThreadSetNameResponse = Record<string, never>;
 
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
+const MOBILE_DEVELOPER_INSTRUCTIONS =
+  'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
 
 export class MacBridgeApiClient {
   private readonly ws: MacBridgeWsClient;
@@ -128,11 +142,11 @@ export class MacBridgeApiClient {
       model: requestedModel ?? null,
       modelProvider: null,
       cwd: requestedCwd ?? null,
-      approvalPolicy: 'on-request',
+      approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
       config: null,
       baseInstructions: null,
-      developerInstructions: null,
+      developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       personality: null,
       ephemeral: null,
       experimentalRawEvents: false,
@@ -225,11 +239,11 @@ export class MacBridgeApiClient {
       model: null,
       modelProvider: null,
       cwd: normalizedCwd,
-      approvalPolicy: 'on-request',
+      approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
       config: null,
       baseInstructions: null,
-      developerInstructions: null,
+      developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       personality: null,
       persistExtendedHistory: true,
     });
@@ -258,20 +272,38 @@ export class MacBridgeApiClient {
     const normalizedCwd = normalizeCwd(body.cwd);
     const normalizedModel = normalizeModel(body.model);
     const normalizedEffort = normalizeEffort(body.effort);
+    const requestedPlanMode =
+      typeof body.collaborationMode === 'string' &&
+      body.collaborationMode.trim().toLowerCase() === 'plan';
+    let effectiveModel = normalizedModel;
+    if (requestedPlanMode && !effectiveModel) {
+      try {
+        const models = await this.listModels(false);
+        effectiveModel =
+          models.find((entry) => entry.isDefault)?.id ?? models[0]?.id ?? null;
+      } catch {
+        // Best effort: fall back to the current thread settings if model lookup fails.
+      }
+    }
+    const normalizedCollaborationMode = toTurnCollaborationMode(
+      body.collaborationMode,
+      effectiveModel,
+      normalizedEffort
+    );
 
     try {
       await this.ws.request('thread/resume', {
         threadId: id,
         history: null,
         path: null,
-        model: normalizedModel ?? null,
+        model: effectiveModel ?? null,
         modelProvider: null,
         cwd: normalizedCwd ?? null,
-        approvalPolicy: 'on-request',
+        approvalPolicy: 'untrusted',
         sandbox: 'workspace-write',
         config: null,
         baseInstructions: null,
-        developerInstructions: null,
+        developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
         personality: null,
         persistExtendedHistory: true,
       });
@@ -291,12 +323,12 @@ export class MacBridgeApiClient {
       cwd: normalizedCwd ?? null,
       approvalPolicy: null,
       sandboxPolicy: null,
-      model: normalizedModel ?? null,
+      model: effectiveModel ?? null,
       effort: normalizedEffort ?? null,
       summary: null,
       personality: null,
       outputSchema: null,
-      collaborationMode: null,
+      collaborationMode: normalizedCollaborationMode,
     });
 
     const turnId = turnStart.turn?.id;
@@ -389,11 +421,11 @@ export class MacBridgeApiClient {
       model: normalizeModel(options?.model) ?? null,
       modelProvider: null,
       cwd: normalizeCwd(options?.cwd) ?? null,
-      approvalPolicy: 'on-request',
+      approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
       config: null,
       baseInstructions: null,
-      developerInstructions: null,
+      developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       persistExtendedHistory: true,
     });
 
@@ -412,6 +444,16 @@ export class MacBridgeApiClient {
     return this.ws.request<ResolveApprovalResponse>('bridge/approvals/resolve', {
       id,
       decision,
+    });
+  }
+
+  resolveUserInput(
+    id: string,
+    body: ResolveUserInputRequest
+  ): Promise<ResolveUserInputResponse> {
+    return this.ws.request<ResolveUserInputResponse>('bridge/userInput/resolve', {
+      id,
+      answers: body.answers,
     });
   }
 
@@ -543,6 +585,34 @@ function normalizeEffort(effort: string | null | undefined): ReasoningEffort | n
   }
 
   return null;
+}
+
+function toTurnCollaborationMode(
+  value: CollaborationMode | string | null | undefined,
+  model: string | null,
+  effort: ReasoningEffort | null
+): AppServerCollaborationMode | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized !== 'plan') {
+    return null;
+  }
+
+  if (!model) {
+    return null;
+  }
+
+  return {
+    mode: 'plan',
+    settings: {
+      model,
+      reasoning_effort: effort,
+      developer_instructions: null,
+    },
+  };
 }
 
 function toReasoningEffortOptions(raw: unknown): ModelReasoningEffortOption[] {
