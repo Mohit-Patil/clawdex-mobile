@@ -144,4 +144,61 @@ describe('MacBridgeWsClient', () => {
     expect(listener).toHaveBeenNthCalledWith(1, true);
     expect(listener).toHaveBeenNthCalledWith(2, false);
   });
+
+  it('waitForTurnCompletion resolves from cached completion events', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    client.connect();
+
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        params: {
+          threadId: 'thr_1',
+          turn: {
+            id: 'turn_1',
+            status: 'completed',
+          },
+        },
+      })
+    );
+
+    await expect(client.waitForTurnCompletion('thr_1', 'turn_1', 100)).resolves.toBeUndefined();
+  });
+
+  it('waitForTurnCompletion accepts snake_case completion payloads', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    client.connect();
+
+    const waitPromise = client.waitForTurnCompletion('thr_2', 'turn_2', 100);
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        params: {
+          thread_id: 'thr_2',
+          turn_id: 'turn_2',
+          status: 'completed',
+        },
+      })
+    );
+
+    await expect(waitPromise).resolves.toBeUndefined();
+  });
+
+  it('waitForTurnCompletion tolerates completion payloads without turn id', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    client.connect();
+
+    const waitPromise = client.waitForTurnCompletion('thr_3', 'turn_3', 100);
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        params: {
+          threadId: 'thr_3',
+          status: 'completed',
+        },
+      })
+    );
+
+    await expect(waitPromise).resolves.toBeUndefined();
+  });
 });

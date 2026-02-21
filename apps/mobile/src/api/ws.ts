@@ -27,6 +27,14 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface TurnCompletionSnapshot {
+  threadId: string;
+  turnId: string | null;
+  status: string | null;
+  errorMessage: string | null;
+  completedAt: number;
+}
+
 interface RpcError {
   code: number;
   message: string;
@@ -34,6 +42,7 @@ interface RpcError {
 }
 
 export class MacBridgeWsClient {
+  private static readonly TURN_COMPLETION_TTL_MS = 5 * 60 * 1000;
   private socket: WebSocket | null = null;
   private connected = false;
   private shouldReconnect = false;
@@ -43,6 +52,7 @@ export class MacBridgeWsClient {
   private readonly eventListeners = new Set<EventListener>();
   private readonly statusListeners = new Set<StatusListener>();
   private readonly pendingRequests = new Map<string | number, PendingRequest>();
+  private readonly recentTurnCompletions = new Map<string, TurnCompletionSnapshot>();
   private readonly authToken: string | null;
   private readonly allowQueryTokenAuth: boolean;
   private readonly baseUrl: string;
@@ -132,6 +142,12 @@ export class MacBridgeWsClient {
     turnId: string,
     timeoutMs = this.requestTimeoutMs
   ): Promise<void> {
+    const cachedCompletion = this.getTurnCompletion(threadId, turnId);
+    if (cachedCompletion) {
+      this.assertTurnSucceeded(cachedCompletion);
+      return;
+    }
+
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         unsubscribe();
@@ -143,27 +159,37 @@ export class MacBridgeWsClient {
           return;
         }
 
-        const params = toRecord(event.params);
-        const eventThreadId = readString(params?.threadId);
-        if (eventThreadId !== threadId) {
+        const completion = toTurnCompletionSnapshot(event.params);
+        if (!completion || completion.threadId !== threadId) {
           return;
         }
 
-        const turn = toRecord(params?.turn);
-        const completedTurnId = readString(turn?.id);
-        if (completedTurnId !== turnId) {
+        const completedTurnId = completion.turnId;
+        if (completedTurnId && completedTurnId !== turnId) {
           return;
         }
 
-        const turnStatus = readString(turn?.status);
-        const turnError = toRecord(turn?.error);
-        const turnErrorMessage = readString(turnError?.message);
+        const normalizedCompletion: TurnCompletionSnapshot = completedTurnId
+          ? completion
+          : {
+              ...completion,
+              turnId,
+            };
+        this.rememberTurnCompletion(normalizedCompletion);
 
         clearTimeout(timeout);
         unsubscribe();
 
-        if (turnStatus === 'failed' || turnStatus === 'interrupted') {
-          reject(new Error(turnErrorMessage ?? `turn ${turnStatus ?? 'failed'}`));
+        if (
+          normalizedCompletion.status === 'failed' ||
+          normalizedCompletion.status === 'interrupted'
+        ) {
+          reject(
+            new Error(
+              normalizedCompletion.errorMessage ??
+                `turn ${normalizedCompletion.status ?? 'failed'}`
+            )
+          );
           return;
         }
 
@@ -317,6 +343,13 @@ export class MacBridgeWsClient {
     }
 
     if (hasMethod) {
+      if (String(record.method) === 'turn/completed') {
+        const completion = toTurnCompletionSnapshot(record.params);
+        if (completion?.turnId) {
+          this.rememberTurnCompletion(completion);
+        }
+      }
+
       this.emitEvent({
         method: String(record.method),
         params: toRecord(record.params),
@@ -329,6 +362,38 @@ export class MacBridgeWsClient {
       clearTimeout(pending.timeout);
       pending.reject(error);
       this.pendingRequests.delete(id);
+    }
+  }
+
+  private getTurnCompletion(threadId: string, turnId: string): TurnCompletionSnapshot | null {
+    this.pruneTurnCompletions();
+    return this.recentTurnCompletions.get(turnCompletionKey(threadId, turnId)) ?? null;
+  }
+
+  private rememberTurnCompletion(snapshot: TurnCompletionSnapshot): void {
+    if (!snapshot.turnId) {
+      return;
+    }
+
+    this.pruneTurnCompletions();
+    this.recentTurnCompletions.set(
+      turnCompletionKey(snapshot.threadId, snapshot.turnId),
+      snapshot
+    );
+  }
+
+  private pruneTurnCompletions(): void {
+    const now = Date.now();
+    for (const [key, snapshot] of this.recentTurnCompletions.entries()) {
+      if (now - snapshot.completedAt > MacBridgeWsClient.TURN_COMPLETION_TTL_MS) {
+        this.recentTurnCompletions.delete(key);
+      }
+    }
+  }
+
+  private assertTurnSucceeded(snapshot: TurnCompletionSnapshot): void {
+    if (snapshot.status === 'failed' || snapshot.status === 'interrupted') {
+      throw new Error(snapshot.errorMessage ?? `turn ${snapshot.status ?? 'failed'}`);
     }
   }
 
@@ -368,4 +433,33 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function turnCompletionKey(threadId: string, turnId: string): string {
+  return `${threadId}::${turnId}`;
+}
+
+function toTurnCompletionSnapshot(value: unknown): TurnCompletionSnapshot | null {
+  const params = toRecord(value);
+  if (!params) {
+    return null;
+  }
+
+  const threadId = readString(params.threadId) ?? readString(params.thread_id);
+  const turn = toRecord(params.turn);
+  const turnId =
+    readString(turn?.id) ?? readString(params.turnId) ?? readString(params.turn_id);
+  if (!threadId) {
+    return null;
+  }
+
+  const turnError = toRecord(turn?.error) ?? toRecord(params.error);
+
+  return {
+    threadId,
+    turnId,
+    status: readString(turn?.status) ?? readString(params.status),
+    errorMessage: readString(turnError?.message),
+    completedAt: Date.now(),
+  };
 }
