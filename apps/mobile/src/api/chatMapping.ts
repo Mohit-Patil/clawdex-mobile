@@ -39,6 +39,7 @@ export type RawThreadItem =
 
 export interface RawThread {
   id?: string;
+  name?: string;
   preview?: string;
   modelProvider?: string;
   createdAt?: number;
@@ -143,8 +144,14 @@ function extractLastError(turns: RawTurn[]): string | null {
 
 export function toRawThread(value: unknown): RawThread {
   const record = toRecord(value) ?? {};
+  const threadName =
+    readString(record.name) ??
+    readString(record.threadName) ??
+    readString(record.thread_name) ??
+    undefined;
   return {
     id: readString(record.id) ?? undefined,
+    name: threadName,
     preview: readString(record.preview) ?? undefined,
     modelProvider: readString(record.modelProvider) ?? undefined,
     createdAt: readNumber(record.createdAt) ?? undefined,
@@ -188,10 +195,11 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
   const turns = Array.isArray(raw.turns) ? raw.turns : [];
 
   const lastError = extractLastError(turns);
+  const displayTitle = raw.name ?? raw.preview;
 
   return {
     id: raw.id,
-    title: toPreview(raw.preview || `Chat ${raw.id.slice(0, 8)}`),
+    title: toPreview(displayTitle || `Chat ${raw.id.slice(0, 8)}`),
     status: mapRawStatus(raw.status, turns),
     createdAt,
     updatedAt,

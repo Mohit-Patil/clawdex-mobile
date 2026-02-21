@@ -46,7 +46,7 @@ export function TermsScreen({ termsUrl, onOpenDrawer }: TermsScreenProps) {
   return (
     <View style={styles.container}>
       <LinearGradient
-        colors={['#111827', '#1F2937', '#05050A']}
+        colors={[colors.bgMain, colors.bgMain, colors.bgMain]}
         style={StyleSheet.absoluteFill}
       />
       <SafeAreaView style={styles.safeArea}>

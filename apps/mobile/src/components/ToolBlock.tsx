@@ -35,7 +35,7 @@ export function ToolBlock({ command, status, output, durationMs }: ToolBlockProp
         onPress={() => setExpanded(!expanded)}
       >
         <View style={styles.header}>
-          <Ionicons name="folder-open" size={14} color={colors.accent} />
+          <Ionicons name="folder-open" size={14} color={colors.textSecondary} />
           <Text style={styles.command} numberOfLines={expanded ? undefined : 1}>
             {command}
           </Text>

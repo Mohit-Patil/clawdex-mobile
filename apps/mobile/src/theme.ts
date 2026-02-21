@@ -2,42 +2,47 @@ import { Platform, StyleSheet } from 'react-native';
 
 export const colors = {
   // Backgrounds
-  bgMain: '#0D0D0D',
-  bgSidebar: '#1A1A1A',
-  bgItem: '#1A1A1A',
-  bgInput: 'rgba(255, 255, 255, 0.06)',
+  bgMain: '#000000',
+  bgSidebar: '#0C0D10',
+  bgItem: '#1B1D21',
+  bgInput: '#23262B',
 
   // Borders
-  border: 'rgba(255, 255, 255, 0.1)',
-  borderLight: 'rgba(255, 255, 255, 0.05)',
-  borderHighlight: 'rgba(255, 255, 255, 0.12)',
+  border: 'rgba(255, 255, 255, 0.18)',
+  borderLight: 'rgba(255, 255, 255, 0.12)',
+  borderHighlight: 'rgba(255, 255, 255, 0.28)',
 
   // Text
-  textPrimary: '#E8E8E8',
-  textSecondary: '#999999',
-  textMuted: 'rgba(255, 255, 255, 0.4)',
+  textPrimary: '#F3F4F8',
+  textSecondary: '#D0D5DF',
+  textMuted: 'rgba(232, 236, 244, 0.74)',
 
-  // Accent — gold/amber
-  accent: '#C8A946',
-  accentPressed: '#B89A3A',
+  // Accent
+  accent: '#B5BDCC',
+  accentPressed: '#9CA5B7',
 
   // User bubble
-  userBubble: '#1E1E1E',
-  userBubbleBorder: 'rgba(255, 255, 255, 0.1)',
+  userBubble: '#262A31',
+  userBubbleBorder: 'rgba(212, 219, 232, 0.32)',
 
   // Assistant — no bubble
   assistantBubbleBg: 'transparent',
   assistantBubbleBorder: 'transparent',
 
+  // Inline/code highlight
+  inlineCodeBg: '#2A303A',
+  inlineCodeBorder: 'rgba(197, 206, 223, 0.42)',
+  inlineCodeText: '#EEF2FB',
+
   // Tool block
-  toolBlockBg: 'rgba(255, 255, 255, 0.04)',
-  toolBlockBorder: '#C8A946',
+  toolBlockBg: 'rgba(255, 255, 255, 0.09)',
+  toolBlockBorder: '#5A6376',
 
   // Status
-  statusRunning: '#C8A946',
-  statusComplete: '#10B981',
+  statusRunning: '#C2C9D8',
+  statusComplete: '#C6CDD9',
   statusError: '#EF4444',
-  statusIdle: 'rgba(255, 255, 255, 0.4)',
+  statusIdle: '#B4BCCB',
 
   // Misc
   error: '#EF4444',

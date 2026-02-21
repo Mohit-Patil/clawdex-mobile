@@ -3,6 +3,7 @@ import 'react-native-gesture-handler';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  PanResponder,
   Pressable,
   StyleSheet,
   useWindowDimensions,
@@ -24,6 +25,11 @@ import { colors } from './src/theme';
 type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings' | 'Privacy' | 'Terms';
 
 const DRAWER_WIDTH = 280;
+const EDGE_SWIPE_WIDTH = 24;
+const SWIPE_OPEN_DISTANCE = 56;
+const SWIPE_CLOSE_DISTANCE = 56;
+const SWIPE_OPEN_VELOCITY = 0.4;
+const SWIPE_CLOSE_VELOCITY = -0.4;
 
 export default function App() {
   const ws = useMemo(
@@ -44,9 +50,9 @@ export default function App() {
   const mainRef = useRef<MainScreenHandle>(null);
   const [currentScreen, setCurrentScreen] = useState<Screen>('Main');
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
-  const isOpen = useRef(false);
   const { width: screenWidth } = useWindowDimensions();
 
   useEffect(() => {
@@ -55,7 +61,7 @@ export default function App() {
   }, [ws]);
 
   const openDrawer = useCallback(() => {
-    isOpen.current = true;
+    setDrawerOpen(true);
     Animated.parallel([
       Animated.spring(drawerAnim, {
         toValue: 0,
@@ -72,7 +78,7 @@ export default function App() {
   }, [drawerAnim, overlayAnim]);
 
   const closeDrawer = useCallback(() => {
-    isOpen.current = false;
+    setDrawerOpen(false);
     Animated.parallel([
       Animated.spring(drawerAnim, {
         toValue: -DRAWER_WIDTH,
@@ -87,6 +93,62 @@ export default function App() {
       }),
     ]).start();
   }, [drawerAnim, overlayAnim]);
+
+  const openSwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gesture) => {
+          if (drawerOpen) {
+            return false;
+          }
+
+          if (gesture.dx <= 0) {
+            return false;
+          }
+
+          const isMostlyHorizontal = Math.abs(gesture.dx) > Math.abs(gesture.dy);
+          const isFromEdge = gesture.moveX <= EDGE_SWIPE_WIDTH + 12;
+
+          return isMostlyHorizontal && isFromEdge && gesture.dx > 8;
+        },
+        onPanResponderRelease: (_, gesture) => {
+          if (
+            gesture.dx > SWIPE_OPEN_DISTANCE ||
+            gesture.vx > SWIPE_OPEN_VELOCITY
+          ) {
+            openDrawer();
+          }
+        },
+      }),
+    [drawerOpen, openDrawer]
+  );
+
+  const closeSwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gesture) => {
+          if (!drawerOpen) {
+            return false;
+          }
+
+          if (gesture.dx >= 0) {
+            return false;
+          }
+
+          const isMostlyHorizontal = Math.abs(gesture.dx) > Math.abs(gesture.dy);
+          return isMostlyHorizontal && gesture.dx < -8;
+        },
+        onPanResponderRelease: (_, gesture) => {
+          if (
+            gesture.dx < -SWIPE_CLOSE_DISTANCE ||
+            gesture.vx < SWIPE_CLOSE_VELOCITY
+          ) {
+            closeDrawer();
+          }
+        },
+      }),
+    [closeDrawer, drawerOpen]
+  );
 
   const navigate = useCallback(
     (screen: Screen) => {
@@ -173,7 +235,8 @@ export default function App() {
 
       {/* Overlay */}
       <Animated.View
-        pointerEvents={isOpen.current ? 'auto' : 'none'}
+        pointerEvents={drawerOpen ? 'auto' : 'none'}
+        {...closeSwipeResponder.panHandlers}
         style={[styles.overlay, { opacity: overlayAnim }]}
       >
         <Pressable style={StyleSheet.absoluteFill} onPress={closeDrawer} />
@@ -181,6 +244,7 @@ export default function App() {
 
       {/* Drawer */}
       <Animated.View
+        {...closeSwipeResponder.panHandlers}
         style={[
           styles.drawer,
           { transform: [{ translateX: drawerAnim }] },
@@ -195,6 +259,12 @@ export default function App() {
           onNavigate={navigate}
         />
       </Animated.View>
+
+      <View
+        pointerEvents={drawerOpen ? 'none' : 'auto'}
+        style={styles.edgeSwipeZone}
+        {...openSwipeResponder.panHandlers}
+      />
     </View>
   );
 }
@@ -219,5 +289,13 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: DRAWER_WIDTH,
     zIndex: 20,
+  },
+  edgeSwipeZone: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    bottom: 0,
+    width: EDGE_SWIPE_WIDTH,
+    zIndex: 30,
   },
 });

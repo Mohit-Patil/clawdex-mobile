@@ -101,7 +101,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   plusBtnPressed: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: colors.bgItem,
   },
   inputWrapper: {
     flex: 1,
@@ -128,7 +128,7 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: colors.bgItem,
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: spacing.xs,

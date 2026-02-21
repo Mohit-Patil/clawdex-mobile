@@ -97,7 +97,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     marginHorizontal: spacing.lg,
     marginBottom: spacing.sm,
-    backgroundColor: 'rgba(18, 18, 18, 0.96)',
+    backgroundColor: colors.bgSidebar,
     borderWidth: 1,
     borderColor: colors.borderHighlight,
     borderRadius: radius.md,

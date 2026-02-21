@@ -106,7 +106,7 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
             <View style={styles.trafficLights}>
               <View style={[styles.trafficLight, { backgroundColor: '#FF5F56' }]} />
               <View style={[styles.trafficLight, { backgroundColor: '#FFBD2E' }]} />
-              <View style={[styles.trafficLight, { backgroundColor: '#27C93F' }]} />
+              <View style={[styles.trafficLight, { backgroundColor: '#8A93A5' }]} />
             </View>
             <Text style={styles.windowTitle}>bash — 80x24</Text>
             <View style={styles.trafficLightsPlaceholder} />
@@ -209,7 +209,7 @@ const styles = StyleSheet.create({
   outputContent: { padding: spacing.md },
   outputText: {
     ...typography.mono,
-    color: '#10B981', // Hacker green
+    color: '#D4D7DF',
     fontSize: 13,
     lineHeight: 20,
   },
@@ -226,7 +226,7 @@ const styles = StyleSheet.create({
     paddingTop: spacing.md,
     paddingBottom: Platform.OS === 'ios' ? spacing.xl : spacing.md,
   },
-  prompt: { ...typography.mono, color: '#10B981', fontWeight: '700' },
+  prompt: { ...typography.mono, color: colors.textSecondary, fontWeight: '700' },
   input: {
     flex: 1,
     ...typography.mono,

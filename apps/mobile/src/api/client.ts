@@ -50,6 +50,8 @@ interface AppServerStartResponse {
   };
 }
 
+type AppServerThreadSetNameResponse = Record<string, never>;
+
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
 
 export class MacBridgeApiClient {
@@ -143,6 +145,28 @@ export class MacBridgeApiClient {
       });
       return mapChat(toRawThread(response.thread));
     }
+  }
+
+  async renameChat(id: string, name: string): Promise<Chat> {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      throw new Error('Chat name cannot be empty');
+    }
+
+    await this.ws.request<AppServerThreadSetNameResponse>('thread/name/set', {
+      threadId: id,
+      name: trimmedName,
+    });
+
+    const updated = await this.getChat(id);
+    if (updated.title === trimmedName) {
+      return updated;
+    }
+
+    return {
+      ...updated,
+      title: trimmedName,
+    };
   }
 
   async sendChatMessage(id: string, body: SendChatMessageRequest): Promise<Chat> {

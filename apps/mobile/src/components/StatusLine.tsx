@@ -47,6 +47,6 @@ const styles = StyleSheet.create({
   text: {
     ...typography.caption,
     fontStyle: 'italic',
-    color: colors.accent,
+    color: colors.textMuted,
   },
 });

@@ -62,11 +62,11 @@ export function ApprovalBanner({ approval, onResolve }: ApprovalBannerProps) {
           disabled={resolving !== null}
         >
           {resolving === 'accept' ? (
-            <ActivityIndicator size="small" color={colors.statusComplete} />
+            <ActivityIndicator size="small" color={colors.textPrimary} />
           ) : (
             <>
-              <Ionicons name="checkmark" size={14} color={colors.statusComplete} />
-              <Text style={[styles.btnText, { color: colors.statusComplete }]}>Accept</Text>
+              <Ionicons name="checkmark" size={14} color={colors.textPrimary} />
+              <Text style={[styles.btnText, { color: colors.textPrimary }]}>Accept</Text>
             </>
           )}
         </Pressable>
@@ -79,9 +79,9 @@ const styles = StyleSheet.create({
   container: {
     marginHorizontal: spacing.lg,
     marginBottom: spacing.sm,
-    backgroundColor: 'rgba(200, 169, 70, 0.08)',
+    backgroundColor: colors.bgItem,
     borderWidth: 1,
-    borderColor: 'rgba(200, 169, 70, 0.3)',
+    borderColor: colors.borderHighlight,
     borderRadius: radius.md,
     padding: spacing.md,
   },
@@ -100,7 +100,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textPrimary,
     lineHeight: 18,
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    backgroundColor: colors.bgItem,
     borderRadius: radius.sm,
     padding: spacing.sm,
     marginBottom: spacing.sm,
@@ -133,8 +133,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(239, 68, 68, 0.08)',
   },
   acceptBtn: {
-    borderColor: 'rgba(16, 185, 129, 0.3)',
-    backgroundColor: 'rgba(16, 185, 129, 0.08)',
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.bgInput,
   },
   btnText: {
     fontSize: 13,

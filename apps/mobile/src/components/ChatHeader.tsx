@@ -4,10 +4,13 @@ import { colors, spacing, typography } from '../theme';
 
 interface ChatHeaderProps {
   onOpenDrawer: () => void;
-  modelName?: string;
+  title: string;
+  onOpenTitleMenu?: () => void;
 }
 
-export function ChatHeader({ onOpenDrawer, modelName = 'Codex' }: ChatHeaderProps) {
+export function ChatHeader({ onOpenDrawer, title, onOpenTitleMenu }: ChatHeaderProps) {
+  const titleDisplay = title.trim() || 'New chat';
+
   return (
     <View style={styles.headerContainer}>
       <SafeAreaView>
@@ -15,10 +18,24 @@ export function ChatHeader({ onOpenDrawer, modelName = 'Codex' }: ChatHeaderProp
           <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
             <Ionicons name="menu" size={22} color={colors.textPrimary} />
           </Pressable>
-          <View style={styles.modelNameRow}>
-            <Text style={styles.modelName}>{modelName}</Text>
-            <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
-          </View>
+          {onOpenTitleMenu ? (
+            <Pressable
+              onPress={onOpenTitleMenu}
+              hitSlop={8}
+              style={({ pressed }) => [styles.titleButton, pressed && styles.titleButtonPressed]}
+            >
+              <Text numberOfLines={1} style={styles.modelName}>
+                {titleDisplay}
+              </Text>
+              <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
+            </Pressable>
+          ) : (
+            <View style={styles.modelNameRow}>
+              <Text numberOfLines={1} style={styles.modelName}>
+                {titleDisplay}
+              </Text>
+            </View>
+          )}
           <View style={{ flex: 1 }} />
           <Ionicons name="sparkles-outline" size={20} color={colors.textMuted} />
         </View>
@@ -47,10 +64,24 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
+    flexShrink: 1,
+  },
+  titleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    borderRadius: 8,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 2,
+    flexShrink: 1,
+  },
+  titleButtonPressed: {
+    backgroundColor: colors.bgItem,
   },
   modelName: {
     ...typography.largeTitle,
     fontSize: 20,
     color: colors.textPrimary,
+    flexShrink: 1,
   },
 });

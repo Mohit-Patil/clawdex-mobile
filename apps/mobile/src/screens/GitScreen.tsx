@@ -65,7 +65,7 @@ export function GitScreen({ api, onOpenDrawer }: GitScreenProps) {
   return (
     <View style={styles.container}>
       <LinearGradient
-        colors={['#0F0C29', '#302B63', '#05050A']}
+        colors={[colors.bgMain, colors.bgMain, colors.bgMain]}
         style={StyleSheet.absoluteFill}
       />
       <SafeAreaView style={styles.safeArea}>

@@ -55,6 +55,7 @@ export function DrawerContent({
     return ws.onEvent((event: RpcNotification) => {
       if (
         event.method === 'thread/started' ||
+        event.method === 'thread/name/updated' ||
         event.method === 'turn/completed' ||
         event.method === 'thread/status/changed'
       ) {
@@ -77,10 +78,14 @@ export function DrawerContent({
         {/* New Chat button */}
         <View style={styles.header}>
           <Pressable
-            style={({ pressed }) => [styles.newChatBtn, pressed && styles.newChatBtnPressed]}
+            style={({ pressed }) => [
+              styles.navItem,
+              styles.newChatBtn,
+              pressed && styles.navItemPressed,
+            ]}
             onPress={onNewChat}
           >
-            <Ionicons name="add" size={16} color={colors.white} />
+            <Ionicons name="add" size={16} color={colors.textPrimary} />
             <Text style={styles.newChatText}>New chat</Text>
           </Pressable>
         </View>
@@ -196,21 +201,16 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.lg,
   },
   newChatBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.accent,
-    borderRadius: 8,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  newChatBtnPressed: {
-    backgroundColor: colors.accentPressed,
+    marginHorizontal: 0,
+    marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgItem,
   },
   newChatText: {
-    ...typography.headline,
-    color: colors.white,
-    fontSize: 14,
+    ...typography.body,
+    fontWeight: '500',
+    color: colors.textPrimary,
   },
   navItem: {
     flexDirection: 'row',
@@ -262,9 +262,9 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xs,
   },
   chatItemSelected: {
-    backgroundColor: 'rgba(200, 169, 70, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(200, 169, 70, 0.2)',
+    borderColor: colors.borderHighlight,
   },
   chatItemPressed: {
     backgroundColor: colors.bgItem,

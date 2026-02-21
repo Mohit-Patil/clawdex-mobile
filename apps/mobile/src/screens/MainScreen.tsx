@@ -8,12 +8,16 @@ import {
   useState,
 } from 'react';
 import {
+  ActionSheetIOS,
+  Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 
@@ -97,6 +101,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [activeCommands, setActiveCommands] = useState<RunEvent[]>([]);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
     const [streamingText, setStreamingText] = useState<string | null>(null);
+    const [renameModalVisible, setRenameModalVisible] = useState(false);
+    const [renameDraft, setRenameDraft] = useState('');
+    const [renaming, setRenaming] = useState(false);
     const [activity, setActivity] = useState<ActivityState>({
       tone: 'idle',
       title: 'Ready',
@@ -192,6 +199,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setActiveCommands([]);
       setPendingApproval(null);
       setStreamingText(null);
+      setRenameModalVisible(false);
+      setRenameDraft('');
+      setRenaming(false);
       setActivity({
         tone: 'idle',
         title: 'Ready',
@@ -230,6 +240,81 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setCreating(false);
       }
     }, [api, resetComposerState]);
+
+    const openRenameModal = useCallback(() => {
+      if (!selectedChat) {
+        return;
+      }
+
+      setRenameDraft(selectedChat.title || '');
+      setRenameModalVisible(true);
+    }, [selectedChat]);
+
+    const openChatTitleMenu = useCallback(() => {
+      if (!selectedChat) {
+        return;
+      }
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            options: ['Rename chat', 'Cancel'],
+            cancelButtonIndex: 1,
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 0) {
+              openRenameModal();
+            }
+          }
+        );
+        return;
+      }
+
+      Alert.alert('Chat options', selectedChat.title || 'Current chat', [
+        {
+          text: 'Rename chat',
+          onPress: openRenameModal,
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ]);
+    }, [openRenameModal, selectedChat]);
+
+    const closeRenameModal = useCallback(() => {
+      if (renaming) {
+        return;
+      }
+      setRenameModalVisible(false);
+    }, [renaming]);
+
+    const submitRenameChat = useCallback(async () => {
+      if (!selectedChatId || renaming) {
+        return;
+      }
+
+      const nextName = renameDraft.trim();
+      if (!nextName) {
+        setRenameModalVisible(false);
+        return;
+      }
+
+      try {
+        setRenaming(true);
+        const updated = await api.renameChat(selectedChatId, nextName);
+        setSelectedChat({
+          ...updated,
+          title: nextName,
+        });
+        setError(null);
+        setRenameModalVisible(false);
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setRenaming(false);
+      }
+    }, [api, renameDraft, renaming, selectedChatId]);
 
     useImperativeHandle(ref, () => ({
       openChat: (id: string) => {
@@ -406,6 +491,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       return ws.onEvent((event: RpcNotification) => {
         const currentId = chatIdRef.current;
+
+        if (event.method === 'thread/name/updated') {
+          const params = toRecord(event.params);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
+          if (!threadId || threadId !== currentId) {
+            return;
+          }
+
+          const threadName =
+            readString(params?.threadName) ?? readString(params?.thread_name);
+          if (threadName && threadName.trim()) {
+            setSelectedChat((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    title: threadName,
+                  }
+                : prev
+            );
+          } else {
+            void loadChat(threadId);
+          }
+          return;
+        }
 
         if (event.method.startsWith('codex/event/')) {
           const params = toRecord(event.params);
@@ -1228,10 +1337,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const isLoading = sending || creating;
     const isStreaming = sending || creating || Boolean(streamingText);
     const showActivity = Boolean(selectedChatId) || isLoading || activity.tone !== 'idle';
+    const headerTitle = selectedChat?.title?.trim() || 'New chat';
 
     return (
       <View style={styles.container}>
-        <ChatHeader onOpenDrawer={onOpenDrawer} />
+        <ChatHeader
+          onOpenDrawer={onOpenDrawer}
+          title={headerTitle}
+          onOpenTitleMenu={selectedChat ? openChatTitleMenu : undefined}
+        />
 
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -1276,6 +1390,56 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           </View>
         </KeyboardAvoidingView>
+
+        <Modal
+          visible={renameModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeRenameModal}
+        >
+          <View style={styles.renameModalBackdrop}>
+            <View style={styles.renameModalCard}>
+              <Text style={styles.renameModalTitle}>Rename chat</Text>
+              <TextInput
+                value={renameDraft}
+                onChangeText={setRenameDraft}
+                placeholder="Chat name"
+                placeholderTextColor={colors.textMuted}
+                style={styles.renameModalInput}
+                autoFocus
+                editable={!renaming}
+                maxLength={120}
+              />
+              <View style={styles.renameModalActions}>
+                <Pressable
+                  onPress={closeRenameModal}
+                  style={({ pressed }) => [
+                    styles.renameModalButton,
+                    styles.renameModalButtonSecondary,
+                    pressed && styles.renameModalButtonPressed,
+                  ]}
+                  disabled={renaming}
+                >
+                  <Text style={styles.renameModalButtonSecondaryText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => void submitRenameChat()}
+                  style={({ pressed }) => [
+                    styles.renameModalButton,
+                    styles.renameModalButtonPrimary,
+                    pressed && styles.renameModalButtonPrimaryPressed,
+                    (renaming || !renameDraft.trim()) && styles.renameModalButtonDisabled,
+                  ]}
+                  disabled={renaming || !renameDraft.trim()}
+                >
+                  <Text style={styles.renameModalButtonPrimaryText}>
+                    {renaming ? 'Saving...' : 'Save'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </View>
     );
   }
@@ -1549,6 +1713,72 @@ const styles = StyleSheet.create({
   composerContainer: {
     backgroundColor: colors.bgMain,
   },
+  renameModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  renameModalCard: {
+    backgroundColor: colors.bgItem,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  renameModalTitle: {
+    ...typography.headline,
+    color: colors.textPrimary,
+  },
+  renameModalInput: {
+    color: colors.textPrimary,
+    backgroundColor: colors.bgInput,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    fontSize: 15,
+  },
+  renameModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: spacing.sm,
+  },
+  renameModalButton: {
+    borderRadius: 10,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+  },
+  renameModalButtonSecondary: {
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+  },
+  renameModalButtonSecondaryText: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
+  renameModalButtonPrimary: {
+    borderColor: colors.accent,
+    backgroundColor: colors.accent,
+  },
+  renameModalButtonPrimaryPressed: {
+    backgroundColor: colors.accentPressed,
+    borderColor: colors.accentPressed,
+  },
+  renameModalButtonDisabled: {
+    opacity: 0.45,
+  },
+  renameModalButtonPressed: {
+    opacity: 0.8,
+  },
+  renameModalButtonPrimaryText: {
+    ...typography.body,
+    color: colors.black,
+    fontWeight: '600',
+  },
 
   // Compose
   composeContainer: {
@@ -1586,7 +1816,7 @@ const styles = StyleSheet.create({
     padding: spacing.md,
   },
   suggestionCardPressed: {
-    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    backgroundColor: colors.bgInput,
   },
   suggestionText: {
     ...typography.caption,

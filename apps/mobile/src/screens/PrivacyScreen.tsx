@@ -46,7 +46,7 @@ export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
   return (
     <View style={styles.container}>
       <LinearGradient
-        colors={['#0A0F1F', '#13203A', '#05050A']}
+        colors={[colors.bgMain, colors.bgMain, colors.bgMain]}
         style={StyleSheet.absoluteFill}
       />
       <SafeAreaView style={styles.safeArea}>

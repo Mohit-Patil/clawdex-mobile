@@ -1453,6 +1453,7 @@ fn is_forwarded_method(method: &str) -> bool {
             | "thread/resume"
             | "thread/read"
             | "thread/list"
+            | "thread/name/set"
             | "thread/fork"
             | "thread/archive"
             | "thread/unarchive"
