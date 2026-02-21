@@ -1,18 +1,18 @@
-export type ThreadStatus = 'idle' | 'running' | 'error' | 'complete';
+export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
 
-export type ThreadMessageRole = 'user' | 'assistant' | 'system';
+export type ChatMessageRole = 'user' | 'assistant' | 'system';
 
-export interface ThreadMessage {
+export interface ChatMessage {
   id: string;
-  role: ThreadMessageRole;
+  role: ChatMessageRole;
   content: string;
   createdAt: string;
 }
 
-export interface ThreadSummary {
+export interface ChatSummary {
   id: string;
   title: string;
-  status: ThreadStatus;
+  status: ChatStatus;
   createdAt: string;
   updatedAt: string;
   statusUpdatedAt: string;
@@ -28,18 +28,18 @@ export interface ThreadSummary {
   lastError?: string;
 }
 
-export interface Thread extends ThreadSummary {
-  messages: ThreadMessage[];
+export interface Chat extends ChatSummary {
+  messages: ChatMessage[];
 }
 
-export interface CreateThreadRequest {
+export interface CreateChatRequest {
   title?: string;
   message?: string;
 }
 
-export interface SendThreadMessageRequest {
+export interface SendChatMessageRequest {
   content: string;
-  role?: ThreadMessageRole;
+  role?: ChatMessageRole;
 }
 
 export interface TerminalExecRequest {

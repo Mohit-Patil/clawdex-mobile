@@ -21,7 +21,7 @@ describe('MacBridgeApiClient', () => {
     expect(result.status).toBe('ok');
   });
 
-  it('listThreads() maps app-server list response', async () => {
+  it('listChats() maps app-server list response', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({
       data: [
@@ -30,21 +30,106 @@ describe('MacBridgeApiClient', () => {
           preview: 'hello world',
           createdAt: 1700000000,
           updatedAt: 1700000001,
+          status: { type: 'active' },
+          turns: [
+            {
+              status: 'completed',
+              items: [],
+            },
+          ],
+        },
+      ],
+    });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const chats = await client.listChats();
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/list',
+      expect.objectContaining({
+        sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'unknown'],
+      })
+    );
+    expect(chats).toHaveLength(1);
+    expect(chats[0].id).toBe('thr_1');
+    expect(chats[0].status).toBe('complete');
+  });
+
+  it('listChats() treats idle thread status as complete even with stale inProgress turn', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      data: [
+        {
+          id: 'thr_idle_with_stale_turn',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000001,
           status: { type: 'idle' },
+          turns: [
+            {
+              status: 'inProgress',
+              items: [],
+            },
+          ],
+        },
+      ],
+    });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const chats = await client.listChats();
+
+    expect(chats).toHaveLength(1);
+    expect(chats[0].status).toBe('complete');
+  });
+
+  it('listChats() excludes sub-agent source kinds defensively', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      data: [
+        {
+          id: 'thr_root',
+          preview: 'root chat',
+          createdAt: 1700000000,
+          updatedAt: 1700000001,
+          status: { type: 'idle' },
+          source: 'appServer',
+          turns: [],
+        },
+        {
+          id: 'thr_sub',
+          preview: 'spawned worker',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: 'thr_root',
+                depth: 1,
+              },
+            },
+          },
+          turns: [],
+        },
+        {
+          id: 'thr_sub_legacy',
+          preview: 'legacy sub-agent',
+          createdAt: 1700000000,
+          updatedAt: 1700000003,
+          status: { type: 'idle' },
+          source: { kind: 'subAgent' },
           turns: [],
         },
       ],
     });
 
     const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
-    const threads = await client.listThreads();
+    const chats = await client.listChats();
 
-    expect(ws.request).toHaveBeenCalledWith('thread/list', expect.any(Object));
-    expect(threads).toHaveLength(1);
-    expect(threads[0].id).toBe('thr_1');
+    expect(chats.map((chat) => chat.id)).toEqual(['thr_root']);
   });
 
-  it('sendThreadMessage() starts a turn and waits for completion', async () => {
+  it('sendChatMessage() starts a turn and waits for completion', async () => {
     const ws = createWsMock();
     ws.request
       .mockResolvedValueOnce({}) // thread/resume
@@ -76,11 +161,11 @@ describe('MacBridgeApiClient', () => {
       });
 
     const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
-    const thread = await client.sendThreadMessage('thr_1', { content: 'Hello' });
+    const chat = await client.sendChatMessage('thr_1', { content: 'Hello' });
 
     expect(ws.request).toHaveBeenNthCalledWith(2, 'turn/start', expect.any(Object));
     expect(ws.waitForTurnCompletion).toHaveBeenCalledWith('thr_1', 'turn_1');
-    expect(thread.id).toBe('thr_1');
-    expect(thread.messages.length).toBeGreaterThan(0);
+    expect(chat.id).toBe('thr_1');
+    expect(chat.messages.length).toBeGreaterThan(0);
   });
 });

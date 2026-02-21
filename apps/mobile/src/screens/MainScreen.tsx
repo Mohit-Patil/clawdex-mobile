@@ -23,8 +23,8 @@ import type {
   PendingApproval,
   RpcNotification,
   RunEvent,
-  Thread,
-  ThreadMessage,
+  Chat,
+  ChatMessage as ChatTranscriptMessage,
 } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
 import { ActivityBar, type ActivityTone } from '../components/ActivityBar';
@@ -37,8 +37,8 @@ import { TypingIndicator } from '../components/TypingIndicator';
 import { colors, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
-  openThread: (id: string) => void;
-  startNewThread: () => void;
+  openChat: (id: string) => void;
+  startNewChat: () => void;
 }
 
 interface MainScreenProps {
@@ -67,11 +67,29 @@ const DEFAULT_ACTIVITY_PHRASES = [
 ];
 
 const MAX_ACTIVITY_PHRASES = 8;
+const RUN_WATCHDOG_MS = 15_000;
+const LIKELY_RUNNING_RECENT_UPDATE_MS = 120_000;
+const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
+  'task_started',
+  'agent_reasoning_delta',
+  'reasoning_content_delta',
+  'reasoning_raw_content_delta',
+  'agent_reasoning_raw_content_delta',
+  'agent_reasoning_section_break',
+  'agent_message_delta',
+  'agent_message_content_delta',
+  'exec_command_begin',
+  'exec_command_end',
+  'mcp_startup_update',
+  'mcp_tool_call_begin',
+  'web_search_begin',
+  'background_event',
+]);
 
 export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
   function MainScreen({ api, ws, onOpenDrawer }, ref) {
-    const [selectedThread, setSelectedThread] = useState<Thread | null>(null);
-    const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+    const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
+    const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
     const [draft, setDraft] = useState('');
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -85,23 +103,41 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     });
     const [activityPhrases, setActivityPhrases] = useState<string[]>([]);
     const scrollRef = useRef<ScrollView>(null);
+    const sendingRef = useRef(false);
+    const creatingRef = useRef(false);
+    const selectedChatStatusRef = useRef<Chat['status']>('idle');
 
-    // Ref so the WS handler always reads the latest thread ID without
+    // Ref so the WS handler always reads the latest chat ID without
     // needing to re-subscribe on every change.
-    const threadIdRef = useRef<string | null>(null);
-    threadIdRef.current = selectedThreadId;
+    const chatIdRef = useRef<string | null>(null);
+    chatIdRef.current = selectedChatId;
 
     // Track whether a command arrived since the last delta — used to
     // know when a new thinking segment starts so we can replace the old one.
     const hadCommandRef = useRef(false);
     const reasoningSummaryRef = useRef<Record<string, string>>({});
+    const codexReasoningBufferRef = useRef('');
+    const runWatchdogUntilRef = useRef(0);
+
+    const bumpRunWatchdog = useCallback((durationMs = RUN_WATCHDOG_MS) => {
+      runWatchdogUntilRef.current = Math.max(
+        runWatchdogUntilRef.current,
+        Date.now() + durationMs
+      );
+    }, []);
+
+    const clearRunWatchdog = useCallback(() => {
+      runWatchdogUntilRef.current = 0;
+    }, []);
 
     const appendActivityPhrase = useCallback(
       (value: string | null | undefined, seedDefaults = false) => {
         const phrase = toTickerSnippet(value);
         setActivityPhrases((prev) => {
+          const shouldSeedDefaults =
+            seedDefaults && prev.length === 0 && !phrase;
           const base =
-            seedDefaults && prev.length === 0
+            shouldSeedDefaults
               ? [...DEFAULT_ACTIVITY_PHRASES]
               : [...prev];
           if (!phrase) {
@@ -119,6 +155,27 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
 
     useEffect(() => {
+      sendingRef.current = sending;
+    }, [sending]);
+
+    useEffect(() => {
+      creatingRef.current = creating;
+    }, [creating]);
+
+    useEffect(() => {
+      selectedChatStatusRef.current = selectedChat?.status ?? 'idle';
+    }, [selectedChat?.status]);
+
+    const isRunContextActive = useCallback(() => {
+      return (
+        runWatchdogUntilRef.current > Date.now() ||
+        sendingRef.current ||
+        creatingRef.current ||
+        selectedChatStatusRef.current === 'running'
+      );
+    }, []);
+
+    useEffect(() => {
       if (activity.tone !== 'running') {
         setActivityPhrases([]);
         return;
@@ -128,8 +185,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [activity.tone, activity.title, activity.detail, appendActivityPhrase]);
 
     const resetComposerState = useCallback(() => {
-      setSelectedThread(null);
-      setSelectedThreadId(null);
+      setSelectedChat(null);
+      setSelectedChatId(null);
       setDraft('');
       setError(null);
       setActiveCommands([]);
@@ -141,30 +198,32 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       });
       setActivityPhrases([]);
       reasoningSummaryRef.current = {};
+      codexReasoningBufferRef.current = '';
       hadCommandRef.current = false;
-    }, []);
+      clearRunWatchdog();
+    }, [clearRunWatchdog]);
 
-    const startNewThread = useCallback(async () => {
+    const startNewChat = useCallback(async () => {
       resetComposerState();
       try {
         setCreating(true);
         setActivity({
           tone: 'running',
-          title: 'Creating thread',
+          title: 'Creating chat',
         });
-        const created = await api.createThread({});
-        setSelectedThreadId(created.id);
-        setSelectedThread(created);
+        const created = await api.createChat({});
+        setSelectedChatId(created.id);
+        setSelectedChat(created);
         setError(null);
         setActivity({
           tone: 'idle',
-          title: 'Thread ready',
+          title: 'Chat ready',
         });
       } catch (err) {
         setError((err as Error).message);
         setActivity({
           tone: 'error',
-          title: 'Failed to create thread',
+          title: 'Failed to create chat',
           detail: (err as Error).message,
         });
       } finally {
@@ -173,83 +232,113 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [api, resetComposerState]);
 
     useImperativeHandle(ref, () => ({
-      openThread: (id: string) => {
-        void loadThread(id);
+      openChat: (id: string) => {
+        void loadChat(id);
       },
-      startNewThread: () => {
-        void startNewThread();
+      startNewChat: () => {
+        void startNewChat();
       },
     }));
 
-    const loadThread = useCallback(
-      async (threadId: string) => {
+    const loadChat = useCallback(
+      async (chatId: string) => {
         try {
-          const thread = await api.getThread(threadId);
-          setSelectedThreadId(threadId);
-          setSelectedThread(thread);
+          clearRunWatchdog();
+          const chat = await api.getChat(chatId);
+          setSelectedChatId(chatId);
+          setSelectedChat(chat);
           setError(null);
           setActiveCommands([]);
           setPendingApproval(null);
           setStreamingText(null);
-          setActivity({
-            tone: 'idle',
-            title: 'Ready',
-          });
+          const shouldRun = isChatLikelyRunning(chat);
+          if (shouldRun) {
+            bumpRunWatchdog();
+            setActivity({
+              tone: 'running',
+              title: 'Working',
+            });
+            appendActivityPhrase('Working', true);
+          } else {
+            setActivity(
+              chat.status === 'complete'
+                ? {
+                    tone: 'complete',
+                    title: 'Turn completed',
+                  }
+                : chat.status === 'error'
+                  ? {
+                      tone: 'error',
+                      title: 'Turn failed',
+                      detail: chat.lastError ?? undefined,
+                    }
+                  : {
+                      tone: 'idle',
+                      title: 'Ready',
+                    }
+            );
+          }
           reasoningSummaryRef.current = {};
+          codexReasoningBufferRef.current = '';
           hadCommandRef.current = false;
         } catch (err) {
           setError((err as Error).message);
           setActivity({
             tone: 'error',
-            title: 'Failed to load thread',
+            title: 'Failed to load chat',
             detail: (err as Error).message,
           });
         }
       },
-      [api]
+      [api, appendActivityPhrase, bumpRunWatchdog, clearRunWatchdog]
     );
 
-    const createThread = useCallback(async () => {
+    const createChat = useCallback(async () => {
       const content = draft.trim();
       if (!content) return;
 
-      const optimisticThreadId = `temp-${Date.now()}`;
-      const optimisticMessage: ThreadMessage = {
+      const optimisticMessage: ChatTranscriptMessage = {
         id: `msg-${Date.now()}`,
         role: 'user',
         content,
         createdAt: new Date().toISOString(),
       };
 
-      const optimisticThread: Thread = {
-        id: optimisticThreadId,
-        title: 'New Thread...',
-        status: 'running',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        statusUpdatedAt: new Date().toISOString(),
-        lastMessagePreview: content.slice(0, 50),
-        messages: [optimisticMessage],
-      };
-
       setDraft('');
-      setSelectedThreadId(optimisticThreadId);
-      setSelectedThread(optimisticThread);
 
       try {
         setCreating(true);
         setActivity({
           tone: 'running',
-          title: 'Starting turn',
+          title: 'Creating chat',
         });
-        const created = await api.createThread({ message: content });
-        setSelectedThreadId(created.id);
-        setSelectedThread(created);
+        const created = await api.createChat({});
+
+        setSelectedChatId(created.id);
+        setSelectedChat({
+          ...created,
+          status: 'running',
+          updatedAt: new Date().toISOString(),
+          statusUpdatedAt: new Date().toISOString(),
+          lastMessagePreview: content.slice(0, 50),
+          messages: [...created.messages, optimisticMessage],
+        });
+
+        setActivity({
+          tone: 'running',
+          title: 'Working',
+        });
+        bumpRunWatchdog();
+        appendActivityPhrase('Turn started', true);
+
+        const updated = await api.sendChatMessage(created.id, { content });
+        setSelectedChat(updated);
         setError(null);
         setActivity({
           tone: 'complete',
           title: 'Turn completed',
         });
+        clearRunWatchdog();
       } catch (err) {
         setError((err as Error).message);
         setActivity({
@@ -257,16 +346,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Turn failed',
           detail: (err as Error).message,
         });
+        clearRunWatchdog();
       } finally {
         setCreating(false);
       }
-    }, [api, draft]);
+    }, [api, draft, appendActivityPhrase, bumpRunWatchdog, clearRunWatchdog]);
 
     const sendMessage = useCallback(async () => {
       const content = draft.trim();
-      if (!selectedThreadId || !content) return;
+      if (!selectedChatId || !content) return;
 
-      const optimisticMessage: ThreadMessage = {
+      const optimisticMessage: ChatTranscriptMessage = {
         id: `msg-${Date.now()}`,
         role: 'user',
         content,
@@ -274,7 +364,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       };
 
       setDraft('');
-      setSelectedThread((prev) => {
+      setSelectedChat((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
@@ -289,13 +379,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           tone: 'running',
           title: 'Sending message',
         });
-        const updated = await api.sendThreadMessage(selectedThreadId, { content });
-        setSelectedThread(updated);
+        bumpRunWatchdog();
+        const updated = await api.sendChatMessage(selectedChatId, { content });
+        setSelectedChat(updated);
         setError(null);
         setActivity({
           tone: 'complete',
           title: 'Turn completed',
         });
+        clearRunWatchdog();
       } catch (err) {
         setError((err as Error).message);
         setActivity({
@@ -303,16 +395,264 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Turn failed',
           detail: (err as Error).message,
         });
+        clearRunWatchdog();
       } finally {
         setSending(false);
       }
-    }, [api, draft, selectedThreadId]);
+    }, [api, draft, selectedChatId, bumpRunWatchdog, clearRunWatchdog]);
 
     useEffect(() => {
       const pendingApprovalId = pendingApproval?.id;
 
       return ws.onEvent((event: RpcNotification) => {
-        const currentId = threadIdRef.current;
+        const currentId = chatIdRef.current;
+
+        if (event.method.startsWith('codex/event/')) {
+          const params = toRecord(event.params);
+          const msg = toRecord(params?.msg);
+          const codexEventType =
+            readString(msg?.type) ?? event.method.replace('codex/event/', '');
+          const threadId =
+            readString(msg?.thread_id) ??
+            readString(msg?.threadId) ??
+            readString(params?.threadId) ??
+            readString(params?.conversationId) ??
+            readString(msg?.conversation_id);
+
+          if (!currentId) {
+            return;
+          }
+
+          const isMatchingThread = Boolean(threadId) && threadId === currentId;
+          const isUnscopedRunEvent =
+            !threadId &&
+            isCodexRunHeartbeatEvent(codexEventType) &&
+            isRunContextActive();
+
+          if (!isMatchingThread && !isUnscopedRunEvent) {
+            return;
+          }
+
+          const activeThreadId = threadId ?? currentId;
+
+          if (isCodexRunHeartbeatEvent(codexEventType)) {
+            bumpRunWatchdog();
+          }
+
+          if (codexEventType === 'task_started') {
+            setActivity({
+              tone: 'running',
+              title: 'Working',
+            });
+            appendActivityPhrase('Turn started', true);
+            return;
+          }
+
+          if (
+            codexEventType === 'agent_reasoning_delta' ||
+            codexEventType === 'reasoning_content_delta' ||
+            codexEventType === 'reasoning_raw_content_delta' ||
+            codexEventType === 'agent_reasoning_raw_content_delta'
+          ) {
+            const delta = readString(msg?.delta);
+            if (!delta) {
+              return;
+            }
+
+            codexReasoningBufferRef.current += delta;
+            const heading =
+              extractFirstBoldSnippet(codexReasoningBufferRef.current, 56) ??
+              extractFirstBoldSnippet(delta, 56);
+            const summary = toTickerSnippet(stripMarkdownInline(delta), 64);
+
+            setActivity({
+              tone: 'running',
+              title: heading ?? 'Reasoning',
+              detail: heading ? undefined : summary ?? undefined,
+            });
+
+            if (heading) {
+              setActivityPhrases([heading]);
+            } else if (summary) {
+              appendActivityPhrase(`Reasoning: ${summary}`, true);
+            } else {
+              appendActivityPhrase('Reasoning', true);
+            }
+            return;
+          }
+
+          if (codexEventType === 'agent_reasoning_section_break') {
+            codexReasoningBufferRef.current = '';
+            setActivityPhrases(['Analyzing text']);
+            return;
+          }
+
+          if (
+            codexEventType === 'agent_message_delta' ||
+            codexEventType === 'agent_message_content_delta'
+          ) {
+            const delta = readString(msg?.delta);
+            if (!delta) {
+              return;
+            }
+
+            if (hadCommandRef.current) {
+              setStreamingText(delta);
+              setActiveCommands([]);
+              hadCommandRef.current = false;
+            } else {
+              setStreamingText((prev) => (prev ?? '') + delta);
+            }
+
+            setActivity((prev) =>
+              prev.tone === 'running' && prev.title === 'Thinking'
+                ? prev
+                : {
+                    tone: 'running',
+                    title: 'Thinking',
+                  }
+            );
+            appendActivityPhrase('Drafting response', true);
+            setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+            return;
+          }
+
+          if (codexEventType === 'exec_command_begin') {
+            const command = toCommandDisplay(msg?.command);
+            const detail = toTickerSnippet(command, 80);
+            setActivity({
+              tone: 'running',
+              title: 'Running command',
+              detail: detail ?? undefined,
+            });
+            appendActivityPhrase(
+              detail ? `Running command: ${detail}` : 'Running command',
+              true
+            );
+            return;
+          }
+
+          if (codexEventType === 'exec_command_end') {
+            const status = readString(msg?.status);
+            const command = toCommandDisplay(msg?.command);
+            const detail = toTickerSnippet(command, 80);
+            const failed = status === 'failed' || status === 'error';
+
+            setActivity({
+              tone: failed ? 'error' : 'running',
+              title: failed ? 'Command failed' : 'Working',
+              detail: detail ?? undefined,
+            });
+            appendActivityPhrase(
+              failed
+                ? detail
+                  ? `Command failed: ${detail}`
+                  : 'Command failed'
+                : detail
+                  ? `Command completed: ${detail}`
+                  : 'Command completed',
+              true
+            );
+            return;
+          }
+
+          if (codexEventType === 'mcp_startup_update') {
+            const server = readString(msg?.server);
+            const state =
+              readString(msg?.status) ??
+              readString(toRecord(msg?.status)?.type);
+            const detail = [server, state].filter(Boolean).join(' · ');
+
+            setActivity({
+              tone: 'running',
+              title: 'Starting MCP servers',
+              detail: detail || undefined,
+            });
+            appendActivityPhrase(
+              detail ? `Starting MCP: ${detail}` : 'Starting MCP servers',
+              true
+            );
+            return;
+          }
+
+          if (codexEventType === 'mcp_tool_call_begin') {
+            const server = readString(msg?.server);
+            const tool = readString(msg?.tool);
+            const detail = [server, tool].filter(Boolean).join(' / ');
+
+            setActivity({
+              tone: 'running',
+              title: 'Running tool',
+              detail: detail || undefined,
+            });
+            appendActivityPhrase(
+              detail ? `Running tool: ${detail}` : 'Running tool',
+              true
+            );
+            return;
+          }
+
+          if (codexEventType === 'web_search_begin') {
+            const query = toTickerSnippet(readString(msg?.query), 64);
+            setActivity({
+              tone: 'running',
+              title: 'Searching web',
+              detail: query ?? undefined,
+            });
+            appendActivityPhrase(
+              query ? `Searching web: ${query}` : 'Searching web',
+              true
+            );
+            return;
+          }
+
+          if (codexEventType === 'background_event') {
+            const message =
+              toTickerSnippet(readString(msg?.message), 72) ??
+              toTickerSnippet(readString(msg?.text), 72);
+            setActivity({
+              tone: 'running',
+              title: message ?? 'Working',
+            });
+            if (message) {
+              setActivityPhrases([message]);
+            } else {
+              appendActivityPhrase('Working', true);
+            }
+            return;
+          }
+
+          if (codexEventType === 'turn_aborted') {
+            clearRunWatchdog();
+            setActiveCommands([]);
+            setStreamingText(null);
+            setActivityPhrases([]);
+            reasoningSummaryRef.current = {};
+            codexReasoningBufferRef.current = '';
+            hadCommandRef.current = false;
+            setActivity({
+              tone: 'error',
+              title: 'Turn interrupted',
+            });
+            void loadChat(activeThreadId);
+            return;
+          }
+
+          if (codexEventType === 'task_complete') {
+            clearRunWatchdog();
+            setActivity({
+              tone: 'complete',
+              title: 'Turn completed',
+            });
+            setActivityPhrases([]);
+            setStreamingText(null);
+            reasoningSummaryRef.current = {};
+            codexReasoningBufferRef.current = '';
+            hadCommandRef.current = false;
+            void loadChat(activeThreadId);
+            return;
+          }
+        }
 
         // Streaming delta -> transient thinking text
         if (event.method === 'item/agentMessage/delta') {
@@ -323,6 +663,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const delta = readString(params?.delta);
           if (!delta) return;
 
+          bumpRunWatchdog();
           if (hadCommandRef.current) {
             setStreamingText(delta);
             setActiveCommands([]);
@@ -349,6 +690,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId || threadId !== currentId) {
             return;
           }
+          bumpRunWatchdog();
           setActivity({
             tone: 'running',
             title: 'Turn started',
@@ -363,6 +705,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId || threadId !== currentId) {
             return;
           }
+          bumpRunWatchdog();
           const item = toRecord(params?.item);
           const itemType = readString(item?.type);
 
@@ -431,6 +774,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           const delta = toTickerSnippet(readString(params?.delta), 56);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Planning'
@@ -454,6 +798,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           const itemId = readString(params?.itemId);
           const summaryIndex = readNumber(params?.summaryIndex);
           const summaryKey =
@@ -481,6 +826,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           const delta = readString(params?.delta);
           const itemId = readString(params?.itemId);
           const summaryIndex = readNumber(params?.summaryIndex);
@@ -488,28 +834,33 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             itemId && summaryIndex !== null ? `${itemId}:${String(summaryIndex)}` : null;
 
           let summaryText = toTickerSnippet(delta, 64);
+          let heading = extractFirstBoldSnippet(delta, 56);
           if (summaryKey) {
             const accumulated = (reasoningSummaryRef.current[summaryKey] ?? '') + (delta ?? '');
             reasoningSummaryRef.current[summaryKey] = accumulated;
             summaryText = toTickerSnippet(stripMarkdownInline(accumulated), 64);
+            heading = extractFirstBoldSnippet(accumulated, 56) ?? heading;
           }
 
           setActivity((prev) => {
-            const detail = summaryText ?? prev.detail;
+            const title = heading ?? 'Reasoning';
+            const detail = heading ? undefined : summaryText ?? prev.detail;
             if (
               prev.tone === 'running' &&
-              prev.title === 'Reasoning' &&
+              prev.title === title &&
               prev.detail === detail
             ) {
               return prev;
             }
             return {
               tone: 'running',
-              title: 'Reasoning',
+              title,
               detail,
             };
           });
-          if (summaryText) {
+          if (heading) {
+            setActivityPhrases([heading]);
+          } else if (summaryText) {
             setActivityPhrases([summaryText]);
           } else {
             setActivityPhrases(['Analyzing text']);
@@ -524,6 +875,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           const delta = toTickerSnippet(readString(params?.delta), 56);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Reasoning'
@@ -547,6 +899,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           const delta = toLastLineSnippet(readString(params?.delta), 64);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Running command'
@@ -570,6 +923,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           const message = toTickerSnippet(readString(params?.message), 64);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Running tool'
@@ -593,6 +947,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           setActivity({
             tone: 'running',
             title: 'Terminal interaction',
@@ -608,6 +963,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           setActivity({
             tone: 'running',
             title: 'Plan updated',
@@ -623,6 +979,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          bumpRunWatchdog();
           setActivity({
             tone: 'running',
             title: 'Updating diff',
@@ -679,6 +1036,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId || currentId !== threadId) {
             return;
           }
+          clearRunWatchdog();
 
           const turn = toRecord(params?.turn);
           const status = readString(turn?.status);
@@ -690,6 +1048,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           hadCommandRef.current = false;
           setActivityPhrases([]);
           reasoningSummaryRef.current = {};
+          codexReasoningBufferRef.current = '';
 
           if (status === 'failed' || status === 'interrupted') {
             setError(turnErrorMessage ?? `turn ${status ?? 'failed'}`);
@@ -704,13 +1063,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               title: 'Turn completed',
             });
           }
-          void loadThread(threadId);
+          void loadChat(threadId);
           return;
         }
 
         if (event.method === 'bridge/approval.requested') {
           const parsed = toPendingApproval(event.params);
           if (parsed && parsed.threadId === currentId) {
+            clearRunWatchdog();
             setPendingApproval(parsed);
             setActivity({
               tone: 'idle',
@@ -725,6 +1085,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const params = toRecord(event.params);
           const resolvedId = readString(params?.id);
           if (pendingApprovalId && resolvedId === pendingApprovalId) {
+            bumpRunWatchdog();
             setPendingApproval(null);
             setActivity({
               tone: 'running',
@@ -747,11 +1108,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Connected',
                   }
             );
-            void loadThread(currentId);
+            void loadChat(currentId);
             return;
           }
 
           if (status === 'disconnected') {
+            clearRunWatchdog();
             setActivity({
               tone: 'error',
               title: 'Disconnected',
@@ -759,21 +1121,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
         }
       });
-    }, [ws, pendingApproval?.id, loadThread, appendActivityPhrase]);
+    }, [
+      ws,
+      pendingApproval?.id,
+      loadChat,
+      appendActivityPhrase,
+      bumpRunWatchdog,
+      clearRunWatchdog,
+      isRunContextActive,
+    ]);
 
     useEffect(() => {
-      if (!selectedThreadId) {
+      if (!selectedChatId) {
         return;
       }
+      const hasPendingApproval = Boolean(pendingApproval?.id);
 
-      const syncThread = async () => {
+      const syncChat = async () => {
         if (sending || creating) {
           return;
         }
 
         try {
-          const latest = await api.getThread(selectedThreadId);
-          setSelectedThread((prev) => {
+          const latest = await api.getChat(selectedChatId);
+          setSelectedChat((prev) => {
             if (!prev || prev.id !== latest.id) {
               return latest;
             }
@@ -784,17 +1155,62 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
             return isUnchanged ? prev : latest;
           });
+
+          const shouldRunFromChat = isChatLikelyRunning(latest);
+          const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
+          const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
+
+          if (shouldShowRunning && !hasPendingApproval) {
+            bumpRunWatchdog();
+            setActivity((prev) =>
+              prev.tone === 'running'
+                ? prev
+                : {
+                    tone: 'running',
+                    title: 'Working',
+                  }
+            );
+          } else if (!hasPendingApproval) {
+            clearRunWatchdog();
+            setActivity(
+              latest.status === 'complete'
+                ? {
+                    tone: 'complete',
+                    title: 'Turn completed',
+                  }
+                : latest.status === 'error'
+                  ? {
+                      tone: 'error',
+                      title: 'Turn failed',
+                      detail: latest.lastError ?? undefined,
+                    }
+                  : {
+                      tone: 'idle',
+                      title: 'Ready',
+                    }
+            );
+            setActivityPhrases([]);
+          }
         } catch {
           // Polling is best-effort; keep the current view if refresh fails.
         }
       };
 
       const timer = setInterval(() => {
-        void syncThread();
+        void syncChat();
       }, 2500);
 
       return () => clearInterval(timer);
-    }, [api, selectedThreadId, sending, creating]);
+    }, [
+      api,
+      selectedChatId,
+      sending,
+      creating,
+      appendActivityPhrase,
+      pendingApproval?.id,
+      bumpRunWatchdog,
+      clearRunWatchdog,
+    ]);
 
     const handleResolveApproval = useCallback(
       async (id: string, decision: ApprovalDecision) => {
@@ -808,10 +1224,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [api]
     );
 
-    const handleSubmit = selectedThread ? sendMessage : createThread;
+    const handleSubmit = selectedChat ? sendMessage : createChat;
     const isLoading = sending || creating;
     const isStreaming = sending || creating || Boolean(streamingText);
-    const showActivity = Boolean(selectedThreadId) || isLoading || activity.tone !== 'idle';
+    const showActivity = Boolean(selectedChatId) || isLoading || activity.tone !== 'idle';
 
     return (
       <View style={styles.container}>
@@ -822,9 +1238,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           keyboardVerticalOffset={0}
           style={styles.keyboardAvoiding}
         >
-          {selectedThread ? (
+          {selectedChat ? (
             <ChatView
-              thread={selectedThread}
+              chat={selectedChat}
               activeCommands={activeCommands}
               streamingText={streamingText}
               scrollRef={scrollRef}
@@ -854,9 +1270,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               value={draft}
               onChangeText={setDraft}
               onSubmit={() => void handleSubmit()}
-              onNewThread={() => void startNewThread()}
+              onNewChat={() => void startNewChat()}
               isLoading={isLoading}
-              placeholder={selectedThread ? 'Reply...' : 'Message Codex...'}
+              placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
             />
           </View>
         </KeyboardAvoidingView>
@@ -894,19 +1310,19 @@ function ComposeView({ onSuggestion }: { onSuggestion: (s: string) => void }) {
 // ── Chat View ──────────────────────────────────────────────────────
 
 function ChatView({
-  thread,
+  chat,
   activeCommands,
   streamingText,
   scrollRef,
   isStreaming,
 }: {
-  thread: Thread;
+  chat: Chat;
   activeCommands: RunEvent[];
   streamingText: string | null;
   scrollRef: React.RefObject<ScrollView | null>;
   isStreaming: boolean;
 }) {
-  const filtered = thread.messages.filter((msg) => {
+  const filtered = chat.messages.filter((msg) => {
     const text = msg.content || '';
     if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
     if (text.includes('Current working directory is:')) return false;
@@ -1020,6 +1436,61 @@ function toActivityPhrase(title: string, detail?: string): string | null {
   }
 
   return compactTitle ?? compactDetail ?? null;
+}
+
+function isCodexRunHeartbeatEvent(codexEventType: string): boolean {
+  return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType);
+}
+
+function isChatLikelyRunning(chat: Chat): boolean {
+  if (chat.status === 'running') {
+    return true;
+  }
+
+  if (chat.status === 'error') {
+    return false;
+  }
+
+  const lastMessage = chat.messages[chat.messages.length - 1];
+  if (!lastMessage || lastMessage.role !== 'user') {
+    return false;
+  }
+
+  const updatedAtMs = Date.parse(chat.updatedAt);
+  if (!Number.isFinite(updatedAtMs)) {
+    return false;
+  }
+
+  return Date.now() - updatedAtMs < LIKELY_RUNNING_RECENT_UPDATE_MS;
+}
+
+function extractFirstBoldSnippet(
+  value: string | null | undefined,
+  maxLength = 56
+): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const match = value.match(/\*\*([^*]+)\*\*/);
+  if (!match) {
+    return null;
+  }
+
+  return toTickerSnippet(match[1], maxLength);
+}
+
+function toCommandDisplay(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const parts = value.filter((entry): entry is string => typeof entry === 'string');
+  if (parts.length === 0) {
+    return null;
+  }
+
+  return parts.join(' ');
 }
 
 function toPendingApproval(value: unknown): PendingApproval | null {

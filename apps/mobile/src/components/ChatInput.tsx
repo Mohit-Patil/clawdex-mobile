@@ -16,7 +16,7 @@ interface ChatInputProps {
   value: string;
   onChangeText: (text: string) => void;
   onSubmit: () => void;
-  onNewThread: () => void;
+  onNewChat: () => void;
   isLoading: boolean;
   placeholder?: string;
 }
@@ -25,7 +25,7 @@ export function ChatInput({
   value,
   onChangeText,
   onSubmit,
-  onNewThread,
+  onNewChat,
   isLoading,
   placeholder = 'Message Codex...',
 }: ChatInputProps) {
@@ -34,7 +34,7 @@ export function ChatInput({
   return (
     <View style={styles.container}>
       <Pressable
-        onPress={onNewThread}
+        onPress={onNewChat}
         style={({ pressed }) => [styles.plusBtn, pressed && styles.plusBtnPressed]}
       >
         <Ionicons name="add" size={20} color={colors.textMuted} />

@@ -43,7 +43,7 @@ export default function App() {
   );
   const mainRef = useRef<MainScreenHandle>(null);
   const [currentScreen, setCurrentScreen] = useState<Screen>('Main');
-  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const isOpen = useRef(false);
@@ -96,20 +96,20 @@ export default function App() {
     [closeDrawer]
   );
 
-  const handleSelectThread = useCallback(
+  const handleSelectChat = useCallback(
     (id: string) => {
-      setSelectedThreadId(id);
+      setSelectedChatId(id);
       setCurrentScreen('Main');
-      mainRef.current?.openThread(id);
+      mainRef.current?.openChat(id);
       closeDrawer();
     },
     [closeDrawer]
   );
 
-  const handleNewThread = useCallback(() => {
-    setSelectedThreadId(null);
+  const handleNewChat = useCallback(() => {
+    setSelectedChatId(null);
     setCurrentScreen('Main');
-    mainRef.current?.startNewThread();
+    mainRef.current?.startNewChat();
     closeDrawer();
   }, [closeDrawer]);
 
@@ -189,9 +189,9 @@ export default function App() {
         <DrawerContent
           api={api}
           ws={ws}
-          selectedThreadId={selectedThreadId}
-          onSelectThread={handleSelectThread}
-          onNewThread={handleNewThread}
+          selectedChatId={selectedChatId}
+          onSelectChat={handleSelectChat}
+          onNewChat={handleNewChat}
           onNavigate={navigate}
         />
       </Animated.View>

@@ -1,8 +1,8 @@
 import type {
-  Thread,
-  ThreadMessage,
-  ThreadStatus,
-  ThreadSummary,
+  Chat,
+  ChatMessage,
+  ChatStatus,
+  ChatSummary,
 } from './types';
 
 export type RawThreadStatus =
@@ -45,9 +45,7 @@ export interface RawThread {
   updatedAt?: number;
   status?: RawThreadStatus;
   cwd?: string;
-  source?: {
-    kind?: string;
-  };
+  source?: unknown;
   turns?: RawTurn[];
 }
 
@@ -82,22 +80,20 @@ function unixSecondsToIso(value: number | undefined): string {
   return new Date(value * 1000).toISOString();
 }
 
-function mapRawStatus(status: unknown, turns: RawTurn[] | undefined): ThreadStatus {
+function mapRawStatus(status: unknown, turns: RawTurn[] | undefined): ChatStatus {
   const statusRecord = toRecord(status);
-  const statusType = readString(statusRecord?.type);
-
-  if (statusType === 'active') {
-    return 'running';
-  }
-
-  if (statusType === 'systemError') {
-    return 'error';
-  }
-
-  const lastTurn = Array.isArray(turns) && turns.length > 0 ? turns[turns.length - 1] : null;
+  const statusType = readString(statusRecord?.type) ?? readString(status);
+  const hasTurns = Array.isArray(turns) && turns.length > 0;
+  const lastTurn = hasTurns ? turns[turns.length - 1] : null;
   const lastTurnStatus = readString(lastTurn?.status);
+  const isIdleLikeStatus = statusType === 'idle' || statusType === 'notLoaded';
 
   if (lastTurnStatus === 'inProgress') {
+    // Some thread/read payloads can return stale turn state while the thread
+    // itself is already idle/notLoaded. Prefer the thread lifecycle in that case.
+    if (isIdleLikeStatus) {
+      return hasTurns ? 'complete' : 'idle';
+    }
     return 'running';
   }
 
@@ -109,8 +105,18 @@ function mapRawStatus(status: unknown, turns: RawTurn[] | undefined): ThreadStat
     return 'complete';
   }
 
-  if (statusType === 'idle' || statusType === 'notLoaded') {
-    return Array.isArray(turns) && turns.length > 0 ? 'complete' : 'idle';
+  if (statusType === 'systemError') {
+    return 'error';
+  }
+
+  if (statusType === 'active') {
+    // Some backends keep a thread "active" while loaded in memory even when no
+    // turn is running. If there is no in-progress turn, avoid false "working" UI.
+    return hasTurns ? 'complete' : 'idle';
+  }
+
+  if (isIdleLikeStatus) {
+    return hasTurns ? 'complete' : 'idle';
   }
 
   return 'idle';
@@ -145,7 +151,7 @@ export function toRawThread(value: unknown): RawThread {
     updatedAt: readNumber(record.updatedAt) ?? undefined,
     status: (record.status as RawThreadStatus) ?? undefined,
     cwd: readString(record.cwd) ?? undefined,
-    source: toRecord(record.source) as { kind?: string } | undefined,
+    source: record.source,
     turns: Array.isArray(record.turns)
       ? (record.turns.map((turn) => toRawTurn(turn)).filter(Boolean) as RawTurn[])
       : undefined,
@@ -172,7 +178,7 @@ function toRawTurn(value: unknown): RawTurn | null {
   };
 }
 
-export function mapThreadSummary(raw: RawThread): ThreadSummary | null {
+export function mapChatSummary(raw: RawThread): ChatSummary | null {
   if (!raw.id) {
     return null;
   }
@@ -185,7 +191,7 @@ export function mapThreadSummary(raw: RawThread): ThreadSummary | null {
 
   return {
     id: raw.id,
-    title: toPreview(raw.preview || `Thread ${raw.id.slice(0, 8)}`),
+    title: toPreview(raw.preview || `Chat ${raw.id.slice(0, 8)}`),
     status: mapRawStatus(raw.status, turns),
     createdAt,
     updatedAt,
@@ -193,15 +199,65 @@ export function mapThreadSummary(raw: RawThread): ThreadSummary | null {
     lastMessagePreview: toPreview(raw.preview || ''),
     cwd: readString(raw.cwd) ?? undefined,
     modelProvider: readString(raw.modelProvider) ?? undefined,
-    sourceKind: readString(toRecord(raw.source)?.kind) ?? undefined,
+    sourceKind: mapSourceKind(raw.source),
     lastError: lastError ?? undefined,
   };
 }
 
-export function mapThread(raw: RawThread): Thread {
-  const summary = mapThreadSummary(raw);
+function mapSourceKind(source: unknown): string | undefined {
+  if (typeof source === 'string') {
+    return source;
+  }
+
+  const sourceRecord = toRecord(source);
+  if (!sourceRecord) {
+    return undefined;
+  }
+
+  // Legacy shape used by older adapters.
+  const legacyKind = readString(sourceRecord.kind);
+  if (legacyKind) {
+    return legacyKind;
+  }
+
+  // Current app-server shape: { subAgent: ... } tagged union.
+  if ('subAgent' in sourceRecord) {
+    const subAgent = sourceRecord.subAgent;
+    if (typeof subAgent === 'string') {
+      if (subAgent === 'review') return 'subAgentReview';
+      if (subAgent === 'compact') return 'subAgentCompact';
+      if (subAgent === 'memory_consolidation') return 'subAgentOther';
+      return 'subAgent';
+    }
+
+    const subAgentRecord = toRecord(subAgent);
+    if (!subAgentRecord) {
+      return 'subAgent';
+    }
+
+    if (toRecord(subAgentRecord.thread_spawn)) {
+      return 'subAgentThreadSpawn';
+    }
+
+    if (readString(subAgentRecord.other)) {
+      return 'subAgentOther';
+    }
+
+    return 'subAgent';
+  }
+
+  const typeKind = readString(sourceRecord.type);
+  if (typeKind && typeKind.startsWith('subAgent')) {
+    return typeKind;
+  }
+
+  return undefined;
+}
+
+export function mapChat(raw: RawThread): Chat {
+  const summary = mapChatSummary(raw);
   if (!summary) {
-    throw new Error('thread id missing in app-server response');
+    throw new Error('chat id missing in app-server response');
   }
 
   const messages = mapMessages(raw, summary.createdAt);
@@ -218,14 +274,14 @@ export function mapThread(raw: RawThread): Thread {
   };
 }
 
-function mapMessages(raw: RawThread, fallbackCreatedAt: string): ThreadMessage[] {
+function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
   const turns = Array.isArray(raw.turns) ? raw.turns : [];
   if (turns.length === 0) {
     return [];
   }
 
   const baseTs = new Date(fallbackCreatedAt).getTime();
-  const messages: ThreadMessage[] = [];
+  const messages: ChatMessage[] = [];
 
   for (const turn of turns) {
     const items = Array.isArray(turn.items) ? turn.items : [];

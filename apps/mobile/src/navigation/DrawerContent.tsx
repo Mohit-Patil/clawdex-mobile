@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import type { MacBridgeApiClient } from '../api/client';
-import type { RpcNotification, ThreadSummary } from '../api/types';
+import type { ChatSummary, RpcNotification } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
 import { colors, spacing, typography } from '../theme';
 
@@ -19,27 +19,27 @@ type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings' | 'Privacy' | 'Terms';
 interface DrawerContentProps {
   api: MacBridgeApiClient;
   ws: MacBridgeWsClient;
-  selectedThreadId: string | null;
-  onSelectThread: (id: string) => void;
-  onNewThread: () => void;
+  selectedChatId: string | null;
+  onSelectChat: (id: string) => void;
+  onNewChat: () => void;
   onNavigate: (screen: Screen) => void;
 }
 
 export function DrawerContent({
   api,
   ws,
-  selectedThreadId,
-  onSelectThread,
-  onNewThread,
+  selectedChatId,
+  onSelectChat,
+  onNewChat,
   onNavigate,
 }: DrawerContentProps) {
-  const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const loadThreads = useCallback(async () => {
+  const loadChats = useCallback(async () => {
     try {
-      const data = await api.listThreads();
-      setThreads(sortThreads(data));
+      const data = await api.listChats();
+      setChats(sortChats(data));
     } catch {
       // silently fail
     } finally {
@@ -48,8 +48,8 @@ export function DrawerContent({
   }, [api]);
 
   useEffect(() => {
-    void loadThreads();
-  }, [loadThreads]);
+    void loadChats();
+  }, [loadChats]);
 
   useEffect(() => {
     return ws.onEvent((event: RpcNotification) => {
@@ -58,30 +58,30 @@ export function DrawerContent({
         event.method === 'turn/completed' ||
         event.method === 'thread/status/changed'
       ) {
-        void loadThreads();
+        void loadChats();
       }
     });
-  }, [ws, loadThreads]);
+  }, [ws, loadChats]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      void loadThreads();
+      void loadChats();
     }, 4000);
 
     return () => clearInterval(timer);
-  }, [loadThreads]);
+  }, [loadChats]);
 
   return (
     <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        {/* New Thread button */}
+        {/* New Chat button */}
         <View style={styles.header}>
           <Pressable
-            style={({ pressed }) => [styles.newThreadBtn, pressed && styles.newThreadBtnPressed]}
-            onPress={onNewThread}
+            style={({ pressed }) => [styles.newChatBtn, pressed && styles.newChatBtnPressed]}
+            onPress={onNewChat}
           >
             <Ionicons name="add" size={16} color={colors.white} />
-            <Text style={styles.newThreadText}>New thread</Text>
+            <Text style={styles.newChatText}>New chat</Text>
           </Pressable>
         </View>
 
@@ -99,35 +99,35 @@ export function DrawerContent({
           onPress={() => onNavigate('Terms')}
         />
 
-        {/* Threads section */}
+        {/* Chats section */}
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Threads</Text>
+          <Text style={styles.sectionTitle}>Chats</Text>
         </View>
 
         {loading ? (
           <ActivityIndicator color={colors.textMuted} style={styles.loader} />
         ) : (
           <FlatList
-            data={threads}
+            data={chats}
             keyExtractor={(item) => item.id}
             style={styles.list}
             showsVerticalScrollIndicator={false}
-            ListEmptyComponent={<Text style={styles.emptyText}>No threads yet</Text>}
+            ListEmptyComponent={<Text style={styles.emptyText}>No chats yet</Text>}
             renderItem={({ item }) => {
-              const isSelected = item.id === selectedThreadId;
+              const isSelected = item.id === selectedChatId;
               return (
                 <Pressable
                   style={({ pressed }) => [
-                    styles.threadItem,
-                    isSelected && styles.threadItemSelected,
-                    pressed && styles.threadItemPressed,
+                    styles.chatItem,
+                    isSelected && styles.chatItemSelected,
+                    pressed && styles.chatItemPressed,
                   ]}
-                  onPress={() => onSelectThread(item.id)}
+                  onPress={() => onSelectChat(item.id)}
                 >
-                  <Text style={[styles.threadTitle, isSelected && styles.threadTitleSelected]} numberOfLines={1}>
+                  <Text style={[styles.chatTitle, isSelected && styles.chatTitleSelected]} numberOfLines={1}>
                     {item.title || 'Untitled'}
                   </Text>
-                  <Text style={styles.threadAge}>{relativeTime(item.updatedAt)}</Text>
+                  <Text style={styles.chatAge}>{relativeTime(item.updatedAt)}</Text>
                 </Pressable>
               );
             }}
@@ -170,8 +170,8 @@ function NavItem({
   );
 }
 
-function sortThreads(threads: ThreadSummary[]): ThreadSummary[] {
-  return [...threads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+function sortChats(chats: ChatSummary[]): ChatSummary[] {
+  return [...chats].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 function relativeTime(iso: string): string {
@@ -195,7 +195,7 @@ const styles = StyleSheet.create({
     paddingTop: spacing.md,
     paddingBottom: spacing.lg,
   },
-  newThreadBtn: {
+  newChatBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
@@ -204,10 +204,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
   },
-  newThreadBtnPressed: {
+  newChatBtnPressed: {
     backgroundColor: colors.accentPressed,
   },
-  newThreadText: {
+  newChatText: {
     ...typography.headline,
     color: colors.white,
     fontSize: 14,
@@ -251,7 +251,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: spacing.xl,
   },
-  threadItem: {
+  chatItem: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -261,25 +261,25 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginBottom: spacing.xs,
   },
-  threadItemSelected: {
+  chatItemSelected: {
     backgroundColor: 'rgba(200, 169, 70, 0.1)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(200, 169, 70, 0.2)',
   },
-  threadItemPressed: {
+  chatItemPressed: {
     backgroundColor: colors.bgItem,
   },
-  threadTitle: {
+  chatTitle: {
     ...typography.body,
     color: colors.textMuted,
     flex: 1,
     marginRight: spacing.sm,
   },
-  threadTitleSelected: {
+  chatTitleSelected: {
     color: colors.textPrimary,
     fontWeight: '600',
   },
-  threadAge: {
+  chatAge: {
     ...typography.caption,
     flexShrink: 0,
   },

@@ -2,11 +2,11 @@ import { Platform, StyleSheet, Text, View } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
 
-import type { ThreadMessage } from '../api/types';
+import type { ChatMessage } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface ChatMessageProps {
-  message: ThreadMessage;
+  message: ChatMessage;
 }
 
 export function ChatMessage({ message }: ChatMessageProps) {

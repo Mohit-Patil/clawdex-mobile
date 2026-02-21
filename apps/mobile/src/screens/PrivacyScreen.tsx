@@ -60,12 +60,12 @@ export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
 
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <Section title="What This App Does">
-            Codex Mobile Control connects to your own Mac bridge service and lets you view threads,
+            Codex Mobile Control connects to your own Mac bridge service and lets you view chats,
             run approved commands, and perform Git operations on your machine.
           </Section>
 
           <Section title="Data Processed">
-            - Thread messages and responses are sent between mobile and your bridge.
+            - Chat messages and responses are sent between mobile and your bridge.
             - Terminal command text and output are sent to the bridge when you run commands.
             - Git status, diffs, and commit messages are returned from your repo.
           </Section>

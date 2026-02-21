@@ -1,22 +1,22 @@
 import {
-  mapThread,
-  mapThreadSummary,
+  mapChat,
+  mapChatSummary,
   toRawThread,
-} from './threadMapping';
+} from './chatMapping';
 import type {
   ApprovalDecision,
-  CreateThreadRequest,
+  CreateChatRequest,
+  Chat,
+  ChatSummary,
   GitCommitRequest,
   GitCommitResponse,
   GitDiffResponse,
   GitStatusResponse,
   PendingApproval,
   ResolveApprovalResponse,
-  SendThreadMessageRequest,
+  SendChatMessageRequest,
   TerminalExecRequest,
   TerminalExecResponse,
-  Thread,
-  ThreadSummary,
 } from './types';
 import type { MacBridgeWsClient } from './ws';
 
@@ -50,6 +50,8 @@ interface AppServerStartResponse {
   };
 }
 
+const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
+
 export class MacBridgeApiClient {
   private readonly ws: MacBridgeWsClient;
 
@@ -61,13 +63,13 @@ export class MacBridgeApiClient {
     return this.ws.request<HealthResponse>('bridge/health/read');
   }
 
-  async listThreads(): Promise<ThreadSummary[]> {
+  async listChats(): Promise<ChatSummary[]> {
     const response = await this.ws.request<AppServerListResponse>('thread/list', {
       cursor: null,
       limit: 200,
       sortKey: null,
       modelProviders: null,
-      sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'unknown'],
+      sourceKinds: CHAT_LIST_SOURCE_KINDS,
       archived: false,
       cwd: null,
     });
@@ -75,12 +77,13 @@ export class MacBridgeApiClient {
     const listRaw = Array.isArray(response.data) ? response.data : [];
 
     return listRaw
-      .map((item) => mapThreadSummary(toRawThread(item)))
-      .filter((item): item is ThreadSummary => item !== null)
+      .map((item) => mapChatSummary(toRawThread(item)))
+      .filter((item): item is ChatSummary => item !== null)
+      .filter((item) => !isSubAgentSource(item.sourceKind))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  async createThread(body: CreateThreadRequest): Promise<Thread> {
+  async createChat(body: CreateChatRequest): Promise<Chat> {
     const started = await this.ws.request<AppServerStartResponse>('thread/start', {
       model: null,
       modelProvider: null,
@@ -96,34 +99,34 @@ export class MacBridgeApiClient {
       persistExtendedHistory: true,
     });
 
-    const threadId = started.thread?.id;
-    if (!threadId) {
-      throw new Error('thread/start did not return a thread id');
+    const chatId = started.thread?.id;
+    if (!chatId) {
+      throw new Error('thread/start did not return a chat id');
     }
 
     const initialPrompt = body.message?.trim();
     if (initialPrompt) {
-      return this.sendThreadMessage(threadId, {
+      return this.sendChatMessage(chatId, {
         content: initialPrompt,
         role: 'user',
       });
     }
 
     if (started.thread) {
-      return mapThread(toRawThread(started.thread));
+      return mapChat(toRawThread(started.thread));
     }
 
-    return this.getThread(threadId);
+    return this.getChat(chatId);
   }
 
-  async getThread(id: string): Promise<Thread> {
+  async getChat(id: string): Promise<Chat> {
     try {
       const response = await this.ws.request<AppServerReadResponse>('thread/read', {
         threadId: id,
         includeTurns: true,
       });
 
-      return mapThread(toRawThread(response.thread));
+      return mapChat(toRawThread(response.thread));
     } catch (error) {
       const message = String((error as Error).message ?? error);
       const isMaterializationGap =
@@ -138,18 +141,18 @@ export class MacBridgeApiClient {
         threadId: id,
         includeTurns: false,
       });
-      return mapThread(toRawThread(response.thread));
+      return mapChat(toRawThread(response.thread));
     }
   }
 
-  async sendThreadMessage(id: string, body: SendThreadMessageRequest): Promise<Thread> {
+  async sendChatMessage(id: string, body: SendChatMessageRequest): Promise<Chat> {
     const content = body.content.trim();
     if (!content) {
-      return this.getThread(id);
+      return this.getChat(id);
     }
 
     if ((body.role ?? 'user') !== 'user') {
-      throw new Error('Only user role is supported in bridge/thread messaging');
+      throw new Error('Only user role is supported in bridge/chat messaging');
     }
 
     try {
@@ -169,7 +172,7 @@ export class MacBridgeApiClient {
         persistExtendedHistory: true,
       });
     } catch {
-      // Best effort: turn/start still works for recently started threads.
+      // Best effort: turn/start still works for recently started chats.
     }
 
     const turnStart = await this.ws.request<AppServerTurnResponse>('turn/start', {
@@ -198,7 +201,7 @@ export class MacBridgeApiClient {
     }
 
     await this.ws.waitForTurnCompletion(id, turnId);
-    return this.getThread(id);
+    return this.getChat(id);
   }
 
   listApprovals(): Promise<PendingApproval[]> {
@@ -227,4 +230,8 @@ export class MacBridgeApiClient {
   gitCommit(body: GitCommitRequest): Promise<GitCommitResponse> {
     return this.ws.request<GitCommitResponse>('bridge/git/commit', body);
   }
+}
+
+function isSubAgentSource(sourceKind: string | undefined): boolean {
+  return typeof sourceKind === 'string' && sourceKind.startsWith('subAgent');
 }
