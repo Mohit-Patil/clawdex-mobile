@@ -114,66 +114,7 @@ export interface RunEvent {
   detail?: string;
 }
 
-export type BridgeWsEvent =
-  | {
-      type: 'thread.created';
-      payload: ThreadSummary;
-    }
-  | {
-      type: 'thread.updated';
-      payload: ThreadSummary;
-    }
-  | {
-      type: 'thread.message';
-      payload: {
-        threadId: string;
-        message: ThreadMessage;
-      };
-    }
-  | {
-      type: 'thread.message.delta';
-      payload: {
-        threadId: string;
-        messageId: string;
-        delta: string;
-        content: string;
-        updatedAt: string;
-      };
-    }
-  | {
-      type: 'thread.run.event';
-      payload: {
-        threadId: string;
-        eventType: string;
-        at: string;
-        detail?: string;
-      };
-    }
-  | {
-      type: 'terminal.executed';
-      payload: TerminalExecResponse;
-    }
-  | {
-      type: 'git.updated';
-      payload: GitStatusResponse;
-    }
-  | {
-      type: 'approval.requested';
-      payload: PendingApproval;
-    }
-  | {
-      type: 'approval.resolved';
-      payload: {
-        id: string;
-        decision: ApprovalDecision;
-        resolvedAt: string;
-        threadId: string;
-      };
-    }
-  | {
-      type: 'health';
-      payload: {
-        status: 'ok';
-        at: string;
-      };
-    };
+export interface RpcNotification {
+  method: string;
+  params: Record<string, unknown> | null;
+}

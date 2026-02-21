@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 import Animated, { FadeInUp } from 'react-native-reanimated';
 
 import type { RunEvent } from '../api/types';
@@ -15,7 +15,7 @@ const labels: Record<string, string> = {
   'run.failed': 'Run failed',
 };
 
-const icons: Record<string, { name: string; color: string }> = {
+const icons: Record<string, { name: keyof typeof Ionicons.glyphMap; color: string }> = {
   'run.started': { name: 'play-circle-outline', color: colors.statusRunning },
   'run.completed': { name: 'checkmark-circle-outline', color: colors.statusComplete },
   'run.failed': { name: 'close-circle-outline', color: colors.statusError },
@@ -28,7 +28,7 @@ export function StatusLine({ event }: StatusLineProps) {
 
   return (
     <Animated.View entering={FadeInUp.duration(200)} style={styles.container}>
-      <Ionicons name={icon.name as any} size={14} color={icon.color} />
+      <Ionicons name={icon.name} size={14} color={icon.color} />
       <Text style={[styles.text, { color: icon.color }]}>
         {label}
         {detail ? ` — ${detail}` : ''}

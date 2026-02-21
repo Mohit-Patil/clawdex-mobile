@@ -1,16 +1,24 @@
 import { RealtimeHub } from '../realtimeHub';
 import type { BridgeWsEvent } from '../../types';
+import type { WebSocket } from '@fastify/websocket';
 
 // ---------------------------------------------------------------------------
 // Mock WebSocket client helper
 // ---------------------------------------------------------------------------
 
-function createMockClient(readyState = 1) {
-  const handlers: Record<string, Function> = {};
+interface MockClient {
+  readyState: number;
+  send: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
+  _triggerClose: () => void;
+}
+
+function createMockClient(readyState = 1): MockClient {
+  const handlers: Record<string, () => void> = {};
   return {
     readyState,
     send: vi.fn(),
-    on: vi.fn((event: string, handler: Function) => {
+    on: vi.fn((event: string, handler: () => void) => {
       handlers[event] = handler;
     }),
     // Helper to trigger close event in tests
@@ -33,8 +41,8 @@ describe('RealtimeHub', () => {
     const client1 = createMockClient(1);
     const client2 = createMockClient(1);
 
-    hub.addClient(client1 as any);
-    hub.addClient(client2 as any);
+    hub.addClient(client1 as unknown as WebSocket);
+    hub.addClient(client2 as unknown as WebSocket);
     hub.broadcast(sampleEvent);
 
     const expected = JSON.stringify(sampleEvent);
@@ -49,8 +57,8 @@ describe('RealtimeHub', () => {
     const openClient = createMockClient(1);
     const closedClient = createMockClient(3); // WebSocket.CLOSED = 3
 
-    hub.addClient(openClient as any);
-    hub.addClient(closedClient as any);
+    hub.addClient(openClient as unknown as WebSocket);
+    hub.addClient(closedClient as unknown as WebSocket);
     hub.broadcast(sampleEvent);
 
     expect(openClient.send).toHaveBeenCalledTimes(1);
@@ -61,7 +69,7 @@ describe('RealtimeHub', () => {
     const hub = new RealtimeHub();
     const client = createMockClient(1);
 
-    hub.addClient(client as any);
+    hub.addClient(client as unknown as WebSocket);
 
     // Verify the close handler was registered
     expect(client.on).toHaveBeenCalledWith('close', expect.any(Function));
@@ -94,7 +102,7 @@ describe('RealtimeHub', () => {
     ];
 
     for (const client of clients) {
-      hub.addClient(client as any);
+      hub.addClient(client as unknown as WebSocket);
     }
 
     hub.broadcast(sampleEvent);

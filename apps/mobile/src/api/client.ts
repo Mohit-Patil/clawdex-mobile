@@ -1,3 +1,8 @@
+import {
+  mapThread,
+  mapThreadSummary,
+  toRawThread,
+} from './threadMapping';
 import type {
   ApprovalDecision,
   CreateThreadRequest,
@@ -11,8 +16,9 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
   Thread,
-  ThreadSummary
+  ThreadSummary,
 } from './types';
+import type { MacBridgeWsClient } from './ws';
 
 interface HealthResponse {
   status: 'ok';
@@ -21,112 +27,204 @@ interface HealthResponse {
 }
 
 interface ApiClientOptions {
-  baseUrl: string;
-  timeoutMs?: number;
-  authToken?: string | null;
+  ws: MacBridgeWsClient;
+}
+
+interface AppServerListResponse {
+  data?: unknown[];
+}
+
+interface AppServerReadResponse {
+  thread?: unknown;
+}
+
+interface AppServerTurnResponse {
+  turn?: {
+    id?: string;
+  };
+}
+
+interface AppServerStartResponse {
+  thread?: {
+    id?: string;
+  };
 }
 
 export class MacBridgeApiClient {
-  private readonly baseUrl: string;
-  private readonly timeoutMs: number;
-  private readonly authToken: string | null;
+  private readonly ws: MacBridgeWsClient;
 
   constructor(options: ApiClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/$/, '');
-    this.timeoutMs = options.timeoutMs ?? 180_000; // Increased to 3 minutes to match backend
-    this.authToken = options.authToken?.trim() || null;
-  }
-
-  wsUrl(): string {
-    const wsBase = this.baseUrl.startsWith('https://')
-      ? this.baseUrl.replace('https://', 'wss://')
-      : this.baseUrl.replace('http://', 'ws://');
-    return `${wsBase}/ws`;
+    this.ws = options.ws;
   }
 
   health(): Promise<HealthResponse> {
-    return this.request<HealthResponse>('/health');
+    return this.ws.request<HealthResponse>('bridge/health/read');
   }
 
-  listThreads(): Promise<ThreadSummary[]> {
-    return this.request<ThreadSummary[]>('/threads');
-  }
-
-  createThread(body: CreateThreadRequest): Promise<Thread> {
-    return this.request<Thread>('/threads', {
-      method: 'POST',
-      body: JSON.stringify(body)
+  async listThreads(): Promise<ThreadSummary[]> {
+    const response = await this.ws.request<AppServerListResponse>('thread/list', {
+      cursor: null,
+      limit: 200,
+      sortKey: null,
+      modelProviders: null,
+      sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'unknown'],
+      archived: false,
+      cwd: null,
     });
+
+    const listRaw = Array.isArray(response.data) ? response.data : [];
+
+    return listRaw
+      .map((item) => mapThreadSummary(toRawThread(item)))
+      .filter((item): item is ThreadSummary => item !== null)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  getThread(id: string): Promise<Thread> {
-    return this.request<Thread>(`/threads/${encodeURIComponent(id)}`);
-  }
-
-  sendThreadMessage(id: string, body: SendThreadMessageRequest): Promise<Thread> {
-    return this.request<Thread>(`/threads/${encodeURIComponent(id)}/message`, {
-      method: 'POST',
-      body: JSON.stringify(body)
+  async createThread(body: CreateThreadRequest): Promise<Thread> {
+    const started = await this.ws.request<AppServerStartResponse>('thread/start', {
+      model: null,
+      modelProvider: null,
+      cwd: null,
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-write',
+      config: null,
+      baseInstructions: null,
+      developerInstructions: null,
+      personality: null,
+      ephemeral: null,
+      experimentalRawEvents: false,
+      persistExtendedHistory: true,
     });
+
+    const threadId = started.thread?.id;
+    if (!threadId) {
+      throw new Error('thread/start did not return a thread id');
+    }
+
+    const initialPrompt = body.message?.trim();
+    if (initialPrompt) {
+      return this.sendThreadMessage(threadId, {
+        content: initialPrompt,
+        role: 'user',
+      });
+    }
+
+    if (started.thread) {
+      return mapThread(toRawThread(started.thread));
+    }
+
+    return this.getThread(threadId);
+  }
+
+  async getThread(id: string): Promise<Thread> {
+    try {
+      const response = await this.ws.request<AppServerReadResponse>('thread/read', {
+        threadId: id,
+        includeTurns: true,
+      });
+
+      return mapThread(toRawThread(response.thread));
+    } catch (error) {
+      const message = String((error as Error).message ?? error);
+      const isMaterializationGap =
+        message.includes('includeTurns') &&
+        (message.includes('material') || message.includes('materialis'));
+
+      if (!isMaterializationGap) {
+        throw error;
+      }
+
+      const response = await this.ws.request<AppServerReadResponse>('thread/read', {
+        threadId: id,
+        includeTurns: false,
+      });
+      return mapThread(toRawThread(response.thread));
+    }
+  }
+
+  async sendThreadMessage(id: string, body: SendThreadMessageRequest): Promise<Thread> {
+    const content = body.content.trim();
+    if (!content) {
+      return this.getThread(id);
+    }
+
+    if ((body.role ?? 'user') !== 'user') {
+      throw new Error('Only user role is supported in bridge/thread messaging');
+    }
+
+    try {
+      await this.ws.request('thread/resume', {
+        threadId: id,
+        history: null,
+        path: null,
+        model: null,
+        modelProvider: null,
+        cwd: null,
+        approvalPolicy: 'on-request',
+        sandbox: 'workspace-write',
+        config: null,
+        baseInstructions: null,
+        developerInstructions: null,
+        personality: null,
+        persistExtendedHistory: true,
+      });
+    } catch {
+      // Best effort: turn/start still works for recently started threads.
+    }
+
+    const turnStart = await this.ws.request<AppServerTurnResponse>('turn/start', {
+      threadId: id,
+      input: [
+        {
+          type: 'text',
+          text: content,
+          text_elements: [],
+        },
+      ],
+      cwd: null,
+      approvalPolicy: null,
+      sandboxPolicy: null,
+      model: null,
+      effort: null,
+      summary: null,
+      personality: null,
+      outputSchema: null,
+      collaborationMode: null,
+    });
+
+    const turnId = turnStart.turn?.id;
+    if (!turnId) {
+      throw new Error('turn/start did not return turn id');
+    }
+
+    await this.ws.waitForTurnCompletion(id, turnId);
+    return this.getThread(id);
   }
 
   listApprovals(): Promise<PendingApproval[]> {
-    return this.request<PendingApproval[]>('/approvals');
+    return this.ws.request<PendingApproval[]>('bridge/approvals/list');
   }
 
   resolveApproval(id: string, decision: ApprovalDecision): Promise<ResolveApprovalResponse> {
-    return this.request<ResolveApprovalResponse>(`/approvals/${encodeURIComponent(id)}/decision`, {
-      method: 'POST',
-      body: JSON.stringify({ decision })
+    return this.ws.request<ResolveApprovalResponse>('bridge/approvals/resolve', {
+      id,
+      decision,
     });
   }
 
   execTerminal(body: TerminalExecRequest): Promise<TerminalExecResponse> {
-    return this.request<TerminalExecResponse>('/terminal/exec', {
-      method: 'POST',
-      body: JSON.stringify(body)
-    });
+    return this.ws.request<TerminalExecResponse>('bridge/terminal/exec', body);
   }
 
   gitStatus(): Promise<GitStatusResponse> {
-    return this.request<GitStatusResponse>('/git/status');
+    return this.ws.request<GitStatusResponse>('bridge/git/status');
   }
 
   gitDiff(): Promise<GitDiffResponse> {
-    return this.request<GitDiffResponse>('/git/diff');
+    return this.ws.request<GitDiffResponse>('bridge/git/diff');
   }
 
   gitCommit(body: GitCommitRequest): Promise<GitCommitResponse> {
-    return this.request<GitCommitResponse>('/git/commit', {
-      method: 'POST',
-      body: JSON.stringify(body)
-    });
-  }
-
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-
-    try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
-          ...(init.headers ?? {})
-        },
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`HTTP ${response.status}: ${body}`);
-      }
-
-      return (await response.json()) as T;
-    } finally {
-      clearTimeout(timeout);
-    }
+    return this.ws.request<GitCommitResponse>('bridge/git/commit', body);
   }
 }

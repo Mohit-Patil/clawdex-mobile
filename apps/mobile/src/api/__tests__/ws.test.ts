@@ -1,9 +1,6 @@
-import { MacBridgeWsClient } from '../ws';
 import { Platform } from 'react-native';
 
-// ---------------------------------------------------------------------------
-// Mock WebSocket
-// ---------------------------------------------------------------------------
+import { MacBridgeWsClient } from '../ws';
 
 class MockWebSocket {
   onopen: (() => void) | null = null;
@@ -11,36 +8,32 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
 
+  send = jest.fn();
   close = jest.fn();
+  readyState = 1;
 
-  // Test helpers
   simulateOpen() {
     this.onopen?.();
   }
+
   simulateClose() {
     this.onclose?.();
   }
+
   simulateError() {
     this.onerror?.();
   }
+
   simulateMessage(data: string) {
     this.onmessage?.({ data });
   }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 let mockInstances: MockWebSocket[];
 
 function latestMockSocket(): MockWebSocket {
   return mockInstances[mockInstances.length - 1];
 }
-
-// ---------------------------------------------------------------------------
-// Setup / Teardown
-// ---------------------------------------------------------------------------
 
 beforeEach(() => {
   mockInstances = [];
@@ -57,183 +50,98 @@ afterEach(() => {
   delete (global as any).WebSocket;
 });
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-const TEST_URL = 'ws://localhost:9000';
-
 describe('MacBridgeWsClient', () => {
-  // -- connect() -----------------------------------------------------------
+  it('connect() builds /rpc websocket URL', () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    client.connect();
 
-  describe('connect()', () => {
-    it('creates a WebSocket with the given URL', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      client.connect();
+    expect(global.WebSocket).toHaveBeenCalledWith('ws://localhost:8787/rpc');
+  });
 
-      expect(global.WebSocket).toHaveBeenCalledWith(TEST_URL);
-      expect(mockInstances).toHaveLength(1);
+  it('sends Authorization header on native when auth token is provided', () => {
+    const client = new MacBridgeWsClient('http://localhost:8787', {
+      authToken: 'token-abc',
     });
+    client.connect();
 
-    it('is idempotent - calling twice does not create a second socket', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      client.connect();
-      client.connect();
+    if (Platform.OS === 'web') {
+      expect(global.WebSocket).toHaveBeenCalledWith('ws://localhost:8787/rpc');
+      return;
+    }
 
-      expect(global.WebSocket).toHaveBeenCalledTimes(1);
-      expect(mockInstances).toHaveLength(1);
-    });
-
-    it('sends Authorization header options when auth token is set on native', () => {
-      const client = new MacBridgeWsClient(TEST_URL, { authToken: 'token-abc' });
-      client.connect();
-
-      if (Platform.OS === 'web') {
-        expect(global.WebSocket).toHaveBeenCalledWith(TEST_URL);
-        return;
-      }
-
-      expect(global.WebSocket).toHaveBeenCalledWith(TEST_URL, undefined, {
-        headers: { Authorization: 'Bearer token-abc' },
-      });
-    });
-
-    it('supports web query-token fallback when explicitly enabled', () => {
-      if (Platform.OS !== 'web') {
-        return;
-      }
-
-      const client = new MacBridgeWsClient(TEST_URL, {
-        authToken: 'token-xyz',
-        allowQueryTokenAuth: true,
-      });
-      client.connect();
-
-      expect(global.WebSocket).toHaveBeenCalledWith(`${TEST_URL}?token=token-xyz`);
+    expect(global.WebSocket).toHaveBeenCalledWith('ws://localhost:8787/rpc', undefined, {
+      headers: { Authorization: 'Bearer token-abc' },
     });
   });
 
-  // -- disconnect() --------------------------------------------------------
+  it('supports web query token auth fallback when enabled', () => {
+    if (Platform.OS !== 'web') {
+      return;
+    }
 
-  describe('disconnect()', () => {
-    it('calls socket.close() and nulls reference so next connect() creates new socket', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      client.connect();
-
-      const firstSocket = latestMockSocket();
-      client.disconnect();
-
-      expect(firstSocket.close).toHaveBeenCalledTimes(1);
-
-      // A subsequent connect() should create a brand-new socket
-      client.connect();
-      expect(mockInstances).toHaveLength(2);
+    const client = new MacBridgeWsClient('http://localhost:8787', {
+      authToken: 'token-xyz',
+      allowQueryTokenAuth: true,
     });
+    client.connect();
 
-    it('is safe when not connected (no error thrown)', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      expect(() => client.disconnect()).not.toThrow();
+    expect(global.WebSocket).toHaveBeenCalledWith('ws://localhost:8787/rpc?token=token-xyz');
+  });
+
+  it('onEvent emits rpc notifications', () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    const listener = jest.fn();
+    client.onEvent(listener);
+    client.connect();
+
+    latestMockSocket().simulateMessage(
+      JSON.stringify({ method: 'turn/completed', params: { threadId: 'thr_1' } })
+    );
+
+    expect(listener).toHaveBeenCalledWith({
+      method: 'turn/completed',
+      params: { threadId: 'thr_1' },
     });
   });
 
-  // -- onEvent -------------------------------------------------------------
+  it('request() resolves using JSON-RPC response id', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    client.connect();
 
-  describe('onEvent', () => {
-    it('listener receives parsed BridgeWsEvent when onmessage fires with valid JSON', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      const listener = jest.fn();
-      client.onEvent(listener);
-      client.connect();
+    const socket = latestMockSocket();
+    socket.simulateOpen();
 
-      const payload = {
-        type: 'health',
-        payload: { status: 'ok', at: '2024-01-01T00:00:00Z' },
-      };
+    const requestPromise = client.request<{ ok: boolean }>('bridge/health/read');
+    await Promise.resolve();
 
-      latestMockSocket().simulateMessage(JSON.stringify(payload));
+    const sentPayload = JSON.parse(String(socket.send.mock.calls[0][0])) as {
+      id: string;
+      method: string;
+    };
 
-      expect(listener).toHaveBeenCalledTimes(1);
-      expect(listener).toHaveBeenCalledWith(payload);
-    });
+    expect(sentPayload.method).toBe('bridge/health/read');
 
-    it('does not throw or emit to listeners on malformed JSON', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      const listener = jest.fn();
-      client.onEvent(listener);
-      client.connect();
+    socket.simulateMessage(
+      JSON.stringify({
+        id: sentPayload.id,
+        result: { ok: true },
+      })
+    );
 
-      expect(() => {
-        latestMockSocket().simulateMessage('not json');
-      }).not.toThrow();
-
-      expect(listener).not.toHaveBeenCalled();
-    });
-
-    it('does not emit to listeners when JSON is missing the type field', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      const listener = jest.fn();
-      client.onEvent(listener);
-      client.connect();
-
-      latestMockSocket().simulateMessage(JSON.stringify({ foo: 'bar' }));
-
-      expect(listener).not.toHaveBeenCalled();
-    });
-
-    it('returns an unsubscribe function that removes the listener', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      const listener = jest.fn();
-      const unsubscribe = client.onEvent(listener);
-      client.connect();
-
-      const event = {
-        type: 'health',
-        payload: { status: 'ok', at: '2024-01-01T00:00:00Z' },
-      };
-
-      // First message should be received
-      latestMockSocket().simulateMessage(JSON.stringify(event));
-      expect(listener).toHaveBeenCalledTimes(1);
-
-      // After unsubscribe, listener should no longer receive events
-      unsubscribe();
-      latestMockSocket().simulateMessage(JSON.stringify(event));
-      expect(listener).toHaveBeenCalledTimes(1);
-    });
+    await expect(requestPromise).resolves.toEqual({ ok: true });
   });
 
-  // -- onStatus ------------------------------------------------------------
+  it('onStatus emits open/close state changes', () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    const listener = jest.fn();
+    client.onStatus(listener);
+    client.connect();
 
-  describe('onStatus', () => {
-    it('listener receives true on socket open, false on socket close', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      const listener = jest.fn();
-      client.onStatus(listener);
-      client.connect();
+    const socket = latestMockSocket();
+    socket.simulateOpen();
+    client.disconnect();
 
-      latestMockSocket().simulateOpen();
-      expect(listener).toHaveBeenCalledWith(true);
-
-      latestMockSocket().simulateClose();
-      expect(listener).toHaveBeenCalledWith(false);
-
-      expect(listener).toHaveBeenCalledTimes(2);
-    });
-
-    it('returns an unsubscribe function that removes the listener', () => {
-      const client = new MacBridgeWsClient(TEST_URL);
-      const listener = jest.fn();
-      const unsubscribe = client.onStatus(listener);
-      client.connect();
-
-      // Listener should receive the open event
-      latestMockSocket().simulateOpen();
-      expect(listener).toHaveBeenCalledTimes(1);
-
-      // After unsubscribe, listener should no longer receive status changes
-      unsubscribe();
-      latestMockSocket().simulateClose();
-      expect(listener).toHaveBeenCalledTimes(1);
-    });
+    expect(listener).toHaveBeenNthCalledWith(1, true);
+    expect(listener).toHaveBeenNthCalledWith(2, false);
   });
 });

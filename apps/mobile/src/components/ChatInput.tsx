@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import {
   ActivityIndicator,
+  type NativeSyntheticEvent,
   Platform,
   Pressable,
   StyleSheet,
   TextInput,
+  type TextInputKeyPressEventData,
   View,
 } from 'react-native';
 
@@ -46,11 +48,14 @@ export function ChatInput({
           placeholder={placeholder}
           placeholderTextColor={colors.textMuted}
           multiline
-          onKeyPress={(e: any) => {
+          onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
+            const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
+              shiftKey?: boolean;
+            };
             if (
               Platform.OS === 'web' &&
-              e.nativeEvent.key === 'Enter' &&
-              !e.nativeEvent.shiftKey
+              keyEvent.key === 'Enter' &&
+              !keyEvent.shiftKey
             ) {
               e.preventDefault();
               if (canSend) onSubmit();
@@ -77,11 +82,11 @@ export function ChatInput({
 const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
+    alignItems: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
-    paddingBottom: Platform.OS === 'ios' ? spacing.xxl : spacing.md,
+    paddingBottom: Platform.OS === 'ios' ? spacing.lg : spacing.md,
     backgroundColor: colors.bgMain,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.borderLight,
@@ -101,14 +106,14 @@ const styles = StyleSheet.create({
   inputWrapper: {
     flex: 1,
     flexDirection: 'row',
-    alignItems: 'flex-end',
+    alignItems: 'center',
     backgroundColor: colors.bgInput,
     borderWidth: 1,
     borderColor: colors.borderHighlight,
     borderRadius: radius.lg,
     paddingHorizontal: spacing.md,
-    paddingVertical: Platform.OS === 'ios' ? spacing.sm : spacing.xs,
-    minHeight: 36,
+    paddingVertical: spacing.xs,
+    minHeight: 40,
     maxHeight: 120,
   },
   input: {
@@ -116,7 +121,8 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: 14,
     lineHeight: 20,
-    paddingVertical: 0,
+    paddingVertical: Platform.OS === 'ios' ? 2 : 0,
+    textAlignVertical: 'center',
   },
   sendBtn: {
     width: 28,

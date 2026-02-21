@@ -72,9 +72,15 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
 
   useEffect(() => {
     return ws.onEvent((event) => {
-      if (event.type === 'terminal.executed') {
+      if (event.method === 'bridge/terminal/completed') {
+        const payload = event.params;
+        const command = typeof payload?.command === 'string' ? payload.command : 'unknown';
+        const code =
+          typeof payload?.code === 'number' || payload?.code === null
+            ? payload.code
+            : null;
         setOutput((prev) =>
-          `${prev}\n\n[ws] ${event.payload.command} → ${String(event.payload.code)}`.trim()
+          `${prev}\n\n[ws] ${command} → ${String(code)}`.trim()
         );
       }
     });

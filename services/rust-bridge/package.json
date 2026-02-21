@@ -1,0 +1,13 @@
+{
+  "name": "@codex/rust-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "cargo run",
+    "start": "cargo run --release",
+    "build": "cargo build --release",
+    "typecheck": "cargo check",
+    "lint": "cargo fmt --check",
+    "test": "cargo test"
+  }
+}

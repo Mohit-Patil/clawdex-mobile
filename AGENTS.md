@@ -3,12 +3,15 @@
 ## Project Purpose
 - Monorepo for controlling Codex from mobile:
   - `apps/mobile`: Expo React Native client (Threads, Terminal, Git, Settings).
-  - `services/mac-bridge`: Fastify + WebSocket service wrapping `codex app-server`, git, and terminal execution.
+  - `services/rust-bridge`: Rust WebSocket JSON-RPC bridge that wraps `codex app-server` plus terminal/git helpers.
+  - `services/mac-bridge`: legacy TypeScript bridge kept for reference.
 
 ## Repo Layout
 - `apps/mobile`: UI and API client code.
   - API layer: `src/api/*`
   - Screens: `src/screens/*`
+- `services/rust-bridge`: primary backend bridge service.
+  - WS RPC server + app-server adapter: `src/main.rs`
 - `services/mac-bridge`: backend bridge service.
   - HTTP/WS server: `src/server.ts`, `src/index.ts`
   - Service adapters: `src/services/*`
@@ -20,7 +23,7 @@
    - `npm install`
 2. Copy env examples:
    - `cp apps/mobile/.env.example apps/mobile/.env`
-   - `cp services/mac-bridge/.env.example services/mac-bridge/.env`
+   - `cp services/rust-bridge/.env.example services/rust-bridge/.env`
 
 ### Starting the Bridge
 
@@ -32,7 +35,7 @@ BRIDGE_PORT=8787 \
 BRIDGE_ALLOW_INSECURE_NO_AUTH=true \
 CODEX_CLI_BIN=codex \
 BRIDGE_WORKDIR="$(pwd)" \
-npm run -w @codex/mac-bridge dev
+npm run -w @codex/rust-bridge dev
 ```
 
 - `BRIDGE_HOST=0.0.0.0` binds to all interfaces so the phone on the same LAN can reach it. Without this it defaults to `127.0.0.1` (localhost only).
@@ -65,30 +68,28 @@ Optionally run on a specific platform:
 - `npm run lint` (all workspaces)
 - `npm run typecheck` (all workspaces)
 - `npm run build` (all workspaces)
-- `npm run -w @codex/mac-bridge dev` (bridge watch mode)
+- `npm run -w @codex/rust-bridge dev` (bridge run mode)
 - `npm run -w @codex/mobile start` (Expo dev server)
 
 ## Architecture Notes
 - Mobile app creates one `MacBridgeApiClient` and one `MacBridgeWsClient` in `App.tsx` and passes them to screen components.
 - Threads, Terminal, and Git screens keep local `useState` and call typed API helpers in `apps/mobile/src/api/client.ts`.
 - Bridge exposes:
-  - REST: health, threads, terminal exec, git status/diff/commit
-  - WS: run/thread/terminal/git events
-- `CodexCliAdapter` manages thread cache and run events; `CodexAppServerClient` manages the `codex app-server` child process.
+  - WebSocket JSON-RPC (`/rpc`) for thread, turn, approvals, terminal, and git operations.
+  - Optional HTTP `/health` endpoint.
+- App-server events (`turn/*`, `item/*`) are forwarded over WS; approval prompts are surfaced as `bridge/approval.*`.
 
 ## Coding Conventions
 - Keep changes in `src/` only; do not manually edit build artifacts.
-- Preserve strong typing across bridge contracts (`services/mac-bridge/src/types.ts`, `apps/mobile/src/api/types.ts`).
-- Use Zod validation for new bridge request bodies.
-- Prefer small service-layer additions over bloating route handlers.
+- Preserve strong typing across bridge contracts (`services/rust-bridge/src/main.rs`, `apps/mobile/src/api/types.ts`).
+- Prefer small service-layer additions over bloating the main RPC router.
 - For mobile, keep API requests in `src/api/client.ts` and UI logic in screen files.
 
 ## Security Guardrails
 - Treat bridge as trusted-network only until auth is added:
-  - CORS is permissive.
-  - `/terminal/exec` executes shell commands.
-  - Git endpoints can mutate repository state.
-- Never expose `services/mac-bridge` directly to the public internet in current form.
+  - `bridge/terminal/exec` executes shell commands.
+  - `bridge/git/*` can mutate repository state.
+- Never expose `services/rust-bridge` directly to the public internet in current form.
 - If adding new execution endpoints, enforce authentication/authorization first.
 
 ## Known Risks

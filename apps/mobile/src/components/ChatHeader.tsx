@@ -29,14 +29,9 @@ export function ChatHeader({ onOpenDrawer, modelName = 'Codex' }: ChatHeaderProp
 
 const styles = StyleSheet.create({
   headerContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
     backgroundColor: colors.bgMain,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.borderLight,
-    zIndex: 10,
   },
   header: {
     flexDirection: 'row',

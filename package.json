@@ -10,11 +10,12 @@
     "mobile": "npm run -w @codex/mobile start",
     "ios": "npm run -w @codex/mobile ios",
     "android": "npm run -w @codex/mobile android",
-    "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
+    "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/rust-bridge dev",
+    "bridge:ts": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "build": "npm run --workspaces build",
     "typecheck": "npm run --workspaces typecheck",
     "lint": "npm run --workspaces lint",
-    "test": "npm run test -w @codex/mac-bridge && npm run test -w @codex/mobile"
+    "test": "npm run test -w @codex/mac-bridge && npm run test -w @codex/mobile && npm run test -w @codex/rust-bridge"
   },
   "dependencies": {
     "@types/react": "^19.1.10",

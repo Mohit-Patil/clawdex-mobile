@@ -15,11 +15,12 @@ interface ToolBlockProps {
 export function ToolBlock({ command, status, output, durationMs }: ToolBlockProps) {
   const [expanded, setExpanded] = useState(false);
 
-  const statusIcon = status === 'running'
-    ? null
-    : status === 'complete'
-      ? 'checkmark'
-      : 'close';
+  const statusIcon: keyof typeof Ionicons.glyphMap | null =
+    status === 'running'
+      ? null
+      : status === 'complete'
+        ? 'checkmark'
+        : 'close';
 
   const statusColor = status === 'running'
     ? colors.statusRunning
@@ -44,7 +45,7 @@ export function ToolBlock({ command, status, output, durationMs }: ToolBlockProp
             ) : (
               <>
                 {statusIcon && (
-                  <Ionicons name={statusIcon as any} size={14} color={statusColor} />
+                  <Ionicons name={statusIcon} size={14} color={statusColor} />
                 )}
                 {durationMs != null && (
                   <Text style={[styles.duration, { color: statusColor }]}>

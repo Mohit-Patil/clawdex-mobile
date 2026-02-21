@@ -9,6 +9,7 @@ yarn-error.log*
 # TypeScript build artifacts
 **/dist/
 *.tsbuildinfo
+**/target/
 
 # Expo / React Native
 .expo/

@@ -1,12 +1,12 @@
-# Codex Mobile Control (Expo + mac-bridge)
+# Codex Mobile Control (Expo + Rust Bridge)
 
 V1 scaffold for remotely controlling Codex running on a Mac from a cross-platform Expo app.
 
 ## Repo layout
 
 - `apps/mobile`: Expo (iOS + Android) TypeScript app with tabs for Threads, Terminal, Git, Settings.
-- `services/mac-bridge`: Node.js TypeScript service (Fastify + WebSocket) that exposes REST/WS APIs and a clean Codex adapter layer.
-  - Thread/session history is sourced from `codex app-server` (persisted Codex sessions), so mobile can load and continue existing sessions.
+- `services/rust-bridge`: Rust WebSocket JSON-RPC service that proxies `codex app-server` and exposes terminal/git helpers.
+- `services/mac-bridge`: legacy Node.js TypeScript bridge kept for reference.
 
 ## Prerequisites
 
@@ -28,21 +28,21 @@ npm install
 
 ```bash
 cp apps/mobile/.env.example apps/mobile/.env
-cp services/mac-bridge/.env.example services/mac-bridge/.env
+cp services/rust-bridge/.env.example services/rust-bridge/.env
 ```
 
 Bridge env notes:
 - `BRIDGE_WORKDIR`: absolute path to the repo/directory where Codex CLI should run.
   - `npm run bridge` now sets this automatically to the repo root (`$(pwd)`), so Codex edits your project files instead of the `services/mac-bridge` subfolder.
 - `CODEX_CLI_BIN`: Codex CLI executable path/name (defaults to `codex`).
-- `BRIDGE_AUTH_TOKEN`: bearer token for bridge REST/WS auth. Required by default.
+- `BRIDGE_AUTH_TOKEN`: bearer token for bridge WS auth. Required by default.
 - `BRIDGE_ALLOW_INSECURE_NO_AUTH=true`: local-dev-only escape hatch to run bridge without auth.
 - `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true`: optional fallback for browser WebSocket clients that cannot set `Authorization` headers.
 - `BRIDGE_CORS_ORIGINS`: comma-separated origin allowlist for browser access. If unset, CORS response headers are disabled.
-- `BRIDGE_TERMINAL_ALLOWED_COMMANDS`: comma-separated allowlist for `/terminal/exec` (default: `pwd,ls,cat,git`).
-- `BRIDGE_DISABLE_TERMINAL_EXEC=true`: disable `/terminal/exec` entirely.
+- `BRIDGE_TERMINAL_ALLOWED_COMMANDS`: comma-separated allowlist for `bridge/terminal/exec` (default: `pwd,ls,cat,git`).
+- `BRIDGE_DISABLE_TERMINAL_EXEC=true`: disable terminal execution entirely.
 
-3. Start mac-bridge:
+3. Start Rust bridge:
 
 ```bash
 npm run bridge
@@ -76,24 +76,24 @@ Set `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` to populate the in-app Terms screen link.
 - `npm run mobile`: Start Expo dev server
 - `npm run ios`: Open iOS simulator via Expo
 - `npm run android`: Open Android emulator via Expo
-- `npm run bridge`: Start mac-bridge in watch mode
+- `npm run bridge`: Start Rust bridge
+- `npm run bridge:ts`: Start legacy TypeScript bridge
 - `npm run lint`: Run lint in all workspaces
 - `npm run typecheck`: Run typecheck in all workspaces
 - `npm run build`: Build all workspaces
 
-## API summary (mac-bridge)
+## API summary (rust-bridge)
 
 - `GET /health`
-- `GET /threads`
-- `POST /threads`
-- `GET /threads/:id`
-- `POST /threads/:id/message`
-- `GET /approvals`
-- `POST /approvals/:id/decision`
-- `POST /terminal/exec`
-- `GET /git/status`
-- `GET /git/diff`
-- `POST /git/commit`
-- `GET /ws` (WebSocket events)
+- `GET /rpc` (WebSocket JSON-RPC)
+- Forwarded app-server methods: `thread/*`, `turn/*`, `review/start`, `model/list`, `skills/list`, `app/list`
+- Bridge methods:
+  - `bridge/health/read`
+  - `bridge/terminal/exec`
+  - `bridge/git/status`
+  - `bridge/git/diff`
+  - `bridge/git/commit`
+  - `bridge/approvals/list`
+  - `bridge/approvals/resolve`
 
-Thread execution events stream over `GET /ws` while Codex is running, including thread status transitions and assistant message deltas.
+Thread execution events stream through JSON-RPC notifications (`turn/*`, `item/*`) plus bridge notifications (`bridge/approval.*`, `bridge/terminal/completed`, `bridge/git/updated`).

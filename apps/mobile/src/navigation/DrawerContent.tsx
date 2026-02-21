@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import type { MacBridgeApiClient } from '../api/client';
-import type { BridgeWsEvent, ThreadSummary } from '../api/types';
+import type { RpcNotification, ThreadSummary } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
 import { colors, spacing, typography } from '../theme';
 
@@ -52,25 +52,24 @@ export function DrawerContent({
   }, [loadThreads]);
 
   useEffect(() => {
-    return ws.onEvent((event: BridgeWsEvent) => {
-      if (event.type === 'thread.created' || event.type === 'thread.updated') {
-        setThreads((prev) => upsertThread(prev, event.payload));
-      }
-      if (event.type === 'thread.message.delta') {
-        setThreads((prev) =>
-          prev.map((t) =>
-            t.id === event.payload.threadId
-              ? {
-                ...t,
-                lastMessagePreview: event.payload.content,
-                updatedAt: event.payload.updatedAt,
-              }
-              : t
-          )
-        );
+    return ws.onEvent((event: RpcNotification) => {
+      if (
+        event.method === 'thread/started' ||
+        event.method === 'turn/completed' ||
+        event.method === 'thread/status/changed'
+      ) {
+        void loadThreads();
       }
     });
-  }, [ws]);
+  }, [ws, loadThreads]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void loadThreads();
+    }, 4000);
+
+    return () => clearInterval(timer);
+  }, [loadThreads]);
 
   return (
     <View style={styles.container}>
@@ -173,13 +172,6 @@ function NavItem({
 
 function sortThreads(threads: ThreadSummary[]): ThreadSummary[] {
   return [...threads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-}
-
-function upsertThread(threads: ThreadSummary[], summary: ThreadSummary): ThreadSummary[] {
-  const idx = threads.findIndex((t) => t.id === summary.id);
-  const next =
-    idx === -1 ? [...threads, summary] : threads.map((t, i) => (i === idx ? summary : t));
-  return sortThreads(next);
 }
 
 function relativeTime(iso: string): string {

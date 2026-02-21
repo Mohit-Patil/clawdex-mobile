@@ -26,21 +26,20 @@ type Screen = 'Main' | 'Terminal' | 'Git' | 'Settings' | 'Privacy' | 'Terms';
 const DRAWER_WIDTH = 280;
 
 export default function App() {
-  const api = useMemo(
-    () =>
-      new MacBridgeApiClient({
-        baseUrl: env.macBridgeUrl,
-        authToken: env.macBridgeToken
-      }),
-    []
-  );
   const ws = useMemo(
     () =>
-      new MacBridgeWsClient(api.wsUrl(), {
+      new MacBridgeWsClient(env.macBridgeUrl, {
         authToken: env.macBridgeToken,
         allowQueryTokenAuth: env.allowWsQueryTokenAuth
       }),
-    [api]
+    []
+  );
+  const api = useMemo(
+    () =>
+      new MacBridgeApiClient({
+        ws,
+      }),
+    [ws]
   );
   const mainRef = useRef<MainScreenHandle>(null);
   const [currentScreen, setCurrentScreen] = useState<Screen>('Main');
