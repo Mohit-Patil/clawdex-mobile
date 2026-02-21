@@ -204,6 +204,42 @@ describe('MacBridgeApiClient', () => {
     );
   });
 
+  it('renameChat() retries with threadName when name payload is rejected', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockRejectedValueOnce(new Error('missing field `threadName`'))
+      .mockResolvedValueOnce({}) // thread/name/set retry with threadName
+      .mockResolvedValueOnce({}) // explicit threadName attempt
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_rename',
+          preview: '',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          name: 'Renamed Chat',
+          turns: [],
+        },
+      });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const renamed = await client.renameChat('thr_rename', 'Renamed Chat');
+
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/name/set', {
+      threadId: 'thr_rename',
+      name: 'Renamed Chat',
+    });
+    expect(ws.request).toHaveBeenNthCalledWith(2, 'thread/name/set', {
+      threadId: 'thr_rename',
+      threadName: 'Renamed Chat',
+    });
+    expect(ws.request).toHaveBeenNthCalledWith(3, 'thread/name/set', {
+      threadId: 'thr_rename',
+      threadName: 'Renamed Chat',
+    });
+    expect(renamed.title).toBe('Renamed Chat');
+  });
+
   it('sendChatMessage() forwards selected model/effort to turn/start', async () => {
     const ws = createWsMock();
     ws.request

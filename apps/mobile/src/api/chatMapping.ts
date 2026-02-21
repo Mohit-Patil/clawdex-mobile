@@ -40,6 +40,7 @@ export type RawThreadItem =
 export interface RawThread {
   id?: string;
   name?: string;
+  title?: string;
   preview?: string;
   modelProvider?: string;
   createdAt?: number;
@@ -146,12 +147,14 @@ export function toRawThread(value: unknown): RawThread {
   const record = toRecord(value) ?? {};
   const threadName =
     readString(record.name) ??
+    readString(record.title) ??
     readString(record.threadName) ??
     readString(record.thread_name) ??
     undefined;
   return {
     id: readString(record.id) ?? undefined,
     name: threadName,
+    title: threadName,
     preview: readString(record.preview) ?? undefined,
     modelProvider: readString(record.modelProvider) ?? undefined,
     createdAt: readNumber(record.createdAt) ?? undefined,

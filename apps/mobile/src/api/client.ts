@@ -70,6 +70,7 @@ const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown']
 
 export class MacBridgeApiClient {
   private readonly ws: MacBridgeWsClient;
+  private readonly renamedTitles = new Map<string, string>();
 
   constructor(options: ApiClientOptions) {
     this.ws = options.ws;
@@ -93,7 +94,27 @@ export class MacBridgeApiClient {
     const listRaw = Array.isArray(response.data) ? response.data : [];
 
     return listRaw
-      .map((item) => mapChatSummary(toRawThread(item)))
+      .map((item) => {
+        const rawThread = toRawThread(item);
+        if (rawThread.id && rawThread.name?.trim()) {
+          this.renamedTitles.set(rawThread.id, rawThread.name.trim());
+        }
+
+        const mapped = mapChatSummary(rawThread);
+        if (!mapped) {
+          return null;
+        }
+
+        const cachedTitle = this.renamedTitles.get(mapped.id);
+        if (cachedTitle) {
+          return {
+            ...mapped,
+            title: cachedTitle,
+          };
+        }
+
+        return mapped;
+      })
       .filter((item): item is ChatSummary => item !== null)
       .filter((item) => !isSubAgentSource(item.sourceKind))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -135,7 +156,7 @@ export class MacBridgeApiClient {
     }
 
     if (started.thread) {
-      return mapChat(toRawThread(started.thread));
+      return this.mapChatWithCachedTitle(started.thread);
     }
 
     return this.getChat(chatId);
@@ -148,7 +169,7 @@ export class MacBridgeApiClient {
         includeTurns: true,
       });
 
-      return mapChat(toRawThread(response.thread));
+      return this.mapChatWithCachedTitle(response.thread);
     } catch (error) {
       const message = String((error as Error).message ?? error);
       const isMaterializationGap =
@@ -163,7 +184,7 @@ export class MacBridgeApiClient {
         threadId: id,
         includeTurns: false,
       });
-      return mapChat(toRawThread(response.thread));
+      return this.mapChatWithCachedTitle(response.thread);
     }
   }
 
@@ -173,15 +194,17 @@ export class MacBridgeApiClient {
       throw new Error('Chat name cannot be empty');
     }
 
-    await this.ws.request<AppServerThreadSetNameResponse>('thread/name/set', {
+    await this.trySetThreadName(id, {
       threadId: id,
       name: trimmedName,
     });
+    await this.trySetThreadName(id, {
+      threadId: id,
+      threadName: trimmedName,
+    });
 
+    this.renamedTitles.set(id, trimmedName);
     const updated = await this.getChat(id);
-    if (updated.title === trimmedName) {
-      return updated;
-    }
 
     return {
       ...updated,
@@ -375,7 +398,7 @@ export class MacBridgeApiClient {
     });
 
     if (response.thread) {
-      return mapChat(toRawThread(response.thread));
+      return this.mapChatWithCachedTitle(response.thread);
     }
 
     throw new Error('thread/fork did not return a chat payload');
@@ -422,6 +445,62 @@ export class MacBridgeApiClient {
     return this.ws.request<GitPushResponse>('bridge/git/push', {
       cwd: normalizedCwd ?? null,
     });
+  }
+
+  private mapChatWithCachedTitle(rawThreadValue: unknown): Chat {
+    const rawThread = toRawThread(rawThreadValue);
+    if (rawThread.id && rawThread.name?.trim()) {
+      this.renamedTitles.set(rawThread.id, rawThread.name.trim());
+    }
+
+    const mapped = mapChat(rawThread);
+    const cachedTitle = this.renamedTitles.get(mapped.id);
+    if (!cachedTitle) {
+      return mapped;
+    }
+
+    return {
+      ...mapped,
+      title: cachedTitle,
+    };
+  }
+
+  private async trySetThreadName(
+    threadId: string,
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    try {
+      await this.ws.request<AppServerThreadSetNameResponse>('thread/name/set', payload);
+    } catch (error) {
+      const message = String((error as Error).message ?? error);
+      const expectedFieldMismatch =
+        message.includes('threadName') ||
+        message.includes('name') ||
+        message.includes('missing field') ||
+        message.includes('unknown field');
+
+      if (!expectedFieldMismatch) {
+        throw error;
+      }
+
+      const triedThreadName = Object.prototype.hasOwnProperty.call(payload, 'threadName');
+      const nameValue = readString(payload.threadName) ?? readString(payload.name);
+      if (!nameValue) {
+        throw error;
+      }
+
+      const fallbackPayload = triedThreadName
+        ? {
+            threadId,
+            name: nameValue,
+          }
+        : {
+            threadId,
+            threadName: nameValue,
+          };
+
+      await this.ws.request<AppServerThreadSetNameResponse>('thread/name/set', fallbackPayload);
+    }
   }
 }
 

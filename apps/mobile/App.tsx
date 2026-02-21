@@ -53,6 +53,8 @@ export default function App() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [activeChat, setActiveChat] = useState<Chat | null>(null);
   const [gitChat, setGitChat] = useState<Chat | null>(null);
+  const [pendingMainChatId, setPendingMainChatId] = useState<string | null>(null);
+  const [pendingMainChatSnapshot, setPendingMainChatSnapshot] = useState<Chat | null>(null);
   const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -120,11 +122,29 @@ export default function App() {
             gesture.dx > SWIPE_OPEN_DISTANCE ||
             gesture.vx > SWIPE_OPEN_VELOCITY
           ) {
+            if (currentScreen === 'ChatGit') {
+              const chatId = gitChat?.id ?? activeChat?.id ?? selectedChatId;
+              const resumeChat =
+                gitChat && gitChat.id === chatId
+                  ? gitChat
+                  : activeChat && activeChat.id === chatId
+                    ? activeChat
+                    : null;
+              setCurrentScreen('Main');
+              setGitChat(null);
+              if (chatId) {
+                setSelectedChatId(chatId);
+                setPendingMainChatId(chatId);
+                setPendingMainChatSnapshot(resumeChat);
+              }
+              return;
+            }
+
             openDrawer();
           }
         },
       }),
-    [drawerOpen, openDrawer]
+    [activeChat, currentScreen, drawerOpen, gitChat, openDrawer, selectedChatId]
   );
 
   const closeSwipeResponder = useMemo(
@@ -167,13 +187,16 @@ export default function App() {
       setSelectedChatId(id);
       setGitChat(null);
       setCurrentScreen('Main');
-      mainRef.current?.openChat(id);
+      setPendingMainChatId(id);
+      setPendingMainChatSnapshot(null);
       closeDrawer();
     },
     [closeDrawer]
   );
 
   const handleNewChat = useCallback(() => {
+    setPendingMainChatId(null);
+    setPendingMainChatSnapshot(null);
     setSelectedChatId(null);
     setActiveChat(null);
     setGitChat(null);
@@ -200,12 +223,20 @@ export default function App() {
 
   const handleCloseGit = useCallback(() => {
     const chatId = gitChat?.id ?? activeChat?.id ?? selectedChatId;
+    const resumeChat =
+      gitChat && gitChat.id === chatId
+        ? gitChat
+        : activeChat && activeChat.id === chatId
+          ? activeChat
+          : null;
     setCurrentScreen('Main');
+    setGitChat(null);
     if (chatId) {
       setSelectedChatId(chatId);
-      mainRef.current?.openChat(chatId);
+      setPendingMainChatId(chatId);
+      setPendingMainChatSnapshot(resumeChat);
     }
-  }, [activeChat?.id, gitChat?.id, selectedChatId]);
+  }, [activeChat, gitChat, selectedChatId]);
 
   const openPrivacy = useCallback(() => {
     setCurrentScreen('Privacy');
@@ -237,6 +268,12 @@ export default function App() {
             defaultStartCwd={defaultStartCwd}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
+            pendingOpenChatId={pendingMainChatId}
+            pendingOpenChatSnapshot={pendingMainChatSnapshot}
+            onPendingOpenChatHandled={() => {
+              setPendingMainChatId(null);
+              setPendingMainChatSnapshot(null);
+            }}
           />
         );
       case 'Settings':
@@ -275,6 +312,12 @@ export default function App() {
             defaultStartCwd={defaultStartCwd}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
+            pendingOpenChatId={pendingMainChatId}
+            pendingOpenChatSnapshot={pendingMainChatSnapshot}
+            onPendingOpenChatHandled={() => {
+              setPendingMainChatId(null);
+              setPendingMainChatSnapshot(null);
+            }}
           />
         );
     }

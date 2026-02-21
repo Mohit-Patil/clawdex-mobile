@@ -5,6 +5,7 @@ import {
   AppState,
   Modal,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   SectionList,
   ScrollView,
@@ -50,6 +51,7 @@ export function DrawerContent({
 }: DrawerContentProps) {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
   const hasAppliedInitialCollapseRef = useRef(false);
@@ -71,13 +73,20 @@ export function DrawerContent({
   const defaultWorkspaceLabel =
     normalizeCwd(selectedDefaultCwd) ?? 'Bridge default workspace';
 
-  const loadChats = useCallback(async () => {
+  const loadChats = useCallback(async (showRefresh = false) => {
+    if (showRefresh) {
+      setRefreshing(true);
+    }
+
     try {
       const data = await api.listChats();
       setChats(sortChats(data));
     } catch {
       // silently fail
     } finally {
+      if (showRefresh) {
+        setRefreshing(false);
+      }
       setLoading(false);
     }
   }, [api]);
@@ -206,6 +215,15 @@ export function DrawerContent({
               contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
               stickySectionHeadersEnabled={false}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={() => {
+                    void loadChats(true);
+                  }}
+                  tintColor={colors.textMuted}
+                />
+              }
               renderSectionHeader={({ section }) => {
                 const collapsed = collapsedWorkspaceKeys.has(section.key);
                 return (

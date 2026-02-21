@@ -48,7 +48,7 @@ import { TypingIndicator } from '../components/TypingIndicator';
 import { colors, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
-  openChat: (id: string) => void;
+  openChat: (id: string, optimisticChat?: Chat | null) => void;
   startNewChat: () => void;
 }
 
@@ -60,6 +60,9 @@ interface MainScreenProps {
   defaultStartCwd?: string | null;
   onDefaultStartCwdChange?: (cwd: string | null) => void;
   onChatContextChange?: (chat: Chat | null) => void;
+  pendingOpenChatId?: string | null;
+  pendingOpenChatSnapshot?: Chat | null;
+  onPendingOpenChatHandled?: () => void;
 }
 
 const SUGGESTIONS = [
@@ -292,13 +295,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       defaultStartCwd,
       onDefaultStartCwdChange,
       onChatContextChange,
+      pendingOpenChatId,
+      pendingOpenChatSnapshot,
+      onPendingOpenChatHandled,
     },
     ref
   ) {
     const { height: windowHeight } = useWindowDimensions();
-    const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
-    const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
-    const [openingChatId, setOpeningChatId] = useState<string | null>(null);
+    const initialPendingSnapshot =
+      pendingOpenChatId && pendingOpenChatSnapshot?.id === pendingOpenChatId
+        ? pendingOpenChatSnapshot
+        : null;
+    const [selectedChat, setSelectedChat] = useState<Chat | null>(
+      initialPendingSnapshot
+    );
+    const [selectedChatId, setSelectedChatId] = useState<string | null>(
+      initialPendingSnapshot?.id ?? pendingOpenChatId ?? null
+    );
+    const [openingChatId, setOpeningChatId] = useState<string | null>(
+      initialPendingSnapshot ? null : pendingOpenChatId ?? null
+    );
     const [draft, setDraft] = useState('');
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -715,7 +731,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [renaming]);
 
     const submitRenameChat = useCallback(async () => {
-      if (!selectedChatId || renaming) {
+      const activeChatId = selectedChatId ?? selectedChat?.id ?? null;
+      if (!activeChatId || renaming) {
         return;
       }
 
@@ -727,7 +744,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       try {
         setRenaming(true);
-        const updated = await api.renameChat(selectedChatId, nextName);
+        const updated = await api.renameChat(activeChatId, nextName);
         setSelectedChat({
           ...updated,
           title: nextName,
@@ -739,7 +756,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       } finally {
         setRenaming(false);
       }
-    }, [api, renameDraft, renaming, selectedChatId]);
+    }, [api, renameDraft, renaming, selectedChat?.id, selectedChatId]);
 
     const appendLocalAssistantMessage = useCallback(
       (content: string) => {
@@ -870,7 +887,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         if (name === 'rename') {
-          if (!selectedChatId) {
+          const activeChatId = selectedChatId ?? selectedChat?.id ?? null;
+          if (!activeChatId) {
             setError('/rename requires an open chat');
             return true;
           }
@@ -882,7 +900,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           try {
             setRenaming(true);
-            const updated = await api.renameChat(selectedChatId, argText);
+            const updated = await api.renameChat(activeChatId, argText);
             setSelectedChat(updated);
             setActivity({
               tone: 'complete',
@@ -1015,23 +1033,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       ]
     );
 
-    useImperativeHandle(ref, () => ({
-      openChat: (id: string) => {
-        setSelectedChatId(id);
-        setOpeningChatId(id);
-        setError(null);
-        setActivity({
-          tone: 'running',
-          title: 'Opening chat',
-        });
-        appendActivityPhrase('Opening chat', true);
-        void loadChat(id);
-      },
-      startNewChat: () => {
-        startNewChat();
-      },
-    }));
-
     const loadChat = useCallback(
       async (chatId: string) => {
         const requestId = loadChatRequestRef.current + 1;
@@ -1096,6 +1097,84 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
       [api, appendActivityPhrase, bumpRunWatchdog, clearRunWatchdog]
     );
+
+    const openChatThread = useCallback(
+      (id: string, optimisticChat?: Chat | null) => {
+        const canReuseSnapshot = Boolean(
+          optimisticChat &&
+            optimisticChat.id === id &&
+            optimisticChat.messages.length > 0
+        );
+
+        setSelectedChatId(id);
+        setError(null);
+
+        if (canReuseSnapshot && optimisticChat) {
+          setSelectedChat(optimisticChat);
+          setOpeningChatId(null);
+          setActivity(
+            optimisticChat.status === 'running'
+              ? {
+                  tone: 'running',
+                  title: 'Working',
+                }
+              : optimisticChat.status === 'complete'
+                ? {
+                    tone: 'complete',
+                    title: 'Turn completed',
+                  }
+                : optimisticChat.status === 'error'
+                  ? {
+                      tone: 'error',
+                      title: 'Turn failed',
+                      detail: optimisticChat.lastError ?? undefined,
+                    }
+                  : {
+                      tone: 'idle',
+                      title: 'Ready',
+                    }
+          );
+        } else {
+          setOpeningChatId(id);
+          setActivity({
+            tone: 'running',
+            title: 'Opening chat',
+          });
+          appendActivityPhrase('Opening chat', true);
+        }
+
+        void loadChat(id);
+      },
+      [appendActivityPhrase, loadChat]
+    );
+
+    useImperativeHandle(ref, () => ({
+      openChat: (id: string, optimisticChat?: Chat | null) => {
+        openChatThread(id, optimisticChat);
+      },
+      startNewChat: () => {
+        startNewChat();
+      },
+    }));
+
+    useEffect(() => {
+      if (!pendingOpenChatId) {
+        return;
+      }
+
+      const snapshot =
+        pendingOpenChatSnapshot && pendingOpenChatSnapshot.id === pendingOpenChatId
+          ? pendingOpenChatSnapshot
+          : null;
+
+      openChatThread(pendingOpenChatId, snapshot);
+      onPendingOpenChatHandled?.();
+    }, [
+      onPendingOpenChatHandled,
+      openChatThread,
+      pendingOpenChatId,
+      pendingOpenChatSnapshot,
+    ]);
 
     const createChat = useCallback(async () => {
       const content = draft.trim();
