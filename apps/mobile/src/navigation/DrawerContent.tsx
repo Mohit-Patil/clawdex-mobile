@@ -1,10 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Modal,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -20,6 +22,8 @@ interface DrawerContentProps {
   api: MacBridgeApiClient;
   ws: MacBridgeWsClient;
   selectedChatId: string | null;
+  selectedDefaultCwd: string | null;
+  onSelectDefaultCwd: (cwd: string | null) => void;
   onSelectChat: (id: string) => void;
   onNewChat: () => void;
   onNavigate: (screen: Screen) => void;
@@ -29,12 +33,18 @@ export function DrawerContent({
   api,
   ws,
   selectedChatId,
+  selectedDefaultCwd,
+  onSelectDefaultCwd,
   onSelectChat,
   onNewChat,
   onNavigate,
 }: DrawerContentProps) {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const workspaceOptions = useMemo(() => listWorkspaces(chats), [chats]);
+  const defaultWorkspaceLabel =
+    normalizeCwd(selectedDefaultCwd) ?? 'Bridge default workspace';
 
   const loadChats = useCallback(async () => {
     try {
@@ -88,6 +98,23 @@ export function DrawerContent({
             >
               <Ionicons name="add" size={16} color={colors.textPrimary} />
               <Text style={styles.newChatText}>New chat</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.workspaceSection}>
+            <Text style={styles.sectionTitle}>Start Directory</Text>
+            <Pressable
+              style={({ pressed }) => [
+                styles.workspacePicker,
+                pressed && styles.workspacePickerPressed,
+              ]}
+              onPress={() => setWorkspacePickerOpen(true)}
+            >
+              <Ionicons name="folder-open-outline" size={16} color={colors.textMuted} />
+              <Text style={styles.workspacePickerText} numberOfLines={1}>
+                {defaultWorkspaceLabel}
+              </Text>
+              <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
             </Pressable>
           </View>
 
@@ -149,6 +176,53 @@ export function DrawerContent({
           />
         </View>
       </SafeAreaView>
+
+      <Modal
+        visible={workspacePickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setWorkspacePickerOpen(false)}
+      >
+        <View style={styles.workspaceModalBackdrop}>
+          <View style={styles.workspaceModalCard}>
+            <Text style={styles.workspaceModalTitle}>Start directory for new chats</Text>
+            <ScrollView
+              style={styles.workspaceModalList}
+              contentContainerStyle={styles.workspaceModalListContent}
+              showsVerticalScrollIndicator={false}
+            >
+              <WorkspaceOption
+                label="Bridge default workspace"
+                selected={normalizeCwd(selectedDefaultCwd) === null}
+                onPress={() => {
+                  onSelectDefaultCwd(null);
+                  setWorkspacePickerOpen(false);
+                }}
+              />
+              {workspaceOptions.map((cwd) => (
+                <WorkspaceOption
+                  key={cwd}
+                  label={cwd}
+                  selected={cwd === normalizeCwd(selectedDefaultCwd)}
+                  onPress={() => {
+                    onSelectDefaultCwd(cwd);
+                    setWorkspacePickerOpen(false);
+                  }}
+                />
+              ))}
+            </ScrollView>
+            <Pressable
+              style={({ pressed }) => [
+                styles.workspaceModalCloseBtn,
+                pressed && styles.workspaceModalCloseBtnPressed,
+              ]}
+              onPress={() => setWorkspacePickerOpen(false)}
+            >
+              <Text style={styles.workspaceModalCloseText}>Close</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -177,8 +251,62 @@ function NavItem({
   );
 }
 
+function WorkspaceOption({
+  label,
+  selected,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.workspaceOption,
+        selected && styles.workspaceOptionSelected,
+        pressed && styles.workspaceOptionPressed,
+      ]}
+      onPress={onPress}
+    >
+      <Text style={[styles.workspaceOptionText, selected && styles.workspaceOptionTextSelected]} numberOfLines={2}>
+        {label}
+      </Text>
+      {selected ? (
+        <Ionicons name="checkmark-circle" size={16} color={colors.textPrimary} />
+      ) : null}
+    </Pressable>
+  );
+}
+
 function sortChats(chats: ChatSummary[]): ChatSummary[] {
   return [...chats].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function normalizeCwd(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function listWorkspaces(chats: ChatSummary[]): string[] {
+  const sorted = [...chats].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const chat of sorted) {
+    const cwd = normalizeCwd(chat.cwd);
+    if (!cwd || seen.has(cwd)) {
+      continue;
+    }
+    seen.add(cwd);
+    result.push(cwd);
+  }
+
+  return result;
 }
 
 function relativeTime(iso: string): string {
@@ -204,7 +332,31 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.md,
-    paddingBottom: spacing.lg,
+    paddingBottom: spacing.md,
+  },
+  workspaceSection: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.md,
+    gap: spacing.xs,
+  },
+  workspacePicker: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.bgItem,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    borderRadius: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  workspacePickerPressed: {
+    opacity: 0.85,
+  },
+  workspacePickerText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    flex: 1,
   },
   newChatBtn: {
     marginHorizontal: 0,
@@ -238,7 +390,7 @@ const styles = StyleSheet.create({
   },
   sectionHeader: {
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.lg,
+    paddingTop: spacing.md,
     paddingBottom: spacing.sm,
   },
   sectionTitle: {
@@ -297,5 +449,75 @@ const styles = StyleSheet.create({
     borderTopColor: colors.borderLight,
     paddingTop: spacing.md,
     paddingBottom: spacing.md,
+  },
+  workspaceModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  workspaceModalCard: {
+    backgroundColor: colors.bgSidebar,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    maxHeight: '70%',
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  workspaceModalTitle: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  workspaceModalList: {
+    maxHeight: 340,
+  },
+  workspaceModalListContent: {
+    gap: spacing.xs,
+  },
+  workspaceOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgItem,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  workspaceOptionSelected: {
+    borderColor: colors.borderHighlight,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  workspaceOptionPressed: {
+    opacity: 0.88,
+  },
+  workspaceOptionText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    flex: 1,
+  },
+  workspaceOptionTextSelected: {
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  workspaceModalCloseBtn: {
+    alignSelf: 'flex-end',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  workspaceModalCloseBtnPressed: {
+    opacity: 0.85,
+  },
+  workspaceModalCloseText: {
+    ...typography.caption,
+    color: colors.textPrimary,
   },
 });

@@ -7,20 +7,25 @@
     "services/*"
   ],
   "scripts": {
-    "mobile": "npm run -w @codex/mobile start",
-    "ios": "npm run -w @codex/mobile ios",
-    "android": "npm run -w @codex/mobile android",
+    "mobile": "./scripts/start-expo.sh mobile",
+    "ios": "./scripts/start-expo.sh ios",
+    "android": "./scripts/start-expo.sh android",
     "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/rust-bridge dev",
+    "setup:wizard": "./scripts/setup-wizard.sh",
+    "secure:setup": "./scripts/setup-secure-dev.sh",
+    "secure:bridge": "./scripts/start-bridge-secure.sh",
     "bridge:ts": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "build": "npm run --workspaces build",
     "typecheck": "npm run --workspaces typecheck",
     "lint": "npm run --workspaces lint",
-    "test": "npm run test -w @codex/mac-bridge && npm run test -w @codex/mobile && npm run test -w @codex/rust-bridge"
+    "test": "npm run test -w @codex/mac-bridge && npm run test -w clawdex-mobile && npm run test -w @codex/rust-bridge",
+    "teardown": "./scripts/teardown.sh"
   },
   "dependencies": {
     "@types/react": "^19.1.10",
     "react": "^19.1.0",
-    "react-native": "^0.81.5"
+    "react-native": "^0.81.5",
+    "expo": "~54.0.33"
   },
   "overrides": {
     "minimatch": "10.2.2",

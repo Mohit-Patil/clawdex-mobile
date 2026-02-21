@@ -26,6 +26,8 @@ web-build/
 .metro-health-check*
 
 # iOS
+/ios/
+/apps/mobile/ios/
 ios/Pods/
 ios/*.xcworkspace
 ios/*.xcodeproj/xcuserdata/
@@ -36,6 +38,8 @@ DerivedData/
 build/
 
 # Android
+/android/
+/apps/mobile/android/
 android/app/build/
 android/build/
 android/.gradle/
@@ -70,3 +74,4 @@ coverage/
 *.pid
 *.seed
 .claude/
+/app.json

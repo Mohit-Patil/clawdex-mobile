@@ -53,6 +53,7 @@ export default function App() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [activeChat, setActiveChat] = useState<Chat | null>(null);
   const [gitChat, setGitChat] = useState<Chat | null>(null);
+  const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
@@ -233,6 +234,7 @@ export default function App() {
             ws={ws}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
+            defaultStartCwd={defaultStartCwd}
             onChatContextChange={handleChatContextChange}
           />
         );
@@ -269,6 +271,7 @@ export default function App() {
             ws={ws}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
+            defaultStartCwd={defaultStartCwd}
             onChatContextChange={handleChatContextChange}
           />
         );
@@ -303,6 +306,8 @@ export default function App() {
           api={api}
           ws={ws}
           selectedChatId={selectedChatId}
+          selectedDefaultCwd={defaultStartCwd}
+          onSelectDefaultCwd={setDefaultStartCwd}
           onSelectChat={handleSelectChat}
           onNewChat={handleNewChat}
           onNavigate={navigate}

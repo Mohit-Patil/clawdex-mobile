@@ -1,99 +1,347 @@
-# Codex Mobile Control (Expo + Rust Bridge)
+# Clawdex Mobile (Codex Mobile Control)
 
-V1 scaffold for remotely controlling Codex running on a Mac from a cross-platform Expo app.
+Control Codex from your phone using an Expo React Native app (`apps/mobile`) and a Rust bridge (`services/rust-bridge`) running on your Mac.
 
-## Repo layout
+This project is intended for trusted/private networking (Tailscale or local LAN). Do not expose the bridge publicly.
 
-- `apps/mobile`: Expo (iOS + Android) TypeScript app with tabs for Threads, Terminal, Git, Settings.
-- `services/rust-bridge`: Rust WebSocket JSON-RPC service that proxies `codex app-server` and exposes terminal/git helpers.
-- `services/mac-bridge`: legacy Node.js TypeScript bridge kept for reference.
+## What You Get
+
+- Chat with Codex from mobile
+- Choose a default start directory for new chats (from existing chat workspaces)
+- Chat-scoped Git controls (status, commit, push)
+- Terminal command execution through bridge
+- Live thread/run updates over WebSocket
+- Guided setup wizard for first-time onboarding
+
+## Project Layout
+
+- `apps/mobile`: Expo client (UI + API client)
+- `services/rust-bridge`: primary bridge (WebSocket JSON-RPC + `codex app-server` adapter)
+- `services/mac-bridge`: legacy TypeScript bridge (reference only)
+- `scripts/`: onboarding and runtime helper scripts
 
 ## Prerequisites
 
+- macOS
 - Node.js 20+
 - npm 10+
-- Xcode + iOS Simulator (for iOS)
-- Android Studio + Android Emulator (for Android)
-- A Mac machine reachable from the mobile device/emulator for bridge API calls
+- `codex` CLI installed and available in `PATH`
+- `git` installed and available in `PATH`
+- Tailscale on Mac + phone (recommended)
+- Expo Go on phone (for non-standalone flow)
 
-## Setup
+Optional for local simulator/emulator workflows:
 
-1. Install dependencies from repo root:
+- Xcode + iOS Simulator
+- Android Studio + Android Emulator
+
+## Fastest Start (Recommended)
+
+```bash
+npm install
+npm run setup:wizard
+```
+
+`setup:wizard` walks through:
+
+1. codex CLI check
+2. Tailscale install check (offers Homebrew install)
+3. Tailscale login/connectivity check (opens browser flow if needed)
+4. Expo Go readiness check
+5. Secure env generation
+6. Optional one-terminal run (bridge in background + Expo QR in foreground)
+
+## Manual Secure Setup (No Wizard)
+
+### 1) Install dependencies
 
 ```bash
 npm install
 ```
 
-2. Configure env files:
+### 2) Generate secure runtime config
 
 ```bash
-cp apps/mobile/.env.example apps/mobile/.env
-cp services/rust-bridge/.env.example services/rust-bridge/.env
+npm run secure:setup
 ```
 
-Bridge env notes:
-- `BRIDGE_WORKDIR`: absolute path to the repo/directory where Codex CLI should run.
-  - `npm run bridge` now sets this automatically to the repo root (`$(pwd)`), so Codex edits your project files instead of the `services/mac-bridge` subfolder.
-- `CODEX_CLI_BIN`: Codex CLI executable path/name (defaults to `codex`).
-- `BRIDGE_AUTH_TOKEN`: bearer token for bridge WS auth. Required by default.
-- `BRIDGE_ALLOW_INSECURE_NO_AUTH=true`: local-dev-only escape hatch to run bridge without auth.
-- `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true`: optional fallback for browser WebSocket clients that cannot set `Authorization` headers.
-- `BRIDGE_CORS_ORIGINS`: comma-separated origin allowlist for browser access. If unset, CORS response headers are disabled.
-- `BRIDGE_TERMINAL_ALLOWED_COMMANDS`: comma-separated allowlist for `bridge/terminal/exec` (default: `pwd,ls,cat,git`).
-- `BRIDGE_DISABLE_TERMINAL_EXEC=true`: disable terminal execution entirely.
+This creates/updates:
 
-3. Start Rust bridge:
+- `.env.secure` (bridge runtime config + token)
+- `apps/mobile/.env` (bridge URL/token for mobile app)
+
+### 3) Start bridge
 
 ```bash
-npm run bridge
+npm run secure:bridge
 ```
 
-## Run mobile app
-
-From repo root:
+### 4) Start Expo
 
 ```bash
 npm run mobile
 ```
 
-Then launch with:
+`npm run mobile` uses `scripts/start-expo.sh`, which sets `REACT_NATIVE_PACKAGER_HOSTNAME` to your configured secure host (from `.env.secure`), so QR resolves predictably.
+
+## Day-to-Day Commands
+
+From repo root:
+
+- `npm run setup:wizard` — guided setup + optional one-terminal launch
+- `npm run secure:setup` — generate/update secure env
+- `npm run secure:bridge` — start rust bridge from `.env.secure`
+- `npm run mobile` — start Expo using configured host
+- `npm run ios` — start Expo for iOS target (same host strategy)
+- `npm run android` — start Expo for Android target (same host strategy)
+- `npm run teardown` — interactive teardown (stop processes + cleanup)
+- `npm run lint` — lint all workspaces
+- `npm run typecheck` — typecheck all workspaces
+- `npm run build` — build all workspaces
+
+## Teardown / Cleanup
+
+Use:
 
 ```bash
-npm run ios
-npm run android
+npm run teardown
 ```
 
-Note: for physical devices, set `EXPO_PUBLIC_MAC_BRIDGE_URL` to your Mac's LAN IP (for example `http://192.168.1.10:8787`) instead of `localhost`.
-Always set `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` to match `BRIDGE_AUTH_TOKEN`.
-For non-local deployments, prefer `https://` bridge URLs and `wss://` websockets.
-Set `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH=true` only when you explicitly need browser WebSocket auth fallback.
-`EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE=true` suppresses the mobile warning for non-local `http://` URLs.
-Set `EXPO_PUBLIC_PRIVACY_POLICY_URL` to populate the in-app Privacy screen policy link.
-Set `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` to populate the in-app Terms screen link.
+Teardown can:
 
-## Scripts
+- stop running Expo + bridge processes
+- remove generated artifacts (`.env.secure`, `.bridge.log`)
+- optionally reset `apps/mobile/.env` from `.env.example`
+- optionally run `tailscale down`
 
-- `npm run mobile`: Start Expo dev server
-- `npm run ios`: Open iOS simulator via Expo
-- `npm run android`: Open Android emulator via Expo
-- `npm run bridge`: Start Rust bridge
-- `npm run bridge:ts`: Start legacy TypeScript bridge
-- `npm run lint`: Run lint in all workspaces
-- `npm run typecheck`: Run typecheck in all workspaces
-- `npm run build`: Build all workspaces
+Non-interactive mode:
 
-## API summary (rust-bridge)
+```bash
+npm run teardown -- --yes
+```
+
+## Environment Reference
+
+### Bridge runtime (`.env.secure`, generated)
+
+| Variable | Purpose |
+|---|---|
+| `BRIDGE_HOST` | bind host for rust bridge |
+| `BRIDGE_PORT` | bridge port (default `8787`) |
+| `BRIDGE_AUTH_TOKEN` | required auth token |
+| `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query token auth fallback |
+| `CODEX_CLI_BIN` | codex executable |
+| `BRIDGE_WORKDIR` | working directory for terminal/git |
+
+### Mobile runtime (`apps/mobile/.env`, generated/updated)
+
+| Variable | Purpose |
+|---|---|
+| `EXPO_PUBLIC_MAC_BRIDGE_URL` | bridge base URL |
+| `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` | token sent by mobile client |
+| `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH` | web query-token behavior |
+| `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
+| `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
+| `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` | in-app Terms link |
+
+## Verifying Setup
+
+### Bridge health
+
+```bash
+curl "$(awk -F= '/^EXPO_PUBLIC_MAC_BRIDGE_URL=/{print $2}' apps/mobile/.env)/health"
+```
+
+Expected: JSON containing `"status":"ok"`.
+
+### In-app smoke test
+
+1. Open app, check `Settings` shows bridge connected.
+2. Open the sidebar and set `Start Directory` (optional).
+3. Create a chat and send a prompt.
+4. Open Git from chat header:
+   - changed files visible
+   - commit works
+   - push button appears when branch is ahead
+
+## Choosing Start Directory (Home/Sidebar)
+
+You can control where new chats start from directly in the mobile app:
+
+1. Open the left sidebar.
+2. Under `Start Directory`, tap the directory row.
+3. Pick one of:
+   - `Bridge default workspace`
+   - any workspace path discovered from your existing chats
+
+Behavior:
+
+- This selection is used when creating a new chat.
+- Existing chats keep their own workspace unless you change them from chat Git/workspace controls.
+- If you choose `Bridge default workspace`, chat creation falls back to bridge-level `BRIDGE_WORKDIR`.
+
+## Standalone App Install (Without Expo Go)
+
+Yes, this is supported.
+
+### Option A: EAS Cloud Builds (Recommended)
+
+This is the most reliable path for standalone installs.
+
+#### Step 1: Install and login EAS CLI
+
+```bash
+npm install -g eas-cli
+npx eas login
+```
+
+#### Step 2: Configure Expo/EAS in app workspace
+
+```bash
+cd apps/mobile
+npx eas build:configure
+```
+
+This will create `eas.json` if missing.
+
+#### Step 3: Set app identifiers in `apps/mobile/app.json`
+
+Add unique IDs:
+
+```json
+{
+  "expo": {
+    "ios": {
+      "bundleIdentifier": "com.yourorg.clawdexmobile"
+    },
+    "android": {
+      "package": "com.yourorg.clawdexmobile"
+    }
+  }
+}
+```
+
+#### Step 4: Build standalone binaries
+
+From `apps/mobile`:
+
+```bash
+# Android internal distribution
+npx eas build -p android --profile preview
+
+# iOS internal distribution (device allowlist required)
+npx eas build -p ios --profile preview
+```
+
+Notes:
+
+- iOS internal builds require Apple Developer account + device provisioning.
+- For iOS device registration flows, use `npx eas device:create`.
+- No App Store submission is required for internal distribution.
+
+### Option B: Local Native Builds (No EAS Cloud)
+
+From `apps/mobile`:
+
+```bash
+npx expo run:ios --device
+npx expo run:android --device
+```
+
+Use this only if your local native toolchains/signing are already configured.
+
+## iOS Distribution Reality (Important)
+
+iOS does not allow arbitrary sideloading like Android. Without public App Store release, your practical paths are:
+
+1. Development/Internal (device allowlist via provisioning)
+2. TestFlight private testing
+
+So yes, cloud builds without App Store listing are possible, but still require Apple signing/provisioning.
+
+## API Summary (Rust Bridge)
+
+### Endpoints
 
 - `GET /health`
 - `GET /rpc` (WebSocket JSON-RPC)
-- Forwarded app-server methods: `thread/*`, `turn/*`, `review/start`, `model/list`, `skills/list`, `app/list`
-- Bridge methods:
-  - `bridge/health/read`
-  - `bridge/terminal/exec`
-  - `bridge/git/status`
-  - `bridge/git/diff`
-  - `bridge/git/commit`
-  - `bridge/approvals/list`
-  - `bridge/approvals/resolve`
 
-Thread execution events stream through JSON-RPC notifications (`turn/*`, `item/*`) plus bridge notifications (`bridge/approval.*`, `bridge/terminal/completed`, `bridge/git/updated`).
+### Forwarded methods
+
+- `thread/*`
+- `turn/*`
+- `review/start`
+- `model/list`
+- `skills/list`
+- `app/list`
+
+### Bridge RPC methods
+
+- `bridge/health/read`
+- `bridge/terminal/exec`
+- `bridge/git/status`
+- `bridge/git/diff`
+- `bridge/git/commit`
+- `bridge/git/push`
+- `bridge/approvals/list`
+- `bridge/approvals/resolve`
+
+### Notifications (examples)
+
+- `turn/*`, `item/*`
+- `bridge/approval.*`
+- `bridge/terminal/completed`
+- `bridge/git/updated`
+- `bridge/connection/state`
+
+## Troubleshooting
+
+### Expo starts but QR/network is wrong
+
+- Re-run `npm run secure:setup`
+- Confirm `.env.secure` has the correct `BRIDGE_HOST`
+- Restart `npm run mobile`
+
+### Bridge auth errors (`401`, invalid token)
+
+- Ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` in `apps/mobile/.env`
+- Restart bridge and Expo after token changes
+
+### Tailscale issues
+
+- Verify both Mac and phone are on the same tailnet
+- Run `tailscale ip -4` and verify host in `apps/mobile/.env`
+
+### `codex` not found
+
+- Ensure `codex` is in `PATH`, or set `CODEX_CLI_BIN` accordingly
+
+### Git operations fail
+
+- Verify chat workspace path points to a valid git repo
+- Verify git auth/remote access for push
+
+### Worklets/Reanimated mismatch
+
+- Keep pinned versions aligned (`react-native-reanimated@4.1.1`, `react-native-worklets@0.5.1`)
+- Clear Expo cache:
+
+```bash
+npm run -w clawdex-mobile start -- --clear
+```
+
+## Legacy TypeScript Bridge
+
+`services/mac-bridge` remains available for reference only.
+Primary path is `services/rust-bridge`.
+
+## Development Checks
+
+From repo root:
+
+```bash
+npm run lint
+npm run typecheck
+npm run build
+npm run test
+```

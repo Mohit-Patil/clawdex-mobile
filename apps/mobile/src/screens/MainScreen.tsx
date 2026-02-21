@@ -50,6 +50,7 @@ interface MainScreenProps {
   ws: MacBridgeWsClient;
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
+  defaultStartCwd?: string | null;
   onChatContextChange?: (chat: Chat | null) => void;
 }
 
@@ -93,7 +94,10 @@ const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
 ]);
 
 export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
-  function MainScreen({ api, ws, onOpenDrawer, onOpenGit, onChatContextChange }, ref) {
+  function MainScreen(
+    { api, ws, onOpenDrawer, onOpenGit, defaultStartCwd, onChatContextChange },
+    ref
+  ) {
     const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
     const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
     const [draft, setDraft] = useState('');
@@ -127,6 +131,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const reasoningSummaryRef = useRef<Record<string, string>>({});
     const codexReasoningBufferRef = useRef('');
     const runWatchdogUntilRef = useRef(0);
+    const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
 
     const bumpRunWatchdog = useCallback((durationMs = RUN_WATCHDOG_MS) => {
       runWatchdogUntilRef.current = Math.max(
@@ -227,7 +232,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           tone: 'running',
           title: 'Creating chat',
         });
-        const created = await api.createChat({});
+        const created = await api.createChat({
+          cwd: preferredStartCwd ?? undefined,
+        });
         setSelectedChatId(created.id);
         setSelectedChat(created);
         setError(null);
@@ -245,7 +252,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       } finally {
         setCreating(false);
       }
-    }, [api, resetComposerState]);
+    }, [api, preferredStartCwd, resetComposerState]);
 
     const openRenameModal = useCallback(() => {
       if (!selectedChat) {
@@ -403,7 +410,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           tone: 'running',
           title: 'Creating chat',
         });
-        const created = await api.createChat({});
+        const created = await api.createChat({
+          cwd: preferredStartCwd ?? undefined,
+        });
 
         setSelectedChatId(created.id);
         setSelectedChat({
@@ -424,7 +433,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         const updated = await api.sendChatMessage(created.id, {
           content,
-          cwd: created.cwd,
+          cwd: created.cwd ?? preferredStartCwd ?? undefined,
         });
         setSelectedChat(updated);
         setError(null);
@@ -444,7 +453,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       } finally {
         setCreating(false);
       }
-    }, [api, draft, appendActivityPhrase, bumpRunWatchdog, clearRunWatchdog]);
+    }, [
+      api,
+      draft,
+      preferredStartCwd,
+      appendActivityPhrase,
+      bumpRunWatchdog,
+      clearRunWatchdog,
+    ]);
 
     const sendMessage = useCallback(async () => {
       const content = draft.trim();
@@ -1358,6 +1374,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const showActivity = Boolean(selectedChatId) || isLoading || activity.tone !== 'idle';
     const headerTitle = selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
+    const defaultStartWorkspaceLabel =
+      preferredStartCwd ?? 'Bridge default workspace';
 
     return (
       <View style={styles.container}>
@@ -1392,7 +1410,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               isStreaming={isStreaming}
             />
           ) : (
-            <ComposeView onSuggestion={(s) => setDraft(s)} />
+            <ComposeView
+              startWorkspaceLabel={defaultStartWorkspaceLabel}
+              onSuggestion={(s) => setDraft(s)}
+              onOpenWorkspacePicker={onOpenDrawer}
+            />
           )}
 
           <View style={styles.composerContainer}>
@@ -1478,12 +1500,33 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
 // ── Compose View ───────────────────────────────────────────────────
 
-function ComposeView({ onSuggestion }: { onSuggestion: (s: string) => void }) {
+function ComposeView({
+  startWorkspaceLabel,
+  onSuggestion,
+  onOpenWorkspacePicker,
+}: {
+  startWorkspaceLabel: string;
+  onSuggestion: (s: string) => void;
+  onOpenWorkspacePicker: () => void;
+}) {
   return (
     <View style={styles.composeContainer}>
       <Ionicons name="cube-outline" size={44} color={colors.textMuted} style={styles.composeIcon} />
       <Text style={styles.composeTitle}>Let's build</Text>
       <Text style={styles.composeSubtitle}>clawdex-mobile</Text>
+      <Pressable
+        style={({ pressed }) => [
+          styles.workspaceSelectBtn,
+          pressed && styles.workspaceSelectBtnPressed,
+        ]}
+        onPress={onOpenWorkspacePicker}
+      >
+        <Ionicons name="folder-open-outline" size={16} color={colors.textMuted} />
+        <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
+          {startWorkspaceLabel}
+        </Text>
+        <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+      </Pressable>
       <View style={styles.suggestions}>
         {SUGGESTIONS.map((s) => (
           <Pressable
@@ -1576,6 +1619,15 @@ function readString(value: unknown): string | null {
 
 function readNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function normalizeWorkspacePath(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function stripMarkdownInline(value: string): string {
@@ -1846,7 +1898,28 @@ const styles = StyleSheet.create({
   composeSubtitle: {
     ...typography.body,
     color: colors.textMuted,
+    marginBottom: spacing.lg,
+  },
+  workspaceSelectBtn: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgItem,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
     marginBottom: spacing.xl * 2,
+  },
+  workspaceSelectBtnPressed: {
+    opacity: 0.85,
+  },
+  workspaceSelectLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    flex: 1,
   },
   suggestions: {
     flexDirection: 'row',

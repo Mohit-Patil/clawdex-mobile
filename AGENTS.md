@@ -69,7 +69,7 @@ Optionally run on a specific platform:
 - `npm run typecheck` (all workspaces)
 - `npm run build` (all workspaces)
 - `npm run -w @codex/rust-bridge dev` (bridge run mode)
-- `npm run -w @codex/mobile start` (Expo dev server)
+- `npm run -w clawdex-mobile start` (Expo dev server)
 
 ## Architecture Notes
 - Mobile app creates one `MacBridgeApiClient` and one `MacBridgeWsClient` in `App.tsx` and passes them to screen components.
