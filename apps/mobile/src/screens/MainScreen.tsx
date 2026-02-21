@@ -11,6 +11,7 @@ import {
   ActionSheetIOS,
   ActivityIndicator,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -90,6 +91,8 @@ const DEFAULT_ACTIVITY_PHRASES = [
 ];
 
 const MAX_ACTIVITY_PHRASES = 8;
+const MAX_ACTIVE_COMMANDS = 16;
+const MAX_VISIBLE_TOOL_BLOCKS = 8;
 const RUN_WATCHDOG_MS = 15_000;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 120_000;
 const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
@@ -316,6 +319,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
+    const [keyboardInset, setKeyboardInset] = useState(0);
     const [activity, setActivity] = useState<ActivityState>({
       tone: 'idle',
       title: 'Ready',
@@ -348,6 +352,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       148,
       Math.min(300, Math.floor(windowHeight * 0.34))
     );
+    const maxKeyboardInset = Math.max(220, Math.floor(windowHeight * 0.58));
 
     const bumpRunWatchdog = useCallback((durationMs = RUN_WATCHDOG_MS) => {
       runWatchdogUntilRef.current = Math.max(
@@ -379,6 +384,28 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           );
           deduped.push(phrase);
           return deduped.slice(-MAX_ACTIVITY_PHRASES);
+        });
+      },
+      []
+    );
+
+    const pushActiveCommand = useCallback(
+      (threadId: string, eventType: string, detail: string) => {
+        setActiveCommands((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.eventType === eventType && last.detail === detail) {
+            return prev;
+          }
+
+          const next: RunEvent = {
+            id: `re-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            threadId,
+            eventType,
+            at: new Date().toISOString(),
+            detail,
+          };
+
+          return [...prev, next].slice(-MAX_ACTIVE_COMMANDS);
         });
       },
       []
@@ -1343,10 +1370,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
             if (hadCommandRef.current) {
               setStreamingText(delta);
-              setActiveCommands([]);
               hadCommandRef.current = false;
             } else {
-              setStreamingText((prev) => (prev ?? '') + delta);
+              setStreamingText((prev) => mergeStreamingDelta(prev, delta));
             }
 
             setActivity((prev) =>
@@ -1365,11 +1391,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (codexEventType === 'exec_command_begin') {
             const command = toCommandDisplay(msg?.command);
             const detail = toTickerSnippet(command, 80);
+            const commandLabel = detail ?? 'Command';
             setActivity({
               tone: 'running',
               title: 'Running command',
               detail: detail ?? undefined,
             });
+            pushActiveCommand(activeThreadId, 'command.running', `${commandLabel} | running`);
             appendActivityPhrase(
               detail ? `Running command: ${detail}` : 'Running command',
               true
@@ -1381,6 +1409,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             const status = readString(msg?.status);
             const command = toCommandDisplay(msg?.command);
             const detail = toTickerSnippet(command, 80);
+            const commandLabel = detail ?? 'Command';
             const failed = status === 'failed' || status === 'error';
 
             setActivity({
@@ -1388,6 +1417,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               title: failed ? 'Command failed' : 'Working',
               detail: detail ?? undefined,
             });
+            pushActiveCommand(
+              activeThreadId,
+              'command.completed',
+              `${commandLabel} | ${failed ? 'error' : 'complete'}`
+            );
             appendActivityPhrase(
               failed
                 ? detail
@@ -1424,12 +1458,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             const server = readString(msg?.server);
             const tool = readString(msg?.tool);
             const detail = [server, tool].filter(Boolean).join(' / ');
+            const toolLabel = detail || 'MCP tool call';
 
             setActivity({
               tone: 'running',
               title: 'Running tool',
               detail: detail || undefined,
             });
+            pushActiveCommand(activeThreadId, 'tool.running', `${toolLabel} | running`);
             appendActivityPhrase(
               detail ? `Running tool: ${detail}` : 'Running tool',
               true
@@ -1439,11 +1475,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           if (codexEventType === 'web_search_begin') {
             const query = toTickerSnippet(readString(msg?.query), 64);
+            const searchLabel = query ? `Web search: ${query}` : 'Web search';
             setActivity({
               tone: 'running',
               title: 'Searching web',
               detail: query ?? undefined,
             });
+            pushActiveCommand(activeThreadId, 'web_search.running', `${searchLabel} | running`);
             appendActivityPhrase(
               query ? `Searching web: ${query}` : 'Searching web',
               true
@@ -1511,10 +1549,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
           if (hadCommandRef.current) {
             setStreamingText(delta);
-            setActiveCommands([]);
             hadCommandRef.current = false;
           } else {
-            setStreamingText((prev) => (prev ?? '') + delta);
+            setStreamingText((prev) => mergeStreamingDelta(prev, delta));
           }
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Thinking'
@@ -1556,11 +1593,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           if (itemType === 'commandExecution') {
             const command = readString(item?.command);
+            const commandLabel = toTickerSnippet(command, 80) ?? 'Command';
             setActivity({
               tone: 'running',
               title: 'Running command',
               detail: command ?? undefined,
             });
+            pushActiveCommand(threadId, 'command.running', `${commandLabel} | running`);
             appendActivityPhrase(
               command ? `Running command: ${command}` : 'Running command',
               true
@@ -1569,6 +1608,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (itemType === 'fileChange') {
+            pushActiveCommand(threadId, 'file_change.running', 'Applying file changes | running');
             setActivity({
               tone: 'running',
               title: 'Applying file changes',
@@ -1581,11 +1621,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             const server = readString(item?.server);
             const tool = readString(item?.tool);
             const detail = [server, tool].filter(Boolean).join(' / ');
+            const toolLabel = detail || 'Tool call';
             setActivity({
               tone: 'running',
               title: 'Running tool',
               detail,
             });
+            pushActiveCommand(threadId, 'tool.running', `${toolLabel} | running`);
             appendActivityPhrase(
               detail ? `Running tool: ${detail}` : 'Running tool',
               true
@@ -1842,17 +1884,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           const item = toRecord(params?.item);
-          if (readString(item?.type) === 'commandExecution') {
-            const command = readString(item?.command);
+          const itemType = readString(item?.type);
+          if (itemType === 'commandExecution') {
+            const command = toTickerSnippet(readString(item?.command), 80) ?? 'Command';
             const status = readString(item?.status);
+            const failed = status === 'failed' || status === 'error';
             hadCommandRef.current = true;
             setActivity({
-              tone: status === 'failed' ? 'error' : 'complete',
-              title: status === 'failed' ? 'Command failed' : 'Command completed',
+              tone: failed ? 'error' : 'complete',
+              title: failed ? 'Command failed' : 'Command completed',
               detail: command ?? undefined,
             });
             appendActivityPhrase(
-              status === 'failed'
+              failed
                 ? command
                   ? `Command failed: ${command}`
                   : 'Command failed'
@@ -1860,16 +1904,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   ? `Command completed: ${command}`
                   : 'Command completed'
             );
-            setActiveCommands((prev) => [
-              ...prev,
-              {
-                id: `re-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                threadId,
-                eventType: 'command.completed',
-                at: new Date().toISOString(),
-                detail: [command, status].filter(Boolean).join(' | '),
-              },
-            ]);
+            pushActiveCommand(
+              threadId,
+              'command.completed',
+              `${command} | ${failed ? 'error' : 'complete'}`
+            );
+          } else if (itemType === 'mcpToolCall') {
+            const server = readString(item?.server);
+            const tool = readString(item?.tool);
+            const status = readString(item?.status);
+            const failed = status === 'failed' || status === 'error';
+            const detail = [server, tool].filter(Boolean).join(' / ') || 'Tool call';
+            pushActiveCommand(
+              threadId,
+              'tool.completed',
+              `${detail} | ${failed ? 'error' : 'complete'}`
+            );
+          } else if (itemType === 'fileChange') {
+            const status = readString(item?.status);
+            const failed = status === 'failed' || status === 'error';
+            pushActiveCommand(
+              threadId,
+              'file_change.completed',
+              `File changes | ${failed ? 'error' : 'complete'}`
+            );
           }
           return;
         }
@@ -1973,6 +2031,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       appendActivityPhrase,
       bumpRunWatchdog,
       clearRunWatchdog,
+      pushActiveCommand,
       isRunContextActive,
     ]);
 
@@ -2076,6 +2135,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       onOpenGit(selectedChat);
     }, [onOpenGit, selectedChat]);
 
+    useEffect(() => {
+      if (Platform.OS === 'ios') {
+        const onFrameChange = (endScreenY: number) => {
+          const overlap = Math.max(0, Math.round(windowHeight - endScreenY));
+          const clamped = Math.min(maxKeyboardInset, overlap);
+          setKeyboardInset((prev) => (prev === clamped ? prev : clamped));
+        };
+
+        const onWillChange = Keyboard.addListener('keyboardWillChangeFrame', (event) => {
+          onFrameChange(event.endCoordinates.screenY);
+        });
+        const onWillHide = Keyboard.addListener('keyboardWillHide', () => {
+          setKeyboardInset(0);
+        });
+
+        return () => {
+          onWillChange.remove();
+          onWillHide.remove();
+        };
+      }
+
+      const onDidShow = Keyboard.addListener('keyboardDidShow', (event) => {
+        const height = Math.max(0, Math.round(event.endCoordinates.height));
+        const clamped = Math.min(maxKeyboardInset, height);
+        setKeyboardInset((prev) => (prev === clamped ? prev : clamped));
+      });
+      const onDidHide = Keyboard.addListener('keyboardDidHide', () => {
+        setKeyboardInset(0);
+      });
+
+      return () => {
+        onDidShow.remove();
+        onDidHide.remove();
+      };
+    }, [maxKeyboardInset, windowHeight]);
+
     const handleSubmit = selectedChat ? sendMessage : createChat;
     const isLoading = sending || creating;
     const isStreaming = sending || creating || Boolean(streamingText);
@@ -2126,9 +2221,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         ) : null}
 
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          keyboardVerticalOffset={0}
-          style={styles.keyboardAvoiding}
+          style={[styles.keyboardAvoiding, { paddingBottom: keyboardInset }]}
         >
           {selectedChat && !isOpeningDifferentChat ? (
             <ChatView
@@ -2529,6 +2622,10 @@ function ChatView({
   scrollRef: React.RefObject<ScrollView | null>;
   isStreaming: boolean;
 }) {
+  const { height: windowHeight } = useWindowDimensions();
+  const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
+  const toolPanelMaxHeight = Math.floor(windowHeight * 0.5);
+
   const filtered = chat.messages.filter((msg) => {
     const text = msg.content || '';
     if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
@@ -2562,13 +2659,29 @@ function ChatView({
           {streamingText}
         </Text>
       ) : null}
-      {activeCommands.map((cmd) => {
-        if (!cmd.detail) return null;
-        const parts = cmd.detail.split('|').map((s) => s.trim());
-        const command = parts[0] || cmd.detail;
-        const status = parts[1] === 'error' ? ('error' as const) : ('complete' as const);
-        return <ToolBlock key={cmd.id} command={command} status={status} />;
-      })}
+      {visibleToolBlocks.length > 0 ? (
+        <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
+          <ScrollView
+            nestedScrollEnabled
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.toolPanelContent}
+          >
+            {visibleToolBlocks.map((cmd) => {
+              const tool = toToolBlockState(cmd);
+              if (!tool) {
+                return null;
+              }
+              return (
+                <ToolBlock
+                  key={cmd.id}
+                  command={tool.command}
+                  status={tool.status}
+                />
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
       {isStreaming && !streamingText && activeCommands.length === 0 ? <TypingIndicator /> : null}
     </ScrollView>
   );
@@ -2755,6 +2868,59 @@ function toLastLineSnippet(
     .slice(-1)[0];
 
   return toTickerSnippet(line ?? null, maxLength);
+}
+
+function mergeStreamingDelta(previous: string | null, delta: string): string {
+  if (!delta) {
+    return previous ?? '';
+  }
+
+  const prev = previous ?? '';
+  if (!prev) {
+    return delta;
+  }
+
+  if (delta === prev || prev.endsWith(delta)) {
+    return prev;
+  }
+
+  // Some transports send cumulative snapshots instead of token deltas.
+  if (delta.startsWith(prev)) {
+    return delta;
+  }
+
+  const maxOverlap = Math.min(prev.length, delta.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (prev.endsWith(delta.slice(0, overlap))) {
+      return prev + delta.slice(overlap);
+    }
+  }
+
+  return prev + delta;
+}
+
+function toToolBlockState(
+  event: RunEvent
+): { command: string; status: 'running' | 'complete' | 'error' } | null {
+  if (!event.detail) {
+    return null;
+  }
+
+  const parts = event.detail.split('|').map((value) => value.trim());
+  const command = parts[0] || event.detail;
+  const rawStatus = (parts[1] ?? '').toLowerCase();
+
+  const status: 'running' | 'complete' | 'error' =
+    rawStatus === 'running'
+      ? 'running'
+      : rawStatus === 'error' || rawStatus === 'failed'
+        ? 'error'
+        : 'complete';
+
+  return {
+    command,
+    status,
+  };
 }
 
 function toActivityPhrase(title: string, detail?: string): string | null {
@@ -3172,6 +3338,13 @@ const styles = StyleSheet.create({
     paddingTop: spacing.lg,
     paddingBottom: spacing.xl,
     gap: spacing.xl,
+  },
+  toolPanel: {
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  toolPanelContent: {
+    paddingBottom: spacing.sm,
   },
   chatLoadingContainer: {
     flex: 1,
