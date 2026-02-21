@@ -36,6 +36,7 @@ import { ApprovalBanner } from '../components/ApprovalBanner';
 import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
 import { ChatMessage } from '../components/ChatMessage';
+import { BrandMark } from '../components/BrandMark';
 import { ToolBlock } from '../components/ToolBlock';
 import { TypingIndicator } from '../components/TypingIndicator';
 import { colors, spacing, typography } from '../theme';
@@ -1511,7 +1512,9 @@ function ComposeView({
 }) {
   return (
     <View style={styles.composeContainer}>
-      <Ionicons name="cube-outline" size={44} color={colors.textMuted} style={styles.composeIcon} />
+      <View style={styles.composeIcon}>
+        <BrandMark size={52} />
+      </View>
       <Text style={styles.composeTitle}>Let's build</Text>
       <Text style={styles.composeSubtitle}>clawdex-mobile</Text>
       <Pressable

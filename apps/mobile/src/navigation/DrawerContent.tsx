@@ -14,6 +14,7 @@ import {
 import type { MacBridgeApiClient } from '../api/client';
 import type { ChatSummary, RpcNotification } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
+import { BrandMark } from '../components/BrandMark';
 import { colors, spacing, typography } from '../theme';
 
 type Screen = 'Main' | 'Terminal' | 'Settings' | 'Privacy' | 'Terms';
@@ -86,6 +87,11 @@ export function DrawerContent({
     <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.mainContent}>
+          <View style={styles.brandRow}>
+            <BrandMark size={20} />
+            <Text style={styles.brandText}>Clawdex</Text>
+          </View>
+
           {/* New Chat button */}
           <View style={styles.header}>
             <Pressable
@@ -329,9 +335,22 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
   },
-  header: {
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.md,
+    paddingBottom: spacing.xs,
+  },
+  brandText: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  header: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xs,
     paddingBottom: spacing.md,
   },
   workspaceSection: {

@@ -1,9 +1,28 @@
 {
   "expo": {
-    "name": "Codex Mobile Control",
+    "name": "Clawdex Mobile",
     "slug": "codex-mobile-control",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/brand/app-icon.png",
+    "splash": {
+      "image": "./assets/brand/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/brand/adaptive-icon.png",
+        "backgroundColor": "#000000"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/brand/favicon.png"
+    },
     "platforms": [
       "ios",
       "android",

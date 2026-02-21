@@ -20,6 +20,19 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 - `services/mac-bridge`: legacy TypeScript bridge (reference only)
 - `scripts/`: onboarding and runtime helper scripts
 
+## Branding Assets
+
+Brand files now live in:
+
+- `apps/mobile/assets/brand/app-icon.png` (Expo app icon)
+- `apps/mobile/assets/brand/adaptive-icon.png` (Android adaptive foreground)
+- `apps/mobile/assets/brand/splash-icon.png` (launch image)
+- `apps/mobile/assets/brand/favicon.png` (web favicon)
+- `apps/mobile/assets/brand/mark.png` (in-app logo mark)
+
+Expo config wiring is in `apps/mobile/app.json`.
+In-app brand mark component is `apps/mobile/src/components/BrandMark.tsx`.
+
 ## Prerequisites
 
 - macOS
