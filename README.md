@@ -9,10 +9,15 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 ## What You Get
 
 - Chat with Codex from mobile
+- Switch collaboration mode per turn (`Default` / `Plan`) from the UI or slash command
+- Auto-promote to plan mode when plan events/structured clarifications are requested
 - Choose a default start directory for new chats (from existing chat workspaces)
 - Sidebar chats grouped by workspace as collapsible cards (latest workspace first; first group expanded by default)
-- Use slash commands in chat input (`/model`, `/new`, `/status`, `/rename`, `/compact`, `/review`, `/fork`, `/diff`, `/help`)
+- Use slash commands in chat input (`/model`, `/plan`, `/new`, `/status`, `/rename`, `/compact`, `/review`, `/fork`, `/diff`, `/help`)
 - Select active model from an in-app model picker
+- Structured clarification modal (`request_user_input`) with clickable options and multi-question validation
+- Inline numbered-option fallback rendered as tappable choices with one-tap send
+- Rich approval banner actions: `Deny`, `Allow once`, `Session`, and `Allow similar` (when available)
 - Chat-scoped Git controls (status, commit, push)
 - Terminal command execution through bridge
 - Live thread/run updates over WebSocket
@@ -170,6 +175,20 @@ npm run teardown -- --yes
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
 | `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` | in-app Terms link |
 
+## Production Readiness Checklist
+
+Use this checklist before broader internal rollout:
+
+- Keep bridge network-private only (Tailscale/private LAN/VPN + host firewall); never public internet.
+- Require `BRIDGE_AUTH_TOKEN` and keep `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=false` unless you explicitly need query-token fallback.
+- Do not set `BRIDGE_ALLOW_INSECURE_NO_AUTH=true` outside local debugging.
+- Scope `BRIDGE_WORKDIR` to the smallest repository/root required.
+- Keep mobile approval defaults strict (current mobile behavior uses untrusted policy + workspace-write sandbox).
+- Treat `Session` and `Allow similar` approval decisions as privileged actions; use only on trusted repos.
+- Run bridge under a supervisor (for example `launchd`) with restart policy and centralized logs.
+- Rotate bridge tokens periodically and immediately on device loss.
+- Pin and regularly update `codex` CLI, Node dependencies, Expo SDK, and OS patches.
+
 ## Verifying Setup
 
 ### Bridge health
@@ -185,7 +204,10 @@ Expected: JSON containing `"status":"ok"`.
 1. Open app, check `Settings` shows bridge connected.
 2. Open the sidebar and set `Start Directory` (optional).
 3. Create a chat and send a prompt.
-4. Open Git from chat header:
+4. Open collaboration mode and set `Plan mode` (mode chip or `/plan on`).
+5. Send: `Ask one clarifying question with exactly 3 options.`
+6. Confirm `Clarification needed` modal appears and submits successfully.
+7. Open Git from chat header:
    - changed files visible
    - commit works
    - push button appears when branch is ahead
@@ -212,18 +234,54 @@ Behavior:
   - home compose screen (model row), or
   - active chat metadata row (model chip)
 - Selected model applies to new chats and subsequent turns started from mobile.
+- Collaboration mode can be changed from:
+  - active chat metadata mode chip (`Default mode` / `Plan mode`)
+  - home compose mode row
+  - `/plan` slash command
 
 Supported mobile slash commands:
 
 - `/help`
 - `/new`
 - `/model [model-id]`
+- `/plan [on|off|prompt]`
 - `/status`
 - `/rename <new-name>`
 - `/compact`
 - `/review`
 - `/fork`
 - `/diff`
+
+`/plan` behaviors:
+
+- `/plan on` enables plan mode for following turns.
+- `/plan off` returns to default mode.
+- `/plan <prompt>` sends that prompt in plan mode immediately.
+- If no chat is open, `/plan <prompt>` creates a new chat and runs it.
+
+## Plan Mode, Clarifications, and Approvals
+
+### Plan mode
+
+- Plan mode is sent through `turn/start` using structured `collaborationMode` payloads.
+- The app auto-switches to plan mode when plan events are received or when Codex reports `request_user_input` is unavailable in default mode.
+- Plan cards stream in chat via `item/plan/delta` and `turn/plan/updated`.
+
+### Clarifying questions
+
+- Structured clarifications (`request_user_input`) open a `Clarification needed` modal.
+- Option buttons are selectable; freeform answer boxes appear only when needed (`isOther` or no preset options).
+- Multi-question requests require all answers before submit.
+- If Codex emits numbered options as plain text instead of structured questions, mobile renders tappable fallback options beneath the assistant message.
+
+### Approval UX
+
+- Command/file approvals are surfaced as a banner with:
+  - `Deny`
+  - `Allow once`
+  - `Session`
+  - `Allow similar` (when the bridge receives exec-policy amendment suggestions)
+- Approval events are bridged through `bridge/approval.requested` and `bridge/approval.resolved`.
 
 ## Standalone App Install (Without Expo Go)
 
@@ -330,11 +388,13 @@ So yes, cloud builds without App Store listing are possible, but still require A
 - `bridge/git/push`
 - `bridge/approvals/list`
 - `bridge/approvals/resolve`
+- `bridge/userInput/resolve`
 
 ### Notifications (examples)
 
 - `turn/*`, `item/*`
 - `bridge/approval.*`
+- `bridge/userInput.*`
 - `bridge/terminal/completed`
 - `bridge/git/updated`
 - `bridge/connection/state`
@@ -373,6 +433,16 @@ So yes, cloud builds without App Store listing are possible, but still require A
 
 ```bash
 npm run -w clawdex-mobile start -- --clear
+```
+
+### Plan mode errors (`RPC-32600` invalid `collaborationMode`)
+
+- Ensure mobile app is running the latest JS bundle (restart Expo and reload app).
+- Ensure bridge and mobile are on matching repo revisions.
+- If you still see this after pull/restart, run the API test suite:
+
+```bash
+npm run -w clawdex-mobile test -- --runInBand src/api/__tests__/client.test.ts
 ```
 
 ## Legacy TypeScript Bridge
