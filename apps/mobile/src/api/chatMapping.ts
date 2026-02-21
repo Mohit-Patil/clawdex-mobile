@@ -356,6 +356,17 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
           content: text,
           createdAt: new Date(baseTs + messages.length * 1000).toISOString(),
         });
+        continue;
+      }
+
+      const toolLikeMessage = toToolLikeMessage(itemRecord);
+      if (toolLikeMessage) {
+        messages.push({
+          id: readString(itemRecord.id) ?? generateLocalId(),
+          role: 'system',
+          content: toolLikeMessage,
+          createdAt: new Date(baseTs + messages.length * 1000).toISOString(),
+        });
       }
     }
   }
@@ -365,4 +376,211 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
 
 function generateLocalId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function toToolLikeMessage(item: Record<string, unknown>): string | null {
+  const rawType = readString(item.type);
+  if (!rawType) {
+    return null;
+  }
+
+  const type = normalizeType(rawType);
+
+  if (type === 'plan') {
+    const text = normalizeMultiline(readString(item.text), 1800);
+    return text || null;
+  }
+
+  if (type === 'commandexecution') {
+    const command = normalizeInline(readString(item.command), 240) ?? 'command';
+    const status = normalizeType(readString(item.status) ?? '');
+    const output =
+      normalizeMultiline(readString(item.aggregatedOutput), 2400) ??
+      normalizeMultiline(readString(item.aggregated_output), 2400);
+    const exitCode = readNumber(item.exitCode) ?? readNumber(item.exit_code);
+    const title =
+      status === 'failed' || status === 'error'
+        ? `• Command failed \`${command}\``
+        : `• Ran \`${command}\``;
+    const outputPreview = output ? toNestedOutput(output, 8, 1600) : null;
+    const detail = outputPreview ?? (exitCode !== null ? `exit code ${String(exitCode)}` : null);
+    return withNestedDetail(title, detail);
+  }
+
+  if (type === 'mcptoolcall') {
+    const server = normalizeInline(readString(item.server), 120);
+    const tool = normalizeInline(readString(item.tool), 120);
+    const label = [server, tool].filter(Boolean).join(' / ') || 'MCP tool call';
+    const status = normalizeType(readString(item.status) ?? '');
+    const errorRecord = toRecord(item.error);
+    const errorDetail =
+      normalizeInline(readString(errorRecord?.message), 240) ??
+      normalizeInline(readString(item.error), 240);
+    const resultDetail = toStructuredPreview(item.result, 240);
+    const detail =
+      status === 'failed' || status === 'error'
+        ? errorDetail ?? resultDetail
+        : resultDetail;
+    const title =
+      status === 'failed' || status === 'error'
+        ? `• Tool failed \`${label}\``
+        : `• Called tool \`${label}\``;
+    return withNestedDetail(title, detail);
+  }
+
+  if (type === 'websearch') {
+    const query = normalizeInline(readString(item.query), 180);
+    const actionRecord = toRecord(item.action);
+    const actionType = normalizeType(readString(actionRecord?.type) ?? '');
+    let detail: string | null = query;
+
+    if (actionType === 'openpage') {
+      detail = normalizeInline(readString(actionRecord?.url), 240) ?? detail;
+    } else if (actionType === 'findinpage') {
+      const url = normalizeInline(readString(actionRecord?.url), 180);
+      const pattern = normalizeInline(readString(actionRecord?.pattern), 120);
+      detail = [url, pattern ? `pattern: ${pattern}` : null].filter(Boolean).join(' | ') || detail;
+    }
+
+    const title = query ? `• Searched web for "${query}"` : '• Searched web';
+    return withNestedDetail(title, detail && detail !== query ? detail : null);
+  }
+
+  if (type === 'filechange') {
+    const status = normalizeType(readString(item.status) ?? '');
+    const changeCount = Array.isArray(item.changes) ? item.changes.length : 0;
+    const detail =
+      changeCount > 0
+        ? `${String(changeCount)} file${changeCount === 1 ? '' : 's'} changed`
+        : null;
+    const title =
+      status === 'failed' || status === 'error'
+        ? '• File changes failed'
+        : '• Applied file changes';
+    return withNestedDetail(title, detail);
+  }
+
+  if (type === 'imageview') {
+    const path = normalizeInline(readString(item.path), 220);
+    if (!path) {
+      return null;
+    }
+    return `• Viewed image\n  └ ${path}`;
+  }
+
+  if (type === 'enteredreviewmode') {
+    return '• Entered review mode';
+  }
+
+  if (type === 'exitedreviewmode') {
+    return '• Exited review mode';
+  }
+
+  if (type === 'contextcompaction') {
+    return '• Compacted conversation context';
+  }
+
+  return null;
+}
+
+function normalizeType(value: string): string {
+  return value.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+}
+
+function normalizeInline(value: string | null, maxChars: number): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  if (cleaned.length <= maxChars) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+function normalizeMultiline(value: string | null, maxChars: number): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const cleaned = value
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
+    .replace(/\r\n/g, '\n')
+    .trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  if (cleaned.length <= maxChars) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+function toNestedOutput(
+  value: string,
+  maxLines: number,
+  maxChars: number
+): string | null {
+  const normalized = normalizeMultiline(value, maxChars);
+  if (!normalized) {
+    return null;
+  }
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const limited = lines.slice(0, maxLines);
+  return limited.join('\n');
+}
+
+function withNestedDetail(title: string, detail: string | null): string {
+  if (!detail) {
+    return title;
+  }
+
+  const lines = detail
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) {
+    return title;
+  }
+
+  const first = `  └ ${lines[0]}`;
+  if (lines.length === 1) {
+    return `${title}\n${first}`;
+  }
+
+  const rest = lines.slice(1).map((line) => `    ${line}`);
+  return [title, first, ...rest].join('\n');
+}
+
+function toStructuredPreview(value: unknown, maxChars: number): string | null {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    return normalizeInline(value, maxChars);
+  }
+
+  try {
+    const serialized = JSON.stringify(value);
+    return normalizeInline(serialized, maxChars);
+  } catch {
+    return null;
+  }
 }
