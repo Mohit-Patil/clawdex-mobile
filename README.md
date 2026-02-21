@@ -1,5 +1,7 @@
 # Clawdex Mobile (Codex Mobile Control)
 
+<img src="apps/mobile/assets/brand/app-icon.png" alt="Clawdex app icon" width="112" />
+
 Control Codex from your phone using an Expo React Native app (`apps/mobile`) and a Rust bridge (`services/rust-bridge`) running on your Mac.
 
 This project is intended for trusted/private networking (Tailscale or local LAN). Do not expose the bridge publicly.
@@ -19,6 +21,12 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 - `services/rust-bridge`: primary bridge (WebSocket JSON-RPC + `codex app-server` adapter)
 - `services/mac-bridge`: legacy TypeScript bridge (reference only)
 - `scripts/`: onboarding and runtime helper scripts
+
+## Open Source License Requirements
+
+Follow the project-wide requirements in:
+
+- `docs/open-source-license-requirements.md`
 
 ## Branding Assets
 

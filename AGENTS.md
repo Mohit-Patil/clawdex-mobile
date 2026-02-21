@@ -25,6 +25,10 @@
    - `cp apps/mobile/.env.example apps/mobile/.env`
    - `cp services/rust-bridge/.env.example services/rust-bridge/.env`
 
+## Open Source License Requirements
+- Follow `docs/open-source-license-requirements.md` for licensing and third-party notice obligations.
+- For any release/distribution changes, ensure the guide remains satisfied before merge.
+
 ### Starting the Bridge
 
 The bridge does **not** auto-load `.env` files. All environment variables must be passed inline.

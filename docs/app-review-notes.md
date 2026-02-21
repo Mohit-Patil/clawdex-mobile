@@ -92,6 +92,11 @@ EXPO_PUBLIC_TERMS_OF_SERVICE_URL=https://<your-terms-url>
 - Support contact reachable during review: [contact details]
 - Any temporary review credentials: [if applicable]
 
+## Open Source License Requirements
+
+- Ensure release/app-review artifacts follow `docs/open-source-license-requirements.md`.
+- Keep third-party notices available for review/legal requests.
+
 ## Final Pre-Submit Checklist
 
 - [ ] Privacy Policy URL is live and matches in-app link.

@@ -6,6 +6,11 @@
 
 The foundation is solid. The Codex integration protocol, the bridge architecture, and the real-time streaming pipeline are all correctly implemented. What we have is a working prototype that needs hardening and polish to become production-ready.
 
+## Open Source License Requirements
+
+- Apply the checklist in `docs/open-source-license-requirements.md` for all distributed builds.
+- Include third-party notices in release artifacts before submission/distribution.
+
 ## Delivery Order (Working Plan)
 
 1. **Phase 1 (in progress)**: Security + approvals
