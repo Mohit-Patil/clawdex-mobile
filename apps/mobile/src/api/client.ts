@@ -11,6 +11,7 @@ import type {
   GitCommitRequest,
   GitCommitResponse,
   GitDiffResponse,
+  GitPushResponse,
   GitStatusResponse,
   PendingApproval,
   ResolveApprovalResponse,
@@ -298,6 +299,13 @@ export class MacBridgeApiClient {
     return this.ws.request<GitCommitResponse>('bridge/git/commit', {
       ...body,
       cwd: normalizeCwd(body.cwd) ?? null,
+    });
+  }
+
+  gitPush(cwd?: string): Promise<GitPushResponse> {
+    const normalizedCwd = normalizeCwd(cwd);
+    return this.ws.request<GitPushResponse>('bridge/git/push', {
+      cwd: normalizedCwd ?? null,
     });
   }
 }

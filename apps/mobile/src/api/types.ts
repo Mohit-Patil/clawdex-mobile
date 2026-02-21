@@ -85,6 +85,14 @@ export interface GitCommitResponse {
   cwd?: string;
 }
 
+export interface GitPushResponse {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  pushed: boolean;
+  cwd?: string;
+}
+
 export type ApprovalKind = 'commandExecution' | 'fileChange';
 
 export type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';

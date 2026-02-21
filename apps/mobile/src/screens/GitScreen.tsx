@@ -30,6 +30,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
   const [loading, setLoading] = useState(true);
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [committing, setCommitting] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -42,18 +43,19 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     () => activeChat.cwd?.trim() ?? '',
     [activeChat.cwd]
   );
-  const hasWorkspace = workspaceCwd.length > 0;
+  const requestedCwd = useMemo(() => {
+    const draft = workspaceDraft.trim();
+    if (draft.length > 0) {
+      return draft;
+    }
+    return workspaceCwd.length > 0 ? workspaceCwd : undefined;
+  }, [workspaceCwd, workspaceDraft]);
+  const hasWorkspace = Boolean(requestedCwd);
 
   const refresh = useCallback(async () => {
-    if (!hasWorkspace) {
-      setLoading(false);
-      setStatus(null);
-      return;
-    }
-
     try {
       setLoading(true);
-      const nextStatus = await api.gitStatus(workspaceCwd);
+      const nextStatus = await api.gitStatus(requestedCwd);
       setStatus(nextStatus);
       setError(null);
     } catch (err) {
@@ -61,7 +63,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     } finally {
       setLoading(false);
     }
-  }, [api, hasWorkspace, workspaceCwd]);
+  }, [api, requestedCwd]);
 
   useEffect(() => {
     setLoading(true);
@@ -89,11 +91,6 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
   }, [activeChat.id, api, onChatUpdated, savingWorkspace, workspaceDraft]);
 
   const commit = useCallback(async () => {
-    if (!hasWorkspace) {
-      setError('Set a workspace path before committing.');
-      return;
-    }
-
     const trimmedMessage = commitMessage.trim();
     if (!trimmedMessage) {
       return;
@@ -103,7 +100,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
       setCommitting(true);
       const result = await api.gitCommit({
         message: trimmedMessage,
-        cwd: workspaceCwd,
+        cwd: requestedCwd,
       });
       if (!result.committed) {
         setError(result.stderr || 'Commit failed.');
@@ -116,7 +113,24 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     } finally {
       setCommitting(false);
     }
-  }, [api, commitMessage, hasWorkspace, refresh, workspaceCwd]);
+  }, [api, commitMessage, refresh, requestedCwd]);
+
+  const push = useCallback(async () => {
+    try {
+      setPushing(true);
+      const result = await api.gitPush(requestedCwd);
+      if (!result.pushed) {
+        setError(result.stderr || 'Push failed.');
+      } else {
+        setError(null);
+      }
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPushing(false);
+    }
+  }, [api, refresh, requestedCwd]);
 
   const workspaceChanged = workspaceDraft.trim() !== workspaceCwd;
   const commitWorkspaceIfChanged = useCallback(() => {
@@ -131,6 +145,12 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     () => parseChangedFiles(status?.raw ?? ''),
     [status?.raw]
   );
+  const hasChanges = changedFiles.length > 0;
+  const aheadCount = useMemo(
+    () => parseAheadCount(status?.raw ?? ''),
+    [status?.raw]
+  );
+  const canPush = aheadCount > 0;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -150,9 +170,9 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
           style={({ pressed }) => [
             styles.refreshBtn,
             pressed && styles.refreshBtnPressed,
-            (!hasWorkspace || loading) && styles.refreshBtnDisabled,
+            loading && styles.refreshBtnDisabled,
           ]}
-          disabled={!hasWorkspace || loading}
+          disabled={loading}
         >
           <Ionicons name="refresh" size={16} color={colors.textMuted} />
         </Pressable>
@@ -176,86 +196,109 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
           />
 
           {hasWorkspace ? (
-            <Text style={styles.metaText}>{workspaceCwd}</Text>
+            <Text style={styles.metaText}>{requestedCwd}</Text>
           ) : (
-            <Text style={styles.warningText}>
-              Set a workspace path to enable git for this chat.
-            </Text>
+            <Text style={styles.warningText}>Using bridge root workspace.</Text>
           )}
           {savingWorkspace ? (
             <Text style={styles.metaText}>Saving workspace...</Text>
           ) : null}
         </View>
 
-        {hasWorkspace ? (
-          loading ? (
-            <ActivityIndicator color={colors.textPrimary} style={styles.loader} />
-          ) : (
-            <>
-              <View style={styles.card}>
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Branch</Text>
-                  <Text style={styles.infoValue}>{status?.branch ?? '—'}</Text>
-                </View>
-                <View style={styles.separator} />
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Status</Text>
-                  <Text
-                    style={[styles.infoValue, status?.clean ? styles.clean : styles.dirty]}
-                  >
-                    {status?.clean ? 'clean' : 'changes'}
-                  </Text>
-                </View>
+        {loading ? (
+          <ActivityIndicator color={colors.textPrimary} style={styles.loader} />
+        ) : (
+          <>
+            <View style={styles.card}>
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Branch</Text>
+                <Text style={styles.infoValue}>{status?.branch ?? '—'}</Text>
               </View>
+              <View style={styles.separator} />
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Status</Text>
+                <Text
+                  style={[styles.infoValue, status?.clean ? styles.clean : styles.dirty]}
+                >
+                  {status?.clean ? 'clean' : 'changes'}
+                </Text>
+              </View>
+              {canPush ? (
+                <>
+                  <View style={styles.separator} />
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Ahead</Text>
+                    <Text style={styles.infoValue}>{aheadCount}</Text>
+                  </View>
+                </>
+              ) : null}
+            </View>
 
-              <Text style={styles.sectionLabel}>Commit message</Text>
-              <TextInput
-                style={styles.input}
-                value={commitMessage}
-                onChangeText={setCommitMessage}
-                placeholder="Commit message..."
-                placeholderTextColor={colors.textMuted}
-              />
+            <Text style={styles.sectionLabel}>Commit message</Text>
+            <TextInput
+              style={styles.input}
+              value={commitMessage}
+              onChangeText={setCommitMessage}
+              placeholder="Commit message..."
+              placeholderTextColor={colors.textMuted}
+            />
 
+            <Pressable
+              onPress={() => void commit()}
+              disabled={committing || !commitMessage.trim() || !hasChanges}
+              style={({ pressed }) => [
+                styles.actionBtn,
+                pressed && styles.actionBtnPressed,
+                (committing || !commitMessage.trim() || !hasChanges) &&
+                  styles.actionBtnDisabled,
+              ]}
+            >
+              <Text style={styles.actionBtnText}>
+                {committing ? 'Committing...' : 'Commit'}
+              </Text>
+            </Pressable>
+
+            {canPush ? (
               <Pressable
-                onPress={() => void commit()}
-                disabled={committing || !commitMessage.trim()}
+                onPress={() => void push()}
+                disabled={pushing || committing || loading}
                 style={({ pressed }) => [
                   styles.actionBtn,
+                  styles.pushBtn,
                   pressed && styles.actionBtnPressed,
-                  (committing || !commitMessage.trim()) && styles.actionBtnDisabled,
+                  (pushing || committing || loading) && styles.actionBtnDisabled,
                 ]}
               >
                 <Text style={styles.actionBtnText}>
-                  {committing ? 'Committing...' : 'Commit'}
+                  {pushing ? 'Pushing...' : `Push (${aheadCount})`}
                 </Text>
               </Pressable>
+            ) : null}
 
-              <Text style={styles.sectionLabel}>Changed files</Text>
-              <View style={styles.filesCard}>
-                {changedFiles.length === 0 ? (
-                  <Text style={styles.emptyFilesText}>No changes.</Text>
-                ) : (
-                  <ScrollView
-                    style={styles.filesScroll}
-                    contentContainerStyle={styles.filesScrollContent}
-                    showsVerticalScrollIndicator
-                    nestedScrollEnabled
-                  >
-                    {changedFiles.map((entry) => (
-                      <View key={`${entry.code}:${entry.path}`} style={styles.fileRow}>
-                        <Text style={styles.fileCode}>{entry.code}</Text>
-                        <Text style={styles.filePath} numberOfLines={2}>
-                          {entry.path}
-                        </Text>
-                      </View>
-                    ))}
-                  </ScrollView>
-                )}
-              </View>
-            </>
-          )
-        ) : null}
+            <Text style={styles.sectionLabel}>Changed files</Text>
+            <View style={styles.filesCard}>
+              {changedFiles.length === 0 ? (
+                <Text style={styles.emptyFilesText}>No changes.</Text>
+              ) : (
+                <ScrollView
+                  style={styles.filesScroll}
+                  contentContainerStyle={styles.filesScrollContent}
+                  showsVerticalScrollIndicator
+                  nestedScrollEnabled
+                >
+                  {changedFiles.map((entry) => (
+                    <View key={`${entry.code}:${entry.path}`} style={styles.fileRow}>
+                      <Text style={styles.fileCode}>{entry.code}</Text>
+                      <Text style={styles.filePath} numberOfLines={2}>
+                        {entry.path}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              )}
+            </View>
+          </>
+        )}
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
       </ScrollView>
@@ -349,6 +392,9 @@ const styles = StyleSheet.create({
   actionBtnDisabled: {
     backgroundColor: colors.bgInput,
     opacity: 0.6,
+  },
+  pushBtn: {
+    marginTop: spacing.xs,
   },
   actionBtnText: {
     ...typography.headline,
@@ -470,4 +516,22 @@ function parseChangedFiles(rawStatus: string): ChangedFileEntry[] {
   }
 
   return files;
+}
+
+function parseAheadCount(rawStatus: string): number {
+  const header = rawStatus
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('## '));
+  if (!header) {
+    return 0;
+  }
+
+  const match = header.match(/\bahead\s+(\d+)\b/i);
+  if (!match) {
+    return 0;
+  }
+
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) && value > 0 ? value : 0;
 }

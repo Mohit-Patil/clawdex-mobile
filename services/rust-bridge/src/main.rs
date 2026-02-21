@@ -921,6 +921,30 @@ impl GitService {
         raw_cwd: Option<&str>,
     ) -> Result<GitCommitResponse, BridgeError> {
         let repo_path = self.resolve_repo_path(raw_cwd)?;
+        let add_args = vec![
+            "-C".to_string(),
+            repo_path.to_string_lossy().to_string(),
+            "add".to_string(),
+            "-A".to_string(),
+        ];
+        let add_result = self
+            .terminal
+            .execute_binary("git", &add_args, repo_path.clone(), None)
+            .await?;
+        if add_result.code != Some(0) {
+            return Ok(GitCommitResponse {
+                code: add_result.code,
+                stdout: add_result.stdout,
+                stderr: if !add_result.stderr.is_empty() {
+                    add_result.stderr
+                } else {
+                    "git add -A failed".to_string()
+                },
+                committed: false,
+                cwd: repo_path.to_string_lossy().to_string(),
+            });
+        }
+
         let args = vec![
             "-C".to_string(),
             repo_path.to_string_lossy().to_string(),
@@ -939,6 +963,28 @@ impl GitService {
             stdout: result.stdout,
             stderr: result.stderr,
             committed: result.code == Some(0),
+            cwd: repo_path.to_string_lossy().to_string(),
+        })
+    }
+
+    async fn push(&self, raw_cwd: Option<&str>) -> Result<GitPushResponse, BridgeError> {
+        let repo_path = self.resolve_repo_path(raw_cwd)?;
+        let args = vec![
+            "-C".to_string(),
+            repo_path.to_string_lossy().to_string(),
+            "push".to_string(),
+        ];
+
+        let result = self
+            .terminal
+            .execute_binary("git", &args, repo_path.clone(), None)
+            .await?;
+
+        Ok(GitPushResponse {
+            code: result.code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            pushed: result.code == Some(0),
             cwd: repo_path.to_string_lossy().to_string(),
         })
     }
@@ -1025,6 +1071,15 @@ struct GitCommitResponse {
     stdout: String,
     stderr: String,
     committed: bool,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitPushResponse {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    pushed: bool,
     cwd: String,
 }
 
@@ -1396,6 +1451,28 @@ async fn handle_bridge_method(
             }
 
             Ok(commit_value)
+        }
+        "bridge/git/push" => {
+            let request: GitQueryRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+
+            let push = state.git.push(request.cwd.as_deref()).await?;
+            let push_value = serde_json::to_value(&push)
+                .map_err(|error| BridgeError::server(&error.to_string()))?;
+
+            if push.pushed {
+                if let Ok(status) = state.git.get_status(request.cwd.as_deref()).await {
+                    let status_value = serde_json::to_value(status)
+                        .map_err(|error| BridgeError::server(&error.to_string()))?;
+                    state
+                        .hub
+                        .broadcast_notification("bridge/git/updated", status_value)
+                        .await;
+                }
+            }
+
+            Ok(push_value)
         }
         "bridge/approvals/list" => {
             let list = state.app_server.list_pending_approvals().await;
