@@ -127,8 +127,6 @@ const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 10_000;
 const THREAD_RESUME_RETRY_MS = 1_500;
-const ANDROID_KEYBOARD_EXTRA_OFFSET = 12;
-const IOS_KEYBOARD_EXTRA_OFFSET = 12;
 const INLINE_OPTION_LINE_PATTERN =
   /^(?:[-*+]\s*)?(?:\d{1,2}\s*[.):-]|\(\d{1,2}\)\s*[.):-]?|\[\d{1,2}\]\s*|[A-Ca-c]\s*[.):-]|\([A-Ca-c]\)\s*[.):-]?|option\s+\d{1,2}\s*[.):-]?)\s*(.+)$/i;
 const INLINE_CHOICE_CUE_PHRASES = [
@@ -407,7 +405,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       useState<CollaborationMode>('default');
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
-    const [keyboardInset, setKeyboardInset] = useState(0);
     const [activity, setActivity] = useState<ActivityState>({
       tone: 'idle',
       title: 'Ready',
@@ -450,7 +447,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       148,
       Math.min(300, Math.floor(windowHeight * 0.34))
     );
-    const maxKeyboardInset = Math.max(220, Math.floor(windowHeight * 0.58));
     const attachmentPathSuggestions = useMemo(
       () =>
         toAttachmentPathSuggestions(
@@ -4168,44 +4164,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       onOpenGit(selectedChat);
     }, [onOpenGit, selectedChat]);
 
-    useEffect(() => {
-      if (Platform.OS === 'ios') {
-        const onFrameChange = (endScreenY: number) => {
-          const overlap = Math.max(0, Math.round(windowHeight - endScreenY));
-          const adjustedOverlap =
-            overlap > 0 ? overlap + IOS_KEYBOARD_EXTRA_OFFSET : 0;
-          const clamped = Math.min(maxKeyboardInset, adjustedOverlap);
-          setKeyboardInset((prev) => (prev === clamped ? prev : clamped));
-        };
-
-        const onWillChange = Keyboard.addListener('keyboardWillChangeFrame', (event) => {
-          onFrameChange(event.endCoordinates.screenY);
-        });
-        const onWillHide = Keyboard.addListener('keyboardWillHide', () => {
-          setKeyboardInset(0);
-        });
-
-        return () => {
-          onWillChange.remove();
-          onWillHide.remove();
-        };
-      }
-
-      const onDidShow = Keyboard.addListener('keyboardDidShow', (event) => {
-        const height = Math.max(0, Math.round(event.endCoordinates.height));
-        const adjustedHeight = height + ANDROID_KEYBOARD_EXTRA_OFFSET;
-        const clamped = Math.min(maxKeyboardInset, adjustedHeight);
-        setKeyboardInset((prev) => (prev === clamped ? prev : clamped));
+    const handleComposerFocus = useCallback(() => {
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollToEnd({ animated: true });
       });
-      const onDidHide = Keyboard.addListener('keyboardDidHide', () => {
-        setKeyboardInset(0);
-      });
-
-      return () => {
-        onDidShow.remove();
-        onDidHide.remove();
-      };
-    }, [maxKeyboardInset, windowHeight]);
+    }, []);
 
     const handleSubmit = selectedChat ? sendMessage : createChat;
     const isTurnLoading = sending || creating;
@@ -4276,7 +4239,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         ) : null}
 
         <KeyboardAvoidingView
-          style={[styles.keyboardAvoiding, { paddingBottom: keyboardInset }]}
+          style={styles.keyboardAvoiding}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
           {selectedChat && !isOpeningDifferentChat ? (
             <ChatView
@@ -4358,6 +4322,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             <ChatInput
               value={draft}
               onChangeText={setDraft}
+              onFocus={handleComposerFocus}
               onSubmit={() => void handleSubmit()}
               onStop={() => handleStopTurn()}
               showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}

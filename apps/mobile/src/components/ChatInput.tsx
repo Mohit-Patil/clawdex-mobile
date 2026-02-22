@@ -17,6 +17,7 @@ import { colors, radius, spacing } from '../theme';
 interface ChatInputProps {
   value: string;
   onChangeText: (text: string) => void;
+  onFocus?: () => void;
   onSubmit: () => void;
   onStop?: () => void;
   onAttachPress: () => void;
@@ -31,6 +32,7 @@ interface ChatInputProps {
 export function ChatInput({
   value,
   onChangeText,
+  onFocus,
   onSubmit,
   onStop,
   onAttachPress,
@@ -92,6 +94,7 @@ export function ChatInput({
             style={styles.input}
             value={value}
             onChangeText={onChangeText}
+            onFocus={onFocus}
             placeholder={placeholder}
             placeholderTextColor={colors.textMuted}
             multiline
