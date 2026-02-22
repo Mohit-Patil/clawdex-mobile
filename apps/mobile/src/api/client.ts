@@ -181,7 +181,7 @@ export class MacBridgeApiClient {
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       personality: null,
       ephemeral: null,
-      experimentalRawEvents: false,
+      experimentalRawEvents: true,
       persistExtendedHistory: true,
     });
 
@@ -256,6 +256,7 @@ export class MacBridgeApiClient {
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       personality: null,
+      experimentalRawEvents: true,
       persistExtendedHistory: true,
     });
 
@@ -322,6 +323,7 @@ export class MacBridgeApiClient {
         baseInstructions: null,
         developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
         personality: null,
+        experimentalRawEvents: true,
         persistExtendedHistory: true,
       });
     } catch {

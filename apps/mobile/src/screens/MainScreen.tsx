@@ -2232,6 +2232,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const threadId =
             readString(msg?.thread_id) ??
             readString(msg?.threadId) ??
+            readString(params?.thread_id) ??
             readString(params?.threadId) ??
             readString(params?.conversationId) ??
             readString(msg?.conversation_id);
@@ -2243,8 +2244,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const isMatchingThread = Boolean(threadId) && threadId === currentId;
           const isUnscopedRunEvent =
             !threadId &&
-            isCodexRunHeartbeatEvent(codexEventType) &&
-            Boolean(currentId);
+            Boolean(currentId) &&
+            (isCodexRunHeartbeatEvent(codexEventType) ||
+              CODEX_RUN_COMPLETION_EVENT_TYPES.has(codexEventType) ||
+              CODEX_RUN_ABORT_EVENT_TYPES.has(codexEventType) ||
+              CODEX_RUN_FAILURE_EVENT_TYPES.has(codexEventType));
 
           if (!isMatchingThread && !isUnscopedRunEvent) {
             return;
@@ -2483,7 +2487,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         // Streaming delta -> transient thinking text
         if (event.method === 'item/agentMessage/delta') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || currentId !== threadId) return;
 
           const delta = readString(params?.delta);
@@ -2510,7 +2514,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'turn/started') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId) ?? readString(toRecord(params?.turn)?.threadId);
+          const threadId =
+            readString(params?.threadId) ??
+            readString(params?.thread_id) ??
+            readString(toRecord(params?.turn)?.threadId) ??
+            readString(toRecord(params?.turn)?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2534,7 +2542,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/started') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2597,7 +2605,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/plan/delta') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2634,7 +2642,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/reasoning/summaryPartAdded') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2661,7 +2669,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/reasoning/summaryTextDelta') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2703,7 +2711,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/reasoning/textDelta') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2722,7 +2730,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/commandExecution/outputDelta') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2741,7 +2749,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/mcpToolCall/progress') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2760,7 +2768,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'item/commandExecution/terminalInteraction') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2775,7 +2783,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'turn/plan/updated') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId) ?? currentId;
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id) ?? currentId;
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2808,7 +2816,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'turn/diff/updated') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2824,7 +2832,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         // Command completion blocks
         if (event.method === 'item/completed') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
           if (!threadId || threadId !== currentId) {
             return;
           }
