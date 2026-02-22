@@ -407,6 +407,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const activeTurnIdRef = useRef<string | null>(null);
     activeTurnIdRef.current = activeTurnId;
     const stopRequestedRef = useRef(false);
+    const stopSystemMessageLoggedRef = useRef(false);
 
     // Track whether a command arrived since the last delta — used to
     // know when a new thinking segment starts so we can replace the old one.
@@ -583,6 +584,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         title: 'Ready',
       });
       stopRequestedRef.current = false;
+      stopSystemMessageLoggedRef.current = false;
       reasoningSummaryRef.current = {};
       codexReasoningBufferRef.current = '';
       hadCommandRef.current = false;
@@ -1202,6 +1204,47 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [selectedChatId]
     );
 
+    const appendLocalSystemMessage = useCallback(
+      (content: string) => {
+        const normalized = content.trim();
+        if (!normalized || !selectedChatId) {
+          return;
+        }
+
+        const createdAt = new Date().toISOString();
+        setSelectedChat((prev) => {
+          if (!prev || prev.id !== selectedChatId) {
+            return prev;
+          }
+
+          return {
+            ...prev,
+            updatedAt: createdAt,
+            statusUpdatedAt: createdAt,
+            messages: [
+              ...prev.messages,
+              {
+                id: `local-system-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                role: 'system',
+                content: normalized,
+                createdAt,
+              },
+            ],
+          };
+        });
+        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+      },
+      [selectedChatId]
+    );
+
+    const appendStopSystemMessageIfNeeded = useCallback(() => {
+      if (stopSystemMessageLoggedRef.current) {
+        return;
+      }
+      stopSystemMessageLoggedRef.current = true;
+      appendLocalSystemMessage('Turn stopped by user.');
+    }, [appendLocalSystemMessage]);
+
     const handleTurnFailure = useCallback(
       (error: unknown) => {
         const message = (error as Error).message ?? String(error);
@@ -1213,6 +1256,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (interruptedByUser) {
           setError(null);
+          appendStopSystemMessageIfNeeded();
           setActivity({
             tone: 'complete',
             title: 'Turn stopped',
@@ -1231,7 +1275,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         stopRequestedRef.current = interruptedByUser;
         clearRunWatchdog();
       },
-      [clearRunWatchdog]
+      [appendStopSystemMessageIfNeeded, clearRunWatchdog]
     );
 
     const interruptActiveTurn = useCallback(
@@ -1279,6 +1323,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       }
 
       stopRequestedRef.current = true;
+      stopSystemMessageLoggedRef.current = false;
       setStoppingTurn(true);
       setError(null);
       setActivity({
@@ -1703,7 +1748,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const requestId = loadChatRequestRef.current + 1;
         loadChatRequestRef.current = requestId;
         try {
-          clearRunWatchdog();
           const chat = await api.getChat(chatId);
           if (requestId !== loadChatRequestRef.current) {
             return;
@@ -1716,6 +1760,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setStreamingText(null);
           setActiveTurnId(null);
           setStoppingTurn(false);
+          stopSystemMessageLoggedRef.current = false;
           const shouldRun = isChatLikelyRunning(chat);
           if (shouldRun) {
             bumpRunWatchdog();
@@ -1724,6 +1769,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               title: 'Working',
             });
           } else {
+            clearRunWatchdog();
             setActivity(
               chat.status === 'complete'
                 ? {
@@ -1788,6 +1834,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setActiveTurnId(null);
         setStoppingTurn(false);
         stopRequestedRef.current = false;
+        stopSystemMessageLoggedRef.current = false;
 
         if (canReuseSnapshot && optimisticChat) {
           setSelectedChat(optimisticChat);
@@ -2366,15 +2413,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             const interruptedByUser = stopRequestedRef.current;
             clearRunWatchdog();
             setActiveCommands([]);
-          setStreamingText(null);
-          setActiveTurnId(null);
-          setStoppingTurn(false);
-          stopRequestedRef.current = interruptedByUser;
-          reasoningSummaryRef.current = {};
-          codexReasoningBufferRef.current = '';
-          hadCommandRef.current = false;
+            setStreamingText(null);
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            stopRequestedRef.current = interruptedByUser;
+            reasoningSummaryRef.current = {};
+            codexReasoningBufferRef.current = '';
+            hadCommandRef.current = false;
             if (interruptedByUser) {
               setError(null);
+              appendStopSystemMessageIfNeeded();
             }
             setActivity({
               tone: interruptedByUser ? 'complete' : 'error',
@@ -2864,6 +2912,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (status === 'failed' || status === 'interrupted') {
             if (interruptedByUser) {
               setError(null);
+              appendStopSystemMessageIfNeeded();
               setActivity({
                 tone: 'complete',
                 title: 'Turn stopped',
@@ -2949,6 +2998,34 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return;
         }
 
+        // Externally-started turns (e.g. from CLI) broadcast this event.
+        // Do a lightweight status check — don't call loadChat() which would
+        // wipe streaming text, active commands, and the watchdog.
+        if (event.method === 'thread/status/changed') {
+          const params = toRecord(event.params);
+          const threadId =
+            readString(params?.threadId) ?? readString(params?.thread_id);
+          if (threadId && threadId === currentId) {
+            api.getChat(threadId).then((latest) => {
+              if (chatIdRef.current !== threadId) {
+                return; // user switched away
+              }
+              setSelectedChat((prev) =>
+                prev && prev.id === latest.id ? latest : prev
+              );
+              if (isChatLikelyRunning(latest)) {
+                bumpRunWatchdog();
+                setActivity((prev) =>
+                  prev.tone === 'running'
+                    ? prev
+                    : { tone: 'running', title: 'Working' }
+                );
+              }
+            }).catch(() => {});
+          }
+          return;
+        }
+
         if (event.method === 'bridge/connection/state') {
           const params = toRecord(event.params);
           const status = readString(params?.status);
@@ -2980,6 +3057,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingApproval?.id,
       pendingUserInputRequest?.id,
       loadChat,
+      appendStopSystemMessageIfNeeded,
       bumpRunWatchdog,
       clearRunWatchdog,
       registerTurnStarted,
@@ -3293,6 +3371,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             {showActivity ? (
               <ActivityBar
                 title={activity.title}
+                detail={activity.detail}
                 tone={activity.tone}
               />
             ) : null}

@@ -8,6 +8,7 @@ export type ActivityTone = 'running' | 'complete' | 'error' | 'idle';
 
 interface ActivityBarProps {
   title: string;
+  detail?: string | null;
   tone: ActivityTone;
 }
 
@@ -25,7 +26,7 @@ const COLOR_BY_TONE: Record<ActivityTone, string> = {
   idle: colors.statusIdle,
 };
 
-export function ActivityBar({ title, tone }: ActivityBarProps) {
+export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
   const color = COLOR_BY_TONE[tone];
   const [dotFrame, setDotFrame] = useState(0);
 
@@ -41,7 +42,8 @@ export function ActivityBar({ title, tone }: ActivityBarProps) {
   }, [tone]);
 
   const dots = tone === 'running' ? '.'.repeat(dotFrame) : '';
-  const text = `${title}${dots}`;
+  const suffix = detail ? ` · ${detail}` : '';
+  const text = `${title}${suffix}${dots}`;
 
   return (
     <View style={styles.container}>
