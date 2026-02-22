@@ -3,6 +3,7 @@ import 'react-native-gesture-handler';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  Keyboard,
   PanResponder,
   Pressable,
   StyleSheet,
@@ -67,6 +68,7 @@ export default function App() {
   }, [ws]);
 
   const openDrawer = useCallback(() => {
+    Keyboard.dismiss();
     setDrawerOpen(true);
     Animated.parallel([
       Animated.spring(drawerAnim, {
