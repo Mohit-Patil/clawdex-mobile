@@ -1,6 +1,8 @@
 # Clawdex Mobile (Codex Mobile Control)
 
-<img src="apps/mobile/assets/brand/app-icon.png" alt="Clawdex app icon" width="112" />
+<p align="center">
+  <img src="apps/mobile/assets/brand/app-icon.png" alt="Clawdex app icon" width="112" />
+</p>
 
 Control Codex from your phone using an Expo React Native app (`apps/mobile`) and a Rust bridge (`services/rust-bridge`) running on your Mac.
 
@@ -9,6 +11,7 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 ## What You Get
 
 - Chat with Codex from mobile
+- Attach workspace files and phone files/images from the `+` composer menu (workspace path autocomplete included)
 - Switch collaboration mode per turn (`Default` / `Plan`) from the UI or slash command
 - Auto-promote to plan mode when plan events/structured clarifications are requested
 - Choose a default start directory for new chats (from existing chat workspaces)
@@ -22,6 +25,7 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 - Terminal command execution through bridge
 - Live thread/run updates over WebSocket
 - Immediate in-app loading feedback when opening a chat
+- Stop a running turn from the composer; stopped runs are recorded in transcript as `Turn stopped by user.`
 - Guided setup wizard for first-time onboarding
 
 ## Install (Quick Start)
@@ -217,6 +221,13 @@ Expected: JSON containing `"status":"ok"`.
    - changed files visible
    - commit works
    - push button appears when branch is ahead
+8. Tap the composer `+` button and test:
+   - attach via workspace path (autocomplete suggestions should appear)
+   - attach a file from phone
+   - attach an image from phone
+9. Send a long-running prompt, tap the stop button in composer, and verify:
+   - run transitions to stopped
+   - transcript contains `Turn stopped by user.`
 
 ## Choosing Start Directory (Home/Sidebar)
 
@@ -378,7 +389,7 @@ So yes, cloud builds without App Store listing are possible, but still require A
 ### Forwarded methods
 
 - `thread/*`
-- `turn/*`
+- `turn/*` (includes `turn/interrupt` used by mobile stop control)
 - `review/start`
 - `model/list`
 - `skills/list`
@@ -388,6 +399,7 @@ So yes, cloud builds without App Store listing are possible, but still require A
 
 - `bridge/health/read`
 - `bridge/terminal/exec`
+- `bridge/attachments/upload`
 - `bridge/git/status`
 - `bridge/git/diff`
 - `bridge/git/commit`
@@ -432,6 +444,13 @@ So yes, cloud builds without App Store listing are possible, but still require A
 - Verify chat workspace path points to a valid git repo
 - Verify git auth/remote access for push
 
+### Attachment upload issues
+
+- Ensure file/photo permissions are granted to the mobile app (or Expo Go).
+- Attachment uploads are capped at `20 MB` per file by the bridge.
+- Uploaded payloads are persisted under `BRIDGE_WORKDIR/.clawdex-mobile-attachments` (thread subfolders when thread id is known).
+- Ensure the configured `BRIDGE_WORKDIR` is writable.
+
 ### Worklets/Reanimated mismatch
 
 - Keep pinned versions aligned (`react-native-reanimated@4.1.1`, `react-native-worklets@0.5.1`)
@@ -450,6 +469,12 @@ npm run -w clawdex-mobile start -- --clear
 ```bash
 npm run -w clawdex-mobile test -- --runInBand src/api/__tests__/client.test.ts
 ```
+
+### Stop button does not interrupt a run
+
+- Ensure bridge/mobile are on a revision that supports `turn/interrupt`.
+- If the run already completed, the stop button will disappear and no stop entry will be added.
+- If needed, pull latest, restart bridge, and reload Expo bundle.
 
 ## Legacy TypeScript Bridge
 
