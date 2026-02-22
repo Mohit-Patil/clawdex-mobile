@@ -4913,6 +4913,7 @@ function ChatView({
   const inlineChoiceSet = inlineChoicesEnabled
     ? findInlineChoiceSet(visibleMessages)
     : null;
+  const streamingPreviewText = toStreamingPreviewText(streamingText, visibleMessages);
 
   return (
     <ScrollView
@@ -4973,9 +4974,9 @@ function ChatView({
           />
         </View>
       ) : null}
-      {streamingText ? (
+      {streamingPreviewText ? (
         <Text style={styles.streamingText} numberOfLines={4}>
-          {streamingText}
+          {streamingPreviewText}
         </Text>
       ) : null}
       {shouldShowToolPanel ? (
@@ -5001,7 +5002,7 @@ function ChatView({
           </ScrollView>
         </View>
       ) : null}
-      {isStreaming && !streamingText && activeCommands.length === 0 ? <TypingIndicator /> : null}
+      {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? <TypingIndicator /> : null}
     </ScrollView>
   );
 }
@@ -5710,6 +5711,53 @@ function mergeStreamingDelta(previous: string | null, delta: string): string {
   }
 
   return prev + delta;
+}
+
+function normalizeComparableText(value: string | null | undefined): string {
+  if (!value) {
+    return '';
+  }
+
+  return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function toStreamingPreviewText(
+  streamingText: string | null,
+  visibleMessages: ChatTranscriptMessage[]
+): string | null {
+  const preview = streamingText?.trim() ?? '';
+  if (!preview) {
+    return null;
+  }
+
+  const latestAssistantMessage = [...visibleMessages]
+    .reverse()
+    .find((message) => message.role === 'assistant');
+  if (!latestAssistantMessage) {
+    return preview;
+  }
+
+  const assistantText = latestAssistantMessage.content?.trim() ?? '';
+  if (!assistantText) {
+    return preview;
+  }
+
+  const normalizedPreview = normalizeComparableText(preview);
+  const normalizedAssistant = normalizeComparableText(assistantText);
+  if (!normalizedPreview || !normalizedAssistant) {
+    return preview;
+  }
+
+  // Suppress transient preview if it is already represented by the latest
+  // persisted assistant message (common when multiple delta channels overlap).
+  if (
+    normalizedAssistant.includes(normalizedPreview) ||
+    normalizedPreview.includes(normalizedAssistant)
+  ) {
+    return null;
+  }
+
+  return preview;
 }
 
 function toToolBlockState(
