@@ -253,4 +253,5 @@ export interface RunEvent {
 export interface RpcNotification {
   method: string;
   params: Record<string, unknown> | null;
+  eventId?: number;
 }

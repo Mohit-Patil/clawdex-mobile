@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     path::{Component, Path, PathBuf},
     process::Stdio,
@@ -25,13 +25,16 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use services::{GitService, TerminalService};
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot, Mutex, RwLock},
     time::timeout,
 };
+
+mod services;
 
 const APPROVAL_COMMAND_METHOD: &str = "item/commandExecution/requestApproval";
 const APPROVAL_FILE_METHOD: &str = "item/fileChange/requestApproval";
@@ -39,6 +42,8 @@ const REQUEST_USER_INPUT_METHOD: &str = "item/tool/requestUserInput";
 const REQUEST_USER_INPUT_METHOD_ALT: &str = "tool/requestUserInput";
 const MOBILE_ATTACHMENTS_DIR: &str = ".clawdex-mobile-attachments";
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
+const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -148,14 +153,30 @@ struct AppState {
 
 struct ClientHub {
     next_client_id: AtomicU64,
+    next_event_id: AtomicU64,
+    replay_capacity: usize,
     clients: RwLock<HashMap<u64, mpsc::UnboundedSender<Message>>>,
+    notification_replay: RwLock<VecDeque<ReplayableNotification>>,
+}
+
+#[derive(Clone)]
+struct ReplayableNotification {
+    event_id: u64,
+    payload: Value,
 }
 
 impl ClientHub {
     fn new() -> Self {
+        Self::with_replay_capacity(NOTIFICATION_REPLAY_BUFFER_SIZE)
+    }
+
+    fn with_replay_capacity(replay_capacity: usize) -> Self {
         Self {
             next_client_id: AtomicU64::new(1),
+            next_event_id: AtomicU64::new(1),
+            replay_capacity,
             clients: RwLock::new(HashMap::new()),
+            notification_replay: RwLock::new(VecDeque::new()),
         }
     }
 
@@ -200,11 +221,61 @@ impl ClientHub {
     }
 
     async fn broadcast_notification(&self, method: &str, params: Value) {
-        self.broadcast_json(json!({
+        let event_id = self.next_event_id.fetch_add(1, Ordering::Relaxed);
+        let payload = json!({
             "method": method,
+            "eventId": event_id,
             "params": params
-        }))
-        .await;
+        });
+
+        self.push_replay(event_id, payload.clone()).await;
+        self.broadcast_json(payload).await;
+    }
+
+    async fn push_replay(&self, event_id: u64, payload: Value) {
+        if self.replay_capacity == 0 {
+            return;
+        }
+
+        let mut replay = self.notification_replay.write().await;
+        replay.push_back(ReplayableNotification { event_id, payload });
+        while replay.len() > self.replay_capacity {
+            replay.pop_front();
+        }
+    }
+
+    async fn replay_since(&self, after_event_id: Option<u64>, limit: usize) -> (Vec<Value>, bool) {
+        let after = after_event_id.unwrap_or(0);
+        let replay = self.notification_replay.read().await;
+        let mut events = Vec::new();
+        let mut has_more = false;
+
+        for entry in replay.iter() {
+            if entry.event_id <= after {
+                continue;
+            }
+
+            if events.len() >= limit {
+                has_more = true;
+                break;
+            }
+
+            events.push(entry.payload.clone());
+        }
+
+        (events, has_more)
+    }
+
+    async fn earliest_event_id(&self) -> Option<u64> {
+        self.notification_replay
+            .read()
+            .await
+            .front()
+            .map(|entry| entry.event_id)
+    }
+
+    fn latest_event_id(&self) -> u64 {
+        self.next_event_id.load(Ordering::Relaxed).saturating_sub(1)
     }
 }
 
@@ -674,14 +745,9 @@ impl AppServerBridge {
     }
 
     async fn handle_notification(&self, method: &str, params: Option<Value>) {
-        let mut payload = json!({
-            "method": method,
-        });
-        if let Some(params) = params {
-            payload["params"] = params;
-        }
-
-        self.hub.broadcast_json(payload).await;
+        self.hub
+            .broadcast_notification(method, params.unwrap_or(Value::Null))
+            .await;
     }
 
     async fn handle_response(&self, response: Value) {
@@ -736,354 +802,6 @@ impl AppServerBridge {
         writer.write_all(line.as_bytes()).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await
-    }
-}
-
-#[derive(Clone)]
-struct TerminalService {
-    root: PathBuf,
-    allowed_commands: HashSet<String>,
-    disabled: bool,
-}
-
-impl TerminalService {
-    fn new(root: PathBuf, allowed_commands: HashSet<String>, disabled: bool) -> Self {
-        Self {
-            root,
-            allowed_commands,
-            disabled,
-        }
-    }
-
-    async fn execute_shell(
-        &self,
-        request: TerminalExecRequest,
-    ) -> Result<TerminalExecResponse, BridgeError> {
-        if self.disabled {
-            return Err(BridgeError::forbidden(
-                "terminal_exec_disabled",
-                "Terminal execution is disabled on this bridge.",
-            ));
-        }
-
-        let command = request.command.trim();
-        if command.is_empty() {
-            return Err(BridgeError::invalid_params("command must not be empty"));
-        }
-
-        if contains_disallowed_control_chars(command) {
-            return Err(BridgeError::invalid_params(
-                "command contains disallowed control characters",
-            ));
-        }
-
-        let tokens = shlex::split(command)
-            .ok_or_else(|| BridgeError::invalid_params("invalid command quoting"))?;
-        if tokens.is_empty() {
-            return Err(BridgeError::invalid_params("command must not be empty"));
-        }
-
-        let binary = tokens[0].clone();
-        if !self.allowed_commands.is_empty() && !self.allowed_commands.contains(&binary) {
-            let mut allowed = self.allowed_commands.iter().cloned().collect::<Vec<_>>();
-            allowed.sort();
-            return Err(BridgeError::invalid_params(&format!(
-                "Command \"{binary}\" is not allowed. Allowed commands: {}",
-                allowed.join(", ")
-            )));
-        }
-
-        let args = tokens[1..].to_vec();
-        let cwd = resolve_cwd_within_root(request.cwd.as_deref(), &self.root)
-            .ok_or_else(|| BridgeError::invalid_params("cwd must stay within BRIDGE_WORKDIR"))?;
-
-        self.execute_binary_internal(
-            binary.as_str(),
-            &args,
-            command.to_string(),
-            cwd,
-            request.timeout_ms,
-        )
-        .await
-    }
-
-    async fn execute_binary(
-        &self,
-        binary: &str,
-        args: &[String],
-        cwd: PathBuf,
-        timeout_ms: Option<u64>,
-    ) -> Result<TerminalExecResponse, BridgeError> {
-        let display = std::iter::once(binary.to_string())
-            .chain(args.iter().cloned())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        self.execute_binary_internal(binary, args, display, cwd, timeout_ms)
-            .await
-    }
-
-    async fn execute_binary_internal(
-        &self,
-        binary: &str,
-        args: &[String],
-        display_command: String,
-        cwd: PathBuf,
-        timeout_ms: Option<u64>,
-    ) -> Result<TerminalExecResponse, BridgeError> {
-        let timeout_ms = timeout_ms.unwrap_or(30_000).clamp(100, 120_000);
-        let started_at = Instant::now();
-
-        let mut child = Command::new(binary)
-            .args(args)
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| BridgeError::server(&format!("failed to spawn command: {error}")))?;
-
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| BridgeError::server("failed to capture stdout"))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| BridgeError::server("failed to capture stderr"))?;
-
-        let stdout_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let _ = stdout.read_to_end(&mut bytes).await;
-            bytes
-        });
-
-        let stderr_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let _ = stderr.read_to_end(&mut bytes).await;
-            bytes
-        });
-
-        let mut timed_out = false;
-        let mut exit_code = None;
-        let mut wait_error: Option<String> = None;
-
-        match timeout(Duration::from_millis(timeout_ms), child.wait()).await {
-            Ok(Ok(status)) => {
-                exit_code = status.code();
-            }
-            Ok(Err(error)) => {
-                wait_error = Some(error.to_string());
-                exit_code = Some(-1);
-            }
-            Err(_) => {
-                timed_out = true;
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-            }
-        }
-
-        let stdout_bytes = stdout_task.await.unwrap_or_default();
-        let stderr_bytes = stderr_task.await.unwrap_or_default();
-
-        let stdout_text = String::from_utf8_lossy(&stdout_bytes)
-            .trim_end()
-            .to_string();
-        let mut stderr_text = String::from_utf8_lossy(&stderr_bytes)
-            .trim_end()
-            .to_string();
-        if let Some(wait_error) = wait_error {
-            if !stderr_text.is_empty() {
-                stderr_text.push('\n');
-            }
-            stderr_text.push_str(&wait_error);
-        }
-
-        Ok(TerminalExecResponse {
-            command: display_command,
-            cwd: cwd.to_string_lossy().to_string(),
-            code: exit_code,
-            stdout: stdout_text,
-            stderr: stderr_text,
-            timed_out,
-            duration_ms: started_at.elapsed().as_millis() as u64,
-        })
-    }
-}
-
-#[derive(Clone)]
-struct GitService {
-    terminal: Arc<TerminalService>,
-    root: PathBuf,
-}
-
-impl GitService {
-    fn new(terminal: Arc<TerminalService>, root: PathBuf) -> Self {
-        Self { terminal, root }
-    }
-
-    fn resolve_repo_path(&self, raw_cwd: Option<&str>) -> Result<PathBuf, BridgeError> {
-        resolve_cwd_within_root(raw_cwd, &self.root)
-            .ok_or_else(|| BridgeError::invalid_params("cwd must stay within BRIDGE_WORKDIR"))
-    }
-
-    async fn get_status(&self, raw_cwd: Option<&str>) -> Result<GitStatusResponse, BridgeError> {
-        let repo_path = self.resolve_repo_path(raw_cwd)?;
-        let args = vec![
-            "-C".to_string(),
-            repo_path.to_string_lossy().to_string(),
-            "status".to_string(),
-            "--short".to_string(),
-            "--branch".to_string(),
-        ];
-        let result = self
-            .terminal
-            .execute_binary("git", &args, repo_path.clone(), None)
-            .await?;
-
-        if result.code != Some(0) {
-            return Err(BridgeError::server(
-                &(if !result.stderr.is_empty() {
-                    result.stderr.clone()
-                } else if !result.stdout.is_empty() {
-                    result.stdout.clone()
-                } else {
-                    "git status failed".to_string()
-                }),
-            ));
-        }
-
-        let lines = result
-            .stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect::<Vec<_>>();
-
-        let branch = lines
-            .iter()
-            .find(|line| line.starts_with("## "))
-            .map(|line| {
-                line.trim_start_matches("## ")
-                    .split("...")
-                    .next()
-                    .unwrap_or("unknown")
-            })
-            .unwrap_or("unknown")
-            .to_string();
-
-        let clean = lines.iter().filter(|line| !line.starts_with("## ")).count() == 0;
-
-        Ok(GitStatusResponse {
-            branch,
-            clean,
-            raw: result.stdout,
-            cwd: repo_path.to_string_lossy().to_string(),
-        })
-    }
-
-    async fn get_diff(&self, raw_cwd: Option<&str>) -> Result<GitDiffResponse, BridgeError> {
-        let repo_path = self.resolve_repo_path(raw_cwd)?;
-        let args = vec![
-            "-C".to_string(),
-            repo_path.to_string_lossy().to_string(),
-            "diff".to_string(),
-        ];
-
-        let result = self
-            .terminal
-            .execute_binary("git", &args, repo_path.clone(), None)
-            .await?;
-
-        if result.code != Some(0) {
-            return Err(BridgeError::server(
-                &(if !result.stderr.is_empty() {
-                    result.stderr.clone()
-                } else if !result.stdout.is_empty() {
-                    result.stdout.clone()
-                } else {
-                    "git diff failed".to_string()
-                }),
-            ));
-        }
-
-        Ok(GitDiffResponse {
-            diff: result.stdout,
-            cwd: repo_path.to_string_lossy().to_string(),
-        })
-    }
-
-    async fn commit(
-        &self,
-        message: String,
-        raw_cwd: Option<&str>,
-    ) -> Result<GitCommitResponse, BridgeError> {
-        let repo_path = self.resolve_repo_path(raw_cwd)?;
-        let add_args = vec![
-            "-C".to_string(),
-            repo_path.to_string_lossy().to_string(),
-            "add".to_string(),
-            "-A".to_string(),
-        ];
-        let add_result = self
-            .terminal
-            .execute_binary("git", &add_args, repo_path.clone(), None)
-            .await?;
-        if add_result.code != Some(0) {
-            return Ok(GitCommitResponse {
-                code: add_result.code,
-                stdout: add_result.stdout,
-                stderr: if !add_result.stderr.is_empty() {
-                    add_result.stderr
-                } else {
-                    "git add -A failed".to_string()
-                },
-                committed: false,
-                cwd: repo_path.to_string_lossy().to_string(),
-            });
-        }
-
-        let args = vec![
-            "-C".to_string(),
-            repo_path.to_string_lossy().to_string(),
-            "commit".to_string(),
-            "-m".to_string(),
-            message,
-        ];
-
-        let result = self
-            .terminal
-            .execute_binary("git", &args, repo_path.clone(), None)
-            .await?;
-
-        Ok(GitCommitResponse {
-            code: result.code,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            committed: result.code == Some(0),
-            cwd: repo_path.to_string_lossy().to_string(),
-        })
-    }
-
-    async fn push(&self, raw_cwd: Option<&str>) -> Result<GitPushResponse, BridgeError> {
-        let repo_path = self.resolve_repo_path(raw_cwd)?;
-        let args = vec![
-            "-C".to_string(),
-            repo_path.to_string_lossy().to_string(),
-            "push".to_string(),
-        ];
-
-        let result = self
-            .terminal
-            .execute_binary("git", &args, repo_path.clone(), None)
-            .await?;
-
-        Ok(GitPushResponse {
-            code: result.code,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            pushed: result.code == Some(0),
-            cwd: repo_path.to_string_lossy().to_string(),
-        })
     }
 }
 
@@ -1184,6 +902,13 @@ struct GitPushResponse {
 #[serde(rename_all = "camelCase")]
 struct GitQueryRequest {
     cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventReplayRequest {
+    after_event_id: Option<u64>,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1552,6 +1277,24 @@ async fn handle_bridge_method(
             "at": now_iso(),
             "uptimeSec": state.started_at.elapsed().as_secs(),
         })),
+        "bridge/events/replay" => {
+            let request: EventReplayRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+
+            let limit = request
+                .limit
+                .unwrap_or(200)
+                .clamp(1, NOTIFICATION_REPLAY_MAX_LIMIT);
+            let (events, has_more) = state.hub.replay_since(request.after_event_id, limit).await;
+
+            Ok(json!({
+                "events": events,
+                "hasMore": has_more,
+                "earliestEventId": state.hub.earliest_event_id().await,
+                "latestEventId": state.hub.latest_event_id(),
+            }))
+        }
         "bridge/terminal/exec" => {
             let request: TerminalExecRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
@@ -1950,7 +1693,8 @@ async fn save_uploaded_attachment(
         )));
     }
 
-    let normalized_kind = normalize_attachment_kind(request.kind.as_deref(), request.mime_type.as_deref());
+    let normalized_kind =
+        normalize_attachment_kind(request.kind.as_deref(), request.mime_type.as_deref());
     let file_name = build_attachment_file_name(
         request.file_name.as_deref(),
         request.mime_type.as_deref(),
@@ -1965,9 +1709,9 @@ async fn save_uploaded_attachment(
         }
     }
 
-    fs::create_dir_all(&attachment_dir)
-        .await
-        .map_err(|error| BridgeError::server(&format!("failed to create attachment directory: {error}")))?;
+    fs::create_dir_all(&attachment_dir).await.map_err(|error| {
+        BridgeError::server(&format!("failed to create attachment directory: {error}"))
+    })?;
 
     let timestamp = Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string();
     let unique_name = format!("{timestamp}-{}-{file_name}", std::process::id());
@@ -2004,13 +1748,17 @@ fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
         .unwrap_or(raw)
         .trim();
     if payload.is_empty() {
-        return Err(BridgeError::invalid_params("dataBase64 must contain base64 payload"));
+        return Err(BridgeError::invalid_params(
+            "dataBase64 must contain base64 payload",
+        ));
     }
 
     general_purpose::STANDARD
         .decode(payload)
         .or_else(|_| general_purpose::URL_SAFE.decode(payload))
-        .map_err(|error| BridgeError::invalid_params(&format!("invalid base64 attachment payload: {error}")))
+        .map_err(|error| {
+            BridgeError::invalid_params(&format!("invalid base64 attachment payload: {error}"))
+        })
 }
 
 fn normalize_attachment_kind(kind: Option<&str>, mime_type: Option<&str>) -> &'static str {
@@ -2178,4 +1926,54 @@ fn normalize_path(path: &Path) -> PathBuf {
     }
 
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn replay_since_returns_notifications_after_cursor() {
+        let hub = ClientHub::with_replay_capacity(16);
+        hub.broadcast_notification("turn/started", json!({ "threadId": "thr_1" }))
+            .await;
+        hub.broadcast_notification("turn/completed", json!({ "threadId": "thr_1" }))
+            .await;
+
+        let (events, has_more) = hub.replay_since(Some(1), 10).await;
+        assert_eq!(events.len(), 1);
+        assert!(!has_more);
+        assert_eq!(events[0]["method"], "turn/completed");
+        assert_eq!(events[0]["eventId"], 2);
+        assert_eq!(hub.latest_event_id(), 2);
+    }
+
+    #[tokio::test]
+    async fn replay_since_respects_limit() {
+        let hub = ClientHub::with_replay_capacity(16);
+        hub.broadcast_notification("event/1", json!({})).await;
+        hub.broadcast_notification("event/2", json!({})).await;
+        hub.broadcast_notification("event/3", json!({})).await;
+
+        let (events, has_more) = hub.replay_since(Some(0), 2).await;
+        assert_eq!(events.len(), 2);
+        assert!(has_more);
+        assert_eq!(events[0]["eventId"], 1);
+        assert_eq!(events[1]["eventId"], 2);
+    }
+
+    #[tokio::test]
+    async fn replay_buffer_evicts_oldest_entries() {
+        let hub = ClientHub::with_replay_capacity(2);
+        hub.broadcast_notification("event/1", json!({})).await;
+        hub.broadcast_notification("event/2", json!({})).await;
+        hub.broadcast_notification("event/3", json!({})).await;
+
+        let (events, has_more) = hub.replay_since(Some(0), 10).await;
+        assert_eq!(events.len(), 2);
+        assert!(!has_more);
+        assert_eq!(hub.earliest_event_id().await, Some(2));
+        assert_eq!(events[0]["eventId"], 2);
+        assert_eq!(events[1]["eventId"], 3);
+    }
 }

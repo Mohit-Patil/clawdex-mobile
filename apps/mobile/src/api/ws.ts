@@ -41,8 +41,16 @@ interface RpcError {
   data?: unknown;
 }
 
+interface ReplayEventsResponse {
+  events?: unknown[];
+  hasMore?: boolean;
+  earliestEventId?: number;
+  latestEventId?: number;
+}
+
 export class MacBridgeWsClient {
   private static readonly TURN_COMPLETION_TTL_MS = 5 * 60 * 1000;
+  private static readonly RECENT_EVENT_ID_CACHE_SIZE = 4096;
   private socket: WebSocket | null = null;
   private connected = false;
   private shouldReconnect = false;
@@ -53,11 +61,16 @@ export class MacBridgeWsClient {
   private readonly statusListeners = new Set<StatusListener>();
   private readonly pendingRequests = new Map<string | number, PendingRequest>();
   private readonly recentTurnCompletions = new Map<string, TurnCompletionSnapshot>();
+  private readonly recentEventIds = new Set<number>();
+  private readonly recentEventIdQueue: number[] = [];
   private readonly pendingTurnWaits = new Set<string>();
   private readonly authToken: string | null;
   private readonly allowQueryTokenAuth: boolean;
   private readonly baseUrl: string;
   private readonly requestTimeoutMs: number;
+  private lastSeenEventId = 0;
+  private replaySupported = true;
+  private replayInFlight: Promise<void> | null = null;
   private requestCounter = 0;
 
   constructor(baseUrl: string, options: MacBridgeWsClientOptions = {}) {
@@ -314,6 +327,9 @@ export class MacBridgeWsClient {
           this.socket = socket;
           this.reconnectAttempts = 0;
           this.emitStatus(true);
+          if (this.lastSeenEventId > 0) {
+            this.scheduleReplay();
+          }
           resolve();
         };
 
@@ -407,18 +423,158 @@ export class MacBridgeWsClient {
     }
 
     if (hasMethod) {
-      if (String(record.method) === 'turn/completed') {
-        const completion = toTurnCompletionSnapshot(record.params);
-        if (completion?.turnId) {
-          this.rememberTurnCompletion(completion);
-        }
+      this.handleNotificationRecord(record);
+    }
+  }
+
+  private handleNotificationRecord(
+    record: Record<string, unknown>,
+    options?: {
+      replayFloorEventId?: number;
+    }
+  ): void {
+    const method = readString(record.method);
+    if (!method) {
+      return;
+    }
+
+    const params = toRecord(record.params);
+    const eventId = readEventId(record);
+    if (eventId !== null) {
+      // Bridge restarts reset event IDs; treat that as a new stream.
+      if (eventId === 1 && this.lastSeenEventId > 1) {
+        this.lastSeenEventId = 0;
+        this.clearRecentEventIdCache();
       }
 
-      this.emitEvent({
-        method: String(record.method),
-        params: toRecord(record.params),
-      });
+      const replayFloorEventId = options?.replayFloorEventId ?? null;
+      if (replayFloorEventId !== null) {
+        if (eventId <= replayFloorEventId) {
+          return;
+        }
+      } else if (eventId <= this.lastSeenEventId) {
+        return;
+      }
+
+      if (this.recentEventIds.has(eventId)) {
+        return;
+      }
+      this.markEventIdSeen(eventId);
+
+      if (eventId > this.lastSeenEventId) {
+        this.lastSeenEventId = eventId;
+      }
     }
+
+    if (method === 'turn/completed') {
+      const completion = toTurnCompletionSnapshot(params);
+      if (completion?.turnId) {
+        this.rememberTurnCompletion(completion);
+      }
+    }
+
+    const event: RpcNotification = {
+      method,
+      params,
+    };
+    if (eventId !== null) {
+      event.eventId = eventId;
+    }
+    this.emitEvent(event);
+  }
+
+  private scheduleReplay(): void {
+    if (!this.replaySupported) {
+      return;
+    }
+    if (this.replayInFlight) {
+      return;
+    }
+    if (!this.connected || !this.socket || this.socket.readyState !== 1) {
+      return;
+    }
+
+    this.replayInFlight = this.replayMissedEvents()
+      .catch(() => {
+        // Replay is best-effort; live WS stream continues regardless.
+      })
+      .finally(() => {
+        this.replayInFlight = null;
+      });
+  }
+
+  private async replayMissedEvents(): Promise<void> {
+    if (!this.replaySupported || this.lastSeenEventId <= 0) {
+      return;
+    }
+
+    let cursor = this.lastSeenEventId;
+    const maxPages = 10;
+    for (let page = 0; page < maxPages; page += 1) {
+      let response: ReplayEventsResponse;
+      try {
+        response = await this.request<ReplayEventsResponse>('bridge/events/replay', {
+          afterEventId: cursor,
+          limit: 200,
+        });
+      } catch (error) {
+        const message = String((error as Error).message ?? error).toLowerCase();
+        if (
+          message.includes('rpc -32601') ||
+          message.includes('unknown bridge method: bridge/events/replay')
+        ) {
+          this.replaySupported = false;
+          return;
+        }
+        throw error;
+      }
+
+      const latestEventId = readNumber(response.latestEventId);
+      if (latestEventId !== null && latestEventId < cursor) {
+        this.lastSeenEventId = 0;
+        this.clearRecentEventIdCache();
+        return;
+      }
+
+      const events = Array.isArray(response.events) ? response.events : [];
+      for (const entry of events) {
+        const record = toRecord(entry);
+        if (!record) {
+          continue;
+        }
+        this.handleNotificationRecord(record, {
+          replayFloorEventId: cursor,
+        });
+      }
+
+      const hasMore = response.hasMore === true;
+      if (!hasMore) {
+        return;
+      }
+
+      if (this.lastSeenEventId <= cursor) {
+        return;
+      }
+      cursor = this.lastSeenEventId;
+    }
+  }
+
+  private markEventIdSeen(eventId: number): void {
+    this.recentEventIds.add(eventId);
+    this.recentEventIdQueue.push(eventId);
+    while (
+      this.recentEventIdQueue.length > MacBridgeWsClient.RECENT_EVENT_ID_CACHE_SIZE
+    ) {
+      const removed = this.recentEventIdQueue.shift();
+      if (typeof removed === 'number') {
+        this.recentEventIds.delete(removed);
+      }
+    }
+  }
+
+  private clearRecentEventIdCache(): void {
+    this.recentEventIds.clear();
+    this.recentEventIdQueue.length = 0;
   }
 
   private rejectAllPending(error: Error): void {
@@ -501,6 +657,27 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function readNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed);
+    }
+  }
+  return null;
+}
+
+function readEventId(record: Record<string, unknown>): number | null {
+  const eventId = readNumber(record.eventId) ?? readNumber(record.event_id);
+  if (eventId === null || eventId < 1) {
+    return null;
+  }
+  return eventId;
 }
 
 function turnCompletionKey(threadId: string, turnId: string): string {

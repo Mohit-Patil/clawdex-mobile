@@ -10,6 +10,10 @@ const allowInsecureRemoteBridge =
   'true';
 const privacyPolicyUrl = process.env.EXPO_PUBLIC_PRIVACY_POLICY_URL?.trim() || null;
 const termsOfServiceUrl = process.env.EXPO_PUBLIC_TERMS_OF_SERVICE_URL?.trim() || null;
+const externalStatusFullSyncDebounceMs = parseNonNegativeIntEnv(
+  process.env.EXPO_PUBLIC_EXTERNAL_STATUS_FULL_SYNC_DEBOUNCE_MS,
+  450
+);
 
 if (isInsecureRemoteUrl(macBridgeUrl) && !allowInsecureRemoteBridge) {
   console.warn(
@@ -21,9 +25,28 @@ export const env = {
   macBridgeUrl,
   macBridgeToken,
   allowWsQueryTokenAuth,
+  externalStatusFullSyncDebounceMs,
   privacyPolicyUrl,
   termsOfServiceUrl
 };
+
+function parseNonNegativeIntEnv(value: string | undefined, fallback: number): number {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
 
 function isInsecureRemoteUrl(url: string): boolean {
   try {

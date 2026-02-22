@@ -54,6 +54,7 @@ import { ChatMessage } from '../components/ChatMessage';
 import { BrandMark } from '../components/BrandMark';
 import { ToolBlock } from '../components/ToolBlock';
 import { TypingIndicator } from '../components/TypingIndicator';
+import { env } from '../config';
 import { colors, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
@@ -94,6 +95,17 @@ interface ActivePlanState {
   updatedAt: string;
 }
 
+interface ThreadRuntimeSnapshot {
+  activity?: ActivityState;
+  activeCommands?: RunEvent[];
+  streamingText?: string | null;
+  pendingApproval?: PendingApproval | null;
+  pendingUserInputRequest?: PendingUserInputRequest | null;
+  activeTurnId?: string | null;
+  runWatchdogUntil?: number;
+  updatedAtMs: number;
+}
+
 interface ComposerAttachmentChip {
   id: string;
   label: string;
@@ -112,6 +124,9 @@ const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
+const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
+const IDLE_CHAT_SYNC_INTERVAL_MS = 10_000;
+const THREAD_RESUME_RETRY_MS = 1_500;
 const ANDROID_KEYBOARD_EXTRA_OFFSET = 12;
 const IOS_KEYBOARD_EXTRA_OFFSET = 12;
 const INLINE_OPTION_LINE_PATTERN =
@@ -415,6 +430,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const reasoningSummaryRef = useRef<Record<string, string>>({});
     const codexReasoningBufferRef = useRef('');
     const runWatchdogUntilRef = useRef(0);
+    const externalStatusFullSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null
+    );
+    const externalStatusFullSyncInFlightRef = useRef(false);
+    const externalStatusFullSyncQueuedThreadRef = useRef<string | null>(null);
+    const externalStatusFullSyncNextAllowedAtRef = useRef(0);
+    const threadRuntimeSnapshotsRef = useRef<Record<string, ThreadRuntimeSnapshot>>({});
+    const threadReasoningBuffersRef = useRef<Record<string, string>>({});
+    const threadResumeLastAttemptAtRef = useRef<Record<string, number>>({});
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
     const attachmentWorkspace = selectedChat?.cwd ?? preferredStartCwd ?? null;
     const slashQuery = parseSlashQuery(draft);
@@ -464,24 +488,504 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       runWatchdogUntilRef.current = 0;
     }, []);
 
-    const pushActiveCommand = useCallback(
-      (threadId: string, eventType: string, detail: string) => {
-        setActiveCommands((prev) => {
-          const last = prev[prev.length - 1];
-          if (last && last.eventType === eventType && last.detail === detail) {
-            return prev;
-          }
+    const clearExternalStatusFullSync = useCallback(() => {
+      const timer = externalStatusFullSyncTimerRef.current;
+      if (!timer) {
+        externalStatusFullSyncQueuedThreadRef.current = null;
+        return;
+      }
+      clearTimeout(timer);
+      externalStatusFullSyncTimerRef.current = null;
+      externalStatusFullSyncQueuedThreadRef.current = null;
+    }, []);
 
-          const next: RunEvent = {
-            id: `re-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    const ensureThreadResumeSubscription = useCallback(
+      (threadId: string, options?: { force?: boolean }) => {
+        const normalizedThreadId = threadId.trim();
+        if (!normalizedThreadId) {
+          return;
+        }
+
+        const now = Date.now();
+        const lastAttemptAt = threadResumeLastAttemptAtRef.current[normalizedThreadId] ?? 0;
+        if (!options?.force && now - lastAttemptAt < THREAD_RESUME_RETRY_MS) {
+          return;
+        }
+
+        threadResumeLastAttemptAtRef.current[normalizedThreadId] = now;
+        api.resumeThread(normalizedThreadId).catch(() => {});
+      },
+      [api]
+    );
+
+    const drainExternalStatusFullSyncQueue = useCallback(() => {
+      if (externalStatusFullSyncInFlightRef.current) {
+        return;
+      }
+
+      const queuedThreadId = externalStatusFullSyncQueuedThreadRef.current;
+      if (!queuedThreadId) {
+        return;
+      }
+
+      if (chatIdRef.current !== queuedThreadId) {
+        externalStatusFullSyncQueuedThreadRef.current = null;
+        return;
+      }
+
+      const waitMs = Math.max(
+        0,
+        externalStatusFullSyncNextAllowedAtRef.current - Date.now()
+      );
+      if (waitMs > 0) {
+        if (!externalStatusFullSyncTimerRef.current) {
+          externalStatusFullSyncTimerRef.current = setTimeout(() => {
+            externalStatusFullSyncTimerRef.current = null;
+            drainExternalStatusFullSyncQueue();
+          }, waitMs);
+        }
+        return;
+      }
+
+      externalStatusFullSyncQueuedThreadRef.current = null;
+      externalStatusFullSyncInFlightRef.current = true;
+      externalStatusFullSyncNextAllowedAtRef.current =
+        Date.now() + env.externalStatusFullSyncDebounceMs;
+
+      api
+        .getChat(queuedThreadId)
+        .then((latest) => {
+          if (chatIdRef.current !== queuedThreadId) {
+            return;
+          }
+          setSelectedChat((prev) => (prev && prev.id === latest.id ? latest : prev));
+          if (isChatLikelyRunning(latest)) {
+            bumpRunWatchdog();
+            setActivity((prev) =>
+              prev.tone === 'running' ? prev : { tone: 'running', title: 'Working' }
+            );
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          externalStatusFullSyncInFlightRef.current = false;
+          drainExternalStatusFullSyncQueue();
+        });
+    }, [api, bumpRunWatchdog]);
+
+    const scheduleExternalStatusFullSync = useCallback(
+      (threadId: string) => {
+        if (chatIdRef.current !== threadId) {
+          return;
+        }
+        externalStatusFullSyncQueuedThreadRef.current = threadId;
+        drainExternalStatusFullSyncQueue();
+      },
+      [drainExternalStatusFullSyncQueue]
+    );
+
+    useEffect(
+      () => () => {
+        clearExternalStatusFullSync();
+      },
+      [clearExternalStatusFullSync]
+    );
+
+    const upsertThreadRuntimeSnapshot = useCallback(
+      (
+        threadId: string,
+        updater: (previous: ThreadRuntimeSnapshot) => Partial<ThreadRuntimeSnapshot>
+      ) => {
+        if (!threadId) {
+          return;
+        }
+
+        const previous =
+          threadRuntimeSnapshotsRef.current[threadId] ??
+          ({
+            updatedAtMs: Date.now(),
+          } as ThreadRuntimeSnapshot);
+        const nextPatch = updater(previous);
+
+        threadRuntimeSnapshotsRef.current[threadId] = {
+          ...previous,
+          ...nextPatch,
+          updatedAtMs: Date.now(),
+        };
+      },
+      []
+    );
+
+    const cacheThreadActivity = useCallback(
+      (threadId: string, nextActivity: ActivityState) => {
+        upsertThreadRuntimeSnapshot(threadId, () => ({ activity: nextActivity }));
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
+
+    const cacheThreadStreamingDelta = useCallback(
+      (threadId: string, delta: string) => {
+        const normalized = delta.trim();
+        if (!normalized) {
+          return;
+        }
+
+        upsertThreadRuntimeSnapshot(threadId, (previous) => {
+          const merged = mergeStreamingDelta(previous.streamingText ?? null, delta);
+          return { streamingText: merged };
+        });
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
+
+    const cacheThreadActiveCommand = useCallback(
+      (threadId: string, eventType: string, detail: string) => {
+        upsertThreadRuntimeSnapshot(threadId, (previous) => ({
+          activeCommands: appendRunEventHistory(
+            previous.activeCommands ?? [],
             threadId,
             eventType,
-            at: new Date().toISOString(),
-            detail,
-          };
+            detail
+          ),
+        }));
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
 
-          return [...prev, next].slice(-MAX_ACTIVE_COMMANDS);
-        });
+    const cacheThreadPendingApproval = useCallback(
+      (threadId: string, approval: PendingApproval | null) => {
+        upsertThreadRuntimeSnapshot(threadId, () => ({
+          pendingApproval: approval,
+        }));
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
+
+    const cacheThreadPendingUserInputRequest = useCallback(
+      (threadId: string, request: PendingUserInputRequest | null) => {
+        upsertThreadRuntimeSnapshot(threadId, () => ({
+          pendingUserInputRequest: request,
+        }));
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
+
+    const cacheThreadTurnState = useCallback(
+      (
+        threadId: string,
+        options: {
+          activeTurnId?: string | null;
+          runWatchdogUntil?: number;
+        }
+      ) => {
+        upsertThreadRuntimeSnapshot(threadId, () => options);
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
+
+    const clearThreadRuntimeSnapshot = useCallback(
+      (threadId: string, preserveApprovals = false) => {
+        if (!threadId) {
+          return;
+        }
+
+        delete threadReasoningBuffersRef.current[threadId];
+        upsertThreadRuntimeSnapshot(threadId, (previous) => ({
+          activity: {
+            tone: 'complete',
+            title: 'Turn completed',
+          },
+          activeCommands: [],
+          streamingText: null,
+          activeTurnId: null,
+          runWatchdogUntil: 0,
+          pendingApproval: preserveApprovals ? previous.pendingApproval : null,
+          pendingUserInputRequest: preserveApprovals
+            ? previous.pendingUserInputRequest
+            : null,
+        }));
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
+
+    const applyThreadRuntimeSnapshot = useCallback(
+      (threadId: string) => {
+        if (!threadId) {
+          return;
+        }
+
+        const snapshot = threadRuntimeSnapshotsRef.current[threadId];
+        if (!snapshot) {
+          return;
+        }
+
+        if (snapshot.activeCommands !== undefined) {
+          setActiveCommands(snapshot.activeCommands);
+        }
+        if (snapshot.streamingText !== undefined) {
+          setStreamingText(snapshot.streamingText);
+        }
+        if (snapshot.pendingApproval !== undefined) {
+          setPendingApproval(snapshot.pendingApproval);
+        }
+        if (snapshot.pendingUserInputRequest !== undefined) {
+          setPendingUserInputRequest(snapshot.pendingUserInputRequest);
+          setUserInputDrafts(
+            snapshot.pendingUserInputRequest
+              ? buildUserInputDrafts(snapshot.pendingUserInputRequest)
+              : {}
+          );
+          setUserInputError(null);
+          setResolvingUserInput(false);
+        }
+        if (snapshot.activeTurnId !== undefined) {
+          setActiveTurnId(snapshot.activeTurnId);
+        }
+        if (snapshot.activity) {
+          setActivity(snapshot.activity);
+        }
+        if (
+          typeof snapshot.runWatchdogUntil === 'number' &&
+          snapshot.runWatchdogUntil > runWatchdogUntilRef.current
+        ) {
+          runWatchdogUntilRef.current = snapshot.runWatchdogUntil;
+        }
+      },
+      []
+    );
+
+    const refreshPendingApprovalsForThread = useCallback(
+      async (threadId: string) => {
+        try {
+          const approvals = await api.listApprovals();
+          const match = approvals.find((entry) => entry.threadId === threadId) ?? null;
+          cacheThreadPendingApproval(threadId, match);
+          if (chatIdRef.current === threadId) {
+            setPendingApproval(match);
+            if (match) {
+              setActivity({
+                tone: 'idle',
+                title: 'Waiting for approval',
+                detail: match.command ?? match.kind,
+              });
+            }
+          }
+        } catch {
+          // Best effort hydration for externally-started turns.
+        }
+      },
+      [api, cacheThreadPendingApproval]
+    );
+
+    const cacheCodexRuntimeForThread = useCallback(
+      (
+        threadId: string,
+        codexEventType: string,
+        msg: Record<string, unknown> | null
+      ) => {
+        if (!threadId) {
+          return;
+        }
+
+        if (isCodexRunHeartbeatEvent(codexEventType)) {
+          cacheThreadTurnState(threadId, {
+            runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+          });
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Working',
+          });
+        }
+
+        if (codexEventType === 'taskstarted') {
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Working',
+          });
+          return;
+        }
+
+        if (
+          codexEventType === 'agentreasoningdelta' ||
+          codexEventType === 'reasoningcontentdelta' ||
+          codexEventType === 'reasoningrawcontentdelta' ||
+          codexEventType === 'agentreasoningrawcontentdelta'
+        ) {
+          const delta = readString(msg?.delta);
+          if (!delta) {
+            return;
+          }
+
+          const nextBuffer = `${threadReasoningBuffersRef.current[threadId] ?? ''}${delta}`;
+          threadReasoningBuffersRef.current[threadId] = nextBuffer;
+          const heading =
+            extractFirstBoldSnippet(nextBuffer, 56) ??
+            extractFirstBoldSnippet(delta, 56);
+          const summary = toTickerSnippet(stripMarkdownInline(delta), 64);
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: heading ?? 'Reasoning',
+            detail: heading ? undefined : summary ?? undefined,
+          });
+          return;
+        }
+
+        if (codexEventType === 'agentreasoningsectionbreak') {
+          delete threadReasoningBuffersRef.current[threadId];
+          return;
+        }
+
+        if (
+          codexEventType === 'agentmessagedelta' ||
+          codexEventType === 'agentmessagecontentdelta'
+        ) {
+          const delta = readString(msg?.delta);
+          if (!delta) {
+            return;
+          }
+
+          cacheThreadStreamingDelta(threadId, delta);
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Thinking',
+          });
+          return;
+        }
+
+        if (codexEventType === 'execcommandbegin') {
+          const command = toCommandDisplay(msg?.command);
+          const detail = toTickerSnippet(command, 80);
+          const commandLabel = detail ?? 'Command';
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Running command',
+            detail: detail ?? undefined,
+          });
+          cacheThreadActiveCommand(threadId, 'command.running', `${commandLabel} | running`);
+          return;
+        }
+
+        if (codexEventType === 'execcommandend') {
+          const status = readString(msg?.status);
+          const command = toCommandDisplay(msg?.command);
+          const detail = toTickerSnippet(command, 80);
+          const commandLabel = detail ?? 'Command';
+          const failed = status === 'failed' || status === 'error';
+          cacheThreadActivity(threadId, {
+            tone: failed ? 'error' : 'running',
+            title: failed ? 'Command failed' : 'Working',
+            detail: detail ?? undefined,
+          });
+          cacheThreadActiveCommand(
+            threadId,
+            'command.completed',
+            `${commandLabel} | ${failed ? 'error' : 'complete'}`
+          );
+          return;
+        }
+
+        if (codexEventType === 'mcpstartupupdate') {
+          const server = readString(msg?.server);
+          const state =
+            readString(msg?.status) ??
+            readString(toRecord(msg?.status)?.type);
+          const detail = [server, state].filter(Boolean).join(' · ');
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Starting MCP servers',
+            detail: detail || undefined,
+          });
+          return;
+        }
+
+        if (codexEventType === 'mcptoolcallbegin') {
+          const server = readString(msg?.server);
+          const tool = readString(msg?.tool);
+          const detail = [server, tool].filter(Boolean).join(' / ');
+          const toolLabel = detail || 'MCP tool call';
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Running tool',
+            detail: detail || undefined,
+          });
+          cacheThreadActiveCommand(threadId, 'tool.running', `${toolLabel} | running`);
+          return;
+        }
+
+        if (codexEventType === 'websearchbegin') {
+          const query = toTickerSnippet(readString(msg?.query), 64);
+          const searchLabel = query ? `Web search: ${query}` : 'Web search';
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Searching web',
+            detail: query ?? undefined,
+          });
+          cacheThreadActiveCommand(threadId, 'web_search.running', `${searchLabel} | running`);
+          return;
+        }
+
+        if (codexEventType === 'backgroundevent') {
+          const message =
+            toTickerSnippet(readString(msg?.message), 72) ??
+            toTickerSnippet(readString(msg?.text), 72);
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: message ?? 'Working',
+          });
+          return;
+        }
+
+        if (CODEX_RUN_ABORT_EVENT_TYPES.has(codexEventType)) {
+          cacheThreadTurnState(threadId, {
+            activeTurnId: null,
+            runWatchdogUntil: 0,
+          });
+          upsertThreadRuntimeSnapshot(threadId, () => ({
+            activity: {
+              tone: 'error',
+              title: 'Turn interrupted',
+            },
+            activeCommands: [],
+            streamingText: null,
+          }));
+          return;
+        }
+
+        if (CODEX_RUN_FAILURE_EVENT_TYPES.has(codexEventType)) {
+          cacheThreadTurnState(threadId, {
+            activeTurnId: null,
+            runWatchdogUntil: 0,
+          });
+          upsertThreadRuntimeSnapshot(threadId, () => ({
+            activity: {
+              tone: 'error',
+              title: 'Turn failed',
+            },
+            activeCommands: [],
+            streamingText: null,
+          }));
+          return;
+        }
+
+        if (CODEX_RUN_COMPLETION_EVENT_TYPES.has(codexEventType)) {
+          clearThreadRuntimeSnapshot(threadId, true);
+        }
+      },
+      [
+        cacheThreadActiveCommand,
+        cacheThreadActivity,
+        cacheThreadStreamingDelta,
+        cacheThreadTurnState,
+        clearThreadRuntimeSnapshot,
+        upsertThreadRuntimeSnapshot,
+      ]
+    );
+
+    const pushActiveCommand = useCallback(
+      (threadId: string, eventType: string, detail: string) => {
+        setActiveCommands((prev) =>
+          appendRunEventHistory(prev, threadId, eventType, detail)
+        );
       },
       []
     );
@@ -553,6 +1057,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [activeModel, selectedEffort]);
 
     const resetComposerState = useCallback(() => {
+      clearExternalStatusFullSync();
       loadChatRequestRef.current += 1;
       setSelectedChat(null);
       setSelectedChatId(null);
@@ -589,7 +1094,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       codexReasoningBufferRef.current = '';
       hadCommandRef.current = false;
       clearRunWatchdog();
-    }, [clearRunWatchdog]);
+    }, [clearExternalStatusFullSync, clearRunWatchdog]);
 
     const startNewChat = useCallback(() => {
       // New chat should land on compose/home so user can pick workspace first.
@@ -1302,6 +1807,41 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [api]
     );
 
+    const interruptLatestTurn = useCallback(
+      async (threadId: string) => {
+        try {
+          const interruptedTurnId = await api.interruptLatestTurn(threadId);
+          if (interruptedTurnId) {
+            setActiveTurnId(interruptedTurnId);
+            setError(null);
+            setActivity({
+              tone: 'running',
+              title: 'Stopping turn',
+            });
+            return;
+          }
+
+          setStoppingTurn(false);
+          stopRequestedRef.current = false;
+          setActivity({
+            tone: 'idle',
+            title: 'No active turn found',
+          });
+        } catch (error) {
+          const message = (error as Error).message ?? String(error);
+          setError(message);
+          setActivity({
+            tone: 'error',
+            title: 'Failed to stop turn',
+            detail: message,
+          });
+          setStoppingTurn(false);
+          stopRequestedRef.current = false;
+        }
+      },
+      [api]
+    );
+
     const registerTurnStarted = useCallback(
       (threadId: string, turnId: string) => {
         const currentChatId = chatIdRef.current;
@@ -1335,8 +1875,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       const turnId = activeTurnIdRef.current;
       if (threadId && turnId) {
         void interruptActiveTurn(threadId, turnId);
+        return;
       }
-    }, [interruptActiveTurn, stoppingTurn]);
+
+      if (threadId) {
+        void interruptLatestTurn(threadId);
+        return;
+      }
+
+      setStoppingTurn(false);
+      stopRequestedRef.current = false;
+      setActivity({
+        tone: 'idle',
+        title: 'No active turn found',
+      });
+    }, [interruptActiveTurn, interruptLatestTurn, stoppingTurn]);
 
     const handleSlashCommand = useCallback(
       async (input: string): Promise<boolean> => {
@@ -1791,6 +2344,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           reasoningSummaryRef.current = {};
           codexReasoningBufferRef.current = '';
           hadCommandRef.current = false;
+          applyThreadRuntimeSnapshot(chatId);
+          void refreshPendingApprovalsForThread(chatId);
         } catch (err) {
           if (requestId !== loadChatRequestRef.current) {
             return;
@@ -1807,7 +2362,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
         }
       },
-      [api, bumpRunWatchdog, clearRunWatchdog]
+      [
+        api,
+        applyThreadRuntimeSnapshot,
+        bumpRunWatchdog,
+        clearRunWatchdog,
+        refreshPendingApprovalsForThread,
+      ]
     );
 
     const openChatThread = useCallback(
@@ -1869,9 +2430,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           });
         }
 
+        applyThreadRuntimeSnapshot(id);
+        void refreshPendingApprovalsForThread(id);
         loadChat(id).catch(() => {});
       },
-      [loadChat]
+      [
+        applyThreadRuntimeSnapshot,
+        loadChat,
+        refreshPendingApprovalsForThread,
+      ]
     );
 
     useImperativeHandle(ref, () => ({
@@ -2251,6 +2818,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               CODEX_RUN_FAILURE_EVENT_TYPES.has(codexEventType));
 
           if (!isMatchingThread && !isUnscopedRunEvent) {
+            if (threadId) {
+              cacheCodexRuntimeForThread(threadId, codexEventType, msg);
+            }
             return;
           }
 
@@ -2258,6 +2828,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           if (isCodexRunHeartbeatEvent(codexEventType)) {
             bumpRunWatchdog();
+            scheduleExternalStatusFullSync(activeThreadId);
           }
 
           if (codexEventType === 'taskstarted') {
@@ -2488,10 +3059,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/agentMessage/delta') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || currentId !== threadId) return;
-
           const delta = readString(params?.delta);
-          if (!delta) return;
+          if (!threadId || !delta) return;
+          if (currentId !== threadId) {
+            cacheThreadStreamingDelta(threadId, delta);
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Thinking',
+            });
+            return;
+          }
 
           bumpRunWatchdog();
           if (hadCommandRef.current) {
@@ -2519,7 +3099,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             readString(params?.thread_id) ??
             readString(toRecord(params?.turn)?.threadId) ??
             readString(toRecord(params?.turn)?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
             return;
           }
           const turn = toRecord(params?.turn);
@@ -2529,6 +3109,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             readString(turn?.id) ??
             readString(turn?.turnId) ??
             null;
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              activeTurnId: startedTurnId,
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Turn started',
+            });
+            return;
+          }
           if (startedTurnId) {
             registerTurnStarted(threadId, startedTurnId);
           }
@@ -2543,12 +3134,77 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/started') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
             return;
           }
-          bumpRunWatchdog();
           const item = toRecord(params?.item);
           const itemType = readString(item?.type);
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            if (itemType === 'commandExecution') {
+              const command = readString(item?.command);
+              const commandLabel = toTickerSnippet(command, 80) ?? 'Command';
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Running command',
+                detail: command ?? undefined,
+              });
+              cacheThreadActiveCommand(
+                threadId,
+                'command.running',
+                `${commandLabel} | running`
+              );
+              return;
+            }
+
+            if (itemType === 'fileChange') {
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Applying file changes',
+              });
+              cacheThreadActiveCommand(
+                threadId,
+                'file_change.running',
+                'Applying file changes | running'
+              );
+              return;
+            }
+
+            if (itemType === 'mcpToolCall') {
+              const server = readString(item?.server);
+              const tool = readString(item?.tool);
+              const detail = [server, tool].filter(Boolean).join(' / ');
+              const toolLabel = detail || 'Tool call';
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Running tool',
+                detail,
+              });
+              cacheThreadActiveCommand(threadId, 'tool.running', `${toolLabel} | running`);
+              return;
+            }
+
+            if (itemType === 'plan') {
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Planning',
+              });
+              return;
+            }
+
+            if (itemType === 'reasoning') {
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Reasoning',
+              });
+              return;
+            }
+            return;
+          }
+
+          bumpRunWatchdog();
 
           if (itemType === 'commandExecution') {
             const command = readString(item?.command);
@@ -2606,7 +3262,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/plan/delta') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Planning',
+            });
             return;
           }
 
@@ -2643,7 +3309,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/reasoning/summaryPartAdded') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Reasoning',
+            });
             return;
           }
 
@@ -2670,12 +3346,29 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/reasoning/summaryTextDelta') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          const delta = readString(params?.delta);
+          if (threadId !== currentId) {
+            if (delta) {
+              const buffer = `${threadReasoningBuffersRef.current[threadId] ?? ''}${delta}`;
+              threadReasoningBuffersRef.current[threadId] = buffer;
+              const heading = extractFirstBoldSnippet(buffer, 56);
+              const summary = toTickerSnippet(stripMarkdownInline(buffer), 64);
+              cacheThreadTurnState(threadId, {
+                runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+              });
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: heading ?? 'Reasoning',
+                detail: heading ? undefined : summary ?? undefined,
+              });
+            }
             return;
           }
 
           bumpRunWatchdog();
-          const delta = readString(params?.delta);
           const itemId = readString(params?.itemId);
           const summaryIndex = readNumber(params?.summaryIndex);
           const summaryKey =
@@ -2712,7 +3405,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/reasoning/textDelta') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Reasoning',
+            });
             return;
           }
 
@@ -2731,7 +3434,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/commandExecution/outputDelta') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Running command',
+            });
             return;
           }
 
@@ -2750,7 +3463,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/mcpToolCall/progress') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Running tool',
+            });
             return;
           }
 
@@ -2769,7 +3492,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/commandExecution/terminalInteraction') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Terminal interaction',
+            });
             return;
           }
 
@@ -2784,7 +3517,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'turn/plan/updated') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id) ?? currentId;
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Plan updated',
+            });
             return;
           }
 
@@ -2817,7 +3560,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'turn/diff/updated') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
+            return;
+          }
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Updating diff',
+            });
             return;
           }
 
@@ -2833,12 +3586,50 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'item/completed') {
           const params = toRecord(event.params);
           const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
-          if (!threadId || threadId !== currentId) {
+          if (!threadId) {
             return;
           }
 
           const item = toRecord(params?.item);
           const itemType = readString(item?.type);
+          if (threadId !== currentId) {
+            if (itemType === 'commandExecution') {
+              const command = toTickerSnippet(readString(item?.command), 80) ?? 'Command';
+              const status = readString(item?.status);
+              const failed = status === 'failed' || status === 'error';
+              cacheThreadActivity(threadId, {
+                tone: failed ? 'error' : 'complete',
+                title: failed ? 'Command failed' : 'Command completed',
+                detail: command ?? undefined,
+              });
+              cacheThreadActiveCommand(
+                threadId,
+                'command.completed',
+                `${command} | ${failed ? 'error' : 'complete'}`
+              );
+            } else if (itemType === 'mcpToolCall') {
+              const server = readString(item?.server);
+              const tool = readString(item?.tool);
+              const status = readString(item?.status);
+              const failed = status === 'failed' || status === 'error';
+              const detail = [server, tool].filter(Boolean).join(' / ') || 'Tool call';
+              cacheThreadActiveCommand(
+                threadId,
+                'tool.completed',
+                `${detail} | ${failed ? 'error' : 'complete'}`
+              );
+            } else if (itemType === 'fileChange') {
+              const status = readString(item?.status);
+              const failed = status === 'failed' || status === 'error';
+              cacheThreadActiveCommand(
+                threadId,
+                'file_change.completed',
+                `File changes | ${failed ? 'error' : 'complete'}`
+              );
+            }
+            return;
+          }
+
           if (itemType === 'commandExecution') {
             const command = toTickerSnippet(readString(item?.command), 80) ?? 'Command';
             const status = readString(item?.status);
@@ -2886,11 +3677,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             readString(params?.thread_id) ??
             readString(turn?.threadId) ??
             readString(turn?.thread_id);
-          if (!threadId || currentId !== threadId) {
+          if (!threadId) {
             return;
           }
-          clearRunWatchdog();
-
           const status = readString(turn?.status) ?? readString(params?.status);
           const completedTurnId =
             readString(turn?.id) ??
@@ -2898,6 +3687,33 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             readString(params?.turnId) ??
             readString(params?.turn_id) ??
             null;
+          if (currentId !== threadId) {
+            delete threadReasoningBuffersRef.current[threadId];
+            cacheThreadTurnState(threadId, {
+              activeTurnId: null,
+              runWatchdogUntil: 0,
+            });
+            upsertThreadRuntimeSnapshot(threadId, () => ({
+              activeCommands: [],
+              streamingText: null,
+              pendingUserInputRequest: null,
+              activity:
+                status === 'failed' || status === 'interrupted'
+                  ? {
+                      tone: 'error',
+                      title: 'Turn failed',
+                      detail: status ?? undefined,
+                    }
+                  : {
+                      tone: 'complete',
+                      title: 'Turn completed',
+                    },
+            }));
+            return;
+          }
+
+          clearRunWatchdog();
+
           const interruptedByUser = status === 'interrupted' && stopRequestedRef.current;
           const turnError = toRecord(turn?.error) ?? toRecord(params?.error);
           const turnErrorMessage = readString(turnError?.message);
@@ -2945,32 +3761,50 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'bridge/approval.requested') {
           const parsed = toPendingApproval(event.params);
-          if (parsed && parsed.threadId === currentId) {
-            clearRunWatchdog();
-            setPendingApproval(parsed);
-            setActivity({
+          if (parsed) {
+            cacheThreadPendingApproval(parsed.threadId, parsed);
+            cacheThreadActivity(parsed.threadId, {
               tone: 'idle',
               title: 'Waiting for approval',
               detail: parsed.command ?? parsed.kind,
             });
+
+            if (parsed.threadId === currentId) {
+              clearRunWatchdog();
+              setPendingApproval(parsed);
+              setActivity({
+                tone: 'idle',
+                title: 'Waiting for approval',
+                detail: parsed.command ?? parsed.kind,
+              });
+            }
           }
           return;
         }
 
         if (event.method === 'bridge/userInput.requested') {
           const parsed = toPendingUserInputRequest(event.params);
-          if (parsed && parsed.threadId === currentId) {
-            setSelectedCollaborationMode('plan');
-            clearRunWatchdog();
-            setPendingUserInputRequest(parsed);
-            setUserInputDrafts(buildUserInputDrafts(parsed));
-            setUserInputError(null);
-            setResolvingUserInput(false);
-            setActivity({
+          if (parsed) {
+            cacheThreadPendingUserInputRequest(parsed.threadId, parsed);
+            cacheThreadActivity(parsed.threadId, {
               tone: 'idle',
               title: 'Clarification needed',
               detail: parsed.questions[0]?.header ?? 'Answer required',
             });
+
+            if (parsed.threadId === currentId) {
+              setSelectedCollaborationMode('plan');
+              clearRunWatchdog();
+              setPendingUserInputRequest(parsed);
+              setUserInputDrafts(buildUserInputDrafts(parsed));
+              setUserInputError(null);
+              setResolvingUserInput(false);
+              setActivity({
+                tone: 'idle',
+                title: 'Clarification needed',
+                detail: parsed.questions[0]?.header ?? 'Answer required',
+              });
+            }
           }
           return;
         }
@@ -2978,6 +3812,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'bridge/userInput.resolved') {
           const params = toRecord(event.params);
           const resolvedId = readString(params?.id);
+          if (resolvedId) {
+            for (const [threadId, snapshot] of Object.entries(
+              threadRuntimeSnapshotsRef.current
+            )) {
+              if (snapshot.pendingUserInputRequest?.id !== resolvedId) {
+                continue;
+              }
+              cacheThreadPendingUserInputRequest(threadId, null);
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Input submitted',
+              });
+            }
+          }
           if (pendingUserInputRequestId && resolvedId === pendingUserInputRequestId) {
             bumpRunWatchdog();
             setPendingUserInputRequest(null);
@@ -2995,6 +3843,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'bridge/approval.resolved') {
           const params = toRecord(event.params);
           const resolvedId = readString(params?.id);
+          if (resolvedId) {
+            for (const [threadId, snapshot] of Object.entries(
+              threadRuntimeSnapshotsRef.current
+            )) {
+              if (snapshot.pendingApproval?.id !== resolvedId) {
+                continue;
+              }
+              cacheThreadPendingApproval(threadId, null);
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Approval resolved',
+              });
+            }
+          }
           if (pendingApprovalId && resolvedId === pendingApprovalId) {
             bumpRunWatchdog();
             setPendingApproval(null);
@@ -3014,22 +3876,46 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const threadId =
             readString(params?.threadId) ?? readString(params?.thread_id);
           if (threadId && threadId === currentId) {
-            api.getChat(threadId).then((latest) => {
-              if (chatIdRef.current !== threadId) {
-                return; // user switched away
-              }
-              setSelectedChat((prev) =>
-                prev && prev.id === latest.id ? latest : prev
-              );
-              if (isChatLikelyRunning(latest)) {
-                bumpRunWatchdog();
-                setActivity((prev) =>
-                  prev.tone === 'running'
-                    ? prev
-                    : { tone: 'running', title: 'Working' }
-                );
-              }
-            }).catch(() => {});
+            api
+              .getChatSummary(threadId)
+              .then((summary) => {
+                if (chatIdRef.current !== threadId) {
+                  return; // user switched away
+                }
+
+                setSelectedChat((prev) => {
+                  if (!prev || prev.id !== summary.id) {
+                    return prev;
+                  }
+                  return {
+                    ...prev,
+                    ...summary,
+                    messages: prev.messages,
+                  };
+                });
+
+                if (isChatSummaryLikelyRunning(summary)) {
+                  ensureThreadResumeSubscription(threadId);
+                  bumpRunWatchdog();
+                  setActivity((prev) =>
+                    prev.tone === 'running'
+                      ? prev
+                      : { tone: 'running', title: 'Working' }
+                  );
+                }
+              })
+              .catch(() => {});
+
+            scheduleExternalStatusFullSync(threadId);
+          } else if (threadId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Working',
+            });
+            void refreshPendingApprovalsForThread(threadId);
           }
           return;
         }
@@ -3062,14 +3948,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       });
     }, [
       ws,
+      api,
       pendingApproval?.id,
       pendingUserInputRequest?.id,
       loadChat,
       appendStopSystemMessageIfNeeded,
       bumpRunWatchdog,
+      cacheCodexRuntimeForThread,
+      cacheThreadActiveCommand,
+      cacheThreadActivity,
+      cacheThreadPendingApproval,
+      cacheThreadPendingUserInputRequest,
+      cacheThreadStreamingDelta,
+      cacheThreadTurnState,
       clearRunWatchdog,
+      refreshPendingApprovalsForThread,
+      scheduleExternalStatusFullSync,
+      ensureThreadResumeSubscription,
       registerTurnStarted,
       pushActiveCommand,
+      upsertThreadRuntimeSnapshot,
     ]);
 
     useEffect(() => {
@@ -3078,6 +3976,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       }
       const hasPendingApproval = Boolean(pendingApproval?.id);
       const hasPendingUserInput = Boolean(pendingUserInputRequest?.id);
+      let stopped = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
 
       const syncChat = async () => {
         if (sending || creating) {
@@ -3101,6 +4001,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const shouldRunFromChat = isChatLikelyRunning(latest);
           const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
+
+          if (shouldRunFromChat) {
+            // Only attach a live subscription when the server-reported status
+            // is actively running; avoid resuming idle historical chats.
+            ensureThreadResumeSubscription(selectedChatId);
+          }
 
           if (shouldShowRunning && !hasPendingApproval && !hasPendingUserInput) {
             setActivity((prev) => {
@@ -3152,11 +4058,31 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
       };
 
-      const timer = setInterval(() => {
-        void syncChat();
-      }, 2500);
+      const scheduleNextSync = () => {
+        if (stopped) {
+          return;
+        }
+        const shouldPollFast =
+          Boolean(activeTurnIdRef.current) || runWatchdogUntilRef.current > Date.now();
+        const intervalMs = shouldPollFast
+          ? ACTIVE_CHAT_SYNC_INTERVAL_MS
+          : IDLE_CHAT_SYNC_INTERVAL_MS;
+        timer = setTimeout(() => {
+          void syncChat().finally(() => {
+            scheduleNextSync();
+          });
+        }, intervalMs);
+      };
 
-      return () => clearInterval(timer);
+      void syncChat();
+      scheduleNextSync();
+
+      return () => {
+        stopped = true;
+        if (timer) {
+          clearTimeout(timer);
+        }
+      };
     }, [
       api,
       selectedChatId,
@@ -3166,18 +4092,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingUserInputRequest?.id,
       bumpRunWatchdog,
       clearRunWatchdog,
+      ensureThreadResumeSubscription,
     ]);
 
     const handleResolveApproval = useCallback(
       async (id: string, decision: ApprovalDecision) => {
         try {
           await api.resolveApproval(id, decision);
+          if (selectedChatId) {
+            cacheThreadPendingApproval(selectedChatId, null);
+          }
           setPendingApproval(null);
         } catch (err) {
           setError((err as Error).message);
         }
       },
-      [api]
+      [api, cacheThreadPendingApproval, selectedChatId]
     );
 
     const setUserInputDraft = useCallback((questionId: string, value: string) => {
@@ -3208,6 +4138,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setResolvingUserInput(true);
       try {
         await api.resolveUserInput(pendingUserInputRequest.id, { answers });
+        cacheThreadPendingUserInputRequest(pendingUserInputRequest.threadId, null);
         setPendingUserInputRequest(null);
         setUserInputDrafts({});
         setUserInputError(null);
@@ -3224,6 +4155,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [
       api,
       bumpRunWatchdog,
+      cacheThreadPendingUserInputRequest,
       pendingUserInputRequest,
       resolvingUserInput,
       userInputDrafts,
@@ -3282,8 +4214,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const isOpeningChat = Boolean(openingChatId);
     const isOpeningDifferentChat =
       Boolean(openingChatId) && selectedChat?.id !== openingChatId;
+    const isTurnLikelyRunning =
+      Boolean(activeTurnId) || (selectedChat ? isChatLikelyRunning(selectedChat) : false);
     const showActivity =
-      isLoading || isOpeningChat || activity.tone !== 'idle';
+      isLoading ||
+      isOpeningChat ||
+      activity.tone !== 'idle' ||
+      activity.title !== 'Ready' ||
+      Boolean(activity.detail);
     const headerTitle = isOpeningDifferentChat
       ? 'Opening chat'
       : selectedChat?.title?.trim() || 'New chat';
@@ -3422,7 +4360,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               onChangeText={setDraft}
               onSubmit={() => void handleSubmit()}
               onStop={() => handleStopTurn()}
-              showStopButton={isTurnLoading}
+              showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
               isStopping={stoppingTurn}
               onAttachPress={openAttachmentMenu}
               attachments={composerAttachments}
@@ -4894,6 +5832,28 @@ function toLiveTimelineLine(event: RunEvent): string | null {
   return `${basePrefix} \`${label}\``;
 }
 
+function appendRunEventHistory(
+  previous: RunEvent[],
+  threadId: string,
+  eventType: string,
+  detail: string
+): RunEvent[] {
+  const last = previous[previous.length - 1];
+  if (last && last.eventType === eventType && last.detail === detail) {
+    return previous;
+  }
+
+  const next: RunEvent = {
+    id: `re-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    threadId,
+    eventType,
+    at: new Date().toISOString(),
+    detail,
+  };
+
+  return [...previous, next].slice(-MAX_ACTIVE_COMMANDS);
+}
+
 function normalizeCodexEventType(value: string | null | undefined): string | null {
   if (!value) {
     return null;
@@ -4905,6 +5865,10 @@ function normalizeCodexEventType(value: string | null | undefined): string | nul
 
 function isCodexRunHeartbeatEvent(codexEventType: string): boolean {
   return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType);
+}
+
+function isChatSummaryLikelyRunning(chat: ChatSummary): boolean {
+  return chat.status === 'running';
 }
 
 function isChatLikelyRunning(chat: Chat): boolean {

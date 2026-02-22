@@ -221,4 +221,355 @@ describe('MacBridgeWsClient', () => {
 
     await expect(waitPromise).resolves.toBeUndefined();
   });
+
+  it('deduplicates notifications by eventId', () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    const listener = jest.fn();
+    client.onEvent(listener);
+    client.connect();
+
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        eventId: 5,
+        params: {
+          threadId: 'thr_1',
+          turn: {
+            id: 'turn_1',
+            status: 'completed',
+          },
+        },
+      })
+    );
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        eventId: 5,
+        params: {
+          threadId: 'thr_1',
+          turn: {
+            id: 'turn_1',
+            status: 'completed',
+          },
+        },
+      })
+    );
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        eventId: 4,
+        params: {
+          threadId: 'thr_1',
+          turn: {
+            id: 'turn_1',
+            status: 'completed',
+          },
+        },
+      })
+    );
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith({
+      method: 'turn/completed',
+      eventId: 5,
+      params: {
+        threadId: 'thr_1',
+        turn: {
+          id: 'turn_1',
+          status: 'completed',
+        },
+      },
+    });
+  });
+
+  it('requests replay from latest event id after reconnect', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    const listener = jest.fn();
+    client.onEvent(listener);
+    client.connect();
+
+    const firstSocket = latestMockSocket();
+    firstSocket.simulateOpen();
+    firstSocket.simulateMessage(
+      JSON.stringify({
+        method: 'turn/started',
+        eventId: 10,
+        params: {
+          threadId: 'thr_9',
+          turnId: 'turn_9',
+        },
+      })
+    );
+
+    client.disconnect();
+    client.connect();
+    const secondSocket = latestMockSocket();
+    secondSocket.simulateOpen();
+    await Promise.resolve();
+
+    const replayRequest = secondSocket.send.mock.calls
+      .map((call) =>
+        JSON.parse(String(call[0])) as {
+          id: string;
+          method: string;
+          params?: {
+            afterEventId?: number;
+          };
+        }
+      )
+      .find((payload) => payload.method === 'bridge/events/replay');
+
+    expect(replayRequest).toBeDefined();
+    expect(replayRequest?.params?.afterEventId).toBe(10);
+
+    secondSocket.simulateMessage(
+      JSON.stringify({
+        id: replayRequest?.id,
+        result: {
+          events: [
+            {
+              method: 'turn/completed',
+              eventId: 11,
+              params: {
+                threadId: 'thr_9',
+                turn: {
+                  id: 'turn_9',
+                  status: 'completed',
+                },
+              },
+            },
+          ],
+          hasMore: false,
+        },
+      })
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(listener).toHaveBeenCalledWith({
+      method: 'turn/completed',
+      eventId: 11,
+      params: {
+        threadId: 'thr_9',
+        turn: {
+          id: 'turn_9',
+          status: 'completed',
+        },
+      },
+    });
+  });
+
+  it('replays missed events without duplicating live events received after reconnect', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    const listener = jest.fn();
+    client.onEvent(listener);
+    client.connect();
+
+    const firstSocket = latestMockSocket();
+    firstSocket.simulateOpen();
+    firstSocket.simulateMessage(
+      JSON.stringify({
+        method: 'turn/started',
+        eventId: 100,
+        params: {
+          threadId: 'thr_gap',
+          turnId: 'turn_gap',
+        },
+      })
+    );
+    listener.mockClear();
+
+    client.disconnect();
+    client.connect();
+    const secondSocket = latestMockSocket();
+    secondSocket.simulateOpen();
+    await Promise.resolve();
+
+    const replayRequest = secondSocket.send.mock.calls
+      .map((call) =>
+        JSON.parse(String(call[0])) as {
+          id: string;
+          method: string;
+          params?: {
+            afterEventId?: number;
+          };
+        }
+      )
+      .find((payload) => payload.method === 'bridge/events/replay');
+    expect(replayRequest).toBeDefined();
+    expect(replayRequest?.params?.afterEventId).toBe(100);
+
+    secondSocket.simulateMessage(
+      JSON.stringify({
+        method: 'turn/started',
+        eventId: 105,
+        params: {
+          threadId: 'thr_gap',
+          turnId: 'turn_gap',
+        },
+      })
+    );
+    secondSocket.simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        eventId: 106,
+        params: {
+          threadId: 'thr_gap',
+          turn: {
+            id: 'turn_gap',
+            status: 'completed',
+          },
+        },
+      })
+    );
+
+    secondSocket.simulateMessage(
+      JSON.stringify({
+        id: replayRequest?.id,
+        result: {
+          events: [
+            {
+              method: 'turn/started',
+              eventId: 101,
+              params: {
+                threadId: 'thr_gap',
+                turnId: 'turn_gap',
+              },
+            },
+            {
+              method: 'turn/started',
+              eventId: 102,
+              params: {
+                threadId: 'thr_gap',
+                turnId: 'turn_gap',
+              },
+            },
+            {
+              method: 'turn/started',
+              eventId: 103,
+              params: {
+                threadId: 'thr_gap',
+                turnId: 'turn_gap',
+              },
+            },
+            {
+              method: 'turn/started',
+              eventId: 104,
+              params: {
+                threadId: 'thr_gap',
+                turnId: 'turn_gap',
+              },
+            },
+            {
+              method: 'turn/started',
+              eventId: 105,
+              params: {
+                threadId: 'thr_gap',
+                turnId: 'turn_gap',
+              },
+            },
+            {
+              method: 'turn/completed',
+              eventId: 106,
+              params: {
+                threadId: 'thr_gap',
+                turn: {
+                  id: 'turn_gap',
+                  status: 'completed',
+                },
+              },
+            },
+          ],
+          hasMore: false,
+        },
+      })
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const eventIds = listener.mock.calls
+      .map((call) => (call[0] as { eventId?: number }).eventId)
+      .filter((id): id is number => typeof id === 'number');
+
+    expect(eventIds).toEqual(expect.arrayContaining([101, 102, 103, 104, 105, 106]));
+    expect(eventIds.filter((id) => id === 105)).toHaveLength(1);
+    expect(eventIds.filter((id) => id === 106)).toHaveLength(1);
+  });
+
+  it('accepts new events after bridge event counter reset', async () => {
+    const client = new MacBridgeWsClient('http://localhost:8787');
+    const listener = jest.fn();
+    client.onEvent(listener);
+    client.connect();
+
+    const firstSocket = latestMockSocket();
+    firstSocket.simulateOpen();
+    firstSocket.simulateMessage(
+      JSON.stringify({
+        method: 'turn/started',
+        eventId: 10,
+        params: {
+          threadId: 'thr_reset',
+          turnId: 'turn_a',
+        },
+      })
+    );
+
+    client.disconnect();
+    client.connect();
+    const secondSocket = latestMockSocket();
+    secondSocket.simulateOpen();
+    await Promise.resolve();
+
+    const replayRequest = secondSocket.send.mock.calls
+      .map((call) =>
+        JSON.parse(String(call[0])) as {
+          id: string;
+          method: string;
+        }
+      )
+      .find((payload) => payload.method === 'bridge/events/replay');
+    expect(replayRequest).toBeDefined();
+
+    secondSocket.simulateMessage(
+      JSON.stringify({
+        id: replayRequest?.id,
+        result: {
+          events: [],
+          hasMore: false,
+          latestEventId: 2,
+        },
+      })
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    secondSocket.simulateMessage(
+      JSON.stringify({
+        method: 'turn/completed',
+        eventId: 2,
+        params: {
+          threadId: 'thr_reset',
+          turn: {
+            id: 'turn_a',
+            status: 'completed',
+          },
+        },
+      })
+    );
+
+    expect(listener).toHaveBeenLastCalledWith({
+      method: 'turn/completed',
+      eventId: 2,
+      params: {
+        threadId: 'thr_reset',
+        turn: {
+          id: 'turn_a',
+          status: 'completed',
+        },
+      },
+    });
+  });
 });

@@ -86,7 +86,6 @@ type AppServerThreadSetNameResponse = Record<string, never>;
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
 const MOBILE_DEVELOPER_INSTRUCTIONS =
   'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
-const TURN_COMPLETION_SOFT_TIMEOUT_MS = 180_000;
 
 interface ChatSnapshot {
   rawThread: RawThread;
@@ -113,6 +112,15 @@ interface TurnInputLocalImage {
 interface SendChatMessageOptions {
   onTurnStarted?: (turnId: string) => void;
 }
+
+const ACTIVE_TURN_STATUSES = new Set([
+  'inprogress',
+  'in_progress',
+  'running',
+  'active',
+  'queued',
+  'pending',
+]);
 
 export class MacBridgeApiClient {
   private readonly ws: MacBridgeWsClient;
@@ -213,6 +221,32 @@ export class MacBridgeApiClient {
     return snapshot.chat;
   }
 
+  async getChatSummary(id: string): Promise<ChatSummary> {
+    const response = await this.ws.request<AppServerReadResponse>('thread/read', {
+      threadId: id,
+      includeTurns: false,
+    });
+    const rawThread = toRawThread(response.thread);
+    if (rawThread.id && rawThread.name?.trim()) {
+      this.renamedTitles.set(rawThread.id, rawThread.name.trim());
+    }
+
+    const mapped = mapChatSummary(rawThread);
+    if (!mapped) {
+      throw new Error('chat id missing in app-server response');
+    }
+
+    const cachedTitle = this.renamedTitles.get(mapped.id);
+    if (!cachedTitle) {
+      return mapped;
+    }
+
+    return {
+      ...mapped,
+      title: cachedTitle,
+    };
+  }
+
   async renameChat(id: string, name: string): Promise<Chat> {
     const trimmedName = name.trim();
     if (!trimmedName) {
@@ -243,21 +277,8 @@ export class MacBridgeApiClient {
       throw new Error('Workspace path cannot be empty');
     }
 
-    await this.ws.request('thread/resume', {
-      threadId: id,
-      history: null,
-      path: null,
-      model: null,
-      modelProvider: null,
+    await this.resumeThread(id, {
       cwd: normalizedCwd,
-      approvalPolicy: 'untrusted',
-      sandbox: 'workspace-write',
-      config: null,
-      baseInstructions: null,
-      developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
-      personality: null,
-      experimentalRawEvents: true,
-      persistExtendedHistory: true,
     });
 
     const updated = await this.getChat(id);
@@ -269,6 +290,58 @@ export class MacBridgeApiClient {
       ...updated,
       cwd: normalizedCwd,
     };
+  }
+
+  async resumeThread(
+    id: string,
+    options?: {
+      cwd?: string | null;
+      model?: string | null;
+    }
+  ): Promise<void> {
+    const threadId = id.trim();
+    if (!threadId) {
+      throw new Error('thread id is required');
+    }
+
+    const primaryRequest = {
+      threadId,
+      history: null,
+      path: null,
+      model: normalizeModel(options?.model) ?? null,
+      modelProvider: null,
+      cwd: normalizeCwd(options?.cwd) ?? null,
+      approvalPolicy: 'untrusted',
+      sandbox: 'workspace-write',
+      config: null,
+      baseInstructions: null,
+      developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
+      personality: null,
+      experimentalRawEvents: true,
+      persistExtendedHistory: true,
+    };
+
+    try {
+      await this.ws.request('thread/resume', primaryRequest);
+      return;
+    } catch (primaryError) {
+      // Compatibility fallback for older app-server builds that reject
+      // experimentalRawEvents or strict policy combinations on resume.
+      const legacyRequest = {
+        ...primaryRequest,
+        approvalPolicy: 'on-request',
+        developerInstructions: null,
+      };
+      delete (legacyRequest as { experimentalRawEvents?: boolean }).experimentalRawEvents;
+      try {
+        await this.ws.request('thread/resume', legacyRequest);
+        return;
+      } catch (legacyError) {
+        throw new Error(
+          `thread/resume failed: ${(primaryError as Error).message}; fallback failed: ${(legacyError as Error).message}`
+        );
+      }
+    }
   }
 
   async sendChatMessage(
@@ -310,21 +383,9 @@ export class MacBridgeApiClient {
     );
 
     try {
-      await this.ws.request('thread/resume', {
-        threadId: id,
-        history: null,
-        path: null,
-        model: effectiveModel ?? null,
-        modelProvider: null,
-        cwd: normalizedCwd ?? null,
-        approvalPolicy: 'untrusted',
-        sandbox: 'workspace-write',
-        config: null,
-        baseInstructions: null,
-        developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
-        personality: null,
-        experimentalRawEvents: true,
-        persistExtendedHistory: true,
+      await this.resumeThread(id, {
+        model: effectiveModel,
+        cwd: normalizedCwd,
       });
     } catch {
       // Best effort: turn/start still works for recently started chats.
@@ -349,16 +410,6 @@ export class MacBridgeApiClient {
       throw new Error('turn/start did not return turn id');
     }
     options?.onTurnStarted?.(turnId);
-
-    try {
-      await this.ws.waitForTurnCompletion(id, turnId, TURN_COMPLETION_SOFT_TIMEOUT_MS);
-    } catch (error) {
-      const message = String((error as Error).message ?? error);
-      const isTurnTimeout = message.toLowerCase().includes('turn timed out');
-      if (!isTurnTimeout) {
-        throw error;
-      }
-    }
     return this.getChatWithUserMessage(id, turnId, content);
   }
 
@@ -373,6 +424,29 @@ export class MacBridgeApiClient {
       threadId: normalizedThreadId,
       turnId: normalizedTurnId,
     });
+  }
+
+  async interruptLatestTurn(threadId: string): Promise<string | null> {
+    const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) {
+      throw new Error('threadId is required to interrupt the active turn');
+    }
+
+    const snapshot = await this.readChatSnapshot(normalizedThreadId);
+    const turns = Array.isArray(snapshot.rawThread.turns) ? snapshot.rawThread.turns : [];
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i];
+      const turnId = readString(turn.id);
+      const status = normalizeTurnStatus(readString(turn.status));
+      if (!turnId || !status || !ACTIVE_TURN_STATUSES.has(status)) {
+        continue;
+      }
+
+      await this.interruptTurn(normalizedThreadId, turnId);
+      return turnId;
+    }
+
+    return null;
   }
 
   uploadAttachment(body: UploadAttachmentRequest): Promise<UploadAttachmentResponse> {
@@ -699,6 +773,15 @@ function normalizeEffort(effort: string | null | undefined): ReasoningEffort | n
   }
 
   return null;
+}
+
+function normalizeTurnStatus(status: string | null): string | null {
+  if (!status) {
+    return null;
+  }
+
+  const normalized = status.trim().toLowerCase();
+  return normalized.length > 0 ? normalized : null;
 }
 
 function buildTurnInput(

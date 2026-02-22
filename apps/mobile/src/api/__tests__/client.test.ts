@@ -129,7 +129,7 @@ describe('MacBridgeApiClient', () => {
     expect(chats.map((chat) => chat.id)).toEqual(['thr_root']);
   });
 
-  it('sendChatMessage() starts a turn and waits for completion', async () => {
+  it('sendChatMessage() starts a turn without waiting for completion', async () => {
     const ws = createWsMock();
     ws.request
       .mockResolvedValueOnce({}) // thread/resume
@@ -165,7 +165,7 @@ describe('MacBridgeApiClient', () => {
     const chat = await client.sendChatMessage('thr_1', { content: 'Hello' });
 
     expect(ws.request).toHaveBeenNthCalledWith(2, 'turn/start', expect.any(Object));
-    expect(ws.waitForTurnCompletion).toHaveBeenCalledWith('thr_1', 'turn_1', expect.any(Number));
+    expect(ws.waitForTurnCompletion).not.toHaveBeenCalled();
     expect(chat.id).toBe('thr_1');
     expect(chat.messages.length).toBeGreaterThan(0);
   });
@@ -401,6 +401,38 @@ describe('MacBridgeApiClient', () => {
     );
   });
 
+  it('resumeThread() retries with legacy payload when modern resume params are rejected', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockRejectedValueOnce(new Error('unknown field `experimentalRawEvents`'))
+      .mockResolvedValueOnce({});
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await expect(client.resumeThread('thr_resume')).resolves.toBeUndefined();
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      1,
+      'thread/resume',
+      expect.objectContaining({
+        threadId: 'thr_resume',
+        experimentalRawEvents: true,
+        approvalPolicy: 'untrusted',
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'thread/resume',
+      expect.objectContaining({
+        threadId: 'thr_resume',
+        approvalPolicy: 'on-request',
+        developerInstructions: null,
+      })
+    );
+
+    const legacyPayload = ws.request.mock.calls[1]?.[1] as Record<string, unknown>;
+    expect(legacyPayload).not.toHaveProperty('experimentalRawEvents');
+  });
+
   it('sendChatMessage() forwards mention and local-image attachments to turn/start input', async () => {
     const ws = createWsMock();
     ws.request
@@ -503,6 +535,76 @@ describe('MacBridgeApiClient', () => {
     expect(ws.request).toHaveBeenCalledWith('turn/interrupt', {
       threadId: 'thr_stop',
       turnId: 'turn_stop',
+    });
+  });
+
+  it('interruptLatestTurn() resolves and interrupts the latest active turn', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_active',
+          preview: 'working',
+          createdAt: 1700000000,
+          updatedAt: 1700000001,
+          status: { type: 'active' },
+          turns: [
+            {
+              id: 'turn_done',
+              status: 'completed',
+              items: [],
+            },
+            {
+              id: 'turn_live',
+              status: 'inProgress',
+              items: [],
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({});
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const turnId = await client.interruptLatestTurn('thr_active');
+
+    expect(turnId).toBe('turn_live');
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/read', {
+      threadId: 'thr_active',
+      includeTurns: true,
+    });
+    expect(ws.request).toHaveBeenNthCalledWith(2, 'turn/interrupt', {
+      threadId: 'thr_active',
+      turnId: 'turn_live',
+    });
+  });
+
+  it('interruptLatestTurn() returns null when there is no active turn', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_idle',
+        preview: 'done',
+        createdAt: 1700000000,
+        updatedAt: 1700000001,
+        status: { type: 'idle' },
+        turns: [
+          {
+            id: 'turn_done',
+            status: 'completed',
+            items: [],
+          },
+        ],
+      },
+    });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const turnId = await client.interruptLatestTurn('thr_idle');
+
+    expect(turnId).toBeNull();
+    expect(ws.request).toHaveBeenCalledTimes(1);
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/read', {
+      threadId: 'thr_idle',
+      includeTurns: true,
     });
   });
 

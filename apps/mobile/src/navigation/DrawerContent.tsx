@@ -40,6 +40,8 @@ interface ChatWorkspaceSection {
 }
 
 const RUN_HEARTBEAT_STALE_MS = 20_000;
+const DRAWER_REFRESH_CONNECTED_MS = 10_000;
+const DRAWER_REFRESH_DISCONNECTED_MS = 5_000;
 const RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'task_started',
   'agent_reasoning_delta',
@@ -73,6 +75,7 @@ export function DrawerContent({
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
   const [runHeartbeatAtByThread, setRunHeartbeatAtByThread] = useState<Record<string, number>>({});
+  const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const hasAppliedInitialCollapseRef = useRef(false);
   const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
   const workspaceOptions = useMemo(() => listWorkspaces(chats), [chats]);
@@ -203,6 +206,15 @@ export function DrawerContent({
   }, [ws, loadChats]);
 
   useEffect(() => {
+    return ws.onStatus((connected) => {
+      setWsConnected(connected);
+      if (connected) {
+        void loadChats();
+      }
+    });
+  }, [ws, loadChats]);
+
+  useEffect(() => {
     const timer = setInterval(() => {
       setRunHeartbeatAtByThread((prev) => {
         const now = Date.now();
@@ -222,10 +234,10 @@ export function DrawerContent({
   useEffect(() => {
     const timer = setInterval(() => {
       void loadChats();
-    }, 4000);
+    }, wsConnected ? DRAWER_REFRESH_CONNECTED_MS : DRAWER_REFRESH_DISCONNECTED_MS);
 
     return () => clearInterval(timer);
-  }, [loadChats]);
+  }, [loadChats, wsConnected]);
 
   useEffect(() => {
     chatSectionsRef.current = chatSections;
@@ -245,13 +257,14 @@ export function DrawerContent({
       if (state === 'active') {
         setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(chatSectionsRef.current));
         hasAppliedInitialCollapseRef.current = true;
+        void loadChats();
       }
     });
 
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [loadChats]);
 
   const toggleWorkspaceSection = useCallback((sectionKey: string) => {
     setCollapsedWorkspaceKeys((prev) => {
