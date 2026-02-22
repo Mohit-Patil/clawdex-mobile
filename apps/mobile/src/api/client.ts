@@ -110,6 +110,10 @@ interface TurnInputLocalImage {
   path: string;
 }
 
+interface SendChatMessageOptions {
+  onTurnStarted?: (turnId: string) => void;
+}
+
 export class MacBridgeApiClient {
   private readonly ws: MacBridgeWsClient;
   private readonly renamedTitles = new Map<string, string>();
@@ -266,7 +270,11 @@ export class MacBridgeApiClient {
     };
   }
 
-  async sendChatMessage(id: string, body: SendChatMessageRequest): Promise<Chat> {
+  async sendChatMessage(
+    id: string,
+    body: SendChatMessageRequest,
+    options?: SendChatMessageOptions
+  ): Promise<Chat> {
     const content = body.content.trim();
     if (!content) {
       return this.getChat(id);
@@ -338,6 +346,7 @@ export class MacBridgeApiClient {
     if (!turnId) {
       throw new Error('turn/start did not return turn id');
     }
+    options?.onTurnStarted?.(turnId);
 
     try {
       await this.ws.waitForTurnCompletion(id, turnId, TURN_COMPLETION_SOFT_TIMEOUT_MS);
@@ -349,6 +358,19 @@ export class MacBridgeApiClient {
       }
     }
     return this.getChatWithUserMessage(id, turnId, content);
+  }
+
+  async interruptTurn(threadId: string, turnId: string): Promise<void> {
+    const normalizedThreadId = threadId.trim();
+    const normalizedTurnId = turnId.trim();
+    if (!normalizedThreadId || !normalizedTurnId) {
+      throw new Error('threadId and turnId are required to interrupt a turn');
+    }
+
+    await this.ws.request<Record<string, never>>('turn/interrupt', {
+      threadId: normalizedThreadId,
+      turnId: normalizedTurnId,
+    });
   }
 
   uploadAttachment(body: UploadAttachmentRequest): Promise<UploadAttachmentResponse> {

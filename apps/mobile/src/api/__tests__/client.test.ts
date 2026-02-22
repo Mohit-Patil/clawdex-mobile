@@ -493,6 +493,19 @@ describe('MacBridgeApiClient', () => {
     expect(uploaded.path).toBe('.clawdex-mobile-attachments/file.txt');
   });
 
+  it('interruptTurn() calls turn/interrupt with thread and turn id', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({});
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.interruptTurn('thr_stop', 'turn_stop');
+
+    expect(ws.request).toHaveBeenCalledWith('turn/interrupt', {
+      threadId: 'thr_stop',
+      turnId: 'turn_stop',
+    });
+  });
+
   it('sendChatMessage() sends structured collaborationMode for plan mode', async () => {
     const ws = createWsMock();
     ws.request

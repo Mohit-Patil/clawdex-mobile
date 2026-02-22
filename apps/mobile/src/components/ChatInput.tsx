@@ -18,10 +18,13 @@ interface ChatInputProps {
   value: string;
   onChangeText: (text: string) => void;
   onSubmit: () => void;
+  onStop?: () => void;
   onAttachPress: () => void;
   attachments?: Array<{ id: string; label: string }>;
   onRemoveAttachment?: (id: string) => void;
   isLoading: boolean;
+  showStopButton?: boolean;
+  isStopping?: boolean;
   placeholder?: string;
 }
 
@@ -29,13 +32,18 @@ export function ChatInput({
   value,
   onChangeText,
   onSubmit,
+  onStop,
   onAttachPress,
   attachments = [],
   onRemoveAttachment,
   isLoading,
+  showStopButton = false,
+  isStopping = false,
   placeholder = 'Message Codex...',
 }: ChatInputProps) {
   const canSend = value.trim().length > 0 && !isLoading;
+  const canStop = Boolean(showStopButton && onStop);
+  const shouldShowActionButton = canStop || canSend || isLoading;
 
   return (
     <View style={styles.container}>
@@ -101,12 +109,22 @@ export function ChatInput({
               }
             }}
           />
-          {canSend || isLoading ? (
+          {shouldShowActionButton ? (
             <Pressable
-              onPress={canSend ? onSubmit : undefined}
+              onPress={canStop ? onStop : canSend ? onSubmit : undefined}
               style={styles.sendBtn}
+              disabled={canStop ? isStopping : !canSend}
             >
-              {isLoading ? (
+              {canStop ? (
+                <View style={styles.stopButtonContent}>
+                  <Ionicons name="square" size={10} color={colors.textPrimary} />
+                  <ActivityIndicator
+                    size="small"
+                    color={colors.textMuted}
+                    style={styles.stopButtonSpinner}
+                  />
+                </View>
+              ) : isLoading ? (
                 <ActivityIndicator size="small" color={colors.textMuted} />
               ) : (
                 <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
@@ -202,5 +220,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: spacing.xs,
+  },
+  stopButtonContent: {
+    width: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stopButtonSpinner: {
+    position: 'absolute',
   },
 });

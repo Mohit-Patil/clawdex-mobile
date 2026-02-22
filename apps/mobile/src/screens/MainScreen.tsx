@@ -108,19 +108,10 @@ interface SlashCommandDefinition {
   availabilityNote?: string;
 }
 
-const DEFAULT_ACTIVITY_PHRASES = [
-  'Analyzing text',
-  'Inspecting workspace',
-  'Planning next steps',
-  'Running tools',
-  'Preparing response',
-];
-
-const MAX_ACTIVITY_PHRASES = 8;
 const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
-const LIKELY_RUNNING_RECENT_UPDATE_MS = 120_000;
+const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const ANDROID_KEYBOARD_EXTRA_OFFSET = 12;
 const IOS_KEYBOARD_EXTRA_OFFSET = 12;
 const INLINE_OPTION_LINE_PATTERN =
@@ -387,6 +378,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [loadingAttachmentFileCandidates, setLoadingAttachmentFileCandidates] =
       useState(false);
     const [uploadingAttachment, setUploadingAttachment] = useState(false);
+    const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+    const [stoppingTurn, setStoppingTurn] = useState(false);
     const [workspaceModalVisible, setWorkspaceModalVisible] = useState(false);
     const [workspaceOptions, setWorkspaceOptions] = useState<string[]>([]);
     const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
@@ -404,7 +397,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       tone: 'idle',
       title: 'Ready',
     });
-    const [activityPhrases, setActivityPhrases] = useState<string[]>([]);
     const scrollRef = useRef<ScrollView>(null);
     const loadChatRequestRef = useRef(0);
 
@@ -412,6 +404,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     // needing to re-subscribe on every change.
     const chatIdRef = useRef<string | null>(null);
     chatIdRef.current = selectedChatId;
+    const activeTurnIdRef = useRef<string | null>(null);
+    activeTurnIdRef.current = activeTurnId;
+    const stopRequestedRef = useRef(false);
 
     // Track whether a command arrived since the last delta — used to
     // know when a new thinking segment starts so we can replace the old one.
@@ -467,30 +462,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const clearRunWatchdog = useCallback(() => {
       runWatchdogUntilRef.current = 0;
     }, []);
-
-    const appendActivityPhrase = useCallback(
-      (value: string | null | undefined, seedDefaults = false) => {
-        const phrase = toTickerSnippet(value);
-        setActivityPhrases((prev) => {
-          const shouldSeedDefaults =
-            seedDefaults && prev.length === 0 && !phrase;
-          const base =
-            shouldSeedDefaults
-              ? [...DEFAULT_ACTIVITY_PHRASES]
-              : [...prev];
-          if (!phrase) {
-            return base;
-          }
-
-          const deduped = base.filter(
-            (entry) => entry.toLowerCase() !== phrase.toLowerCase()
-          );
-          deduped.push(phrase);
-          return deduped.slice(-MAX_ACTIVITY_PHRASES);
-        });
-      },
-      []
-    );
 
     const pushActiveCommand = useCallback(
       (threadId: string, eventType: string, detail: string) => {
@@ -551,14 +522,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const modelReasoningLabel = `${activeModelLabel} · ${activeEffortLabel}`;
     const collaborationModeLabel = formatCollaborationModeLabel(selectedCollaborationMode);
 
+    // Auto-transition complete/error → idle after 3s so the bar hides.
     useEffect(() => {
-      if (activity.tone !== 'running') {
-        setActivityPhrases([]);
+      if (activity.tone !== 'complete' && activity.tone !== 'error') {
         return;
       }
-
-      appendActivityPhrase(toActivityPhrase(activity.title, activity.detail), true);
-    }, [activity.tone, activity.title, activity.detail, appendActivityPhrase]);
+      const timer = setTimeout(() => {
+        setActivity({ tone: 'idle', title: 'Ready' });
+      }, 3000);
+      return () => clearTimeout(timer);
+    }, [activity.tone]);
 
     useEffect(() => {
       if (!selectedEffort) {
@@ -603,11 +576,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setAttachmentFileCandidates([]);
       setLoadingAttachmentFileCandidates(false);
       setUploadingAttachment(false);
+      setActiveTurnId(null);
+      setStoppingTurn(false);
       setActivity({
         tone: 'idle',
         title: 'Ready',
       });
-      setActivityPhrases([]);
+      stopRequestedRef.current = false;
       reasoningSummaryRef.current = {};
       codexReasoningBufferRef.current = '';
       hadCommandRef.current = false;
@@ -1227,6 +1202,97 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [selectedChatId]
     );
 
+    const handleTurnFailure = useCallback(
+      (error: unknown) => {
+        const message = (error as Error).message ?? String(error);
+        const normalizedMessage = message.toLowerCase();
+        const interruptedByUser =
+          stopRequestedRef.current &&
+          (normalizedMessage.includes('turn aborted') ||
+            normalizedMessage.includes('interrupted'));
+
+        if (interruptedByUser) {
+          setError(null);
+          setActivity({
+            tone: 'complete',
+            title: 'Turn stopped',
+          });
+        } else {
+          setError(message);
+          setActivity({
+            tone: 'error',
+            title: 'Turn failed',
+            detail: message,
+          });
+        }
+
+        setActiveTurnId(null);
+        setStoppingTurn(false);
+        stopRequestedRef.current = interruptedByUser;
+        clearRunWatchdog();
+      },
+      [clearRunWatchdog]
+    );
+
+    const interruptActiveTurn = useCallback(
+      async (threadId: string, turnId: string) => {
+        try {
+          await api.interruptTurn(threadId, turnId);
+          setError(null);
+          setActivity({
+            tone: 'running',
+            title: 'Stopping turn',
+          });
+        } catch (error) {
+          const message = (error as Error).message ?? String(error);
+          setError(message);
+          setActivity({
+            tone: 'error',
+            title: 'Failed to stop turn',
+            detail: message,
+          });
+          setStoppingTurn(false);
+          stopRequestedRef.current = false;
+        }
+      },
+      [api]
+    );
+
+    const registerTurnStarted = useCallback(
+      (threadId: string, turnId: string) => {
+        const currentChatId = chatIdRef.current;
+        if (!threadId || !turnId || (currentChatId && currentChatId !== threadId)) {
+          return;
+        }
+
+        setActiveTurnId(turnId);
+        if (stopRequestedRef.current) {
+          void interruptActiveTurn(threadId, turnId);
+        }
+      },
+      [interruptActiveTurn]
+    );
+
+    const handleStopTurn = useCallback(() => {
+      if (stoppingTurn) {
+        return;
+      }
+
+      stopRequestedRef.current = true;
+      setStoppingTurn(true);
+      setError(null);
+      setActivity({
+        tone: 'running',
+        title: 'Stopping turn',
+      });
+
+      const threadId = chatIdRef.current;
+      const turnId = activeTurnIdRef.current;
+      if (threadId && turnId) {
+        void interruptActiveTurn(threadId, turnId);
+      }
+    }, [interruptActiveTurn, stoppingTurn]);
+
     const handleSlashCommand = useCallback(
       async (input: string): Promise<boolean> => {
         const parsed = parseSlashCommand(input);
@@ -1341,6 +1407,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             setDraft('');
             try {
               setCreating(true);
+              setActiveTurnId(null);
+              setStoppingTurn(false);
+              stopRequestedRef.current = false;
               setActivePlan(null);
               setPendingUserInputRequest(null);
               setUserInputDrafts({});
@@ -1371,7 +1440,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 title: 'Sending plan prompt',
               });
               bumpRunWatchdog();
-              appendActivityPhrase('Turn started', true);
 
               const updated = await api.sendChatMessage(created.id, {
                 content: argText,
@@ -1379,11 +1447,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 model: activeModelId ?? undefined,
                 effort: activeEffort ?? undefined,
                 collaborationMode: 'plan',
+              }, {
+                onTurnStarted: (turnId) => registerTurnStarted(created.id, turnId),
               });
               const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
               if (autoEnabledPlan) {
                 setSelectedCollaborationMode('plan');
-                appendActivityPhrase('Plan mode enabled', true);
               }
               setSelectedChat(updated);
               setError(null);
@@ -1397,13 +1466,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               });
               clearRunWatchdog();
             } catch (err) {
-              setError((err as Error).message);
-              setActivity({
-                tone: 'error',
-                title: 'Turn failed',
-                detail: (err as Error).message,
-              });
-              clearRunWatchdog();
+              handleTurnFailure(err);
             } finally {
               setCreating(false);
             }
@@ -1429,6 +1492,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           try {
             setSending(true);
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            stopRequestedRef.current = false;
             setActivePlan(null);
             setPendingUserInputRequest(null);
             setUserInputDrafts({});
@@ -1445,6 +1511,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               model: activeModelId ?? undefined,
               effort: activeEffort ?? undefined,
               collaborationMode: 'plan',
+            }, {
+              onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
             });
             setSelectedChat(updated);
             setError(null);
@@ -1454,13 +1522,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             clearRunWatchdog();
           } catch (err) {
-            setError((err as Error).message);
-            setActivity({
-              tone: 'error',
-              title: 'Turn failed',
-              detail: (err as Error).message,
-            });
-            clearRunWatchdog();
+            handleTurnFailure(err);
           } finally {
             setSending(false);
           }
@@ -1627,9 +1689,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         openModelModal,
         openRenameModal,
         preferredStartCwd,
+        registerTurnStarted,
         selectedChat,
         selectedChatId,
         selectedCollaborationMode,
+        handleTurnFailure,
         startNewChat,
       ]
     );
@@ -1650,6 +1714,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setActiveCommands([]);
           setPendingApproval(null);
           setStreamingText(null);
+          setActiveTurnId(null);
+          setStoppingTurn(false);
           const shouldRun = isChatLikelyRunning(chat);
           if (shouldRun) {
             bumpRunWatchdog();
@@ -1657,7 +1723,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Working',
             });
-            appendActivityPhrase('Working', true);
           } else {
             setActivity(
               chat.status === 'complete'
@@ -1696,7 +1761,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
         }
       },
-      [api, appendActivityPhrase, bumpRunWatchdog, clearRunWatchdog]
+      [api, bumpRunWatchdog, clearRunWatchdog]
     );
 
     const openChatThread = useCallback(
@@ -1708,6 +1773,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         );
 
         setSelectedChatId(id);
+        setSending(false);
+        setCreating(false);
         setError(null);
         setPendingUserInputRequest(null);
         setUserInputDrafts({});
@@ -1718,6 +1785,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setPendingMentionPaths([]);
         setPendingLocalImagePaths([]);
         setActivePlan(null);
+        setActiveTurnId(null);
+        setStoppingTurn(false);
+        stopRequestedRef.current = false;
 
         if (canReuseSnapshot && optimisticChat) {
           setSelectedChat(optimisticChat);
@@ -1750,12 +1820,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             tone: 'running',
             title: 'Opening chat',
           });
-          appendActivityPhrase('Opening chat', true);
         }
 
-        void loadChat(id);
+        loadChat(id).catch(() => {});
       },
-      [appendActivityPhrase, loadChat]
+      [loadChat]
     );
 
     useImperativeHandle(ref, () => ({
@@ -1810,6 +1879,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       try {
         setCreating(true);
+        setActiveTurnId(null);
+        setStoppingTurn(false);
+        stopRequestedRef.current = false;
         setActivePlan(null);
         setPendingUserInputRequest(null);
         setUserInputDrafts({});
@@ -1840,34 +1912,31 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Working',
         });
         bumpRunWatchdog();
-        appendActivityPhrase('Turn started', true);
 
-        const updated = await api.sendChatMessage(created.id, {
-          content,
-          mentions: turnMentions,
-          localImages: turnLocalImages,
-          cwd: created.cwd ?? preferredStartCwd ?? undefined,
-          model: activeModelId ?? undefined,
-          effort: activeEffort ?? undefined,
-          collaborationMode: selectedCollaborationMode,
-        });
+        const updated = await api.sendChatMessage(
+          created.id,
+          {
+            content,
+            mentions: turnMentions,
+            localImages: turnLocalImages,
+            cwd: created.cwd ?? preferredStartCwd ?? undefined,
+            model: activeModelId ?? undefined,
+            effort: activeEffort ?? undefined,
+            collaborationMode: selectedCollaborationMode,
+          },
+          {
+            onTurnStarted: (turnId) => registerTurnStarted(created.id, turnId),
+          }
+        );
         const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
-        const shouldRemainRunning = isChatLikelyRunning(updated);
         if (autoEnabledPlan) {
           setSelectedCollaborationMode('plan');
-          appendActivityPhrase('Plan mode enabled', true);
         }
         setSelectedChat(updated);
         setPendingMentionPaths([]);
         setPendingLocalImagePaths([]);
         setError(null);
-        if (shouldRemainRunning) {
-          setActivity({
-            tone: 'running',
-            title: 'Working',
-          });
-          bumpRunWatchdog();
-        } else {
+        if (updated.status === 'complete') {
           setActivity({
             tone: 'complete',
             title: 'Turn completed',
@@ -1877,15 +1946,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 : undefined,
           });
           clearRunWatchdog();
+        } else if (updated.status === 'error') {
+          setActivity({
+            tone: 'error',
+            title: 'Turn failed',
+            detail: updated.lastError ?? undefined,
+          });
+          clearRunWatchdog();
+        } else {
+          // 'running' or 'idle' (server may not have started yet) — keep working
+          setActivity({
+            tone: 'running',
+            title: 'Working',
+          });
+          bumpRunWatchdog();
         }
       } catch (err) {
-        setError((err as Error).message);
-        setActivity({
-          tone: 'error',
-          title: 'Turn failed',
-          detail: (err as Error).message,
-        });
-        clearRunWatchdog();
+        handleTurnFailure(err);
       } finally {
         setCreating(false);
       }
@@ -1899,7 +1976,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingLocalImagePaths,
       preferredStartCwd,
       selectedCollaborationMode,
-      appendActivityPhrase,
+      registerTurnStarted,
+      handleTurnFailure,
       bumpRunWatchdog,
       clearRunWatchdog,
     ]);
@@ -1946,6 +2024,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         try {
           setSending(true);
+          setActiveTurnId(null);
+          setStoppingTurn(false);
+          stopRequestedRef.current = false;
           setActivePlan(null);
           setPendingUserInputRequest(null);
           setUserInputDrafts({});
@@ -1956,32 +2037,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             title: 'Sending message',
           });
           bumpRunWatchdog();
-          const updated = await api.sendChatMessage(selectedChatId, {
-            content,
-            mentions: turnMentions,
-            localImages: turnLocalImages,
-            cwd: selectedChat?.cwd,
-            model: activeModelId ?? undefined,
-            effort: activeEffort ?? undefined,
-            collaborationMode: resolvedCollaborationMode,
-          });
+          const updated = await api.sendChatMessage(
+            selectedChatId,
+            {
+              content,
+              mentions: turnMentions,
+              localImages: turnLocalImages,
+              cwd: selectedChat?.cwd,
+              model: activeModelId ?? undefined,
+              effort: activeEffort ?? undefined,
+              collaborationMode: resolvedCollaborationMode,
+            },
+            {
+              onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
+            }
+          );
           const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
-          const shouldRemainRunning = isChatLikelyRunning(updated);
           if (autoEnabledPlan) {
             setSelectedCollaborationMode('plan');
-            appendActivityPhrase('Plan mode enabled', true);
           }
           setSelectedChat(updated);
           setPendingMentionPaths([]);
           setPendingLocalImagePaths([]);
           setError(null);
-          if (shouldRemainRunning) {
-            setActivity({
-              tone: 'running',
-              title: 'Working',
-            });
-            bumpRunWatchdog();
-          } else {
+          if (updated.status === 'complete') {
             setActivity({
               tone: 'complete',
               title: 'Turn completed',
@@ -1991,15 +2070,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   : undefined,
             });
             clearRunWatchdog();
+          } else if (updated.status === 'error') {
+            setActivity({
+              tone: 'error',
+              title: 'Turn failed',
+              detail: updated.lastError ?? undefined,
+            });
+            clearRunWatchdog();
+          } else {
+            // 'running' or 'idle' (server may not have started yet) — keep working
+            setActivity({
+              tone: 'running',
+              title: 'Working',
+            });
+            bumpRunWatchdog();
           }
         } catch (err) {
-          setError((err as Error).message);
-          setActivity({
-            tone: 'error',
-            title: 'Turn failed',
-            detail: (err as Error).message,
-          });
-          clearRunWatchdog();
+          handleTurnFailure(err);
         } finally {
           setSending(false);
         }
@@ -2008,13 +2095,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         activeEffort,
         activeModelId,
         api,
-        appendActivityPhrase,
         handleSlashCommand,
         pendingMentionPaths,
         pendingLocalImagePaths,
         selectedCollaborationMode,
         selectedChat?.cwd,
         selectedChatId,
+        registerTurnStarted,
+        handleTurnFailure,
         bumpRunWatchdog,
         clearRunWatchdog,
       ]
@@ -2080,7 +2168,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 : prev
             );
           } else {
-            void loadChat(threadId);
+            loadChat(threadId).catch(() => {});
           }
           return;
         }
@@ -2126,7 +2214,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Working',
             });
-            appendActivityPhrase('Turn started', true);
             return;
           }
 
@@ -2153,19 +2240,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               detail: heading ? undefined : summary ?? undefined,
             });
 
-            if (heading) {
-              setActivityPhrases([heading]);
-            } else if (summary) {
-              appendActivityPhrase(`Reasoning: ${summary}`, true);
-            } else {
-              appendActivityPhrase('Reasoning', true);
-            }
             return;
           }
 
           if (codexEventType === 'agentreasoningsectionbreak') {
             codexReasoningBufferRef.current = '';
-            setActivityPhrases(['Analyzing text']);
             return;
           }
 
@@ -2193,7 +2272,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Thinking',
                   }
             );
-            appendActivityPhrase('Drafting response', true);
             setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
             return;
           }
@@ -2208,10 +2286,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               detail: detail ?? undefined,
             });
             pushActiveCommand(activeThreadId, 'command.running', `${commandLabel} | running`);
-            appendActivityPhrase(
-              detail ? `Running command: ${detail}` : 'Running command',
-              true
-            );
             return;
           }
 
@@ -2232,16 +2306,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               'command.completed',
               `${commandLabel} | ${failed ? 'error' : 'complete'}`
             );
-            appendActivityPhrase(
-              failed
-                ? detail
-                  ? `Command failed: ${detail}`
-                  : 'Command failed'
-                : detail
-                  ? `Command completed: ${detail}`
-                  : 'Command completed',
-              true
-            );
             return;
           }
 
@@ -2257,10 +2321,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               title: 'Starting MCP servers',
               detail: detail || undefined,
             });
-            appendActivityPhrase(
-              detail ? `Starting MCP: ${detail}` : 'Starting MCP servers',
-              true
-            );
             return;
           }
 
@@ -2276,10 +2336,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               detail: detail || undefined,
             });
             pushActiveCommand(activeThreadId, 'tool.running', `${toolLabel} | running`);
-            appendActivityPhrase(
-              detail ? `Running tool: ${detail}` : 'Running tool',
-              true
-            );
             return;
           }
 
@@ -2292,10 +2348,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               detail: query ?? undefined,
             });
             pushActiveCommand(activeThreadId, 'web_search.running', `${searchLabel} | running`);
-            appendActivityPhrase(
-              query ? `Searching web: ${query}` : 'Searching web',
-              true
-            );
             return;
           }
 
@@ -2307,27 +2359,28 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: message ?? 'Working',
             });
-            if (message) {
-              setActivityPhrases([message]);
-            } else {
-              appendActivityPhrase('Working', true);
-            }
             return;
           }
 
           if (CODEX_RUN_ABORT_EVENT_TYPES.has(codexEventType)) {
+            const interruptedByUser = stopRequestedRef.current;
             clearRunWatchdog();
             setActiveCommands([]);
-            setStreamingText(null);
-            setActivityPhrases([]);
-            reasoningSummaryRef.current = {};
-            codexReasoningBufferRef.current = '';
-            hadCommandRef.current = false;
+          setStreamingText(null);
+          setActiveTurnId(null);
+          setStoppingTurn(false);
+          stopRequestedRef.current = interruptedByUser;
+          reasoningSummaryRef.current = {};
+          codexReasoningBufferRef.current = '';
+          hadCommandRef.current = false;
+            if (interruptedByUser) {
+              setError(null);
+            }
             setActivity({
-              tone: 'error',
-              title: 'Turn interrupted',
+              tone: interruptedByUser ? 'complete' : 'error',
+              title: interruptedByUser ? 'Turn stopped' : 'Turn interrupted',
             });
-            void loadChat(activeThreadId);
+            loadChat(activeThreadId).catch(() => {});
             return;
           }
 
@@ -2335,7 +2388,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             clearRunWatchdog();
             setActiveCommands([]);
             setStreamingText(null);
-            setActivityPhrases([]);
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            stopRequestedRef.current = false;
             reasoningSummaryRef.current = {};
             codexReasoningBufferRef.current = '';
             hadCommandRef.current = false;
@@ -2343,22 +2398,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'error',
               title: 'Turn failed',
             });
-            void loadChat(activeThreadId);
+            loadChat(activeThreadId).catch(() => {});
             return;
           }
 
           if (CODEX_RUN_COMPLETION_EVENT_TYPES.has(codexEventType)) {
             clearRunWatchdog();
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            stopRequestedRef.current = false;
             setActivity({
               tone: 'complete',
               title: 'Turn completed',
             });
-            setActivityPhrases([]);
             setStreamingText(null);
             reasoningSummaryRef.current = {};
             codexReasoningBufferRef.current = '';
             hadCommandRef.current = false;
-            void loadChat(activeThreadId);
+            loadChat(activeThreadId).catch(() => {});
             return;
           }
 
@@ -2371,7 +2428,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Working',
                   }
             );
-            appendActivityPhrase('Working', true);
           }
           return;
         }
@@ -2400,7 +2456,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   title: 'Thinking',
                 }
           );
-          appendActivityPhrase('Drafting response', true);
           setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
           return;
         }
@@ -2411,12 +2466,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId || threadId !== currentId) {
             return;
           }
+          const turn = toRecord(params?.turn);
+          const startedTurnId =
+            readString(params?.turnId) ??
+            readString(params?.turn_id) ??
+            readString(turn?.id) ??
+            readString(turn?.turnId) ??
+            null;
+          if (startedTurnId) {
+            registerTurnStarted(threadId, startedTurnId);
+          }
           bumpRunWatchdog();
           setActivity({
             tone: 'running',
             title: 'Turn started',
           });
-          appendActivityPhrase('Turn started', true);
           return;
         }
 
@@ -2439,10 +2503,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               detail: command ?? undefined,
             });
             pushActiveCommand(threadId, 'command.running', `${commandLabel} | running`);
-            appendActivityPhrase(
-              command ? `Running command: ${command}` : 'Running command',
-              true
-            );
             return;
           }
 
@@ -2452,7 +2512,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Applying file changes',
             });
-            appendActivityPhrase('Applying file changes', true);
             return;
           }
 
@@ -2467,10 +2526,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               detail,
             });
             pushActiveCommand(threadId, 'tool.running', `${toolLabel} | running`);
-            appendActivityPhrase(
-              detail ? `Running tool: ${detail}` : 'Running tool',
-              true
-            );
             return;
           }
 
@@ -2480,7 +2535,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Planning',
             });
-            appendActivityPhrase('Planning next steps', true);
             return;
           }
 
@@ -2489,7 +2543,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Reasoning',
             });
-            appendActivityPhrase('Reasoning through changes', true);
             return;
           }
         }
@@ -2520,7 +2573,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               updatedAt: new Date().toISOString(),
             };
           });
-          const delta = toTickerSnippet(readString(params?.delta), 56);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Planning'
               ? prev
@@ -2528,10 +2580,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   tone: 'running',
                   title: 'Planning',
                 }
-          );
-          appendActivityPhrase(
-            delta ? `Plan update: ${delta}` : 'Planning next steps',
-            true
           );
           return;
         }
@@ -2560,7 +2608,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   title: 'Reasoning',
                 }
           );
-          setActivityPhrases(['Analyzing text']);
           return;
         }
 
@@ -2603,13 +2650,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               detail,
             };
           });
-          if (heading) {
-            setActivityPhrases([heading]);
-          } else if (summaryText) {
-            setActivityPhrases([summaryText]);
-          } else {
-            setActivityPhrases(['Analyzing text']);
-          }
           return;
         }
 
@@ -2621,7 +2661,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           bumpRunWatchdog();
-          const delta = toTickerSnippet(readString(params?.delta), 56);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Reasoning'
               ? prev
@@ -2629,10 +2668,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   tone: 'running',
                   title: 'Reasoning',
                 }
-          );
-          appendActivityPhrase(
-            delta ? `Reasoning: ${delta}` : 'Reasoning through the task',
-            true
           );
           return;
         }
@@ -2645,7 +2680,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           bumpRunWatchdog();
-          const delta = toLastLineSnippet(readString(params?.delta), 64);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Running command'
               ? prev
@@ -2653,10 +2687,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   tone: 'running',
                   title: 'Running command',
                 }
-          );
-          appendActivityPhrase(
-            delta ? `Command output: ${delta}` : 'Streaming command output',
-            true
           );
           return;
         }
@@ -2669,7 +2699,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           bumpRunWatchdog();
-          const message = toTickerSnippet(readString(params?.message), 64);
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Running tool'
               ? prev
@@ -2677,10 +2706,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   tone: 'running',
                   title: 'Running tool',
                 }
-          );
-          appendActivityPhrase(
-            message ? `Tool progress: ${message}` : 'Running tool',
-            true
           );
           return;
         }
@@ -2697,7 +2722,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             tone: 'running',
             title: 'Terminal interaction',
           });
-          appendActivityPhrase('Waiting for terminal interaction', true);
           return;
         }
 
@@ -2731,7 +2755,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             tone: 'running',
             title: 'Plan updated',
           });
-          appendActivityPhrase('Plan updated', true);
           return;
         }
 
@@ -2747,7 +2770,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             tone: 'running',
             title: 'Updating diff',
           });
-          appendActivityPhrase('Updating code diff', true);
           return;
         }
 
@@ -2771,15 +2793,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               title: failed ? 'Command failed' : 'Command completed',
               detail: command ?? undefined,
             });
-            appendActivityPhrase(
-              failed
-                ? command
-                  ? `Command failed: ${command}`
-                  : 'Command failed'
-                : command
-                  ? `Command completed: ${command}`
-                  : 'Command completed'
-            );
             pushActiveCommand(
               threadId,
               'command.completed',
@@ -2823,6 +2836,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           clearRunWatchdog();
 
           const status = readString(turn?.status) ?? readString(params?.status);
+          const completedTurnId =
+            readString(turn?.id) ??
+            readString(turn?.turnId) ??
+            readString(params?.turnId) ??
+            readString(params?.turn_id) ??
+            null;
+          const interruptedByUser = status === 'interrupted' && stopRequestedRef.current;
           const turnError = toRecord(turn?.error) ?? toRecord(params?.error);
           const turnErrorMessage = readString(turnError?.message);
 
@@ -2832,25 +2852,37 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setUserInputDrafts({});
           setUserInputError(null);
           setResolvingUserInput(false);
+          if (!completedTurnId || completedTurnId === activeTurnIdRef.current) {
+            setActiveTurnId(null);
+          }
+          setStoppingTurn(false);
+          stopRequestedRef.current = false;
           hadCommandRef.current = false;
-          setActivityPhrases([]);
           reasoningSummaryRef.current = {};
           codexReasoningBufferRef.current = '';
 
           if (status === 'failed' || status === 'interrupted') {
-            setError(turnErrorMessage ?? `turn ${status ?? 'failed'}`);
-            setActivity({
-              tone: 'error',
-              title: 'Turn failed',
-              detail: turnErrorMessage ?? status ?? undefined,
-            });
+            if (interruptedByUser) {
+              setError(null);
+              setActivity({
+                tone: 'complete',
+                title: 'Turn stopped',
+              });
+            } else {
+              setError(turnErrorMessage ?? `turn ${status ?? 'failed'}`);
+              setActivity({
+                tone: 'error',
+                title: 'Turn failed',
+                detail: turnErrorMessage ?? status ?? undefined,
+              });
+            }
           } else {
             setActivity({
               tone: 'complete',
               title: 'Turn completed',
             });
           }
-          void loadChat(threadId);
+          loadChat(threadId).catch(() => {});
           return;
         }
 
@@ -2899,7 +2931,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Input submitted',
             });
-            appendActivityPhrase('Input submitted', true);
           }
           return;
         }
@@ -2914,7 +2945,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Approval resolved',
             });
-            appendActivityPhrase('Approval resolved', true);
           }
           return;
         }
@@ -2931,7 +2961,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Connected',
                   }
             );
-            void loadChat(currentId);
+            clearRunWatchdog();
+            loadChat(currentId).catch(() => {});
             return;
           }
 
@@ -2949,9 +2980,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingApproval?.id,
       pendingUserInputRequest?.id,
       loadChat,
-      appendActivityPhrase,
       bumpRunWatchdog,
       clearRunWatchdog,
+      registerTurnStarted,
       pushActiveCommand,
     ]);
 
@@ -2986,15 +3017,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
 
           if (shouldShowRunning && !hasPendingApproval && !hasPendingUserInput) {
-            bumpRunWatchdog();
-            setActivity((prev) =>
-              prev.tone === 'running'
+            setActivity((prev) => {
+              // Only guard against watchdog-only bumps overriding a fresh
+              // completion. When the server explicitly reports running, trust it
+              // (handles externally-started turns like CLI).
+              if (
+                !shouldRunFromChat &&
+                (prev.tone === 'complete' || prev.tone === 'error')
+              ) {
+                return prev;
+              }
+              bumpRunWatchdog();
+              return prev.tone === 'running'
                 ? prev
-                : {
-                    tone: 'running',
-                    title: 'Working',
-                  }
-            );
+                : { tone: 'running', title: 'Working' };
+            });
           } else if (!hasPendingApproval && !hasPendingUserInput) {
             clearRunWatchdog();
             setActivity((prev) => {
@@ -3023,7 +3060,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 title: 'Ready',
               };
             });
-            setActivityPhrases([]);
           }
         } catch {
           // Polling is best-effort; keep the current view if refresh fails.
@@ -3040,7 +3076,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChatId,
       sending,
       creating,
-      appendActivityPhrase,
       pendingApproval?.id,
       pendingUserInputRequest?.id,
       bumpRunWatchdog,
@@ -3094,7 +3129,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           tone: 'running',
           title: 'Input submitted',
         });
-        appendActivityPhrase('Input submitted', true);
         bumpRunWatchdog();
       } catch (err) {
         setUserInputError((err as Error).message);
@@ -3103,7 +3137,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       }
     }, [
       api,
-      appendActivityPhrase,
       bumpRunWatchdog,
       pendingUserInputRequest,
       resolvingUserInput,
@@ -3157,13 +3190,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [maxKeyboardInset, windowHeight]);
 
     const handleSubmit = selectedChat ? sendMessage : createChat;
-    const isLoading = sending || creating || uploadingAttachment;
+    const isTurnLoading = sending || creating;
+    const isLoading = isTurnLoading || uploadingAttachment;
     const isStreaming = sending || creating || Boolean(streamingText);
     const isOpeningChat = Boolean(openingChatId);
     const isOpeningDifferentChat =
       Boolean(openingChatId) && selectedChat?.id !== openingChatId;
     const showActivity =
-      Boolean(selectedChatId) || isLoading || isOpeningChat || activity.tone !== 'idle';
+      isLoading || isOpeningChat || activity.tone !== 'idle';
     const headerTitle = isOpeningDifferentChat
       ? 'Opening chat'
       : selectedChat?.title?.trim() || 'New chat';
@@ -3259,9 +3293,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             {showActivity ? (
               <ActivityBar
                 title={activity.title}
-                detail={activity.detail}
                 tone={activity.tone}
-                runningPhrases={activityPhrases}
               />
             ) : null}
             {showSlashSuggestions ? (
@@ -3302,6 +3334,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               value={draft}
               onChangeText={setDraft}
               onSubmit={() => void handleSubmit()}
+              onStop={() => handleStopTurn()}
+              showStopButton={isTurnLoading}
+              isStopping={stoppingTurn}
               onAttachPress={openAttachmentMenu}
               attachments={composerAttachments}
               onRemoveAttachment={removeComposerAttachment}
@@ -4658,23 +4693,6 @@ function toTickerSnippet(
   return `${cleaned.slice(0, Math.max(1, maxLength - 1))}…`;
 }
 
-function toLastLineSnippet(
-  value: string | null | undefined,
-  maxLength = 72
-): string | null {
-  if (!value) {
-    return null;
-  }
-
-  const line = value
-    .split('\n')
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .slice(-1)[0];
-
-  return toTickerSnippet(line ?? null, maxLength);
-}
-
 function mergeStreamingDelta(previous: string | null, delta: string): string {
   if (!delta) {
     return previous ?? '';
@@ -4789,17 +4807,6 @@ function toLiveTimelineLine(event: RunEvent): string | null {
   return `${basePrefix} \`${label}\``;
 }
 
-function toActivityPhrase(title: string, detail?: string): string | null {
-  const compactTitle = toTickerSnippet(title, 36);
-  const compactDetail = toTickerSnippet(detail ?? null, 64);
-
-  if (compactTitle && compactDetail) {
-    return `${compactTitle}: ${compactDetail}`;
-  }
-
-  return compactTitle ?? compactDetail ?? null;
-}
-
 function normalizeCodexEventType(value: string | null | undefined): string | null {
   if (!value) {
     return null;
@@ -4818,7 +4825,8 @@ function isChatLikelyRunning(chat: Chat): boolean {
     return true;
   }
 
-  if (chat.status === 'error') {
+  // Trust definitive server statuses — don't second-guess them with heuristics.
+  if (chat.status === 'error' || chat.status === 'complete' || chat.status === 'idle') {
     return false;
   }
 

@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInUp } from 'react-native-reanimated';
 
 import { colors, radius, spacing } from '../theme';
@@ -8,13 +7,9 @@ import { colors, radius, spacing } from '../theme';
 interface ToolBlockProps {
   command: string;
   status: 'running' | 'complete' | 'error';
-  output?: string;
-  durationMs?: number;
 }
 
-export function ToolBlock({ command, status, output, durationMs }: ToolBlockProps) {
-  const [expanded, setExpanded] = useState(false);
-
+export function ToolBlock({ command, status }: ToolBlockProps) {
   const statusIcon: keyof typeof Ionicons.glyphMap | null =
     status === 'running'
       ? null
@@ -30,41 +25,17 @@ export function ToolBlock({ command, status, output, durationMs }: ToolBlockProp
 
   return (
     <Animated.View entering={FadeInUp.duration(300)}>
-      <Pressable
-        style={styles.container}
-        onPress={() => setExpanded(!expanded)}
-      >
-        <View style={styles.header}>
-          <Ionicons name="folder-open" size={14} color={colors.textSecondary} />
-          <Text style={styles.command} numberOfLines={expanded ? undefined : 1}>
-            {command}
-          </Text>
-          <View style={styles.statusRow}>
-            {status === 'running' ? (
-              <ActivityIndicator size="small" color={statusColor} />
-            ) : (
-              <>
-                {statusIcon && (
-                  <Ionicons name={statusIcon} size={14} color={statusColor} />
-                )}
-                {durationMs != null && (
-                  <Text style={[styles.duration, { color: statusColor }]}>
-                    {durationMs}ms
-                  </Text>
-                )}
-              </>
-            )}
-            <Ionicons
-              name={expanded ? 'chevron-up' : 'chevron-down'}
-              size={14}
-              color={colors.textMuted}
-            />
-          </View>
-        </View>
-        {expanded && output ? (
-          <Text style={styles.output}>{output}</Text>
+      <View style={styles.container}>
+        <Ionicons name="terminal-outline" size={14} color={colors.textSecondary} />
+        <Text style={styles.command} numberOfLines={1}>
+          {command}
+        </Text>
+        {status === 'running' ? (
+          <ActivityIndicator size="small" color={statusColor} />
+        ) : statusIcon ? (
+          <Ionicons name={statusIcon} size={14} color={statusColor} />
         ) : null}
-      </Pressable>
+      </View>
     </Animated.View>
   );
 }
@@ -73,19 +44,16 @@ const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: colors.toolBlockBg,
-    borderLeftWidth: 3,
-    borderLeftColor: colors.toolBlockBorder,
-    borderRadius: radius.sm,
-    marginVertical: spacing.sm,
-    overflow: 'hidden',
-  },
-  header: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
+    backgroundColor: colors.toolBlockBg,
+    borderLeftWidth: 2,
+    borderLeftColor: colors.toolBlockBorder,
+    borderRadius: radius.sm,
+    marginVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
   },
   command: {
     flex: 1,
@@ -93,26 +61,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textPrimary,
     lineHeight: 18,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    flexShrink: 0,
-  },
-  duration: {
-    fontFamily: monoFont,
-    fontSize: 11,
-  },
-  output: {
-    fontFamily: monoFont,
-    fontSize: 11,
-    color: colors.textSecondary,
-    lineHeight: 16,
-    paddingHorizontal: spacing.md,
-    paddingBottom: spacing.md,
-    paddingTop: spacing.xs,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
   },
 });
