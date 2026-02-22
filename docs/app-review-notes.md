@@ -2,6 +2,10 @@
 
 Use this file as the source for App Store Connect "Notes for Review" and internal submission prep.
 
+Related engineering reference:
+
+- `docs/realtime-streaming-limitations.md`
+
 ## Submission Snapshot
 
 - App name: Codex Mobile Control

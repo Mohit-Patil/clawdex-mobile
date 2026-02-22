@@ -64,6 +64,12 @@ Follow the project-wide requirements in:
 - `LICENSE` (project open-source license text)
 - `docs/open-source-license-requirements.md`
 
+## Realtime Behavior Notes
+
+For known realtime streaming boundaries between mobile, bridge, and standalone CLI runs (and current mitigations), see:
+
+- `docs/realtime-streaming-limitations.md`
+
 ## Branding Assets
 
 Brand files now live in:
