@@ -143,6 +143,7 @@ describe('MacBridgeApiClient', () => {
           status: { type: 'idle' },
           turns: [
             {
+              id: 'turn_1',
               items: [
                 {
                   type: 'userMessage',
@@ -164,7 +165,7 @@ describe('MacBridgeApiClient', () => {
     const chat = await client.sendChatMessage('thr_1', { content: 'Hello' });
 
     expect(ws.request).toHaveBeenNthCalledWith(2, 'turn/start', expect.any(Object));
-    expect(ws.waitForTurnCompletion).toHaveBeenCalledWith('thr_1', 'turn_1');
+    expect(ws.waitForTurnCompletion).toHaveBeenCalledWith('thr_1', 'turn_1', expect.any(Number));
     expect(chat.id).toBe('thr_1');
     expect(chat.messages.length).toBeGreaterThan(0);
   });
@@ -193,12 +194,13 @@ describe('MacBridgeApiClient', () => {
             createdAt: 1700000000,
             updatedAt: 1700000002,
             status: { type: 'idle' },
-            turns: [
-              {
-                items: [
-                  {
-                    type: 'userMessage',
-                    id: 'u_retry',
+              turns: [
+                {
+                  id: 'turn_retry',
+                  items: [
+                    {
+                      type: 'userMessage',
+                      id: 'u_retry',
                     content: [{ type: 'text', text: 'Hello' }],
                   },
                 ],
@@ -221,6 +223,58 @@ describe('MacBridgeApiClient', () => {
           threadId: 'thr_retry',
         })
       );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('sendChatMessage() keeps a repeated user prompt when the new turn is missing from thread/read', async () => {
+    jest.useFakeTimers();
+    try {
+      const ws = createWsMock();
+      const staleReadResponse = {
+        thread: {
+          id: 'thr_repeat',
+          preview: 'repeat',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_old',
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_old_repeat',
+                  content: [{ type: 'text', text: 'repeat' }],
+                },
+                {
+                  type: 'agentMessage',
+                  id: 'a_old_repeat',
+                  text: 'old answer',
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      ws.request
+        .mockResolvedValueOnce({}) // thread/resume
+        .mockResolvedValueOnce({ turn: { id: 'turn_new_repeat' } }) // turn/start
+        .mockResolvedValue(staleReadResponse); // thread/read retries always stale
+
+      const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+      const chatPromise = client.sendChatMessage('thr_repeat', { content: 'repeat' });
+
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(2_000);
+      const chat = await chatPromise;
+
+      const repeatedUserMessages = chat.messages.filter(
+        (message) => message.role === 'user' && message.content === 'repeat'
+      );
+      expect(repeatedUserMessages.length).toBeGreaterThanOrEqual(2);
     } finally {
       jest.useRealTimers();
     }
@@ -311,6 +365,7 @@ describe('MacBridgeApiClient', () => {
           status: { type: 'idle' },
           turns: [
             {
+              id: 'turn_model',
               items: [
                 {
                   type: 'userMessage',
@@ -346,6 +401,98 @@ describe('MacBridgeApiClient', () => {
     );
   });
 
+  it('sendChatMessage() forwards mention and local-image attachments to turn/start input', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_mentions' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_mentions',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_mentions',
+              items: [
+                {
+                  type: 'userMessage',
+              id: 'u_mentions',
+              content: [{ type: 'text', text: 'review these files' }],
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.sendChatMessage('thr_mentions', {
+      content: 'review these files',
+      mentions: [
+        { path: 'apps/mobile/src/screens/MainScreen.tsx' },
+        { path: 'apps/mobile/src/api/client.ts', name: 'client.ts' },
+      ],
+      localImages: [{ path: '.clawdex-mobile-attachments/example.png' }],
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        input: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'text',
+            text: 'review these files',
+          }),
+          expect.objectContaining({
+            type: 'mention',
+            path: 'apps/mobile/src/screens/MainScreen.tsx',
+            name: 'MainScreen.tsx',
+          }),
+          expect.objectContaining({
+            type: 'mention',
+            path: 'apps/mobile/src/api/client.ts',
+            name: 'client.ts',
+          }),
+          expect.objectContaining({
+            type: 'localImage',
+            path: '.clawdex-mobile-attachments/example.png',
+          }),
+        ]),
+      })
+    );
+  });
+
+  it('uploadAttachment() calls bridge/attachments/upload', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      path: '.clawdex-mobile-attachments/file.txt',
+      fileName: 'file.txt',
+      mimeType: 'text/plain',
+      sizeBytes: 10,
+      kind: 'file',
+    });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const uploaded = await client.uploadAttachment({
+      dataBase64: 'aGVsbG8=',
+      fileName: 'file.txt',
+      mimeType: 'text/plain',
+      kind: 'file',
+    });
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/attachments/upload', {
+      dataBase64: 'aGVsbG8=',
+      fileName: 'file.txt',
+      mimeType: 'text/plain',
+      kind: 'file',
+    });
+    expect(uploaded.path).toBe('.clawdex-mobile-attachments/file.txt');
+  });
+
   it('sendChatMessage() sends structured collaborationMode for plan mode', async () => {
     const ws = createWsMock();
     ws.request
@@ -360,6 +507,7 @@ describe('MacBridgeApiClient', () => {
           status: { type: 'idle' },
           turns: [
             {
+              id: 'turn_plan',
               items: [
                 {
                   type: 'userMessage',
@@ -421,6 +569,7 @@ describe('MacBridgeApiClient', () => {
           status: { type: 'idle' },
           turns: [
             {
+              id: 'turn_plan_fallback',
               items: [
                 {
                   type: 'userMessage',

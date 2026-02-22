@@ -20,11 +20,13 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
+    fs,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot, Mutex, RwLock},
@@ -35,6 +37,8 @@ const APPROVAL_COMMAND_METHOD: &str = "item/commandExecution/requestApproval";
 const APPROVAL_FILE_METHOD: &str = "item/fileChange/requestApproval";
 const REQUEST_USER_INPUT_METHOD: &str = "item/tool/requestUserInput";
 const REQUEST_USER_INPUT_METHOD_ALT: &str = "tool/requestUserInput";
+const MOBILE_ATTACHMENTS_DIR: &str = ".clawdex-mobile-attachments";
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -1191,6 +1195,26 @@ struct GitCommitRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AttachmentUploadRequest {
+    data_base64: String,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    thread_id: Option<String>,
+    kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentUploadResponse {
+    path: String,
+    file_name: String,
+    mime_type: Option<String>,
+    size_bytes: usize,
+    kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PendingApproval {
     id: String,
     kind: String,
@@ -1543,6 +1567,13 @@ async fn handle_bridge_method(
                 .await;
 
             Ok(result_value)
+        }
+        "bridge/attachments/upload" => {
+            let request: AttachmentUploadRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let uploaded = save_uploaded_attachment(request, state).await?;
+            serde_json::to_value(uploaded).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/git/status" => {
             let request: GitQueryRequest =
@@ -1897,6 +1928,205 @@ fn is_valid_user_input_answers(answers: &HashMap<String, UserInputAnswerPayload>
             .iter()
             .all(|answer| !answer.trim().is_empty())
     })
+}
+
+async fn save_uploaded_attachment(
+    request: AttachmentUploadRequest,
+    state: &Arc<AppState>,
+) -> Result<AttachmentUploadResponse, BridgeError> {
+    let encoded = request.data_base64.trim();
+    if encoded.is_empty() {
+        return Err(BridgeError::invalid_params("dataBase64 must not be empty"));
+    }
+
+    let bytes = decode_base64_payload(encoded)?;
+    if bytes.is_empty() {
+        return Err(BridgeError::invalid_params("attachment payload is empty"));
+    }
+
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(BridgeError::invalid_params(&format!(
+            "attachment exceeds max size of {MAX_ATTACHMENT_BYTES} bytes"
+        )));
+    }
+
+    let normalized_kind = normalize_attachment_kind(request.kind.as_deref(), request.mime_type.as_deref());
+    let file_name = build_attachment_file_name(
+        request.file_name.as_deref(),
+        request.mime_type.as_deref(),
+        normalized_kind,
+    );
+
+    let mut attachment_dir = state.config.workdir.join(MOBILE_ATTACHMENTS_DIR);
+    if let Some(thread_id) = request.thread_id.as_deref() {
+        let normalized_thread = sanitize_path_segment(thread_id);
+        if !normalized_thread.is_empty() {
+            attachment_dir = attachment_dir.join(normalized_thread);
+        }
+    }
+
+    fs::create_dir_all(&attachment_dir)
+        .await
+        .map_err(|error| BridgeError::server(&format!("failed to create attachment directory: {error}")))?;
+
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string();
+    let unique_name = format!("{timestamp}-{}-{file_name}", std::process::id());
+    let target_path = attachment_dir.join(unique_name);
+    let normalized_target = normalize_path(&target_path);
+    if !normalized_target.starts_with(&state.config.workdir) {
+        return Err(BridgeError::invalid_params(
+            "attachment path must stay within BRIDGE_WORKDIR",
+        ));
+    }
+
+    fs::write(&normalized_target, &bytes)
+        .await
+        .map_err(|error| BridgeError::server(&format!("failed to persist attachment: {error}")))?;
+
+    Ok(AttachmentUploadResponse {
+        path: normalized_target.to_string_lossy().to_string(),
+        file_name,
+        mime_type: request
+            .mime_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        size_bytes: bytes.len(),
+        kind: normalized_kind.to_string(),
+    })
+}
+
+fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
+    let payload = raw
+        .split_once(',')
+        .map(|(_, data)| data)
+        .unwrap_or(raw)
+        .trim();
+    if payload.is_empty() {
+        return Err(BridgeError::invalid_params("dataBase64 must contain base64 payload"));
+    }
+
+    general_purpose::STANDARD
+        .decode(payload)
+        .or_else(|_| general_purpose::URL_SAFE.decode(payload))
+        .map_err(|error| BridgeError::invalid_params(&format!("invalid base64 attachment payload: {error}")))
+}
+
+fn normalize_attachment_kind(kind: Option<&str>, mime_type: Option<&str>) -> &'static str {
+    let normalized = kind
+        .map(str::trim)
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    if normalized == "image" {
+        return "image";
+    }
+    if normalized == "file" {
+        return "file";
+    }
+
+    if let Some(mime) = mime_type {
+        if mime.trim().to_ascii_lowercase().starts_with("image/") {
+            return "image";
+        }
+    }
+
+    "file"
+}
+
+fn build_attachment_file_name(
+    raw_name: Option<&str>,
+    raw_mime_type: Option<&str>,
+    kind: &str,
+) -> String {
+    let requested_name = raw_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if kind == "image" {
+                "image".to_string()
+            } else {
+                "attachment".to_string()
+            }
+        });
+
+    let mut sanitized = sanitize_filename(&requested_name);
+    if !sanitized.contains('.') {
+        if let Some(extension) = infer_extension_from_mime(raw_mime_type) {
+            sanitized.push('.');
+            sanitized.push_str(extension);
+        }
+    }
+
+    sanitized
+}
+
+fn sanitize_filename(value: &str) -> String {
+    let basename = value
+        .split(['/', '\\'])
+        .filter(|segment| !segment.trim().is_empty())
+        .next_back()
+        .unwrap_or("attachment");
+
+    let mut cleaned = basename
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || matches!(char, '.' | '-' | '_') {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    cleaned = cleaned.trim_matches('.').to_string();
+    if cleaned.is_empty() {
+        return "attachment".to_string();
+    }
+
+    if cleaned.len() > 96 {
+        cleaned.truncate(96);
+    }
+
+    cleaned
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    let mut cleaned = value
+        .trim()
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() || matches!(char, '-' | '_') {
+                char
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    cleaned = cleaned.trim_matches('_').to_string();
+    if cleaned.len() > 64 {
+        cleaned.truncate(64);
+    }
+
+    cleaned
+}
+
+fn infer_extension_from_mime(raw_mime_type: Option<&str>) -> Option<&'static str> {
+    let mime = raw_mime_type?.trim().to_ascii_lowercase();
+    match mime.as_str() {
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
+        "text/plain" => Some("txt"),
+        "application/json" => Some("json"),
+        "application/pdf" => Some("pdf"),
+        _ => None,
+    }
 }
 
 fn contains_disallowed_control_chars(value: &str) -> bool {

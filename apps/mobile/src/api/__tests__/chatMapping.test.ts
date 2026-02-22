@@ -95,4 +95,38 @@ describe('chatMapping', () => {
     expect(systemMessages[2].content).toContain('• Called tool `filesystem / read_file`');
     expect(systemMessages[3].content).toContain('• Applied file changes');
   });
+
+  it('maps user mention attachments into readable file markers', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_mentions',
+        preview: 'files',
+        createdAt: 1700000000,
+        updatedAt: 1700000003,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'u_mentions',
+                content: [
+                  { type: 'text', text: 'please review these files' },
+                  { type: 'mention', path: 'apps/mobile/src/screens/MainScreen.tsx' },
+                  { type: 'mention', path: 'apps/mobile/src/api/client.ts' },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('user');
+    expect(chat.messages[0].content).toContain('please review these files');
+    expect(chat.messages[0].content).toContain('[file: apps/mobile/src/screens/MainScreen.tsx]');
+    expect(chat.messages[0].content).toContain('[file: apps/mobile/src/api/client.ts]');
+  });
 });

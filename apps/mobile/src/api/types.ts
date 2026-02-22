@@ -49,6 +49,35 @@ export interface SendChatMessageRequest {
   model?: string;
   effort?: ReasoningEffort;
   collaborationMode?: CollaborationMode;
+  mentions?: MentionInput[];
+  localImages?: LocalImageInput[];
+}
+
+export interface MentionInput {
+  path: string;
+  name?: string;
+}
+
+export interface LocalImageInput {
+  path: string;
+}
+
+export type AttachmentUploadKind = 'file' | 'image';
+
+export interface UploadAttachmentRequest {
+  dataBase64: string;
+  fileName?: string;
+  mimeType?: string;
+  threadId?: string;
+  kind?: AttachmentUploadKind;
+}
+
+export interface UploadAttachmentResponse {
+  path: string;
+  fileName: string;
+  mimeType?: string;
+  sizeBytes: number;
+  kind: AttachmentUploadKind;
 }
 
 export type ReasoningEffort =

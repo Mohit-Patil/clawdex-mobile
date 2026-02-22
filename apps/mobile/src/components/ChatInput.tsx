@@ -4,7 +4,9 @@ import {
   type NativeSyntheticEvent,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
+  Text,
   TextInput,
   type TextInputKeyPressEventData,
   View,
@@ -16,7 +18,9 @@ interface ChatInputProps {
   value: string;
   onChangeText: (text: string) => void;
   onSubmit: () => void;
-  onNewChat: () => void;
+  onAttachPress: () => void;
+  attachments?: Array<{ id: string; label: string }>;
+  onRemoveAttachment?: (id: string) => void;
   isLoading: boolean;
   placeholder?: string;
 }
@@ -25,7 +29,9 @@ export function ChatInput({
   value,
   onChangeText,
   onSubmit,
-  onNewChat,
+  onAttachPress,
+  attachments = [],
+  onRemoveAttachment,
   isLoading,
   placeholder = 'Message Codex...',
 }: ChatInputProps) {
@@ -33,47 +39,81 @@ export function ChatInput({
 
   return (
     <View style={styles.container}>
-      <Pressable
-        onPress={onNewChat}
-        style={({ pressed }) => [styles.plusBtn, pressed && styles.plusBtnPressed]}
-      >
-        <Ionicons name="add" size={20} color={colors.textMuted} />
-      </Pressable>
+      {attachments.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.attachmentListContent}
+          style={styles.attachmentList}
+        >
+          {attachments.map((attachment, index) => (
+            <Pressable
+              key={`${attachment.id}-${String(index)}`}
+              onPress={
+                onRemoveAttachment
+                  ? () => onRemoveAttachment(attachment.id)
+                  : undefined
+              }
+              style={({ pressed }) => [
+                styles.attachmentChip,
+                pressed && styles.attachmentChipPressed,
+              ]}
+            >
+              <Ionicons name="attach-outline" size={12} color={colors.textMuted} />
+              <Text style={styles.attachmentChipText} numberOfLines={1}>
+                {attachment.label}
+              </Text>
+              {onRemoveAttachment ? (
+                <Ionicons name="close-outline" size={12} color={colors.textMuted} />
+              ) : null}
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
 
-      <View style={styles.inputWrapper}>
-        <TextInput
-          style={styles.input}
-          value={value}
-          onChangeText={onChangeText}
-          placeholder={placeholder}
-          placeholderTextColor={colors.textMuted}
-          multiline
-          onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
-            const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
-              shiftKey?: boolean;
-            };
-            if (
-              Platform.OS === 'web' &&
-              keyEvent.key === 'Enter' &&
-              !keyEvent.shiftKey
-            ) {
-              e.preventDefault();
-              if (canSend) onSubmit();
-            }
-          }}
-        />
-        {canSend || isLoading ? (
-          <Pressable
-            onPress={canSend ? onSubmit : undefined}
-            style={styles.sendBtn}
-          >
-            {isLoading ? (
-              <ActivityIndicator size="small" color={colors.textMuted} />
-            ) : (
-              <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
-            )}
-          </Pressable>
-        ) : null}
+      <View style={styles.row}>
+        <Pressable
+          onPress={onAttachPress}
+          style={({ pressed }) => [styles.plusBtn, pressed && styles.plusBtnPressed]}
+        >
+          <Ionicons name="add" size={20} color={colors.textMuted} />
+        </Pressable>
+
+        <View style={styles.inputWrapper}>
+          <TextInput
+            style={styles.input}
+            value={value}
+            onChangeText={onChangeText}
+            placeholder={placeholder}
+            placeholderTextColor={colors.textMuted}
+            multiline
+            onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
+              const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
+                shiftKey?: boolean;
+              };
+              if (
+                Platform.OS === 'web' &&
+                keyEvent.key === 'Enter' &&
+                !keyEvent.shiftKey
+              ) {
+                e.preventDefault();
+                if (canSend) onSubmit();
+              }
+            }}
+          />
+          {canSend || isLoading ? (
+            <Pressable
+              onPress={canSend ? onSubmit : undefined}
+              style={styles.sendBtn}
+            >
+              {isLoading ? (
+                <ActivityIndicator size="small" color={colors.textMuted} />
+              ) : (
+                <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
+              )}
+            </Pressable>
+          ) : null}
+        </View>
       </View>
     </View>
   );
@@ -81,15 +121,45 @@ export function ChatInput({
 
 const styles = StyleSheet.create({
   container: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
+    gap: spacing.xs,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     paddingBottom: Platform.OS === 'ios' ? spacing.lg : spacing.md,
     backgroundColor: colors.bgMain,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.borderLight,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  attachmentList: {
+    maxHeight: 34,
+  },
+  attachmentListContent: {
+    gap: spacing.xs,
+    paddingRight: spacing.sm,
+  },
+  attachmentChip: {
+    height: 28,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.bgInput,
+    paddingHorizontal: spacing.sm,
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    maxWidth: 260,
+  },
+  attachmentChipPressed: {
+    backgroundColor: colors.bgItem,
+  },
+  attachmentChipText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    flexShrink: 1,
   },
   plusBtn: {
     width: 36,

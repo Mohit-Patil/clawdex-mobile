@@ -1,9 +1,13 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as ImagePicker from 'expo-image-picker';
 import {
   forwardRef,
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -35,6 +39,8 @@ import type {
   Chat,
   ChatSummary,
   ModelOption,
+  MentionInput,
+  LocalImageInput,
   ReasoningEffort,
   TurnPlanStep,
   ChatMessage as ChatTranscriptMessage,
@@ -88,6 +94,11 @@ interface ActivePlanState {
   updatedAt: string;
 }
 
+interface ComposerAttachmentChip {
+  id: string;
+  label: string;
+}
+
 interface SlashCommandDefinition {
   name: string;
   summary: string;
@@ -107,9 +118,9 @@ const DEFAULT_ACTIVITY_PHRASES = [
 
 const MAX_ACTIVITY_PHRASES = 8;
 const MAX_ACTIVE_COMMANDS = 16;
-const MAX_VISIBLE_TOOL_BLOCKS = 8;
+const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
-const LIKELY_RUNNING_RECENT_UPDATE_MS = 1_800_000;
+const LIKELY_RUNNING_RECENT_UPDATE_MS = 120_000;
 const ANDROID_KEYBOARD_EXTRA_OFFSET = 12;
 const IOS_KEYBOARD_EXTRA_OFFSET = 12;
 const INLINE_OPTION_LINE_PATTERN =
@@ -128,27 +139,29 @@ const INLINE_CHOICE_CUE_PHRASES = [
   'confirm',
 ];
 const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
-  'task_started',
-  'agent_reasoning_delta',
-  'reasoning_content_delta',
-  'reasoning_raw_content_delta',
-  'agent_reasoning_raw_content_delta',
-  'agent_reasoning_section_break',
-  'agent_message_delta',
-  'agent_message_content_delta',
-  'exec_command_begin',
-  'exec_command_end',
-  'mcp_startup_update',
-  'mcp_tool_call_begin',
-  'web_search_begin',
-  'background_event',
+  'taskstarted',
+  'agentreasoningdelta',
+  'reasoningcontentdelta',
+  'reasoningrawcontentdelta',
+  'agentreasoningrawcontentdelta',
+  'agentreasoningsectionbreak',
+  'agentmessagedelta',
+  'agentmessagecontentdelta',
+  'execcommandbegin',
+  'execcommandend',
+  'mcpstartupupdate',
+  'mcptoolcallbegin',
+  'websearchbegin',
+  'backgroundevent',
 ]);
-const CODEX_RUN_TERMINAL_EVENT_TYPES = new Set([
-  'task_complete',
-  'turn_aborted',
-  'task_failed',
-  'turn_failed',
-  'task_interrupted',
+const CODEX_RUN_COMPLETION_EVENT_TYPES = new Set(['taskcomplete']);
+const CODEX_RUN_ABORT_EVENT_TYPES = new Set([
+  'turnaborted',
+  'taskinterrupted',
+]);
+const CODEX_RUN_FAILURE_EVENT_TYPES = new Set([
+  'taskfailed',
+  'turnfailed',
 ]);
 
 const SLASH_COMMANDS: SlashCommandDefinition[] = [
@@ -366,6 +379,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [renameModalVisible, setRenameModalVisible] = useState(false);
     const [renameDraft, setRenameDraft] = useState('');
     const [renaming, setRenaming] = useState(false);
+    const [attachmentModalVisible, setAttachmentModalVisible] = useState(false);
+    const [attachmentPathDraft, setAttachmentPathDraft] = useState('');
+    const [pendingMentionPaths, setPendingMentionPaths] = useState<string[]>([]);
+    const [pendingLocalImagePaths, setPendingLocalImagePaths] = useState<string[]>([]);
+    const [attachmentFileCandidates, setAttachmentFileCandidates] = useState<string[]>([]);
+    const [loadingAttachmentFileCandidates, setLoadingAttachmentFileCandidates] =
+      useState(false);
+    const [uploadingAttachment, setUploadingAttachment] = useState(false);
     const [workspaceModalVisible, setWorkspaceModalVisible] = useState(false);
     const [workspaceOptions, setWorkspaceOptions] = useState<string[]>([]);
     const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
@@ -399,6 +420,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const codexReasoningBufferRef = useRef('');
     const runWatchdogUntilRef = useRef(0);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
+    const attachmentWorkspace = selectedChat?.cwd ?? preferredStartCwd ?? null;
     const slashQuery = parseSlashQuery(draft);
     const slashSuggestions =
       slashQuery !== null
@@ -409,6 +431,31 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       Math.min(300, Math.floor(windowHeight * 0.34))
     );
     const maxKeyboardInset = Math.max(220, Math.floor(windowHeight * 0.58));
+    const attachmentPathSuggestions = useMemo(
+      () =>
+        toAttachmentPathSuggestions(
+          attachmentFileCandidates,
+          attachmentPathDraft,
+          pendingMentionPaths
+        ),
+      [attachmentFileCandidates, attachmentPathDraft, pendingMentionPaths]
+    );
+    const composerAttachments = useMemo(() => {
+      const next: ComposerAttachmentChip[] = [];
+      for (const path of pendingMentionPaths) {
+        next.push({
+          id: `file:${path}`,
+          label: path,
+        });
+      }
+      for (const path of pendingLocalImagePaths) {
+        next.push({
+          id: `image:${path}`,
+          label: `image · ${toPathBasename(path)}`,
+        });
+      }
+      return next;
+    }, [pendingLocalImagePaths, pendingMentionPaths]);
 
     const bumpRunWatchdog = useCallback((durationMs = RUN_WATCHDOG_MS) => {
       runWatchdogUntilRef.current = Math.max(
@@ -549,6 +596,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setRenameModalVisible(false);
       setRenameDraft('');
       setRenaming(false);
+      setAttachmentModalVisible(false);
+      setAttachmentPathDraft('');
+      setPendingMentionPaths([]);
+      setPendingLocalImagePaths([]);
+      setAttachmentFileCandidates([]);
+      setLoadingAttachmentFileCandidates(false);
+      setUploadingAttachment(false);
       setActivity({
         tone: 'idle',
         title: 'Ready',
@@ -665,9 +719,296 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [modelOptions]
     );
 
+    const loadAttachmentFileCandidates = useCallback(async () => {
+      setLoadingAttachmentFileCandidates(true);
+      try {
+        const response = await api.execTerminal({
+          command: 'git ls-files --cached --others --exclude-standard',
+          cwd: attachmentWorkspace ?? undefined,
+          timeoutMs: 15_000,
+        });
+        if (response.code !== 0) {
+          setAttachmentFileCandidates([]);
+          return;
+        }
+
+        const lines = response.stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+          .slice(0, 8_000);
+        setAttachmentFileCandidates(lines);
+      } catch {
+        setAttachmentFileCandidates([]);
+      } finally {
+        setLoadingAttachmentFileCandidates(false);
+      }
+    }, [api, attachmentWorkspace]);
+
+    const openAttachmentPathModal = useCallback(() => {
+      setAttachmentPathDraft('');
+      setAttachmentModalVisible(true);
+      setError(null);
+      if (attachmentFileCandidates.length === 0 && !loadingAttachmentFileCandidates) {
+        void loadAttachmentFileCandidates();
+      }
+    }, [
+      attachmentFileCandidates.length,
+      loadAttachmentFileCandidates,
+      loadingAttachmentFileCandidates,
+    ]);
+
+    const closeAttachmentModal = useCallback(() => {
+      setAttachmentModalVisible(false);
+      setAttachmentPathDraft('');
+    }, []);
+
+    const removePendingMentionPath = useCallback((path: string) => {
+      setPendingMentionPaths((prev) => prev.filter((entry) => entry !== path));
+    }, []);
+
+    const removePendingLocalImagePath = useCallback((path: string) => {
+      setPendingLocalImagePaths((prev) => prev.filter((entry) => entry !== path));
+    }, []);
+
+    const removeComposerAttachment = useCallback(
+      (attachmentId: string) => {
+        if (attachmentId.startsWith('file:')) {
+          removePendingMentionPath(attachmentId.slice('file:'.length));
+          return;
+        }
+        if (attachmentId.startsWith('image:')) {
+          removePendingLocalImagePath(attachmentId.slice('image:'.length));
+        }
+      },
+      [removePendingLocalImagePath, removePendingMentionPath]
+    );
+
+    const addPendingMentionPath = useCallback((rawPath: string): boolean => {
+      const normalized = normalizeAttachmentPath(rawPath);
+      if (!normalized) {
+        setError('Enter a file path to attach');
+        return false;
+      }
+
+      setPendingMentionPaths((prev) => {
+        const dedupeKey = normalized.toLowerCase();
+        if (prev.some((entry) => entry.toLowerCase() === dedupeKey)) {
+          return prev;
+        }
+        return [...prev, normalized];
+      });
+      setError(null);
+      return true;
+    }, []);
+
+    const addPendingLocalImagePath = useCallback((rawPath: string): boolean => {
+      const normalized = normalizeAttachmentPath(rawPath);
+      if (!normalized) {
+        setError('Image path is invalid');
+        return false;
+      }
+
+      setPendingLocalImagePaths((prev) => {
+        const dedupeKey = normalized.toLowerCase();
+        if (prev.some((entry) => entry.toLowerCase() === dedupeKey)) {
+          return prev;
+        }
+        return [...prev, normalized];
+      });
+      setError(null);
+      return true;
+    }, []);
+
+    const uploadMobileAttachment = useCallback(
+      async ({
+        uri,
+        fileName,
+        mimeType,
+        kind,
+        dataBase64,
+      }: {
+        uri: string;
+        fileName?: string;
+        mimeType?: string;
+        kind: 'file' | 'image';
+        dataBase64?: string;
+      }) => {
+        const normalizedUri = normalizeAttachmentPath(uri);
+        if (!normalizedUri) {
+          setError('Unable to read attachment from this device');
+          return;
+        }
+
+        setUploadingAttachment(true);
+        try {
+          const base64 =
+            dataBase64 ??
+            (await FileSystem.readAsStringAsync(normalizedUri, {
+              encoding: FileSystem.EncodingType.Base64,
+            }));
+          if (!base64.trim()) {
+            throw new Error('Attachment is empty');
+          }
+
+          const uploaded = await api.uploadAttachment({
+            dataBase64: base64,
+            fileName,
+            mimeType,
+            threadId: selectedChatId ?? undefined,
+            kind,
+          });
+
+          if (uploaded.kind === 'image') {
+            addPendingLocalImagePath(uploaded.path);
+          } else {
+            addPendingMentionPath(uploaded.path);
+          }
+          setError(null);
+        } catch (err) {
+          setError((err as Error).message);
+        } finally {
+          setUploadingAttachment(false);
+        }
+      },
+      [addPendingLocalImagePath, addPendingMentionPath, api, selectedChatId]
+    );
+
+    const pickFileFromDevice = useCallback(async () => {
+      try {
+        const result = await DocumentPicker.getDocumentAsync({
+          type: '*/*',
+          copyToCacheDirectory: true,
+          multiple: false,
+        });
+        if (result.canceled || !result.assets[0]) {
+          return;
+        }
+
+        const file = result.assets[0];
+        await uploadMobileAttachment({
+          uri: file.uri,
+          fileName: file.name,
+          mimeType: file.mimeType ?? undefined,
+          kind: 'file',
+        });
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    }, [uploadMobileAttachment]);
+
+    const pickImageFromDevice = useCallback(async () => {
+      try {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          setError('Photo library permission is required to attach images');
+          return;
+        }
+
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 1,
+          base64: true,
+          allowsMultipleSelection: false,
+        });
+        if (result.canceled || !result.assets[0]) {
+          return;
+        }
+
+        const image = result.assets[0];
+        await uploadMobileAttachment({
+          uri: image.uri,
+          fileName: image.fileName ?? undefined,
+          mimeType: image.mimeType ?? undefined,
+          kind: 'image',
+          dataBase64: image.base64 ?? undefined,
+        });
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    }, [uploadMobileAttachment]);
+
+    const openAttachmentMenu = useCallback(() => {
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            options: [
+              'Attach from workspace path',
+              'Pick file from phone',
+              'Pick image from phone',
+              'Cancel',
+            ],
+            cancelButtonIndex: 3,
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 0) {
+              openAttachmentPathModal();
+              return;
+            }
+            if (buttonIndex === 1) {
+              void pickFileFromDevice();
+              return;
+            }
+            if (buttonIndex === 2) {
+              void pickImageFromDevice();
+            }
+          }
+        );
+        return;
+      }
+
+      Alert.alert('Attach', 'Choose attachment source', [
+        {
+          text: 'Workspace path',
+          onPress: openAttachmentPathModal,
+        },
+        {
+          text: 'File from phone',
+          onPress: () => {
+            void pickFileFromDevice();
+          },
+        },
+        {
+          text: 'Image from phone',
+          onPress: () => {
+            void pickImageFromDevice();
+          },
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ]);
+    }, [openAttachmentPathModal, pickFileFromDevice, pickImageFromDevice]);
+
+    const submitAttachmentPath = useCallback(() => {
+      if (!addPendingMentionPath(attachmentPathDraft)) {
+        return;
+      }
+
+      setAttachmentPathDraft('');
+      setAttachmentModalVisible(false);
+    }, [addPendingMentionPath, attachmentPathDraft]);
+
+    const selectAttachmentSuggestion = useCallback(
+      (path: string) => {
+        if (!addPendingMentionPath(path)) {
+          return;
+        }
+
+        setAttachmentPathDraft('');
+        setAttachmentModalVisible(false);
+      },
+      [addPendingMentionPath]
+    );
+
     useEffect(() => {
       void refreshModelOptions();
     }, [refreshModelOptions]);
+
+    useEffect(() => {
+      setAttachmentFileCandidates([]);
+    }, [attachmentWorkspace]);
 
     const openRenameModal = useCallback(() => {
       if (!selectedChat) {
@@ -1372,6 +1713,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setUserInputDrafts({});
         setUserInputError(null);
         setResolvingUserInput(false);
+        setAttachmentModalVisible(false);
+        setAttachmentPathDraft('');
+        setPendingMentionPaths([]);
+        setPendingLocalImagePaths([]);
         setActivePlan(null);
 
         if (canReuseSnapshot && optimisticChat) {
@@ -1450,10 +1795,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
+      const turnMentions = pendingMentionPaths.map((path) => toMentionInput(path));
+      const turnLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
+      const optimisticContent = toOptimisticUserContent(content, turnMentions, turnLocalImages);
+
       const optimisticMessage: ChatTranscriptMessage = {
         id: `msg-${Date.now()}`,
         role: 'user',
-        content,
+        content: optimisticContent,
         createdAt: new Date().toISOString(),
       };
 
@@ -1495,6 +1844,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         const updated = await api.sendChatMessage(created.id, {
           content,
+          mentions: turnMentions,
+          localImages: turnLocalImages,
           cwd: created.cwd ?? preferredStartCwd ?? undefined,
           model: activeModelId ?? undefined,
           effort: activeEffort ?? undefined,
@@ -1507,6 +1858,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           appendActivityPhrase('Plan mode enabled', true);
         }
         setSelectedChat(updated);
+        setPendingMentionPaths([]);
+        setPendingLocalImagePaths([]);
         setError(null);
         if (shouldRemainRunning) {
           setActivity({
@@ -1542,6 +1895,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       activeEffort,
       activeModelId,
       handleSlashCommand,
+      pendingMentionPaths,
+      pendingLocalImagePaths,
       preferredStartCwd,
       selectedCollaborationMode,
       appendActivityPhrase,
@@ -1568,11 +1923,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
         const resolvedCollaborationMode =
           options?.collaborationMode ?? selectedCollaborationMode;
+        const turnMentions = pendingMentionPaths.map((path) => toMentionInput(path));
+        const turnLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
+        const optimisticContent = toOptimisticUserContent(content, turnMentions, turnLocalImages);
 
         const optimisticMessage: ChatTranscriptMessage = {
           id: `msg-${Date.now()}`,
           role: 'user',
-          content,
+          content: optimisticContent,
           createdAt: new Date().toISOString(),
         };
 
@@ -1600,6 +1958,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
           const updated = await api.sendChatMessage(selectedChatId, {
             content,
+            mentions: turnMentions,
+            localImages: turnLocalImages,
             cwd: selectedChat?.cwd,
             model: activeModelId ?? undefined,
             effort: activeEffort ?? undefined,
@@ -1612,6 +1972,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             appendActivityPhrase('Plan mode enabled', true);
           }
           setSelectedChat(updated);
+          setPendingMentionPaths([]);
+          setPendingLocalImagePaths([]);
           setError(null);
           if (shouldRemainRunning) {
             setActivity({
@@ -1648,6 +2010,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         api,
         appendActivityPhrase,
         handleSlashCommand,
+        pendingMentionPaths,
+        pendingLocalImagePaths,
         selectedCollaborationMode,
         selectedChat?.cwd,
         selectedChatId,
@@ -1724,8 +2088,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method.startsWith('codex/event/')) {
           const params = toRecord(event.params);
           const msg = toRecord(params?.msg);
-          const codexEventType =
-            readString(msg?.type) ?? event.method.replace('codex/event/', '');
+          const codexEventType = normalizeCodexEventType(
+            readString(msg?.type) ?? event.method.replace('codex/event/', '')
+          );
+          if (!codexEventType) {
+            return;
+          }
           const threadId =
             readString(msg?.thread_id) ??
             readString(msg?.threadId) ??
@@ -1753,7 +2121,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             bumpRunWatchdog();
           }
 
-          if (codexEventType === 'task_started') {
+          if (codexEventType === 'taskstarted') {
             setActivity({
               tone: 'running',
               title: 'Working',
@@ -1763,10 +2131,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (
-            codexEventType === 'agent_reasoning_delta' ||
-            codexEventType === 'reasoning_content_delta' ||
-            codexEventType === 'reasoning_raw_content_delta' ||
-            codexEventType === 'agent_reasoning_raw_content_delta'
+            codexEventType === 'agentreasoningdelta' ||
+            codexEventType === 'reasoningcontentdelta' ||
+            codexEventType === 'reasoningrawcontentdelta' ||
+            codexEventType === 'agentreasoningrawcontentdelta'
           ) {
             const delta = readString(msg?.delta);
             if (!delta) {
@@ -1795,15 +2163,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'agent_reasoning_section_break') {
+          if (codexEventType === 'agentreasoningsectionbreak') {
             codexReasoningBufferRef.current = '';
             setActivityPhrases(['Analyzing text']);
             return;
           }
 
           if (
-            codexEventType === 'agent_message_delta' ||
-            codexEventType === 'agent_message_content_delta'
+            codexEventType === 'agentmessagedelta' ||
+            codexEventType === 'agentmessagecontentdelta'
           ) {
             const delta = readString(msg?.delta);
             if (!delta) {
@@ -1830,7 +2198,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'exec_command_begin') {
+          if (codexEventType === 'execcommandbegin') {
             const command = toCommandDisplay(msg?.command);
             const detail = toTickerSnippet(command, 80);
             const commandLabel = detail ?? 'Command';
@@ -1847,7 +2215,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'exec_command_end') {
+          if (codexEventType === 'execcommandend') {
             const status = readString(msg?.status);
             const command = toCommandDisplay(msg?.command);
             const detail = toTickerSnippet(command, 80);
@@ -1877,7 +2245,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'mcp_startup_update') {
+          if (codexEventType === 'mcpstartupupdate') {
             const server = readString(msg?.server);
             const state =
               readString(msg?.status) ??
@@ -1896,7 +2264,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'mcp_tool_call_begin') {
+          if (codexEventType === 'mcptoolcallbegin') {
             const server = readString(msg?.server);
             const tool = readString(msg?.tool);
             const detail = [server, tool].filter(Boolean).join(' / ');
@@ -1915,7 +2283,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'web_search_begin') {
+          if (codexEventType === 'websearchbegin') {
             const query = toTickerSnippet(readString(msg?.query), 64);
             const searchLabel = query ? `Web search: ${query}` : 'Web search';
             setActivity({
@@ -1931,7 +2299,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'background_event') {
+          if (codexEventType === 'backgroundevent') {
             const message =
               toTickerSnippet(readString(msg?.message), 72) ??
               toTickerSnippet(readString(msg?.text), 72);
@@ -1947,7 +2315,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'turn_aborted') {
+          if (CODEX_RUN_ABORT_EVENT_TYPES.has(codexEventType)) {
             clearRunWatchdog();
             setActiveCommands([]);
             setStreamingText(null);
@@ -1963,7 +2331,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          if (codexEventType === 'task_complete') {
+          if (CODEX_RUN_FAILURE_EVENT_TYPES.has(codexEventType)) {
+            clearRunWatchdog();
+            setActiveCommands([]);
+            setStreamingText(null);
+            setActivityPhrases([]);
+            reasoningSummaryRef.current = {};
+            codexReasoningBufferRef.current = '';
+            hadCommandRef.current = false;
+            setActivity({
+              tone: 'error',
+              title: 'Turn failed',
+            });
+            void loadChat(activeThreadId);
+            return;
+          }
+
+          if (CODEX_RUN_COMPLETION_EVENT_TYPES.has(codexEventType)) {
             clearRunWatchdog();
             setActivity({
               tone: 'complete',
@@ -2773,7 +3157,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [maxKeyboardInset, windowHeight]);
 
     const handleSubmit = selectedChat ? sendMessage : createChat;
-    const isLoading = sending || creating;
+    const isLoading = sending || creating || uploadingAttachment;
     const isStreaming = sending || creating || Boolean(streamingText);
     const isOpeningChat = Boolean(openingChatId);
     const isOpeningDifferentChat =
@@ -2918,7 +3302,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               value={draft}
               onChangeText={setDraft}
               onSubmit={() => void handleSubmit()}
-              onNewChat={() => void startNewChat()}
+              onAttachPress={openAttachmentMenu}
+              attachments={composerAttachments}
+              onRemoveAttachment={removeComposerAttachment}
               isLoading={isLoading}
               placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
             />
@@ -3121,6 +3507,111 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   <Text style={styles.renameModalButtonPrimaryText}>
                     {renaming ? 'Saving...' : 'Save'}
                   </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
+          visible={attachmentModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeAttachmentModal}
+        >
+          <View style={styles.renameModalBackdrop}>
+            <View style={styles.renameModalCard}>
+              <Text style={styles.renameModalTitle}>Attach file</Text>
+              <Text style={styles.attachmentModalHint}>
+                Enter a workspace-relative path to include as context.
+              </Text>
+              <TextInput
+                value={attachmentPathDraft}
+                onChangeText={setAttachmentPathDraft}
+                placeholder="apps/mobile/src/screens/MainScreen.tsx"
+                placeholderTextColor={colors.textMuted}
+                style={styles.renameModalInput}
+                autoFocus
+                editable={!isLoading}
+                autoCapitalize="none"
+                autoCorrect={false}
+                onSubmitEditing={submitAttachmentPath}
+                returnKeyType="done"
+              />
+              {loadingAttachmentFileCandidates ? (
+                <Text style={styles.workspaceModalLoading}>Indexing files…</Text>
+              ) : null}
+              {attachmentPathSuggestions.length > 0 ? (
+                <ScrollView
+                  style={styles.attachmentSuggestionsList}
+                  contentContainerStyle={styles.attachmentSuggestionsListContent}
+                  keyboardShouldPersistTaps="handled"
+                  nestedScrollEnabled
+                >
+                  {attachmentPathSuggestions.map((path, index) => (
+                    <Pressable
+                      key={`${path}-${String(index)}`}
+                      onPress={() => selectAttachmentSuggestion(path)}
+                      style={({ pressed }) => [
+                        styles.attachmentSuggestionItem,
+                        index === attachmentPathSuggestions.length - 1 &&
+                          styles.attachmentSuggestionItemLast,
+                        pressed && styles.attachmentSuggestionItemPressed,
+                      ]}
+                    >
+                      <Text style={styles.attachmentSuggestionText} numberOfLines={1}>
+                        {path}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              ) : attachmentPathDraft.trim() && !loadingAttachmentFileCandidates ? (
+                <Text style={styles.workspaceModalLoading}>No matching files found.</Text>
+              ) : null}
+              {pendingMentionPaths.length > 0 ? (
+                <View style={styles.attachmentListColumn}>
+                  {pendingMentionPaths.map((path, index) => (
+                    <View key={`${path}-${String(index)}`} style={styles.attachmentListRow}>
+                      <Text style={styles.attachmentListPath} numberOfLines={1}>
+                        {path}
+                      </Text>
+                      <Pressable
+                        onPress={() => removePendingMentionPath(path)}
+                        style={({ pressed }) => [
+                          styles.attachmentRemoveButton,
+                          pressed && styles.attachmentRemoveButtonPressed,
+                        ]}
+                      >
+                        <Ionicons name="close" size={14} color={colors.textMuted} />
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+              <View style={styles.renameModalActions}>
+                <Pressable
+                  onPress={closeAttachmentModal}
+                  style={({ pressed }) => [
+                    styles.renameModalButton,
+                    styles.renameModalButtonSecondary,
+                    pressed && styles.renameModalButtonPressed,
+                  ]}
+                  disabled={isLoading}
+                >
+                  <Text style={styles.renameModalButtonSecondaryText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={submitAttachmentPath}
+                  style={({ pressed }) => [
+                    styles.renameModalButton,
+                    styles.renameModalButtonPrimary,
+                    pressed && styles.renameModalButtonPrimaryPressed,
+                    (!attachmentPathDraft.trim() || isLoading) &&
+                      styles.renameModalButtonDisabled,
+                  ]}
+                  disabled={!attachmentPathDraft.trim() || isLoading}
+                >
+                  <Text style={styles.renameModalButtonPrimaryText}>Attach</Text>
                 </Pressable>
               </View>
             </View>
@@ -3379,6 +3870,7 @@ function ChatView({
 
   const filtered = chat.messages.filter((msg) => {
     const text = msg.content || '';
+    if (msg.role === 'system') return false;
     if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
     if (text.includes('Current working directory is:')) return false;
     if (text.includes('You are operating in task worktree')) return false;
@@ -3896,6 +4388,94 @@ function normalizeWorkspacePath(value: string | null | undefined): string | null
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function normalizeAttachmentPath(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function toMentionInput(path: string): MentionInput {
+  const segments = path.split(/[\\/]/).filter(Boolean);
+  const name = segments[segments.length - 1] ?? path;
+  return {
+    path,
+    name,
+  };
+}
+
+function toOptimisticUserContent(
+  content: string,
+  mentions: MentionInput[],
+  localImages: LocalImageInput[]
+): string {
+  if (mentions.length === 0 && localImages.length === 0) {
+    return content;
+  }
+
+  const mentionLines = mentions.map((mention) => `[file: ${mention.path}]`);
+  const localImageLines = localImages.map((image) => `[local image: ${image.path}]`);
+  return [content, ...mentionLines, ...localImageLines].join('\n');
+}
+
+function toPathBasename(path: string): string {
+  const normalized = path.trim();
+  if (!normalized) {
+    return 'image';
+  }
+
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] ?? normalized;
+}
+
+function toAttachmentPathSuggestions(
+  candidates: string[],
+  query: string,
+  pendingMentionPaths: string[]
+): string[] {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return [];
+  }
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const selectedSet = new Set(pendingMentionPaths.map((path) => path.trim().toLowerCase()));
+  const startsWithMatches: string[] = [];
+  const containsMatches: string[] = [];
+
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const lowered = trimmed.toLowerCase();
+    if (selectedSet.has(lowered)) {
+      continue;
+    }
+
+    if (!normalizedQuery) {
+      startsWithMatches.push(trimmed);
+      if (startsWithMatches.length >= 8) {
+        break;
+      }
+      continue;
+    }
+
+    if (lowered.startsWith(normalizedQuery)) {
+      startsWithMatches.push(trimmed);
+      continue;
+    }
+
+    if (lowered.includes(`/${normalizedQuery}`) || lowered.includes(normalizedQuery)) {
+      containsMatches.push(trimmed);
+    }
+  }
+
+  return [...startsWithMatches, ...containsMatches].slice(0, 8);
+}
+
 function extractWorkspaceOptions(chats: ChatSummary[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -4220,12 +4800,17 @@ function toActivityPhrase(title: string, detail?: string): string | null {
   return compactTitle ?? compactDetail ?? null;
 }
 
-function isCodexRunHeartbeatEvent(codexEventType: string): boolean {
-  if (CODEX_RUN_TERMINAL_EVENT_TYPES.has(codexEventType)) {
-    return false;
+function normalizeCodexEventType(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
   }
 
-  return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType) || codexEventType.length > 0;
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalized.length > 0 ? normalized : null;
+}
+
+function isCodexRunHeartbeatEvent(codexEventType: string): boolean {
+  return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType);
 }
 
 function isChatLikelyRunning(chat: Chat): boolean {
@@ -4565,6 +5150,36 @@ const styles = StyleSheet.create({
     ...typography.headline,
     color: colors.textPrimary,
   },
+  attachmentModalHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  attachmentSuggestionsList: {
+    maxHeight: 170,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    borderRadius: 10,
+    backgroundColor: colors.bgMain,
+  },
+  attachmentSuggestionsListContent: {
+    paddingVertical: 0,
+  },
+  attachmentSuggestionItem: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.borderLight,
+  },
+  attachmentSuggestionItemLast: {
+    borderBottomWidth: 0,
+  },
+  attachmentSuggestionItemPressed: {
+    backgroundColor: colors.bgInput,
+  },
+  attachmentSuggestionText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+  },
   renameModalInput: {
     color: colors.textPrimary,
     backgroundColor: colors.bgInput,
@@ -4574,6 +5189,39 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     fontSize: 15,
+  },
+  attachmentListColumn: {
+    gap: spacing.xs,
+    maxHeight: 180,
+  },
+  attachmentListRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    borderRadius: 8,
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  attachmentListPath: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    flex: 1,
+  },
+  attachmentRemoveButton: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgItem,
+  },
+  attachmentRemoveButtonPressed: {
+    opacity: 0.8,
   },
   renameModalActions: {
     flexDirection: 'row',

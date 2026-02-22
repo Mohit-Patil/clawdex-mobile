@@ -326,6 +326,11 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
               return `[local image: ${readString(entryRecord.path) ?? 'unknown'}]`;
             }
 
+            if (entryType === 'mention') {
+              const mentionPath = readString(entryRecord.path) ?? 'unknown';
+              return `[file: ${mentionPath}]`;
+            }
+
             return '';
           })
           .filter(Boolean)

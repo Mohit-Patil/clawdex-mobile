@@ -3,6 +3,7 @@ import {
   mapChatSummary,
   readString,
   toRecord,
+  type RawThread,
   toRawThread,
 } from './chatMapping';
 import type {
@@ -21,6 +22,10 @@ import type {
   ResolveUserInputRequest,
   ResolveUserInputResponse,
   SendChatMessageRequest,
+  MentionInput,
+  LocalImageInput,
+  UploadAttachmentRequest,
+  UploadAttachmentResponse,
   ModelOption,
   ReasoningEffort,
   ModelReasoningEffortOption,
@@ -81,7 +86,29 @@ type AppServerThreadSetNameResponse = Record<string, never>;
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
 const MOBILE_DEVELOPER_INSTRUCTIONS =
   'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
-const TURN_COMPLETION_SOFT_TIMEOUT_MS = 45_000;
+const TURN_COMPLETION_SOFT_TIMEOUT_MS = 180_000;
+
+interface ChatSnapshot {
+  rawThread: RawThread;
+  chat: Chat;
+}
+
+interface TurnInputText {
+  type: 'text';
+  text: string;
+  text_elements: [];
+}
+
+interface TurnInputMention {
+  type: 'mention';
+  name: string;
+  path: string;
+}
+
+interface TurnInputLocalImage {
+  type: 'localImage';
+  path: string;
+}
 
 export class MacBridgeApiClient {
   private readonly ws: MacBridgeWsClient;
@@ -178,29 +205,8 @@ export class MacBridgeApiClient {
   }
 
   async getChat(id: string): Promise<Chat> {
-    try {
-      const response = await this.ws.request<AppServerReadResponse>('thread/read', {
-        threadId: id,
-        includeTurns: true,
-      });
-
-      return this.mapChatWithCachedTitle(response.thread);
-    } catch (error) {
-      const message = String((error as Error).message ?? error);
-      const isMaterializationGap =
-        message.includes('includeTurns') &&
-        (message.includes('material') || message.includes('materialis'));
-
-      if (!isMaterializationGap) {
-        throw error;
-      }
-
-      const response = await this.ws.request<AppServerReadResponse>('thread/read', {
-        threadId: id,
-        includeTurns: false,
-      });
-      return this.mapChatWithCachedTitle(response.thread);
-    }
+    const snapshot = await this.readChatSnapshot(id);
+    return snapshot.chat;
   }
 
   async renameChat(id: string, name: string): Promise<Chat> {
@@ -273,6 +279,8 @@ export class MacBridgeApiClient {
     const normalizedCwd = normalizeCwd(body.cwd);
     const normalizedModel = normalizeModel(body.model);
     const normalizedEffort = normalizeEffort(body.effort);
+    const normalizedMentions = normalizeMentions(body.mentions);
+    const normalizedLocalImages = normalizeLocalImages(body.localImages);
     const requestedPlanMode =
       typeof body.collaborationMode === 'string' &&
       body.collaborationMode.trim().toLowerCase() === 'plan';
@@ -314,13 +322,7 @@ export class MacBridgeApiClient {
 
     const turnStart = await this.ws.request<AppServerTurnResponse>('turn/start', {
       threadId: id,
-      input: [
-        {
-          type: 'text',
-          text: content,
-          text_elements: [],
-        },
-      ],
+      input: buildTurnInput(content, normalizedMentions, normalizedLocalImages),
       cwd: normalizedCwd ?? null,
       approvalPolicy: null,
       sandboxPolicy: null,
@@ -346,7 +348,11 @@ export class MacBridgeApiClient {
         throw error;
       }
     }
-    return this.getChatWithUserMessage(id, content);
+    return this.getChatWithUserMessage(id, turnId, content);
+  }
+
+  uploadAttachment(body: UploadAttachmentRequest): Promise<UploadAttachmentResponse> {
+    return this.ws.request<UploadAttachmentResponse>('bridge/attachments/upload', body);
   }
 
   async listModels(includeHidden = false): Promise<ModelOption[]> {
@@ -554,18 +560,74 @@ export class MacBridgeApiClient {
     }
   }
 
-  private async getChatWithUserMessage(id: string, content: string): Promise<Chat> {
+  private async readChatSnapshot(id: string): Promise<ChatSnapshot> {
+    try {
+      const response = await this.ws.request<AppServerReadResponse>('thread/read', {
+        threadId: id,
+        includeTurns: true,
+      });
+      const rawThread = toRawThread(response.thread);
+      return {
+        rawThread,
+        chat: this.mapChatWithCachedTitle(rawThread),
+      };
+    } catch (error) {
+      if (!isMaterializationGapError(error)) {
+        throw error;
+      }
+
+      const response = await this.ws.request<AppServerReadResponse>('thread/read', {
+        threadId: id,
+        includeTurns: false,
+      });
+      const rawThread = toRawThread(response.thread);
+      return {
+        rawThread,
+        chat: this.mapChatWithCachedTitle(rawThread),
+      };
+    }
+  }
+
+  private async getChatWithUserMessage(
+    id: string,
+    turnId: string,
+    content: string
+  ): Promise<Chat> {
     const normalizedContent = content.trim();
-    let latest = await this.getChat(id);
-    if (!normalizedContent || chatHasRecentUserMessage(latest, normalizedContent)) {
+    let latestSnapshot = await this.readChatSnapshot(id);
+    let latest = latestSnapshot.chat;
+
+    if (!normalizedContent) {
+      return latest;
+    }
+
+    const hasMatchingTurnMessage = rawThreadHasTurnUserMessage(
+      latestSnapshot.rawThread,
+      turnId,
+      normalizedContent
+    );
+    const hasFallbackRecentMessage =
+      !rawThreadHasTurns(latestSnapshot.rawThread) &&
+      chatHasRecentUserMessage(latest, normalizedContent);
+    if (hasMatchingTurnMessage || hasFallbackRecentMessage) {
       return latest;
     }
 
     const retryDelaysMs = [150, 300, 500, 800];
     for (const delayMs of retryDelaysMs) {
       await sleep(delayMs);
-      latest = await this.getChat(id);
-      if (chatHasRecentUserMessage(latest, normalizedContent)) {
+      latestSnapshot = await this.readChatSnapshot(id);
+      latest = latestSnapshot.chat;
+
+      const matchedAfterRetry = rawThreadHasTurnUserMessage(
+        latestSnapshot.rawThread,
+        turnId,
+        normalizedContent
+      );
+      const matchedByFallback =
+        !rawThreadHasTurns(latestSnapshot.rawThread) &&
+        chatHasRecentUserMessage(latest, normalizedContent);
+      if (matchedAfterRetry || matchedByFallback) {
         return latest;
       }
     }
@@ -613,6 +675,109 @@ function normalizeEffort(effort: string | null | undefined): ReasoningEffort | n
   }
 
   return null;
+}
+
+function buildTurnInput(
+  content: string,
+  mentions: TurnInputMention[],
+  localImages: TurnInputLocalImage[]
+): Array<TurnInputText | TurnInputMention | TurnInputLocalImage> {
+  const textInput: TurnInputText = {
+    type: 'text',
+    text: content,
+    text_elements: [],
+  };
+
+  if (mentions.length === 0 && localImages.length === 0) {
+    return [textInput];
+  }
+
+  return [textInput, ...mentions, ...localImages];
+}
+
+function normalizeMentions(raw: MentionInput[] | undefined): TurnInputMention[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const normalized: TurnInputMention[] = [];
+  const seenPaths = new Set<string>();
+
+  for (const entry of raw) {
+    if (!entry || typeof entry.path !== 'string') {
+      continue;
+    }
+
+    const path = entry.path.trim();
+    if (!path) {
+      continue;
+    }
+
+    const dedupeKey = path.toLowerCase();
+    if (seenPaths.has(dedupeKey)) {
+      continue;
+    }
+    seenPaths.add(dedupeKey);
+
+    const name = normalizeMentionName(entry.name, path);
+    normalized.push({
+      type: 'mention',
+      name,
+      path,
+    });
+  }
+
+  return normalized;
+}
+
+function normalizeMentionName(name: string | undefined, path: string): string {
+  if (typeof name === 'string') {
+    const trimmed = name.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+
+  const pathSegments = path.split(/[\\/]/).filter(Boolean);
+  const inferred = pathSegments[pathSegments.length - 1];
+  if (typeof inferred === 'string' && inferred.trim().length > 0) {
+    return inferred.trim();
+  }
+
+  return path;
+}
+
+function normalizeLocalImages(raw: LocalImageInput[] | undefined): TurnInputLocalImage[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const normalized: TurnInputLocalImage[] = [];
+  const seenPaths = new Set<string>();
+
+  for (const entry of raw) {
+    if (!entry || typeof entry.path !== 'string') {
+      continue;
+    }
+
+    const path = entry.path.trim();
+    if (!path) {
+      continue;
+    }
+
+    const dedupeKey = path.toLowerCase();
+    if (seenPaths.has(dedupeKey)) {
+      continue;
+    }
+    seenPaths.add(dedupeKey);
+
+    normalized.push({
+      type: 'localImage',
+      path,
+    });
+  }
+
+  return normalized;
 }
 
 function toTurnCollaborationMode(
@@ -693,9 +858,62 @@ function chatHasRecentUserMessage(chat: Chat, content: string, tailSize = 8): bo
   );
 }
 
+function rawThreadHasTurns(rawThread: RawThread): boolean {
+  return Array.isArray(rawThread.turns) && rawThread.turns.length > 0;
+}
+
+function rawThreadHasTurnUserMessage(
+  rawThread: RawThread,
+  turnId: string,
+  content: string
+): boolean {
+  const normalizedContent = content.trim();
+  const normalizedTurnId = turnId.trim();
+  if (!normalizedContent || !normalizedTurnId) {
+    return false;
+  }
+
+  const turns = Array.isArray(rawThread.turns) ? rawThread.turns : [];
+  const matchedTurn = turns.find((turn) => turn.id === normalizedTurnId);
+  if (!matchedTurn || !Array.isArray(matchedTurn.items)) {
+    return false;
+  }
+
+  return matchedTurn.items.some((item) => {
+    const record = toRecord(item);
+    if (!record || readString(record.type) !== 'userMessage') {
+      return false;
+    }
+
+    return extractUserMessageText(record.content).trim() === normalizedContent;
+  });
+}
+
+function extractUserMessageText(value: unknown): string {
+  if (!Array.isArray(value)) {
+    return '';
+  }
+
+  return value
+    .map((entry) => {
+      const record = toRecord(entry);
+      if (!record) {
+        return '';
+      }
+
+      if (readString(record.type) !== 'text') {
+        return '';
+      }
+
+      return readString(record.text) ?? '';
+    })
+    .filter((part) => part.length > 0)
+    .join('\n');
+}
+
 function appendSyntheticUserMessage(chat: Chat, content: string): Chat {
   const normalized = content.trim();
-  if (!normalized || chatHasRecentUserMessage(chat, normalized)) {
+  if (!normalized) {
     return chat;
   }
 
@@ -718,4 +936,12 @@ function appendSyntheticUserMessage(chat: Chat, content: string): Chat {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isMaterializationGapError(error: unknown): boolean {
+  const message = String((error as Error).message ?? error);
+  return (
+    message.includes('includeTurns') &&
+    (message.includes('material') || message.includes('materialis'))
+  );
 }

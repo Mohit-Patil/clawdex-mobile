@@ -166,6 +166,7 @@ name = "codex-rust-bridge"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "futures-util",
  "serde",
