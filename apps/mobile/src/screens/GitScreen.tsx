@@ -8,6 +8,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 
@@ -31,7 +32,9 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [bodyScrollEnabled, setBodyScrollEnabled] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { height: windowHeight } = useWindowDimensions();
 
   useEffect(() => {
     setActiveChat(chat);
@@ -151,6 +154,24 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     [status?.raw]
   );
   const canPush = aheadCount > 0;
+  const filesListMaxHeight = useMemo(() => {
+    const proposed = Math.floor(windowHeight * 0.4);
+    return Math.max(200, Math.min(360, proposed));
+  }, [windowHeight]);
+
+  const disableBodyScroll = useCallback(() => {
+    setBodyScrollEnabled((previous) => (previous ? false : previous));
+  }, []);
+
+  const enableBodyScroll = useCallback(() => {
+    setBodyScrollEnabled((previous) => (previous ? previous : true));
+  }, []);
+
+  useEffect(() => {
+    if ((loading || !hasChanges) && !bodyScrollEnabled) {
+      setBodyScrollEnabled(true);
+    }
+  }, [bodyScrollEnabled, hasChanges, loading]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -178,7 +199,13 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
         </Pressable>
       </View>
 
-      <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+      <ScrollView
+        style={styles.body}
+        contentContainerStyle={styles.bodyContent}
+        scrollEnabled={bodyScrollEnabled}
+        nestedScrollEnabled
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={styles.card}>
           <Text style={styles.sectionLabel}>Workspace</Text>
           <TextInput
@@ -275,16 +302,25 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
               </Pressable>
             ) : null}
 
-            <Text style={styles.sectionLabel}>Changed files</Text>
+            <Text style={styles.sectionLabel}>
+              {hasChanges ? `Changed files (${changedFiles.length})` : 'Changed files'}
+            </Text>
             <View style={styles.filesCard}>
               {changedFiles.length === 0 ? (
                 <Text style={styles.emptyFilesText}>No changes.</Text>
               ) : (
                 <ScrollView
-                  style={styles.filesScroll}
+                  style={[styles.filesScroll, { maxHeight: filesListMaxHeight }]}
                   contentContainerStyle={styles.filesScrollContent}
                   showsVerticalScrollIndicator
                   nestedScrollEnabled
+                  keyboardShouldPersistTaps="handled"
+                  onTouchStart={disableBodyScroll}
+                  onTouchCancel={enableBodyScroll}
+                  onTouchEnd={enableBodyScroll}
+                  onScrollBeginDrag={disableBodyScroll}
+                  onScrollEndDrag={enableBodyScroll}
+                  onMomentumScrollEnd={enableBodyScroll}
                 >
                   {changedFiles.map((entry) => (
                     <View key={`${entry.code}:${entry.path}`} style={styles.fileRow}>
@@ -442,7 +478,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   filesScroll: {
-    maxHeight: 240,
+    minHeight: 56,
   },
   filesScrollContent: {
     paddingVertical: spacing.xs,

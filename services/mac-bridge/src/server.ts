@@ -1,6 +1,6 @@
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
-import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
+import { isAbsolute, resolve as resolvePath } from 'node:path';
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -275,13 +275,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       });
     }
 
-    const resolvedCwd = resolveCwdWithinRoot(parsed.data.cwd, bridgeWorkdir);
-    if (!resolvedCwd) {
-      return reply.code(400).send({
-        error: 'invalid_cwd',
-        message: 'cwd must stay within BRIDGE_WORKDIR'
-      });
-    }
+    const resolvedCwd = resolveTerminalCwd(parsed.data.cwd, bridgeWorkdir);
 
     try {
       const result = await terminal.executeShell(parsed.data.command, {
@@ -422,13 +416,11 @@ function parseCsvList(value: string | undefined, fallback: string[] = []): strin
     .filter(Boolean);
 }
 
-function resolveCwdWithinRoot(rawCwd: string | undefined, root: string): string | null {
+function resolveTerminalCwd(rawCwd: string | undefined, root: string): string {
   const normalizedRoot = resolvePath(root);
-  const requested = resolvePath(rawCwd ?? normalizedRoot);
-  const rel = relative(normalizedRoot, requested);
-  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) {
-    return requested;
+  if (!rawCwd || rawCwd.trim().length === 0) {
+    return normalizedRoot;
   }
 
-  return null;
+  return isAbsolute(rawCwd) ? resolvePath(rawCwd) : resolvePath(normalizedRoot, rawCwd);
 }

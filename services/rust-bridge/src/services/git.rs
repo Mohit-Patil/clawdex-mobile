@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    resolve_cwd_within_root, BridgeError, GitCommitResponse, GitDiffResponse, GitPushResponse,
+    normalize_path, BridgeError, GitCommitResponse, GitDiffResponse, GitPushResponse,
     GitStatusResponse,
 };
 
@@ -19,8 +19,7 @@ impl GitService {
     }
 
     fn resolve_repo_path(&self, raw_cwd: Option<&str>) -> Result<PathBuf, BridgeError> {
-        resolve_cwd_within_root(raw_cwd, &self.root)
-            .ok_or_else(|| BridgeError::invalid_params("cwd must stay within BRIDGE_WORKDIR"))
+        Ok(resolve_git_cwd(raw_cwd, &self.root))
     }
 
     pub(crate) async fn get_status(
@@ -186,5 +185,48 @@ impl GitService {
             pushed: result.code == Some(0),
             cwd: repo_path.to_string_lossy().to_string(),
         })
+    }
+}
+
+fn resolve_git_cwd(raw_cwd: Option<&str>, root: &PathBuf) -> PathBuf {
+    let requested = match raw_cwd {
+        Some(raw) if !raw.trim().is_empty() => {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        }
+        _ => root.to_path_buf(),
+    };
+
+    normalize_path(&requested)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_git_cwd;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolves_relative_cwd_against_root() {
+        let root = PathBuf::from("/bridge/root");
+        let resolved = resolve_git_cwd(Some("workspace/repo"), &root);
+        assert_eq!(resolved, PathBuf::from("/bridge/root/workspace/repo"));
+    }
+
+    #[test]
+    fn keeps_absolute_cwd_outside_root() {
+        let root = PathBuf::from("/bridge/root");
+        let resolved = resolve_git_cwd(Some("/external/repo"), &root);
+        assert_eq!(resolved, PathBuf::from("/external/repo"));
+    }
+
+    #[test]
+    fn falls_back_to_root_when_cwd_missing() {
+        let root = PathBuf::from("/bridge/root");
+        let resolved = resolve_git_cwd(None, &root);
+        assert_eq!(resolved, root);
     }
 }

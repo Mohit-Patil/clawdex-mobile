@@ -1887,29 +1887,6 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
-fn resolve_cwd_within_root(raw_cwd: Option<&str>, root: &Path) -> Option<PathBuf> {
-    let requested = match raw_cwd {
-        Some(raw) if !raw.trim().is_empty() => {
-            let path = PathBuf::from(raw);
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        }
-        _ => root.to_path_buf(),
-    };
-
-    let normalized_root = normalize_path(root);
-    let normalized_requested = normalize_path(&requested);
-
-    if normalized_requested.starts_with(&normalized_root) {
-        Some(normalized_requested)
-    } else {
-        None
-    }
-}
-
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
 

@@ -8,7 +8,7 @@ use std::{
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
 use crate::{
-    contains_disallowed_control_chars, resolve_cwd_within_root, BridgeError, TerminalExecRequest,
+    contains_disallowed_control_chars, normalize_path, BridgeError, TerminalExecRequest,
     TerminalExecResponse,
 };
 
@@ -67,8 +67,7 @@ impl TerminalService {
         }
 
         let args = tokens[1..].to_vec();
-        let cwd = resolve_cwd_within_root(request.cwd.as_deref(), &self.root)
-            .ok_or_else(|| BridgeError::invalid_params("cwd must stay within BRIDGE_WORKDIR"))?;
+        let cwd = resolve_exec_cwd(request.cwd.as_deref(), &self.root);
 
         self.execute_binary_internal(
             binary.as_str(),
@@ -181,5 +180,41 @@ impl TerminalService {
             timed_out,
             duration_ms: started_at.elapsed().as_millis() as u64,
         })
+    }
+}
+
+fn resolve_exec_cwd(raw_cwd: Option<&str>, root: &PathBuf) -> PathBuf {
+    let requested = match raw_cwd {
+        Some(raw) if !raw.trim().is_empty() => {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        }
+        _ => root.to_path_buf(),
+    };
+
+    normalize_path(&requested)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_exec_cwd;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolves_relative_exec_cwd_against_root() {
+        let root = PathBuf::from("/bridge/root");
+        let resolved = resolve_exec_cwd(Some("workspace/repo"), &root);
+        assert_eq!(resolved, PathBuf::from("/bridge/root/workspace/repo"));
+    }
+
+    #[test]
+    fn keeps_absolute_exec_cwd_outside_root() {
+        let root = PathBuf::from("/bridge/root");
+        let resolved = resolve_exec_cwd(Some("/external/repo"), &root);
+        assert_eq!(resolved, PathBuf::from("/external/repo"));
     }
 }
