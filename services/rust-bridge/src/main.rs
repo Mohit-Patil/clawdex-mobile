@@ -218,7 +218,7 @@ impl ClientHub {
             return;
         };
 
-        let message = Message::Text(text);
+        let message = Message::Text(text.into());
         let should_remove = match tx.try_send(message) {
             Ok(()) => false,
             Err(mpsc::error::TrySendError::Closed(_)) => true,
@@ -248,7 +248,7 @@ impl ClientHub {
         {
             let clients = self.clients.read().await;
             for (client_id, tx) in clients.iter() {
-                match tx.try_send(Message::Text(text.clone())) {
+                match tx.try_send(Message::Text(text.clone().into())) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         stale_clients.push(*client_id);
@@ -2218,7 +2218,7 @@ mod tests {
         let client_id = hub.add_client(tx).await;
 
         tx_clone
-            .try_send(Message::Text("queued".to_string()))
+            .try_send(Message::Text("queued".to_string().into()))
             .expect("seed full queue");
 
         hub.broadcast_json(json!({ "method": "event/x" })).await;
