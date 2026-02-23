@@ -38,6 +38,7 @@ export interface CreateChatRequest {
   cwd?: string;
   model?: string;
   effort?: ReasoningEffort;
+  approvalPolicy?: ApprovalPolicy;
 }
 
 export type CollaborationMode = 'default' | 'plan';
@@ -48,6 +49,7 @@ export interface SendChatMessageRequest {
   cwd?: string;
   model?: string;
   effort?: ReasoningEffort;
+  approvalPolicy?: ApprovalPolicy;
   collaborationMode?: CollaborationMode;
   mentions?: MentionInput[];
   localImages?: LocalImageInput[];
@@ -87,6 +89,14 @@ export type ReasoningEffort =
   | 'medium'
   | 'high'
   | 'xhigh';
+
+export type ApprovalPolicy =
+  | 'untrusted'
+  | 'on-request'
+  | 'on-failure'
+  | 'never';
+
+export type ApprovalMode = 'normal' | 'yolo';
 
 export interface ModelReasoningEffortOption {
   effort: ReasoningEffort;

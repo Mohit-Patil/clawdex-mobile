@@ -30,6 +30,8 @@ import {
 
 import type { MacBridgeApiClient } from '../api/client';
 import type {
+  ApprovalMode,
+  ApprovalPolicy,
   ApprovalDecision,
   CollaborationMode,
   PendingApproval,
@@ -70,6 +72,7 @@ interface MainScreenProps {
   defaultStartCwd?: string | null;
   defaultModelId?: string | null;
   defaultReasoningEffort?: ReasoningEffort | null;
+  approvalMode?: ApprovalMode;
   onDefaultStartCwdChange?: (cwd: string | null) => void;
   onChatContextChange?: (chat: Chat | null) => void;
   pendingOpenChatId?: string | null;
@@ -357,6 +360,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       defaultStartCwd,
       defaultModelId,
       defaultReasoningEffort,
+      approvalMode,
       onDefaultStartCwdChange,
       onChatContextChange,
       pendingOpenChatId,
@@ -453,6 +457,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
     const preferredDefaultModelId = normalizeModelId(defaultModelId);
     const preferredDefaultEffort = normalizeReasoningEffort(defaultReasoningEffort);
+    const activeApprovalPolicy = toApprovalPolicyForMode(approvalMode);
     const attachmentWorkspace = selectedChat?.cwd ?? preferredStartCwd ?? null;
     const slashQuery = parseSlashQuery(draft);
     const slashSuggestions =
@@ -621,9 +626,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         threadResumeLastAttemptAtRef.current[normalizedThreadId] = now;
-        api.resumeThread(normalizedThreadId).catch(() => {});
+        api
+          .resumeThread(normalizedThreadId, {
+            approvalPolicy: activeApprovalPolicy,
+          })
+          .catch(() => {});
       },
-      [api]
+      [activeApprovalPolicy, api]
     );
 
     const drainExternalStatusFullSyncQueue = useCallback(() => {
@@ -2182,6 +2191,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 cwd: preferredStartCwd ?? undefined,
                 model: activeModelId ?? undefined,
                 effort: activeEffort ?? undefined,
+                approvalPolicy: activeApprovalPolicy,
               });
 
               setSelectedChatId(created.id);
@@ -2205,6 +2215,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 cwd: created.cwd ?? preferredStartCwd ?? undefined,
                 model: activeModelId ?? undefined,
                 effort: activeEffort ?? undefined,
+                approvalPolicy: activeApprovalPolicy,
                 collaborationMode: 'plan',
               }, {
                 onTurnStarted: (turnId) => registerTurnStarted(created.id, turnId),
@@ -2274,6 +2285,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               cwd: selectedChat?.cwd,
               model: activeModelId ?? undefined,
               effort: activeEffort ?? undefined,
+              approvalPolicy: activeApprovalPolicy,
               collaborationMode: 'plan',
             }, {
               onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
@@ -2410,6 +2422,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             const forked = await api.forkChat(selectedChatId, {
               cwd: selectedChat?.cwd,
               model: activeModelId ?? undefined,
+              approvalPolicy: activeApprovalPolicy,
             });
             setSelectedChatId(forked.id);
             rememberChatModelPreference(
@@ -2454,6 +2467,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         activeModelId,
         activeEffortLabel,
         activeModelLabel,
+        activeApprovalPolicy,
         api,
         appendLocalAssistantMessage,
         bumpRunWatchdog,
@@ -2686,6 +2700,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           cwd: preferredStartCwd ?? undefined,
           model: activeModelId ?? undefined,
           effort: activeEffort ?? undefined,
+          approvalPolicy: activeApprovalPolicy,
         });
 
         setSelectedChatId(created.id);
@@ -2713,6 +2728,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             cwd: created.cwd ?? preferredStartCwd ?? undefined,
             model: activeModelId ?? undefined,
             effort: activeEffort ?? undefined,
+            approvalPolicy: activeApprovalPolicy,
             collaborationMode: selectedCollaborationMode,
           },
           {
@@ -2767,6 +2783,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       draft,
       activeEffort,
       activeModelId,
+      activeApprovalPolicy,
       handleSlashCommand,
       pendingMentionPaths,
       pendingLocalImagePaths,
@@ -2843,6 +2860,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               cwd: selectedChat?.cwd,
               model: activeModelId ?? undefined,
               effort: activeEffort ?? undefined,
+              approvalPolicy: activeApprovalPolicy,
               collaborationMode: resolvedCollaborationMode,
             },
             {
@@ -2896,6 +2914,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [
         activeEffort,
         activeModelId,
+        activeApprovalPolicy,
         api,
         handleSlashCommand,
         pendingMentionPaths,
@@ -5740,6 +5759,10 @@ function normalizeReasoningEffort(
   }
 
   return null;
+}
+
+function toApprovalPolicyForMode(mode: ApprovalMode | null | undefined): ApprovalPolicy {
+  return mode === 'yolo' ? 'never' : 'untrusted';
 }
 
 function getChatModelPreferencesPath(): string | null {

@@ -315,6 +315,30 @@ describe('MacBridgeApiClient', () => {
     );
   });
 
+  it('createChat() forwards selected approval policy to thread/start', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_policy',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.createChat({ approvalPolicy: 'never' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        approvalPolicy: 'never',
+      })
+    );
+  });
+
   it('renameChat() retries with threadName when name payload is rejected', async () => {
     const ws = createWsMock();
     ws.request
@@ -401,6 +425,55 @@ describe('MacBridgeApiClient', () => {
     );
   });
 
+  it('sendChatMessage() forwards selected approval policy to resume and turn/start', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_policy' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_policy_turn',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_policy',
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_policy',
+                  content: [{ type: 'text', text: 'hello' }],
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await client.sendChatMessage('thr_policy_turn', {
+      content: 'hello',
+      approvalPolicy: 'never',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      1,
+      'thread/resume',
+      expect.objectContaining({
+        approvalPolicy: 'never',
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        approvalPolicy: 'never',
+      })
+    );
+  });
+
   it('resumeThread() retries with legacy payload when modern resume params are rejected', async () => {
     const ws = createWsMock();
     ws.request
@@ -431,6 +504,35 @@ describe('MacBridgeApiClient', () => {
 
     const legacyPayload = ws.request.mock.calls[1]?.[1] as Record<string, unknown>;
     expect(legacyPayload).not.toHaveProperty('experimentalRawEvents');
+  });
+
+  it('resumeThread() keeps never approval policy in legacy retry when explicitly requested', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockRejectedValueOnce(new Error('unknown field `experimentalRawEvents`'))
+      .mockResolvedValueOnce({});
+
+    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    await expect(
+      client.resumeThread('thr_resume_never', { approvalPolicy: 'never' })
+    ).resolves.toBeUndefined();
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      1,
+      'thread/resume',
+      expect.objectContaining({
+        threadId: 'thr_resume_never',
+        approvalPolicy: 'never',
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'thread/resume',
+      expect.objectContaining({
+        threadId: 'thr_resume_never',
+        approvalPolicy: 'never',
+      })
+    );
   });
 
   it('sendChatMessage() forwards mention and local-image attachments to turn/start input', async () => {

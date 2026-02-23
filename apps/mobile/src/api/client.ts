@@ -7,6 +7,7 @@ import {
   toRawThread,
 } from './chatMapping';
 import type {
+  ApprovalPolicy,
   ApprovalDecision,
   CollaborationMode,
   CreateChatRequest,
@@ -178,11 +179,12 @@ export class MacBridgeApiClient {
     const requestedCwd = normalizeCwd(body.cwd);
     const requestedModel = normalizeModel(body.model);
     const requestedEffort = normalizeEffort(body.effort);
+    const requestedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy) ?? 'untrusted';
     const started = await this.ws.request<AppServerStartResponse>('thread/start', {
       model: requestedModel ?? null,
       modelProvider: null,
       cwd: requestedCwd ?? null,
-      approvalPolicy: 'untrusted',
+      approvalPolicy: requestedApprovalPolicy,
       sandbox: 'workspace-write',
       config: null,
       baseInstructions: null,
@@ -206,6 +208,7 @@ export class MacBridgeApiClient {
         cwd: requestedCwd ?? undefined,
         model: requestedModel ?? undefined,
         effort: requestedEffort ?? undefined,
+        approvalPolicy: requestedApprovalPolicy,
       });
     }
 
@@ -297,12 +300,17 @@ export class MacBridgeApiClient {
     options?: {
       cwd?: string | null;
       model?: string | null;
+      approvalPolicy?: ApprovalPolicy | null;
     }
   ): Promise<void> {
     const threadId = id.trim();
     if (!threadId) {
       throw new Error('thread id is required');
     }
+    const requestedApprovalPolicy =
+      normalizeApprovalPolicy(options?.approvalPolicy) ?? 'untrusted';
+    const fallbackApprovalPolicy =
+      requestedApprovalPolicy === 'never' ? 'never' : 'on-request';
 
     const primaryRequest = {
       threadId,
@@ -311,7 +319,7 @@ export class MacBridgeApiClient {
       model: normalizeModel(options?.model) ?? null,
       modelProvider: null,
       cwd: normalizeCwd(options?.cwd) ?? null,
-      approvalPolicy: 'untrusted',
+      approvalPolicy: requestedApprovalPolicy,
       sandbox: 'workspace-write',
       config: null,
       baseInstructions: null,
@@ -329,7 +337,7 @@ export class MacBridgeApiClient {
       // experimentalRawEvents or strict policy combinations on resume.
       const legacyRequest = {
         ...primaryRequest,
-        approvalPolicy: 'on-request',
+        approvalPolicy: fallbackApprovalPolicy,
         developerInstructions: null,
       };
       delete (legacyRequest as { experimentalRawEvents?: boolean }).experimentalRawEvents;
@@ -361,6 +369,7 @@ export class MacBridgeApiClient {
     const normalizedCwd = normalizeCwd(body.cwd);
     const normalizedModel = normalizeModel(body.model);
     const normalizedEffort = normalizeEffort(body.effort);
+    const normalizedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy);
     const normalizedMentions = normalizeMentions(body.mentions);
     const normalizedLocalImages = normalizeLocalImages(body.localImages);
     const requestedPlanMode =
@@ -386,6 +395,7 @@ export class MacBridgeApiClient {
       await this.resumeThread(id, {
         model: effectiveModel,
         cwd: normalizedCwd,
+        approvalPolicy: normalizedApprovalPolicy,
       });
     } catch {
       // Best effort: turn/start still works for recently started chats.
@@ -395,7 +405,7 @@ export class MacBridgeApiClient {
       threadId: id,
       input: buildTurnInput(content, normalizedMentions, normalizedLocalImages),
       cwd: normalizedCwd ?? null,
-      approvalPolicy: null,
+      approvalPolicy: normalizedApprovalPolicy ?? null,
       sandboxPolicy: null,
       model: effectiveModel ?? null,
       effort: normalizedEffort ?? null,
@@ -526,15 +536,18 @@ export class MacBridgeApiClient {
     options?: {
       cwd?: string;
       model?: string;
+      approvalPolicy?: ApprovalPolicy | null;
     }
   ): Promise<Chat> {
+    const requestedApprovalPolicy =
+      normalizeApprovalPolicy(options?.approvalPolicy) ?? 'untrusted';
     const response = await this.ws.request<AppServerForkResponse>('thread/fork', {
       threadId: id,
       path: null,
       model: normalizeModel(options?.model) ?? null,
       modelProvider: null,
       cwd: normalizeCwd(options?.cwd) ?? null,
-      approvalPolicy: 'untrusted',
+      approvalPolicy: requestedApprovalPolicy,
       sandbox: 'workspace-write',
       config: null,
       baseInstructions: null,
@@ -768,6 +781,26 @@ function normalizeEffort(effort: string | null | undefined): ReasoningEffort | n
     normalized === 'medium' ||
     normalized === 'high' ||
     normalized === 'xhigh'
+  ) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function normalizeApprovalPolicy(
+  policy: string | null | undefined
+): ApprovalPolicy | null {
+  if (typeof policy !== 'string') {
+    return null;
+  }
+
+  const normalized = policy.trim().toLowerCase();
+  if (
+    normalized === 'untrusted' ||
+    normalized === 'on-request' ||
+    normalized === 'on-failure' ||
+    normalized === 'never'
   ) {
     return normalized;
   }

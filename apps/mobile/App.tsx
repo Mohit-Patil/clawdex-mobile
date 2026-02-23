@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 
 import { MacBridgeApiClient } from './src/api/client';
-import type { Chat, ReasoningEffort } from './src/api/types';
+import type { ApprovalMode, Chat, ReasoningEffort } from './src/api/types';
 import { MacBridgeWsClient } from './src/api/ws';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
@@ -63,6 +63,7 @@ export default function App() {
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
   const [defaultReasoningEffort, setDefaultReasoningEffort] =
     useState<ReasoningEffort | null>(null);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('normal');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
@@ -74,7 +75,11 @@ export default function App() {
   }, [ws]);
 
   const saveAppSettings = useCallback(
-    async (nextModelId: string | null, nextEffort: ReasoningEffort | null) => {
+    async (
+      nextModelId: string | null,
+      nextEffort: ReasoningEffort | null,
+      nextApprovalMode: ApprovalMode
+    ) => {
       const settingsPath = getAppSettingsPath();
       if (!settingsPath) {
         return;
@@ -84,6 +89,7 @@ export default function App() {
         version: APP_SETTINGS_VERSION,
         defaultModelId: nextModelId,
         defaultReasoningEffort: nextEffort,
+        approvalMode: nextApprovalMode,
       });
 
       try {
@@ -112,10 +118,12 @@ export default function App() {
         const parsed = parseAppSettings(raw);
         setDefaultModelId(parsed.defaultModelId);
         setDefaultReasoningEffort(parsed.defaultReasoningEffort);
+        setApprovalMode(parsed.approvalMode);
       } catch {
         if (!cancelled) {
           setDefaultModelId(null);
           setDefaultReasoningEffort(null);
+          setApprovalMode('normal');
         }
       }
     };
@@ -272,9 +280,18 @@ export default function App() {
       const normalizedEffort = normalizeReasoningEffort(effort);
       setDefaultModelId(normalizedModelId);
       setDefaultReasoningEffort(normalizedEffort);
-      void saveAppSettings(normalizedModelId, normalizedEffort);
+      void saveAppSettings(normalizedModelId, normalizedEffort, approvalMode);
     },
-    [saveAppSettings]
+    [approvalMode, saveAppSettings]
+  );
+
+  const handleApprovalModeChange = useCallback(
+    (nextMode: ApprovalMode) => {
+      const normalizedMode = normalizeApprovalMode(nextMode);
+      setApprovalMode(normalizedMode);
+      void saveAppSettings(defaultModelId, defaultReasoningEffort, normalizedMode);
+    },
+    [defaultModelId, defaultReasoningEffort, saveAppSettings]
   );
 
   const handleOpenChatGit = useCallback((chat: Chat) => {
@@ -340,6 +357,7 @@ export default function App() {
             defaultStartCwd={defaultStartCwd}
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
+            approvalMode={approvalMode}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
@@ -359,6 +377,8 @@ export default function App() {
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
             onDefaultModelSettingsChange={handleDefaultModelSettingsChange}
+            approvalMode={approvalMode}
+            onApprovalModeChange={handleApprovalModeChange}
             onOpenDrawer={openDrawer}
             onOpenPrivacy={openPrivacy}
             onOpenTerms={openTerms}
@@ -389,6 +409,7 @@ export default function App() {
             defaultStartCwd={defaultStartCwd}
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
+            approvalMode={approvalMode}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
@@ -459,11 +480,13 @@ function getAppSettingsPath(): string | null {
 function parseAppSettings(raw: string): {
   defaultModelId: string | null;
   defaultReasoningEffort: ReasoningEffort | null;
+  approvalMode: ApprovalMode;
 } {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return {
       defaultModelId: null,
       defaultReasoningEffort: null,
+      approvalMode: 'normal',
     };
   }
 
@@ -477,6 +500,7 @@ function parseAppSettings(raw: string): {
       return {
         defaultModelId: null,
         defaultReasoningEffort: null,
+        approvalMode: 'normal',
       };
     }
 
@@ -487,11 +511,15 @@ function parseAppSettings(raw: string): {
       defaultReasoningEffort: normalizeReasoningEffort(
         (parsed as { defaultReasoningEffort?: unknown }).defaultReasoningEffort
       ),
+      approvalMode: normalizeApprovalMode(
+        (parsed as { approvalMode?: unknown }).approvalMode
+      ),
     };
   } catch {
     return {
       defaultModelId: null,
       defaultReasoningEffort: null,
+      approvalMode: 'normal',
     };
   }
 }
@@ -523,6 +551,10 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | null {
   }
 
   return null;
+}
+
+function normalizeApprovalMode(value: unknown): ApprovalMode {
+  return value === 'yolo' ? 'yolo' : 'normal';
 }
 
 const styles = StyleSheet.create({

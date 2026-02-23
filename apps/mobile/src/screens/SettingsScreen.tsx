@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 
 import type { MacBridgeApiClient } from '../api/client';
-import type { ModelOption, ReasoningEffort } from '../api/types';
+import type { ApprovalMode, ModelOption, ReasoningEffort } from '../api/types';
 import type { MacBridgeWsClient } from '../api/ws';
 import { colors, radius, spacing, typography } from '../theme';
 
@@ -24,10 +24,12 @@ interface SettingsScreenProps {
   bridgeUrl: string;
   defaultModelId?: string | null;
   defaultReasoningEffort?: ReasoningEffort | null;
+  approvalMode?: ApprovalMode;
   onDefaultModelSettingsChange?: (
     modelId: string | null,
     effort: ReasoningEffort | null
   ) => void;
+  onApprovalModeChange?: (mode: ApprovalMode) => void;
   onOpenDrawer: () => void;
   onOpenPrivacy: () => void;
   onOpenTerms: () => void;
@@ -39,7 +41,9 @@ export function SettingsScreen({
   bridgeUrl,
   defaultModelId,
   defaultReasoningEffort,
+  approvalMode,
   onDefaultModelSettingsChange,
+  onApprovalModeChange,
   onOpenDrawer,
   onOpenPrivacy,
   onOpenTerms,
@@ -52,6 +56,7 @@ export function SettingsScreen({
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelModalVisible, setModelModalVisible] = useState(false);
   const [effortModalVisible, setEffortModalVisible] = useState(false);
+  const [approvalModeModalVisible, setApprovalModeModalVisible] = useState(false);
 
   const normalizedDefaultModelId = normalizeModelId(defaultModelId);
   const normalizedDefaultEffort = normalizeReasoningEffort(defaultReasoningEffort);
@@ -76,6 +81,11 @@ export function SettingsScreen({
         ? `Default (${formatReasoningEffort(selectedDefaultModel.defaultReasoningEffort)})`
         : 'Model default'
     : 'Server default';
+  const normalizedApprovalMode = approvalMode === 'yolo' ? 'yolo' : 'normal';
+  const approvalModeLabel =
+    normalizedApprovalMode === 'yolo'
+      ? 'YOLO (no approval prompts)'
+      : 'Normal (ask for approvals)';
 
   const checkHealth = useCallback(async () => {
     try {
@@ -200,6 +210,15 @@ export function SettingsScreen({
     [normalizedDefaultModelId, onDefaultModelSettingsChange]
   );
 
+  const selectApprovalMode = useCallback(
+    (mode: ApprovalMode) => {
+      onApprovalModeChange?.(mode);
+      setApprovalModeModalVisible(false);
+      setError(null);
+    },
+    [onApprovalModeChange]
+  );
+
   return (
     <View style={styles.container}>
       <LinearGradient
@@ -252,6 +271,30 @@ export function SettingsScreen({
               <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
             </Pressable>
           </BlurView>
+
+          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Approvals & Permissions</Text>
+          <BlurView intensity={50} tint="dark" style={styles.card}>
+            <Pressable
+              onPress={() => setApprovalModeModalVisible(true)}
+              style={({ pressed }) => [
+                styles.settingRow,
+                styles.settingRowLast,
+                pressed && styles.linkRowPressed,
+              ]}
+            >
+              <View style={styles.settingRowLeft}>
+                <Text style={styles.rowLabel}>Execution approval mode</Text>
+                <Text style={styles.settingValue} numberOfLines={2}>
+                  {approvalModeLabel}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            </Pressable>
+          </BlurView>
+          <Text style={styles.subtleHintText}>
+            This controls command/file-change approvals only. It does not affect
+            request_user_input questions.
+          </Text>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge</Text>
           <BlurView intensity={50} tint="dark" style={styles.card}>
@@ -315,6 +358,42 @@ export function SettingsScreen({
           {error ? <Text style={styles.errorText}>{error}</Text> : null}
         </ScrollView>
       </SafeAreaView>
+
+      <Modal
+        visible={approvalModeModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setApprovalModeModalVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Execution approval mode</Text>
+            <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
+              <OptionRow
+                label="Normal — Ask for approvals"
+                selected={normalizedApprovalMode === 'normal'}
+                onPress={() => selectApprovalMode('normal')}
+              />
+              <OptionRow
+                label="YOLO — Do not ask approvals"
+                selected={normalizedApprovalMode === 'yolo'}
+                onPress={() => selectApprovalMode('yolo')}
+              />
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setApprovalModeModalVisible(false)}
+                style={({ pressed }) => [
+                  styles.modalCloseBtn,
+                  pressed && styles.workspaceModalCloseBtnPressed,
+                ]}
+              >
+                <Text style={styles.modalCloseText}>Close</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={modelModalVisible}
@@ -524,6 +603,12 @@ const styles = StyleSheet.create({
   },
   settingRowDisabled: {
     opacity: 0.45,
+  },
+  subtleHintText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
+    marginHorizontal: spacing.xs,
   },
   refreshBtn: {
     flexDirection: 'row',
