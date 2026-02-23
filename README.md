@@ -178,7 +178,8 @@ npm run teardown -- --yes
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query token auth fallback |
 | `CODEX_CLI_BIN` | codex executable |
-| `BRIDGE_WORKDIR` | working directory for terminal/git |
+| `BRIDGE_WORKDIR` | absolute working directory for terminal/git |
+| `BRIDGE_ALLOW_OUTSIDE_ROOT_CWD` | allow terminal/git `cwd` outside `BRIDGE_WORKDIR` (default `true`) |
 
 ### Mobile runtime (`apps/mobile/.env`, generated/updated)
 
@@ -198,7 +199,7 @@ Use this checklist before broader internal rollout:
 - Keep bridge network-private only (Tailscale/private LAN/VPN + host firewall); never public internet.
 - Require `BRIDGE_AUTH_TOKEN` and keep `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=false` unless you explicitly need query-token fallback.
 - Do not set `BRIDGE_ALLOW_INSECURE_NO_AUTH=true` outside local debugging.
-- Scope `BRIDGE_WORKDIR` to the smallest repository/root required.
+- Scope `BRIDGE_WORKDIR` to the smallest repository/root required; set `BRIDGE_ALLOW_OUTSIDE_ROOT_CWD=false` if you want to enforce root confinement.
 - Keep mobile approval defaults strict (current mobile behavior uses untrusted policy + workspace-write sandbox).
 - Treat `Session` and `Allow similar` approval decisions as privileged actions; use only on trusted repos.
 - Run bridge under a supervisor (for example `launchd`) with restart policy and centralized logs.

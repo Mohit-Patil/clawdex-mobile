@@ -44,6 +44,7 @@ const MOBILE_ATTACHMENTS_DIR: &str = ".clawdex-mobile-attachments";
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
 const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
+const WS_CLIENT_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -55,6 +56,7 @@ struct BridgeConfig {
     auth_enabled: bool,
     allow_insecure_no_auth: bool,
     allow_query_token_auth: bool,
+    allow_outside_root_cwd: bool,
     disable_terminal_exec: bool,
     terminal_allowed_commands: HashSet<String>,
 }
@@ -67,10 +69,10 @@ impl BridgeConfig {
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(8787);
 
-        let workdir = env::var("BRIDGE_WORKDIR")
+        let configured_workdir = env::var("BRIDGE_WORKDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let workdir = normalize_path(&workdir);
+        let workdir = resolve_bridge_workdir(configured_workdir)?;
 
         let cli_bin = env::var("CODEX_CLI_BIN").unwrap_or_else(|_| "codex".to_string());
         let auth_token = env::var("BRIDGE_AUTH_TOKEN")
@@ -88,6 +90,8 @@ impl BridgeConfig {
 
         let auth_enabled = auth_token.is_some();
         let allow_query_token_auth = parse_bool_env("BRIDGE_ALLOW_QUERY_TOKEN_AUTH");
+        let allow_outside_root_cwd =
+            parse_bool_env_with_default("BRIDGE_ALLOW_OUTSIDE_ROOT_CWD", true);
         let disable_terminal_exec = parse_bool_env("BRIDGE_DISABLE_TERMINAL_EXEC");
 
         let terminal_allowed_commands = parse_csv_env(
@@ -104,6 +108,7 @@ impl BridgeConfig {
             auth_enabled,
             allow_insecure_no_auth,
             allow_query_token_auth,
+            allow_outside_root_cwd,
             disable_terminal_exec,
             terminal_allowed_commands,
         })
@@ -121,8 +126,14 @@ impl BridgeConfig {
 
         if let Some(value) = headers.get("authorization") {
             if let Ok(raw) = value.to_str() {
-                if let Some(token) = raw.strip_prefix("Bearer ") {
-                    if token.trim() == expected {
+                let mut parts = raw.trim().split_whitespace();
+                let scheme = parts.next();
+                let token = parts.next();
+                if let (Some(scheme), Some(token)) = (scheme, token) {
+                    if scheme.eq_ignore_ascii_case("bearer")
+                        && parts.next().is_none()
+                        && constant_time_eq(token, expected)
+                    {
                         return true;
                     }
                 }
@@ -130,8 +141,8 @@ impl BridgeConfig {
         }
 
         if self.allow_query_token_auth {
-            if let Some(token) = query_token {
-                if token == expected {
+            if let Some(token) = query_token.map(str::trim).filter(|token| !token.is_empty()) {
+                if constant_time_eq(token, expected) {
                     return true;
                 }
             }
@@ -155,7 +166,7 @@ struct ClientHub {
     next_client_id: AtomicU64,
     next_event_id: AtomicU64,
     replay_capacity: usize,
-    clients: RwLock<HashMap<u64, mpsc::UnboundedSender<Message>>>,
+    clients: RwLock<HashMap<u64, mpsc::Sender<Message>>>,
     notification_replay: RwLock<VecDeque<ReplayableNotification>>,
 }
 
@@ -180,7 +191,7 @@ impl ClientHub {
         }
     }
 
-    async fn add_client(&self, tx: mpsc::UnboundedSender<Message>) -> u64 {
+    async fn add_client(&self, tx: mpsc::Sender<Message>) -> u64 {
         let id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
         self.clients.write().await.insert(id, tx);
         id
@@ -199,9 +210,28 @@ impl ClientHub {
             }
         };
 
-        let clients = self.clients.read().await;
-        if let Some(tx) = clients.get(&client_id) {
-            let _ = tx.send(Message::Text(text.into()));
+        let tx = {
+            let clients = self.clients.read().await;
+            clients.get(&client_id).cloned()
+        };
+        let Some(tx) = tx else {
+            return;
+        };
+
+        let message = Message::Text(text);
+        let should_remove = match tx.try_send(message) {
+            Ok(()) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => true,
+            Err(mpsc::error::TrySendError::Full(message)) => {
+                match timeout(Duration::from_millis(250), tx.send(message)).await {
+                    Ok(Ok(())) => false,
+                    Ok(Err(_)) | Err(_) => true,
+                }
+            }
+        };
+
+        if should_remove {
+            self.remove_client(client_id).await;
         }
     }
 
@@ -214,9 +244,27 @@ impl ClientHub {
             }
         };
 
-        let clients = self.clients.read().await;
-        for tx in clients.values() {
-            let _ = tx.send(Message::Text(text.clone().into()));
+        let mut stale_clients = Vec::new();
+        {
+            let clients = self.clients.read().await;
+            for (client_id, tx) in clients.iter() {
+                match tx.try_send(Message::Text(text.clone())) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        stale_clients.push(*client_id);
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Keep the client and rely on replay to catch up dropped notifications.
+                    }
+                }
+            }
+        }
+
+        if !stale_clients.is_empty() {
+            let mut clients = self.clients.write().await;
+            for client_id in stale_clients {
+                clients.remove(&client_id);
+            }
         }
     }
 
@@ -1042,8 +1090,13 @@ async fn main() {
         config.workdir.clone(),
         config.terminal_allowed_commands.clone(),
         config.disable_terminal_exec,
+        config.allow_outside_root_cwd,
     ));
-    let git = Arc::new(GitService::new(terminal.clone(), config.workdir.clone()));
+    let git = Arc::new(GitService::new(
+        terminal.clone(),
+        config.workdir.clone(),
+        config.allow_outside_root_cwd,
+    ));
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -1107,10 +1160,10 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut socket_tx, mut socket_rx) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let (tx, mut rx) = mpsc::channel::<Message>(WS_CLIENT_QUEUE_CAPACITY);
     let client_id = state.hub.add_client(tx).await;
 
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             if socket_tx.send(message).await.is_err() {
                 break;
@@ -1132,51 +1185,67 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         )
         .await;
 
-    while let Some(message) = socket_rx.next().await {
-        match message {
-            Ok(Message::Text(text)) => {
-                handle_client_message(client_id, text.to_string(), &state).await;
-            }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Binary(_)) => {
-                state
-                    .hub
-                    .send_json(
-                        client_id,
-                        json!({
-                            "id": Value::Null,
-                            "error": {
-                                "code": -32600,
-                                "message": "Binary websocket messages are not supported"
-                            }
-                        }),
-                    )
-                    .await;
-            }
-            Ok(Message::Ping(payload)) => {
-                state
-                    .hub
-                    .send_json(
-                        client_id,
-                        json!({
-                            "method": "bridge/ping",
-                            "params": {
-                                "size": payload.len()
-                            }
-                        }),
-                    )
-                    .await;
-            }
-            Ok(Message::Pong(_)) => {}
-            Err(error) => {
-                eprintln!("websocket error: {error}");
+    loop {
+        tokio::select! {
+            writer_result = &mut writer_task => {
+                if let Err(error) = writer_result {
+                    eprintln!("websocket writer task error: {error}");
+                }
                 break;
+            }
+            maybe_message = socket_rx.next() => {
+                let Some(message) = maybe_message else {
+                    break;
+                };
+
+                match message {
+                    Ok(Message::Text(text)) => {
+                        handle_client_message(client_id, text.to_string(), &state).await;
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Ok(Message::Binary(_)) => {
+                        state
+                            .hub
+                            .send_json(
+                                client_id,
+                                json!({
+                                    "id": Value::Null,
+                                    "error": {
+                                        "code": -32600,
+                                        "message": "Binary websocket messages are not supported"
+                                    }
+                                }),
+                            )
+                            .await;
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        state
+                            .hub
+                            .send_json(
+                                client_id,
+                                json!({
+                                    "method": "bridge/ping",
+                                    "params": {
+                                        "size": payload.len()
+                                    }
+                                }),
+                            )
+                            .await;
+                    }
+                    Ok(Message::Pong(_)) => {}
+                    Err(error) => {
+                        eprintln!("websocket error: {error}");
+                        break;
+                    }
+                }
             }
         }
     }
 
     state.hub.remove_client(client_id).await;
-    writer_task.abort();
+    if !writer_task.is_finished() {
+        writer_task.abort();
+    }
 }
 
 async fn handle_client_message(client_id: u64, text: String, state: &Arc<AppState>) {
@@ -1481,10 +1550,58 @@ async fn send_rpc_error(
     state.hub.send_json(client_id, payload).await;
 }
 
+fn resolve_bridge_workdir(raw_workdir: PathBuf) -> Result<PathBuf, String> {
+    if !raw_workdir.is_absolute() {
+        return Err(format!(
+            "BRIDGE_WORKDIR must be an absolute path (got: {})",
+            raw_workdir.to_string_lossy()
+        ));
+    }
+
+    let canonical = std::fs::canonicalize(&raw_workdir).map_err(|error| {
+        format!(
+            "BRIDGE_WORKDIR is invalid or inaccessible ({}): {error}",
+            raw_workdir.to_string_lossy()
+        )
+    })?;
+
+    Ok(normalize_path(&canonical))
+}
+
 fn parse_bool_env(name: &str) -> bool {
     env::var(name)
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn parse_bool_env_with_default(name: &str, default: bool) -> bool {
+    env::var(name)
+        .map(|raw| {
+            let value = raw.trim();
+            if value.eq_ignore_ascii_case("true") {
+                true
+            } else if value.eq_ignore_ascii_case("false") {
+                false
+            } else {
+                default
+            }
+        })
+        .unwrap_or(default)
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    let max_len = left_bytes.len().max(right_bytes.len());
+
+    let mut diff = left_bytes.len() ^ right_bytes.len();
+    for index in 0..max_len {
+        let left_byte = *left_bytes.get(index).unwrap_or(&0);
+        let right_byte = *right_bytes.get(index).unwrap_or(&0);
+        diff |= (left_byte ^ right_byte) as usize;
+    }
+
+    diff == 0
 }
 
 fn parse_csv_env(name: &str, fallback: &[&str]) -> HashSet<String> {
@@ -1682,6 +1799,13 @@ async fn save_uploaded_attachment(
         return Err(BridgeError::invalid_params("dataBase64 must not be empty"));
     }
 
+    let estimated_size = estimate_base64_decoded_size(encoded)?;
+    if estimated_size > MAX_ATTACHMENT_BYTES {
+        return Err(BridgeError::invalid_params(&format!(
+            "attachment exceeds max size of {MAX_ATTACHMENT_BYTES} bytes"
+        )));
+    }
+
     let bytes = decode_base64_payload(encoded)?;
     if bytes.is_empty() {
         return Err(BridgeError::invalid_params("attachment payload is empty"));
@@ -1741,7 +1865,7 @@ async fn save_uploaded_attachment(
     })
 }
 
-fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
+fn extract_base64_payload(raw: &str) -> Result<&str, BridgeError> {
     let payload = raw
         .split_once(',')
         .map(|(_, data)| data)
@@ -1752,6 +1876,27 @@ fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
             "dataBase64 must contain base64 payload",
         ));
     }
+
+    Ok(payload)
+}
+
+fn estimate_base64_decoded_size(raw: &str) -> Result<usize, BridgeError> {
+    let payload = extract_base64_payload(raw)?;
+    let encoded_len = payload.len();
+    let padding = payload
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count()
+        .min(2);
+
+    let block_count = (encoded_len + 3) / 4;
+    Ok(block_count.saturating_mul(3).saturating_sub(padding))
+}
+
+fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
+    let payload = extract_base64_payload(raw)?;
 
     general_purpose::STANDARD
         .decode(payload)
@@ -1909,6 +2054,93 @@ fn normalize_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    async fn build_test_bridge(hub: Arc<ClientHub>) -> Arc<AppServerBridge> {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cat process");
+        let writer = child.stdin.take().expect("child stdin available");
+
+        Arc::new(AppServerBridge {
+            child: Mutex::new(child),
+            writer: Mutex::new(writer),
+            pending_requests: Mutex::new(HashMap::new()),
+            internal_waiters: Mutex::new(HashMap::new()),
+            pending_approvals: Mutex::new(HashMap::new()),
+            pending_user_inputs: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
+            approval_counter: AtomicU64::new(1),
+            user_input_counter: AtomicU64::new(1),
+            hub,
+        })
+    }
+
+    async fn shutdown_test_bridge(bridge: &Arc<AppServerBridge>) {
+        let mut child = bridge.child.lock().await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    async fn build_test_state() -> Arc<AppState> {
+        let workdir = normalize_path(&env::temp_dir());
+        let config = Arc::new(BridgeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8787,
+            workdir: workdir.clone(),
+            cli_bin: "cat".to_string(),
+            auth_token: Some("secret-token".to_string()),
+            auth_enabled: true,
+            allow_insecure_no_auth: false,
+            allow_query_token_auth: false,
+            allow_outside_root_cwd: false,
+            disable_terminal_exec: true,
+            terminal_allowed_commands: HashSet::new(),
+        });
+
+        let hub = Arc::new(ClientHub::new());
+        let app_server = build_test_bridge(hub.clone()).await;
+        let terminal = Arc::new(TerminalService::new(
+            config.workdir.clone(),
+            config.terminal_allowed_commands.clone(),
+            config.disable_terminal_exec,
+            config.allow_outside_root_cwd,
+        ));
+        let git = Arc::new(GitService::new(
+            terminal.clone(),
+            config.workdir.clone(),
+            config.allow_outside_root_cwd,
+        ));
+
+        Arc::new(AppState {
+            config,
+            started_at: Instant::now(),
+            hub,
+            app_server,
+            terminal,
+            git,
+        })
+    }
+
+    async fn add_test_client(hub: &Arc<ClientHub>) -> (u64, mpsc::Receiver<Message>) {
+        let (tx, rx) = mpsc::channel(8);
+        let client_id = hub.add_client(tx).await;
+        (client_id, rx)
+    }
+
+    async fn recv_client_json(rx: &mut mpsc::Receiver<Message>) -> Value {
+        let message = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for message")
+            .expect("client channel closed");
+        let Message::Text(text) = message else {
+            panic!("expected text websocket frame");
+        };
+
+        serde_json::from_str(&text).expect("valid json message")
+    }
+
     #[tokio::test]
     async fn replay_since_returns_notifications_after_cursor() {
         let hub = ClientHub::with_replay_capacity(16);
@@ -1952,5 +2184,530 @@ mod tests {
         assert_eq!(hub.earliest_event_id().await, Some(2));
         assert_eq!(events[0]["eventId"], 2);
         assert_eq!(events[1]["eventId"], 3);
+    }
+
+    #[tokio::test]
+    async fn send_json_evicts_closed_clients() {
+        let hub = ClientHub::with_replay_capacity(4);
+        let (tx, rx) = mpsc::channel(1);
+        let client_id = hub.add_client(tx).await;
+        drop(rx);
+
+        hub.send_json(client_id, json!({ "ok": true })).await;
+        assert!(!hub.clients.read().await.contains_key(&client_id));
+    }
+
+    #[tokio::test]
+    async fn send_json_evicts_slow_clients_when_queue_fills() {
+        let hub = ClientHub::with_replay_capacity(4);
+        let (tx, mut rx) = mpsc::channel(1);
+        let client_id = hub.add_client(tx).await;
+
+        hub.send_json(client_id, json!({ "seq": 1 })).await;
+        hub.send_json(client_id, json!({ "seq": 2 })).await;
+
+        assert!(rx.recv().await.is_some());
+        assert!(!hub.clients.read().await.contains_key(&client_id));
+    }
+
+    #[tokio::test]
+    async fn broadcast_json_keeps_clients_when_queue_is_temporarily_full() {
+        let hub = ClientHub::with_replay_capacity(4);
+        let (tx, mut rx) = mpsc::channel(1);
+        let tx_clone = tx.clone();
+        let client_id = hub.add_client(tx).await;
+
+        tx_clone
+            .try_send(Message::Text("queued".to_string()))
+            .expect("seed full queue");
+
+        hub.broadcast_json(json!({ "method": "event/x" })).await;
+
+        assert!(hub.clients.read().await.contains_key(&client_id));
+        let message = rx.recv().await.expect("first queued message");
+        let Message::Text(text) = message else {
+            panic!("expected text frame");
+        };
+        assert_eq!(text, "queued");
+    }
+
+    #[test]
+    fn forwarded_method_allowlist_matches_expected() {
+        assert!(is_forwarded_method("thread/start"));
+        assert!(is_forwarded_method("turn/start"));
+        assert!(is_forwarded_method("thread/loaded/list"));
+        assert!(!is_forwarded_method("bridge/terminal/exec"));
+        assert!(!is_forwarded_method("thread/delete"));
+    }
+
+    #[test]
+    fn approval_decision_validation_accepts_expected_forms() {
+        assert!(is_valid_approval_decision(&json!("accept")));
+        assert!(is_valid_approval_decision(&json!("acceptForSession")));
+        assert!(is_valid_approval_decision(&json!("decline")));
+        assert!(is_valid_approval_decision(&json!("cancel")));
+        assert!(is_valid_approval_decision(&json!({
+            "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": ["--allow-network", "git"]
+            }
+        })));
+    }
+
+    #[test]
+    fn approval_decision_validation_rejects_invalid_values() {
+        assert!(!is_valid_approval_decision(&json!("approve")));
+        assert!(!is_valid_approval_decision(&json!({
+            "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": []
+            }
+        })));
+        assert!(!is_valid_approval_decision(&json!({
+            "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": ["ok", 1]
+            }
+        })));
+        assert!(!is_valid_approval_decision(&json!({
+            "acceptWithExecpolicyAmendment": {}
+        })));
+    }
+
+    #[test]
+    fn parse_internal_id_supports_numeric_and_string_ids() {
+        assert_eq!(parse_internal_id(Some(&json!(42))), Some(42));
+        assert_eq!(parse_internal_id(Some(&json!("17"))), Some(17));
+        assert_eq!(parse_internal_id(Some(&json!(-1))), None);
+        assert_eq!(parse_internal_id(Some(&json!("invalid"))), None);
+        assert_eq!(parse_internal_id(None), None);
+    }
+
+    #[test]
+    fn parse_execpolicy_amendment_supports_array_and_object_forms() {
+        assert_eq!(
+            parse_execpolicy_amendment(Some(&json!(["--allow-network", "git"]))),
+            Some(vec!["--allow-network".to_string(), "git".to_string()])
+        );
+        assert_eq!(
+            parse_execpolicy_amendment(Some(&json!({
+                "execpolicy_amendment": ["npm", "test"]
+            }))),
+            Some(vec!["npm".to_string(), "test".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_execpolicy_amendment_rejects_invalid_or_empty_values() {
+        assert_eq!(parse_execpolicy_amendment(Some(&json!([]))), None);
+        assert_eq!(
+            parse_execpolicy_amendment(Some(&json!({ "execpolicy_amendment": [1, true] }))),
+            None
+        );
+        assert_eq!(
+            parse_execpolicy_amendment(Some(&json!({ "other": ["x"] }))),
+            None
+        );
+        assert_eq!(parse_execpolicy_amendment(Some(&json!(null))), None);
+    }
+
+    #[test]
+    fn parse_user_input_questions_filters_invalid_entries_and_maps_options() {
+        let questions = parse_user_input_questions(Some(&json!([
+            {
+                "id": "q1",
+                "header": "Repo",
+                "question": "Pick one",
+                "isOther": true,
+                "isSecret": false,
+                "options": [
+                    { "label": "main", "description": "default branch" },
+                    { "label": "develop" },
+                    { "description": "missing label" }
+                ]
+            },
+            {
+                "id": "q2",
+                "question": "Missing header"
+            },
+            "not-an-object"
+        ])));
+
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].id, "q1");
+        assert_eq!(questions[0].header, "Repo");
+        assert_eq!(questions[0].question, "Pick one");
+        assert!(questions[0].is_other);
+        assert!(!questions[0].is_secret);
+        let options = questions[0].options.as_ref().expect("options to exist");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].label, "main");
+        assert_eq!(options[0].description, "default branch");
+        assert_eq!(options[1].label, "develop");
+        assert_eq!(options[1].description, "");
+    }
+
+    #[test]
+    fn user_input_answer_validation_enforces_non_empty_ids_and_answers() {
+        let mut valid = HashMap::new();
+        valid.insert(
+            "q1".to_string(),
+            UserInputAnswerPayload {
+                answers: vec!["yes".to_string()],
+            },
+        );
+        assert!(is_valid_user_input_answers(&valid));
+
+        let mut invalid_question_id = HashMap::new();
+        invalid_question_id.insert(
+            "  ".to_string(),
+            UserInputAnswerPayload {
+                answers: vec!["yes".to_string()],
+            },
+        );
+        assert!(!is_valid_user_input_answers(&invalid_question_id));
+
+        let mut invalid_empty_answers = HashMap::new();
+        invalid_empty_answers.insert(
+            "q1".to_string(),
+            UserInputAnswerPayload {
+                answers: Vec::new(),
+            },
+        );
+        assert!(!is_valid_user_input_answers(&invalid_empty_answers));
+
+        let mut invalid_blank_answer = HashMap::new();
+        invalid_blank_answer.insert(
+            "q1".to_string(),
+            UserInputAnswerPayload {
+                answers: vec!["   ".to_string()],
+            },
+        );
+        assert!(!is_valid_user_input_answers(&invalid_blank_answer));
+    }
+
+    #[test]
+    fn decode_base64_payload_supports_standard_urlsafe_and_data_uri_inputs() {
+        assert_eq!(
+            decode_base64_payload("aGVsbG8=").expect("decode standard base64"),
+            b"hello".to_vec()
+        );
+        assert_eq!(
+            decode_base64_payload("data:text/plain;base64,aGVsbG8=")
+                .expect("decode data-uri base64"),
+            b"hello".to_vec()
+        );
+        assert_eq!(
+            decode_base64_payload("_w==").expect("decode url-safe base64"),
+            vec![255]
+        );
+    }
+
+    #[test]
+    fn decode_base64_payload_rejects_invalid_payloads() {
+        assert!(decode_base64_payload("not@@base64").is_err());
+        assert!(decode_base64_payload("data:text/plain;base64,").is_err());
+    }
+
+    #[test]
+    fn estimate_base64_decoded_size_matches_expected_values() {
+        assert_eq!(
+            estimate_base64_decoded_size("aGVsbG8=").unwrap_or_default(),
+            5
+        );
+        assert_eq!(
+            estimate_base64_decoded_size("data:text/plain;base64,aGVsbG8=").unwrap_or_default(),
+            5
+        );
+        assert_eq!(estimate_base64_decoded_size("YQ==").unwrap_or_default(), 1);
+    }
+
+    #[test]
+    fn resolve_bridge_workdir_requires_absolute_existing_paths() {
+        let temp_dir = env::temp_dir();
+        let resolved = resolve_bridge_workdir(temp_dir.clone()).expect("resolve temp dir");
+        assert!(resolved.is_absolute());
+
+        assert!(resolve_bridge_workdir(PathBuf::from("relative/path")).is_err());
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let missing = env::temp_dir().join(format!("clawdex-missing-{nonce}"));
+        assert!(resolve_bridge_workdir(missing).is_err());
+    }
+
+    #[test]
+    fn attachment_kind_normalization_uses_kind_then_mime_fallback() {
+        assert_eq!(normalize_attachment_kind(Some("image"), None), "image");
+        assert_eq!(normalize_attachment_kind(Some(" FILE "), None), "file");
+        assert_eq!(
+            normalize_attachment_kind(Some("unknown"), Some("image/png")),
+            "image"
+        );
+        assert_eq!(
+            normalize_attachment_kind(None, Some("application/pdf")),
+            "file"
+        );
+    }
+
+    #[test]
+    fn attachment_file_name_building_sanitizes_and_infers_extension() {
+        assert_eq!(
+            build_attachment_file_name(None, Some("image/png"), "image"),
+            "image.png"
+        );
+        assert_eq!(
+            build_attachment_file_name(Some("../weird name?.txt"), None, "file"),
+            "weird_name_.txt"
+        );
+        assert_eq!(
+            build_attachment_file_name(Some("notes"), Some("application/json"), "file"),
+            "notes.json"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_drops_path_segments_and_limits_length() {
+        assert_eq!(
+            sanitize_filename("../unsafe/..\\evil?.txt"),
+            "evil_.txt".to_string()
+        );
+        assert_eq!(sanitize_filename("..."), "attachment".to_string());
+        assert_eq!(sanitize_filename(&"a".repeat(120)).len(), 96);
+    }
+
+    #[test]
+    fn sanitize_path_segment_keeps_safe_characters_only() {
+        assert_eq!(
+            sanitize_path_segment(" ../Thread 01/.. "),
+            "Thread_01".to_string()
+        );
+        assert_eq!(sanitize_path_segment(&"a".repeat(80)).len(), 64);
+    }
+
+    #[test]
+    fn infer_extension_from_mime_handles_supported_and_unknown_values() {
+        assert_eq!(infer_extension_from_mime(Some("image/JPEG")), Some("jpg"));
+        assert_eq!(infer_extension_from_mime(Some("text/plain")), Some("txt"));
+        assert_eq!(infer_extension_from_mime(Some("application/zip")), None);
+    }
+
+    #[test]
+    fn disallowed_control_character_detection_flags_shell_metacharacters() {
+        assert!(!contains_disallowed_control_chars("git status"));
+        assert!(contains_disallowed_control_chars("echo hi; ls"));
+        assert!(contains_disallowed_control_chars("echo `whoami`"));
+    }
+
+    #[test]
+    fn normalize_path_collapses_current_and_parent_components() {
+        assert_eq!(
+            normalize_path(Path::new("/tmp/./bridge/../repo/./main.rs")),
+            PathBuf::from("/tmp/repo/main.rs")
+        );
+        assert_eq!(
+            normalize_path(Path::new("a/b/../c/./d")),
+            PathBuf::from("a/c/d")
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_handles_equal_and_different_strings() {
+        assert!(constant_time_eq("secret-token", "secret-token"));
+        assert!(!constant_time_eq("secret-token", "secret-tok3n"));
+        assert!(!constant_time_eq("secret-token", "secret-token-extra"));
+    }
+
+    #[test]
+    fn bridge_config_authorization_validates_header_and_query_token_paths() {
+        let base = BridgeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8787,
+            workdir: PathBuf::from("/tmp/workdir"),
+            cli_bin: "codex".to_string(),
+            auth_token: Some("secret-token".to_string()),
+            auth_enabled: true,
+            allow_insecure_no_auth: false,
+            allow_query_token_auth: false,
+            allow_outside_root_cwd: false,
+            disable_terminal_exec: false,
+            terminal_allowed_commands: HashSet::new(),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "bearer secret-token".parse().expect("header value"),
+        );
+        assert!(base.is_authorized(&headers, None));
+        assert!(!base.is_authorized(&HeaderMap::new(), Some("secret-token")));
+        assert!(!base.is_authorized(&HeaderMap::new(), Some("secret-tok3n")));
+
+        let mut query_allowed = base.clone();
+        query_allowed.allow_query_token_auth = true;
+        assert!(query_allowed.is_authorized(&HeaderMap::new(), Some("secret-token")));
+        assert!(query_allowed.is_authorized(&HeaderMap::new(), Some("  secret-token  ")));
+
+        let mut auth_disabled = base;
+        auth_disabled.auth_enabled = false;
+        auth_disabled.auth_token = None;
+        assert!(auth_disabled.is_authorized(&HeaderMap::new(), None));
+    }
+
+    #[tokio::test]
+    async fn app_server_forwarded_response_routes_to_original_client_request_id() {
+        let hub = Arc::new(ClientHub::new());
+        let bridge = build_test_bridge(hub.clone()).await;
+        let (client_id, mut rx) = add_test_client(&hub).await;
+
+        bridge
+            .forward_request(
+                client_id,
+                json!("client-req-1"),
+                "thread/start",
+                Some(json!({ "foo": "bar" })),
+            )
+            .await
+            .expect("forward request");
+
+        bridge
+            .handle_response(json!({ "id": 1, "result": { "ok": true } }))
+            .await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["id"], "client-req-1");
+        assert_eq!(payload["result"]["ok"], true);
+        assert!(bridge.pending_requests.lock().await.is_empty());
+
+        shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn app_server_fail_all_pending_notifies_waiting_clients() {
+        let hub = Arc::new(ClientHub::new());
+        let bridge = build_test_bridge(hub.clone()).await;
+        let (client_a, mut rx_a) = add_test_client(&hub).await;
+        let (client_b, mut rx_b) = add_test_client(&hub).await;
+
+        bridge
+            .forward_request(client_a, json!("req-a"), "thread/start", None)
+            .await
+            .expect("forward request a");
+        bridge
+            .forward_request(client_b, json!("req-b"), "thread/start", None)
+            .await
+            .expect("forward request b");
+
+        bridge.fail_all_pending("app-server closed").await;
+
+        let payload_a = recv_client_json(&mut rx_a).await;
+        let payload_b = recv_client_json(&mut rx_b).await;
+
+        assert_eq!(payload_a["id"], "req-a");
+        assert_eq!(payload_a["error"]["code"], -32000);
+        assert_eq!(payload_b["id"], "req-b");
+        assert_eq!(payload_b["error"]["code"], -32000);
+
+        shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn app_server_response_completes_internal_waiter() {
+        let hub = Arc::new(ClientHub::new());
+        let bridge = build_test_bridge(hub).await;
+        let (tx, rx) = oneshot::channel();
+        bridge.internal_waiters.lock().await.insert(7, tx);
+
+        bridge
+            .handle_response(json!({ "id": 7, "result": { "initialized": true } }))
+            .await;
+
+        let result = rx.await.expect("waiter result").expect("successful result");
+        assert_eq!(result["initialized"], true);
+
+        shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn handle_client_message_returns_parse_error_for_invalid_json() {
+        let state = build_test_state().await;
+        let (client_id, mut rx) = add_test_client(&state.hub).await;
+
+        handle_client_message(client_id, "{invalid-json".to_string(), &state).await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["id"], Value::Null);
+        assert_eq!(payload["error"]["code"], -32700);
+
+        shutdown_test_bridge(&state.app_server).await;
+    }
+
+    #[tokio::test]
+    async fn handle_client_message_rejects_missing_method() {
+        let state = build_test_state().await;
+        let (client_id, mut rx) = add_test_client(&state.hub).await;
+
+        handle_client_message(client_id, json!({ "id": "abc" }).to_string(), &state).await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["id"], "abc");
+        assert_eq!(payload["error"]["code"], -32600);
+        assert_eq!(payload["error"]["message"], "Missing method");
+
+        shutdown_test_bridge(&state.app_server).await;
+    }
+
+    #[tokio::test]
+    async fn handle_client_message_rejects_non_allowlisted_methods() {
+        let state = build_test_state().await;
+        let (client_id, mut rx) = add_test_client(&state.hub).await;
+
+        handle_client_message(
+            client_id,
+            json!({
+                "id": "abc",
+                "method": "thread/delete",
+            })
+            .to_string(),
+            &state,
+        )
+        .await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["id"], "abc");
+        assert_eq!(payload["error"]["code"], -32601);
+
+        shutdown_test_bridge(&state.app_server).await;
+    }
+
+    #[tokio::test]
+    async fn handle_client_message_forwards_allowlisted_methods_and_relays_result() {
+        let state = build_test_state().await;
+        let (client_id, mut rx) = add_test_client(&state.hub).await;
+
+        handle_client_message(
+            client_id,
+            json!({
+                "id": "request-1",
+                "method": "thread/start",
+                "params": { "model": "o3-mini" }
+            })
+            .to_string(),
+            &state,
+        )
+        .await;
+
+        state
+            .app_server
+            .handle_response(json!({
+                "id": 1,
+                "result": { "threadId": "thr_123" }
+            }))
+            .await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["id"], "request-1");
+        assert_eq!(payload["result"]["threadId"], "thr_123");
+
+        shutdown_test_bridge(&state.app_server).await;
     }
 }

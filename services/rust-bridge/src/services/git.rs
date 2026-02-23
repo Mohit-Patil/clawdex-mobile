@@ -11,15 +11,24 @@ use super::TerminalService;
 pub(crate) struct GitService {
     terminal: Arc<TerminalService>,
     root: PathBuf,
+    allow_outside_root: bool,
 }
 
 impl GitService {
-    pub(crate) fn new(terminal: Arc<TerminalService>, root: PathBuf) -> Self {
-        Self { terminal, root }
+    pub(crate) fn new(
+        terminal: Arc<TerminalService>,
+        root: PathBuf,
+        allow_outside_root: bool,
+    ) -> Self {
+        Self {
+            terminal,
+            root,
+            allow_outside_root,
+        }
     }
 
     fn resolve_repo_path(&self, raw_cwd: Option<&str>) -> Result<PathBuf, BridgeError> {
-        Ok(resolve_git_cwd(raw_cwd, &self.root))
+        resolve_git_cwd(raw_cwd, &self.root, self.allow_outside_root)
     }
 
     pub(crate) async fn get_status(
@@ -188,7 +197,12 @@ impl GitService {
     }
 }
 
-fn resolve_git_cwd(raw_cwd: Option<&str>, root: &PathBuf) -> PathBuf {
+fn resolve_git_cwd(
+    raw_cwd: Option<&str>,
+    root: &PathBuf,
+    allow_outside_root: bool,
+) -> Result<PathBuf, BridgeError> {
+    let normalized_root = normalize_path(root);
     let requested = match raw_cwd {
         Some(raw) if !raw.trim().is_empty() => {
             let path = PathBuf::from(raw);
@@ -201,7 +215,14 @@ fn resolve_git_cwd(raw_cwd: Option<&str>, root: &PathBuf) -> PathBuf {
         _ => root.to_path_buf(),
     };
 
-    normalize_path(&requested)
+    let normalized = normalize_path(&requested);
+    if !allow_outside_root && !normalized.starts_with(&normalized_root) {
+        return Err(BridgeError::invalid_params(
+            "cwd must stay within BRIDGE_WORKDIR",
+        ));
+    }
+
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -212,21 +233,39 @@ mod tests {
     #[test]
     fn resolves_relative_cwd_against_root() {
         let root = PathBuf::from("/bridge/root");
-        let resolved = resolve_git_cwd(Some("workspace/repo"), &root);
+        let resolved =
+            resolve_git_cwd(Some("workspace/repo"), &root, false).expect("resolve relative cwd");
         assert_eq!(resolved, PathBuf::from("/bridge/root/workspace/repo"));
     }
 
     #[test]
-    fn keeps_absolute_cwd_outside_root() {
+    fn rejects_absolute_cwd_outside_root_by_default() {
         let root = PathBuf::from("/bridge/root");
-        let resolved = resolve_git_cwd(Some("/external/repo"), &root);
+        let error = resolve_git_cwd(Some("/external/repo"), &root, false)
+            .expect_err("reject outside-root cwd");
+        assert_eq!(error.code, -32602);
+    }
+
+    #[test]
+    fn rejects_relative_cwd_that_escapes_root() {
+        let root = PathBuf::from("/bridge/root");
+        let error =
+            resolve_git_cwd(Some("../outside"), &root, false).expect_err("reject escaped cwd");
+        assert_eq!(error.code, -32602);
+    }
+
+    #[test]
+    fn allows_absolute_cwd_outside_root_when_enabled() {
+        let root = PathBuf::from("/bridge/root");
+        let resolved =
+            resolve_git_cwd(Some("/external/repo"), &root, true).expect("allow outside root");
         assert_eq!(resolved, PathBuf::from("/external/repo"));
     }
 
     #[test]
     fn falls_back_to_root_when_cwd_missing() {
         let root = PathBuf::from("/bridge/root");
-        let resolved = resolve_git_cwd(None, &root);
+        let resolved = resolve_git_cwd(None, &root, false).expect("fallback to root");
         assert_eq!(resolved, root);
     }
 }

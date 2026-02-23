@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  js-workspaces:
+    name: JS - ${{ matrix.workspace }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace:
+          - "@codex/mac-bridge"
+          - "clawdex-mobile"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint -w "${{ matrix.workspace }}"
+
+      - name: Typecheck
+        run: npm run typecheck -w "${{ matrix.workspace }}"
+
+      - name: Test
+        run: npm run test -w "${{ matrix.workspace }}"
+
+  rust-bridge:
+    name: Rust Bridge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Rust fmt
+        working-directory: services/rust-bridge
+        run: cargo fmt --check
+
+      - name: Rust check
+        working-directory: services/rust-bridge
+        run: cargo check
+
+      - name: Rust test
+        working-directory: services/rust-bridge
+        run: cargo test

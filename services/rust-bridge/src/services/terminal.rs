@@ -17,14 +17,21 @@ pub(crate) struct TerminalService {
     root: PathBuf,
     allowed_commands: HashSet<String>,
     disabled: bool,
+    allow_outside_root: bool,
 }
 
 impl TerminalService {
-    pub(crate) fn new(root: PathBuf, allowed_commands: HashSet<String>, disabled: bool) -> Self {
+    pub(crate) fn new(
+        root: PathBuf,
+        allowed_commands: HashSet<String>,
+        disabled: bool,
+        allow_outside_root: bool,
+    ) -> Self {
         Self {
             root,
             allowed_commands,
             disabled,
+            allow_outside_root,
         }
     }
 
@@ -67,7 +74,7 @@ impl TerminalService {
         }
 
         let args = tokens[1..].to_vec();
-        let cwd = resolve_exec_cwd(request.cwd.as_deref(), &self.root);
+        let cwd = resolve_exec_cwd(request.cwd.as_deref(), &self.root, self.allow_outside_root)?;
 
         self.execute_binary_internal(
             binary.as_str(),
@@ -86,6 +93,16 @@ impl TerminalService {
         cwd: PathBuf,
         timeout_ms: Option<u64>,
     ) -> Result<TerminalExecResponse, BridgeError> {
+        let cwd = normalize_path(&cwd);
+        if !self.allow_outside_root {
+            let normalized_root = normalize_path(&self.root);
+            if !cwd.starts_with(&normalized_root) {
+                return Err(BridgeError::invalid_params(
+                    "cwd must stay within BRIDGE_WORKDIR",
+                ));
+            }
+        }
+
         let display = std::iter::once(binary.to_string())
             .chain(args.iter().cloned())
             .collect::<Vec<_>>()
@@ -183,7 +200,12 @@ impl TerminalService {
     }
 }
 
-fn resolve_exec_cwd(raw_cwd: Option<&str>, root: &PathBuf) -> PathBuf {
+fn resolve_exec_cwd(
+    raw_cwd: Option<&str>,
+    root: &PathBuf,
+    allow_outside_root: bool,
+) -> Result<PathBuf, BridgeError> {
+    let normalized_root = normalize_path(root);
     let requested = match raw_cwd {
         Some(raw) if !raw.trim().is_empty() => {
             let path = PathBuf::from(raw);
@@ -196,7 +218,14 @@ fn resolve_exec_cwd(raw_cwd: Option<&str>, root: &PathBuf) -> PathBuf {
         _ => root.to_path_buf(),
     };
 
-    normalize_path(&requested)
+    let normalized = normalize_path(&requested);
+    if !allow_outside_root && !normalized.starts_with(&normalized_root) {
+        return Err(BridgeError::invalid_params(
+            "cwd must stay within BRIDGE_WORKDIR",
+        ));
+    }
+
+    Ok(normalized)
 }
 
 #[cfg(test)]
@@ -207,14 +236,32 @@ mod tests {
     #[test]
     fn resolves_relative_exec_cwd_against_root() {
         let root = PathBuf::from("/bridge/root");
-        let resolved = resolve_exec_cwd(Some("workspace/repo"), &root);
+        let resolved =
+            resolve_exec_cwd(Some("workspace/repo"), &root, false).expect("resolve relative cwd");
         assert_eq!(resolved, PathBuf::from("/bridge/root/workspace/repo"));
     }
 
     #[test]
-    fn keeps_absolute_exec_cwd_outside_root() {
+    fn rejects_absolute_exec_cwd_outside_root_by_default() {
         let root = PathBuf::from("/bridge/root");
-        let resolved = resolve_exec_cwd(Some("/external/repo"), &root);
+        let error = resolve_exec_cwd(Some("/external/repo"), &root, false)
+            .expect_err("reject outside-root cwd");
+        assert_eq!(error.code, -32602);
+    }
+
+    #[test]
+    fn rejects_relative_exec_cwd_that_escapes_root() {
+        let root = PathBuf::from("/bridge/root");
+        let error =
+            resolve_exec_cwd(Some("../outside"), &root, false).expect_err("reject escape path");
+        assert_eq!(error.code, -32602);
+    }
+
+    #[test]
+    fn allows_absolute_exec_cwd_outside_root_when_enabled() {
+        let root = PathBuf::from("/bridge/root");
+        let resolved =
+            resolve_exec_cwd(Some("/external/repo"), &root, true).expect("allow outside root");
         assert_eq!(resolved, PathBuf::from("/external/repo"));
     }
 }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws", "http1", "tokio"] }
+axum = { version = "0.8", features = ["ws", "http1", "tokio"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 futures-util = "0.3"
