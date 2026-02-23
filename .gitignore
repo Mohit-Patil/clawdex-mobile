@@ -73,5 +73,7 @@ coverage/
 *.log
 *.pid
 *.seed
+.telegram-bot-state.json
+.telegram-bot-state.json.tmp
 .claude/
 /app.json

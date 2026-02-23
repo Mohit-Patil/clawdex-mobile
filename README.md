@@ -53,8 +53,10 @@ For manual setup, see `Manual Secure Setup (No Wizard)` below.
 ## Project Layout
 
 - `apps/mobile`: Expo client (UI + API client)
+- `apps/telegram-miniapp`: Telegram Mini App web client (threads + chat UX)
 - `services/rust-bridge`: primary bridge (WebSocket JSON-RPC + `codex app-server` adapter)
 - `services/mac-bridge`: legacy TypeScript bridge (reference only)
+- `services/telegram-bot`: Telegram bot client for bridge/thread interaction
 - `scripts/`: onboarding and runtime helper scripts
 
 ## Open Source License Requirements
@@ -141,6 +143,8 @@ From repo root:
 - `npm run mobile` — start Expo using configured host
 - `npm run ios` — start Expo for iOS target (same host strategy)
 - `npm run android` — start Expo for Android target (same host strategy)
+- `npm run telegram:bot` — start Telegram bot workspace
+- `npm run telegram:miniapp` — start Telegram Mini App workspace
 - `npm run teardown` — interactive teardown (stop processes + cleanup)
 - `npm run lint` — lint all workspaces
 - `npm run typecheck` — typecheck all workspaces
@@ -190,6 +194,17 @@ npm run teardown -- --yes
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
 | `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` | in-app Terms link |
+
+### Telegram runtime (`services/telegram-bot/.env`, optional)
+
+| Variable | Purpose |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | allowlisted chat ids |
+| `TELEGRAM_ALLOWED_USER_IDS` | allowlisted user ids |
+| `TELEGRAM_ALLOW_UNRESTRICTED` | bypass allowlists for local testing only |
+| `BRIDGE_WS_URL` | rust bridge websocket endpoint (`/rpc`) |
+| `BRIDGE_AUTH_TOKEN` | bridge auth token for websocket auth |
 
 ## Production Readiness Checklist
 
