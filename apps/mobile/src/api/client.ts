@@ -33,7 +33,7 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from './types';
-import type { MacBridgeWsClient } from './ws';
+import type { HostBridgeWsClient } from './ws';
 
 interface HealthResponse {
   status: 'ok';
@@ -42,7 +42,7 @@ interface HealthResponse {
 }
 
 interface ApiClientOptions {
-  ws: MacBridgeWsClient;
+  ws: HostBridgeWsClient;
 }
 
 interface AppServerListResponse {
@@ -123,8 +123,8 @@ const ACTIVE_TURN_STATUSES = new Set([
   'pending',
 ]);
 
-export class MacBridgeApiClient {
-  private readonly ws: MacBridgeWsClient;
+export class HostBridgeApiClient {
+  private readonly ws: HostBridgeWsClient;
   private readonly renamedTitles = new Map<string, string>();
 
   constructor(options: ApiClientOptions) {

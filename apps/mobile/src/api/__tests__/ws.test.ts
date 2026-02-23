@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 
-import { MacBridgeWsClient } from '../ws';
+import { HostBridgeWsClient } from '../ws';
 
 class MockWebSocket {
   onopen: (() => void) | null = null;
@@ -50,16 +50,16 @@ afterEach(() => {
   delete (global as any).WebSocket;
 });
 
-describe('MacBridgeWsClient', () => {
+describe('HostBridgeWsClient', () => {
   it('connect() builds /rpc websocket URL', () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     client.connect();
 
     expect(global.WebSocket).toHaveBeenCalledWith('ws://localhost:8787/rpc');
   });
 
   it('sends Authorization header on native when auth token is provided', () => {
-    const client = new MacBridgeWsClient('http://localhost:8787', {
+    const client = new HostBridgeWsClient('http://localhost:8787', {
       authToken: 'token-abc',
     });
     client.connect();
@@ -79,7 +79,7 @@ describe('MacBridgeWsClient', () => {
       return;
     }
 
-    const client = new MacBridgeWsClient('http://localhost:8787', {
+    const client = new HostBridgeWsClient('http://localhost:8787', {
       authToken: 'token-xyz',
       allowQueryTokenAuth: true,
     });
@@ -89,7 +89,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('onEvent emits rpc notifications', () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();
     client.onEvent(listener);
     client.connect();
@@ -105,7 +105,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('request() resolves using JSON-RPC response id', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     client.connect();
 
     const socket = latestMockSocket();
@@ -132,7 +132,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('onStatus emits open/close state changes', () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();
     client.onStatus(listener);
     client.connect();
@@ -146,7 +146,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('waitForTurnCompletion resolves from cached completion events', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     client.connect();
 
     latestMockSocket().simulateMessage(
@@ -166,7 +166,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('waitForTurnCompletion accepts snake_case completion payloads', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     client.connect();
 
     const waitPromise = client.waitForTurnCompletion('thr_2', 'turn_2', 100);
@@ -185,7 +185,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('waitForTurnCompletion tolerates completion payloads without turn id', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     client.connect();
 
     const waitPromise = client.waitForTurnCompletion('thr_3', 'turn_3', 100);
@@ -203,7 +203,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('waitForTurnCompletion resolves from codex task_complete event', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     client.connect();
 
     const waitPromise = client.waitForTurnCompletion('thr_4', 'turn_4', 100);
@@ -223,7 +223,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('deduplicates notifications by eventId', () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();
     client.onEvent(listener);
     client.connect();
@@ -283,7 +283,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('requests replay from latest event id after reconnect', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();
     client.onEvent(listener);
     client.connect();
@@ -361,7 +361,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('replays missed events without duplicating live events received after reconnect', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();
     client.onEvent(listener);
     client.connect();
@@ -499,7 +499,7 @@ describe('MacBridgeWsClient', () => {
   });
 
   it('accepts new events after bridge event counter reset', async () => {
-    const client = new MacBridgeWsClient('http://localhost:8787');
+    const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();
     client.onEvent(listener);
     client.connect();

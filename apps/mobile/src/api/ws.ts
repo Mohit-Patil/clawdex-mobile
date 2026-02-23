@@ -5,7 +5,7 @@ import type { RpcNotification } from './types';
 type EventListener = (event: RpcNotification) => void;
 type StatusListener = (connected: boolean) => void;
 
-interface MacBridgeWsClientOptions {
+interface HostBridgeWsClientOptions {
   authToken?: string | null;
   allowQueryTokenAuth?: boolean;
   requestTimeoutMs?: number;
@@ -48,7 +48,7 @@ interface ReplayEventsResponse {
   latestEventId?: number;
 }
 
-export class MacBridgeWsClient {
+export class HostBridgeWsClient {
   private static readonly TURN_COMPLETION_TTL_MS = 5 * 60 * 1000;
   private static readonly RECENT_EVENT_ID_CACHE_SIZE = 4096;
   private socket: WebSocket | null = null;
@@ -73,7 +73,7 @@ export class MacBridgeWsClient {
   private replayInFlight: Promise<void> | null = null;
   private requestCounter = 0;
 
-  constructor(baseUrl: string, options: MacBridgeWsClientOptions = {}) {
+  constructor(baseUrl: string, options: HostBridgeWsClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.authToken = options.authToken?.trim() || null;
     this.allowQueryTokenAuth = options.allowQueryTokenAuth ?? false;
@@ -563,7 +563,7 @@ export class MacBridgeWsClient {
     this.recentEventIds.add(eventId);
     this.recentEventIdQueue.push(eventId);
     while (
-      this.recentEventIdQueue.length > MacBridgeWsClient.RECENT_EVENT_ID_CACHE_SIZE
+      this.recentEventIdQueue.length > HostBridgeWsClient.RECENT_EVENT_ID_CACHE_SIZE
     ) {
       const removed = this.recentEventIdQueue.shift();
       if (typeof removed === 'number') {
@@ -605,7 +605,7 @@ export class MacBridgeWsClient {
   private pruneTurnCompletions(): void {
     const now = Date.now();
     for (const [key, snapshot] of this.recentTurnCompletions.entries()) {
-      if (now - snapshot.completedAt > MacBridgeWsClient.TURN_COMPLETION_TTL_MS) {
+      if (now - snapshot.completedAt > HostBridgeWsClient.TURN_COMPLETION_TTL_MS) {
         this.recentTurnCompletions.delete(key);
       }
     }

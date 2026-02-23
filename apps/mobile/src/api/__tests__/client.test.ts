@@ -1,20 +1,20 @@
-import { MacBridgeApiClient } from '../client';
-import type { MacBridgeWsClient } from '../ws';
+import { HostBridgeApiClient } from '../client';
+import type { HostBridgeWsClient } from '../ws';
 
 function createWsMock() {
-  type WsLike = Pick<MacBridgeWsClient, 'request' | 'waitForTurnCompletion'>;
+  type WsLike = Pick<HostBridgeWsClient, 'request' | 'waitForTurnCompletion'>;
   return {
     request: jest.fn(),
     waitForTurnCompletion: jest.fn().mockResolvedValue(undefined),
   } as jest.Mocked<WsLike>;
 }
 
-describe('MacBridgeApiClient', () => {
+describe('HostBridgeApiClient', () => {
   it('health() calls bridge/health/read', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({ status: 'ok', at: '2026-01-01T00:00:00Z', uptimeSec: 10 });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const result = await client.health();
 
     expect(ws.request).toHaveBeenCalledWith('bridge/health/read');
@@ -41,7 +41,7 @@ describe('MacBridgeApiClient', () => {
       ],
     });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const chats = await client.listChats();
 
     expect(ws.request).toHaveBeenCalledWith(
@@ -75,7 +75,7 @@ describe('MacBridgeApiClient', () => {
       ],
     });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const chats = await client.listChats();
 
     expect(chats).toHaveLength(1);
@@ -123,7 +123,7 @@ describe('MacBridgeApiClient', () => {
       ],
     });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const chats = await client.listChats();
 
     expect(chats.map((chat) => chat.id)).toEqual(['thr_root']);
@@ -161,7 +161,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const chat = await client.sendChatMessage('thr_1', { content: 'Hello' });
 
     expect(ws.request).toHaveBeenNthCalledWith(2, 'turn/start', expect.any(Object));
@@ -209,7 +209,7 @@ describe('MacBridgeApiClient', () => {
           },
         }); // retried thread/read
 
-      const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+      const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
       const chatPromise = client.sendChatMessage('thr_retry', { content: 'Hello' });
 
       await Promise.resolve();
@@ -264,7 +264,7 @@ describe('MacBridgeApiClient', () => {
         .mockResolvedValueOnce({ turn: { id: 'turn_new_repeat' } }) // turn/start
         .mockResolvedValue(staleReadResponse); // thread/read retries always stale
 
-      const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+      const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
       const chatPromise = client.sendChatMessage('thr_repeat', { content: 'repeat' });
 
       await Promise.resolve();
@@ -304,7 +304,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.createChat({ model: 'gpt-5.3-codex' });
 
     expect(ws.request).toHaveBeenCalledWith(
@@ -328,7 +328,7 @@ describe('MacBridgeApiClient', () => {
       },
     });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.createChat({ approvalPolicy: 'never' });
 
     expect(ws.request).toHaveBeenCalledWith(
@@ -357,7 +357,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const renamed = await client.renameChat('thr_rename', 'Renamed Chat');
 
     expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/name/set', {
@@ -407,7 +407,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.sendChatMessage('thr_model', {
       content: 'hello',
       model: 'gpt-5.3-codex',
@@ -452,7 +452,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.sendChatMessage('thr_policy_turn', {
       content: 'hello',
       approvalPolicy: 'never',
@@ -480,7 +480,7 @@ describe('MacBridgeApiClient', () => {
       .mockRejectedValueOnce(new Error('unknown field `experimentalRawEvents`'))
       .mockResolvedValueOnce({});
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await expect(client.resumeThread('thr_resume')).resolves.toBeUndefined();
 
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -512,7 +512,7 @@ describe('MacBridgeApiClient', () => {
       .mockRejectedValueOnce(new Error('unknown field `experimentalRawEvents`'))
       .mockResolvedValueOnce({});
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await expect(
       client.resumeThread('thr_resume_never', { approvalPolicy: 'never' })
     ).resolves.toBeUndefined();
@@ -562,7 +562,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.sendChatMessage('thr_mentions', {
       content: 'review these files',
       mentions: [
@@ -610,7 +610,7 @@ describe('MacBridgeApiClient', () => {
       kind: 'file',
     });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const uploaded = await client.uploadAttachment({
       dataBase64: 'aGVsbG8=',
       fileName: 'file.txt',
@@ -631,7 +631,7 @@ describe('MacBridgeApiClient', () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({});
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.interruptTurn('thr_stop', 'turn_stop');
 
     expect(ws.request).toHaveBeenCalledWith('turn/interrupt', {
@@ -666,7 +666,7 @@ describe('MacBridgeApiClient', () => {
       })
       .mockResolvedValueOnce({});
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const turnId = await client.interruptLatestTurn('thr_active');
 
     expect(turnId).toBe('turn_live');
@@ -699,7 +699,7 @@ describe('MacBridgeApiClient', () => {
       },
     });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const turnId = await client.interruptLatestTurn('thr_idle');
 
     expect(turnId).toBeNull();
@@ -737,7 +737,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.sendChatMessage('thr_plan', {
       content: 'hello',
       model: 'gpt-5.3-codex',
@@ -799,7 +799,7 @@ describe('MacBridgeApiClient', () => {
         },
       });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await client.sendChatMessage('thr_plan_fallback', {
       content: 'hello',
       collaborationMode: 'plan',
@@ -850,7 +850,7 @@ describe('MacBridgeApiClient', () => {
       ],
     });
 
-    const client = new MacBridgeApiClient({ ws: ws as unknown as MacBridgeWsClient });
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     const models = await client.listModels();
 
     expect(ws.request).toHaveBeenCalledWith(

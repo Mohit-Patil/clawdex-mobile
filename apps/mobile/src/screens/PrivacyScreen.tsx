@@ -60,7 +60,7 @@ export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
 
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <Section title="What This App Does">
-            Codex Mobile Control connects to your own Mac bridge service and lets you view chats,
+            Clawdex Mobile connects to your own host bridge service and lets you view chats,
             run approved commands, and perform Git operations on your machine.
           </Section>
 
@@ -71,14 +71,14 @@ export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
           </Section>
 
           <Section title="Data Storage and Retention">
-            - Data is stored by services you run (Codex app-server cache, local repo files, and logs).
+            - Data is stored by services you run (Codex app-server cache, repo files, and logs).
             - This app does not define automatic cloud retention.
             - You control deletion by removing local bridge/cache/repo data.
           </Section>
 
           <Section title="Sharing">
             - No ad SDKs are used in this app.
-            - Data may be sent to model providers only when you run Codex workflows through your setup.
+            - Data may be sent to model providers only when you run assistant workflows through your setup.
             - You are responsible for configuring and securing your bridge host and network.
           </Section>
 

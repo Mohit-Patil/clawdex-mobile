@@ -13,6 +13,22 @@ if [[ ! -f "$SECURE_ENV_FILE" ]]; then
   exit 1
 fi
 
+if ! command -v cc >/dev/null 2>&1; then
+  echo "error: missing system C compiler/linker ('cc'). Rust bridge cannot compile without it." >&2
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "Install on Ubuntu/Debian: sudo apt-get update && sudo apt-get install -y build-essential" >&2
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "Install on Fedora/RHEL: sudo dnf install -y gcc gcc-c++ make" >&2
+  elif command -v yum >/dev/null 2>&1; then
+    echo "Install on CentOS/RHEL: sudo yum install -y gcc gcc-c++ make" >&2
+  elif command -v apk >/dev/null 2>&1; then
+    echo "Install on Alpine: sudo apk add build-base" >&2
+  elif command -v xcode-select >/dev/null 2>&1; then
+    echo "Install on macOS: xcode-select --install" >&2
+  fi
+  exit 1
+fi
+
 set -a
 # shellcheck disable=SC1090
 source "$SECURE_ENV_FILE"

@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Clawdex Mobile",
-    "slug": "codex-mobile-control",
+    "slug": "clawdex-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/brand/app-icon.png",

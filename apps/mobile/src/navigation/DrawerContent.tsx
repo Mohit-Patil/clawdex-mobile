@@ -13,17 +13,17 @@ import {
   Text,
   View,
 } from 'react-native';
-import type { MacBridgeApiClient } from '../api/client';
+import type { HostBridgeApiClient } from '../api/client';
 import type { ChatSummary, RpcNotification } from '../api/types';
-import type { MacBridgeWsClient } from '../api/ws';
+import type { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
 import { colors, spacing, typography } from '../theme';
 
 type Screen = 'Main' | 'Terminal' | 'Settings' | 'Privacy' | 'Terms';
 
 interface DrawerContentProps {
-  api: MacBridgeApiClient;
-  ws: MacBridgeWsClient;
+  api: HostBridgeApiClient;
+  ws: HostBridgeWsClient;
   selectedChatId: string | null;
   selectedDefaultCwd: string | null;
   onSelectDefaultCwd: (cwd: string | null) => void;

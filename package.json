@@ -1,7 +1,10 @@
 {
-  "name": "codex-mobile-control",
+  "name": "clawdex-mobile",
   "private": true,
   "version": "0.1.0",
+  "bin": {
+    "clawdex": "./bin/clawdex.js"
+  },
   "workspaces": [
     "apps/*",
     "services/*"
@@ -12,20 +15,21 @@
     "android": "./scripts/start-expo.sh android",
     "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/rust-bridge dev",
     "setup:wizard": "./scripts/setup-wizard.sh",
+    "stop:services": "./scripts/stop-services.sh",
     "secure:setup": "./scripts/setup-secure-dev.sh",
     "secure:bridge": "./scripts/start-bridge-secure.sh",
     "bridge:ts": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "build": "npm run --workspaces build",
     "typecheck": "npm run --workspaces typecheck",
     "lint": "npm run --workspaces lint",
-    "test": "npm run test -w @codex/mac-bridge && npm run test -w clawdex-mobile && npm run test -w @codex/rust-bridge",
+    "test": "npm run test -w @codex/mac-bridge && npm run test -w apps/mobile && npm run test -w @codex/rust-bridge",
     "teardown": "./scripts/teardown.sh"
   },
   "dependencies": {
-    "@types/react": "^19.1.10",
-    "react": "^19.1.0",
-    "react-native": "^0.81.5",
-    "expo": "~54.0.33"
+    "@types/react": "19.1.10",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "expo": "54.0.33"
   },
   "overrides": {
     "minimatch": "10.2.2",

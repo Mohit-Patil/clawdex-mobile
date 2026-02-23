@@ -60,7 +60,7 @@ export function TermsScreen({ termsUrl, onOpenDrawer }: TermsScreenProps) {
 
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <Section title="Use Of Service">
-            This mobile app is a client for interacting with a user-owned Mac bridge and repository.
+            This mobile app is a client for interacting with a user-owned host bridge and repository.
             You are responsible for commands, commits, and approvals executed through your setup.
           </Section>
 

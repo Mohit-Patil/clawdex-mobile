@@ -8,7 +8,7 @@ Related engineering reference:
 
 ## Submission Snapshot
 
-- App name: Codex Mobile Control
+- App name: Clawdex Mobile
 - Build: [fill in build/version]
 - Date prepared: February 21, 2026
 - Primary reviewer contact: [name + email + phone]
@@ -16,10 +16,10 @@ Related engineering reference:
 
 ## What The App Does
 
-Codex Mobile Control is a client for a user-owned Mac host.
+Clawdex Mobile is a client for a user-owned host machine.
 The iOS app connects to a bridge service running on the user's own machine and lets the user:
 
-- View and continue Codex threads
+- View and continue assistant threads
 - Review Git status and diffs
 - Create Git commits
 - Execute approved terminal commands on the user-owned host
@@ -32,12 +32,12 @@ Reviewer can use either of the following:
 
 1. Dedicated review host (recommended for first submission)
 
-- We provide a reachable test Mac bridge URL and token directly to App Review.
+- We provide a reachable test host bridge URL and token directly to App Review.
 - This host stays online during review hours.
 
 2. Local host setup (fallback)
 
-- Start bridge service on a Mac:
+- Start bridge service on the host machine:
 
 ```bash
 npm install
@@ -57,8 +57,8 @@ BRIDGE_CORS_ORIGINS=http://localhost:19006,http://localhost:8081
 - In `apps/mobile/.env`, set:
 
 ```env
-EXPO_PUBLIC_MAC_BRIDGE_URL=http://<mac-lan-ip>:8787
-EXPO_PUBLIC_MAC_BRIDGE_TOKEN=<review-token>
+EXPO_PUBLIC_HOST_BRIDGE_URL=http://<mac-lan-ip>:8787
+EXPO_PUBLIC_HOST_BRIDGE_TOKEN=<review-token>
 EXPO_PUBLIC_PRIVACY_POLICY_URL=https://<your-policy-url>
 EXPO_PUBLIC_TERMS_OF_SERVICE_URL=https://<your-terms-url>
 ```

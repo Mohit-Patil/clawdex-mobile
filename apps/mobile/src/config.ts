@@ -1,7 +1,11 @@
-const macBridgeUrl =
+const hostBridgeUrl =
+  process.env.EXPO_PUBLIC_HOST_BRIDGE_URL?.replace(/\/$/, '') ??
   process.env.EXPO_PUBLIC_MAC_BRIDGE_URL?.replace(/\/$/, '') ??
   'http://127.0.0.1:8787';
-const macBridgeToken = process.env.EXPO_PUBLIC_MAC_BRIDGE_TOKEN?.trim() || null;
+const hostBridgeToken =
+  process.env.EXPO_PUBLIC_HOST_BRIDGE_TOKEN?.trim() ||
+  process.env.EXPO_PUBLIC_MAC_BRIDGE_TOKEN?.trim() ||
+  null;
 const allowWsQueryTokenAuth =
   process.env.EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH?.trim().toLowerCase() ===
   'true';
@@ -15,15 +19,15 @@ const externalStatusFullSyncDebounceMs = parseNonNegativeIntEnv(
   450
 );
 
-if (isInsecureRemoteUrl(macBridgeUrl) && !allowInsecureRemoteBridge) {
+if (isInsecureRemoteUrl(hostBridgeUrl) && !allowInsecureRemoteBridge) {
   console.warn(
-    'EXPO_PUBLIC_MAC_BRIDGE_URL uses http:// for a non-local host. Prefer https:// for remote bridge access.'
+    'EXPO_PUBLIC_HOST_BRIDGE_URL uses http:// for a non-local host. Prefer https:// for remote host bridge access.'
   );
 }
 
 export const env = {
-  macBridgeUrl,
-  macBridgeToken,
+  hostBridgeUrl,
+  hostBridgeToken,
   allowWsQueryTokenAuth,
   externalStatusFullSyncDebounceMs,
   privacyPolicyUrl,

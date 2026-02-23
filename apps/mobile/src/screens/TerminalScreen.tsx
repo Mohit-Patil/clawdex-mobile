@@ -13,13 +13,13 @@ import {
   View,
 } from 'react-native';
 
-import type { MacBridgeApiClient } from '../api/client';
-import type { MacBridgeWsClient } from '../api/ws';
+import type { HostBridgeApiClient } from '../api/client';
+import type { HostBridgeWsClient } from '../api/ws';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface TerminalScreenProps {
-  api: MacBridgeApiClient;
-  ws: MacBridgeWsClient;
+  api: HostBridgeApiClient;
+  ws: HostBridgeWsClient;
   onOpenDrawer: () => void;
 }
 

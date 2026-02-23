@@ -12,12 +12,12 @@ import {
   View,
 } from 'react-native';
 
-import type { MacBridgeApiClient } from '../api/client';
+import type { HostBridgeApiClient } from '../api/client';
 import type { Chat, GitStatusResponse } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface GitScreenProps {
-  api: MacBridgeApiClient;
+  api: HostBridgeApiClient;
   chat: Chat;
   onBack: () => void;
   onChatUpdated?: (chat: Chat) => void;

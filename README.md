@@ -1,16 +1,16 @@
-# Clawdex Mobile (Codex Mobile Control)
+# Clawdex Mobile
 
 <p align="center">
   <img src="apps/mobile/assets/brand/app-icon.png" alt="Clawdex app icon" width="112" />
 </p>
 
-Control Codex from your phone using an Expo React Native app (`apps/mobile`) and a Rust bridge (`services/rust-bridge`) running on your Mac.
+Control Clawdex from your phone using an Expo React Native app (`apps/mobile`) and a Rust bridge (`services/rust-bridge`) running on your host machine.
 
 This project is intended for trusted/private networking (Tailscale or local LAN). Do not expose the bridge publicly.
 
 ## What You Get
 
-- Chat with Codex from mobile
+- Chat with Clawdex from mobile
 - Attach workspace files and phone files/images from the `+` composer menu (workspace path autocomplete included)
 - Switch collaboration mode per turn (`Default` / `Plan`) from the UI or slash command
 - Auto-promote to plan mode when plan events/structured clarifications are requested
@@ -30,7 +30,26 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 
 ## Install (Quick Start)
 
-If you want to install and run immediately, start here:
+If you are using the published CLI package:
+
+```bash
+npx clawdex init
+```
+
+Recommended lifecycle:
+
+```bash
+# 1) Run onboarding + start bridge/Expo
+npx clawdex init
+
+# 2) Scan QR in Expo Go when it appears
+# 3) Press Enter to detach onboarding (services keep running)
+
+# 4) Stop services later
+npx clawdex stop
+```
+
+If you are running directly from this monorepo checkout:
 
 ```bash
 npm install
@@ -41,14 +60,42 @@ Prerequisites are listed in `Prerequisites` below.
 
 `setup:wizard` walks through:
 
-1. codex CLI check
-2. Tailscale install check (offers Homebrew install)
-3. Tailscale login/connectivity check (opens browser flow if needed)
-4. Expo Go readiness check
-5. Secure env generation
-6. Optional one-terminal run (bridge in background + Expo QR in foreground)
+1. Security checkpoint
+2. Prerequisite checks (with install prompts)
+   includes: `git`, `curl`, `openssl`, C compiler/linker (`cc`), Rust/Cargo, Codex CLI, npm workspace deps (including mobile TypeScript tooling)
+3. Tailscale setup on host + phone (install/login/same-network check)
+4. Secure env generation/update
+5. Auto-start bridge + Expo QR in the same flow (default)
+
+During step 3, the wizard now explicitly prompts you to install Tailscale on your phone, sign in, and confirm phone + host are on the same Tailscale network before proceeding.
+During auto-start, onboarding waits for bridge `/health` before launching Expo (first-time Rust compile may take a few minutes on fresh VPS hosts).
+Expo then streams live output in the terminal; press Enter to exit onboarding while bridge + Expo keep running.
+Installer output for Rust/npm/TypeScript is hidden by default to keep onboarding clean.
+Use `CLAWDEX_SETUP_VERBOSE=true npx clawdex init` if you want full install logs.
+
+Skip auto-start when needed:
+
+```bash
+npx clawdex init --no-start
+# or from repo:
+npm run setup:wizard -- --no-start
+```
 
 For manual setup, see `Manual Secure Setup (No Wizard)` below.
+
+## Onboarding Output Cues
+
+After `clawdex init`, expected sequence:
+
+1. Bridge health passes (`Bridge health check passed.`)
+2. Expo starts (`Starting Expo (mobile) in background...`)
+3. You may briefly see a spinner:
+   - `Waiting for Expo output - ...`
+4. Expo output begins:
+   - `expo start --host lan`
+   - QR block
+   - `Metro waiting on exp://...`
+5. Press Enter to detach onboarding while Expo + bridge keep running.
 
 ## Project Layout
 
@@ -85,13 +132,17 @@ In-app brand mark component is `apps/mobile/src/components/BrandMark.tsx`.
 
 ## Prerequisites
 
-- macOS
+- macOS or Linux
 - Node.js 20+
 - npm 10+
 - `codex` CLI installed and available in `PATH`
 - `git` installed and available in `PATH`
-- Tailscale on Mac + phone (recommended)
+- Tailscale on host machine + phone (recommended)
 - Expo Go on phone (for non-standalone flow)
+
+`clawdex init` / `setup:wizard` can install most missing machine prerequisites during onboarding (with prompts). `node` and `npm` must already be installed to run the package itself.
+
+Mobile runtime accepts `EXPO_PUBLIC_HOST_BRIDGE_URL` / `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` (preferred). Legacy `EXPO_PUBLIC_MAC_BRIDGE_URL` / `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` are still accepted for backward compatibility.
 
 Optional for local simulator/emulator workflows:
 
@@ -135,7 +186,8 @@ npm run mobile
 
 From repo root:
 
-- `npm run setup:wizard` — guided setup + optional one-terminal launch
+- `npm run setup:wizard` — guided setup + auto bridge/expo launch by default
+- `npm run stop:services` — stop running Expo + bridge for this project
 - `npm run secure:setup` — generate/update secure env
 - `npm run secure:bridge` — start rust bridge from `.env.secure`
 - `npm run mobile` — start Expo using configured host
@@ -145,6 +197,23 @@ From repo root:
 - `npm run lint` — lint all workspaces
 - `npm run typecheck` — typecheck all workspaces
 - `npm run build` — build all workspaces
+
+Published CLI equivalent:
+
+- `npx clawdex init` — full interactive onboarding + auto-start
+- `npx clawdex stop` — stop running Expo + bridge for this project
+- `npx clawdex init --no-start` — onboarding without launching bridge/expo
+- `npx clawdex init --platform ios` — auto-start with iOS target
+
+## Advanced Knobs
+
+Optional environment variables:
+
+- `CLAWDEX_SETUP_VERBOSE=true` — show full installer output during onboarding (instead of quiet mode)
+- `BRIDGE_HEALTH_WAIT_SECS=300` — max wait for bridge `/health` before reprompt
+- `EXPO_OUTPUT_WAIT_SECS=90` — spinner timeout before continuing to stream Expo logs
+- `EXPO_AUTO_REPAIR=true` — auto-repair React Native runtime when `npm run mobile` detects incomplete deps
+- `EXPO_CLEAR_CACHE=true` — force `expo start --clear` via `npm run mobile`
 
 ## Teardown / Cleanup
 
@@ -157,7 +226,7 @@ npm run teardown
 Teardown can:
 
 - stop running Expo + bridge processes
-- remove generated artifacts (`.env.secure`, `.bridge.log`)
+- remove generated artifacts (`.env.secure`, `.bridge.log`, `.expo.log`, pid files)
 - optionally reset `apps/mobile/.env` from `.env.example`
 - optionally run `tailscale down`
 
@@ -185,8 +254,8 @@ npm run teardown -- --yes
 
 | Variable | Purpose |
 |---|---|
-| `EXPO_PUBLIC_MAC_BRIDGE_URL` | bridge base URL |
-| `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` | token sent by mobile client |
+| `EXPO_PUBLIC_HOST_BRIDGE_URL` | bridge base URL |
+| `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` | token sent by mobile client |
 | `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH` | web query-token behavior |
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
@@ -211,7 +280,7 @@ Use this checklist before broader internal rollout:
 ### Bridge health
 
 ```bash
-curl "$(awk -F= '/^EXPO_PUBLIC_MAC_BRIDGE_URL=/{print $2}' apps/mobile/.env)/health"
+curl "$(awk -F= '/^EXPO_PUBLIC_HOST_BRIDGE_URL=/{print $2}' apps/mobile/.env)/health"
 ```
 
 Expected: JSON containing `"status":"ok"`.
@@ -426,25 +495,81 @@ So yes, cloud builds without App Store listing are possible, but still require A
 
 ## Troubleshooting
 
+### Onboarding looks stuck before Expo logs appear
+
+- This is usually Expo startup latency (first launch can take time while Metro initializes).
+- You should see a spinner line like `Waiting for Expo output ...` before logs begin.
+- Tune spinner timeout if needed:
+```bash
+EXPO_OUTPUT_WAIT_SECS=180 npx clawdex init
+```
+- If Expo never emits logs, inspect:
+```bash
+tail -n 120 .expo.log
+```
+
 ### Expo starts but QR/network is wrong
 
 - Re-run `npm run secure:setup`
 - Confirm `.env.secure` has the correct `BRIDGE_HOST`
 - Restart `npm run mobile`
 
+### Stop all running services quickly
+
+- Preferred:
+```bash
+npx clawdex stop
+```
+- From repo checkout:
+```bash
+npm run stop:services
+```
+
 ### Bridge auth errors (`401`, invalid token)
 
-- Ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_MAC_BRIDGE_TOKEN` in `apps/mobile/.env`
+- Ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` in `apps/mobile/.env`
 - Restart bridge and Expo after token changes
 
 ### Tailscale issues
 
-- Verify both Mac and phone are on the same tailnet
+- Verify both host machine and phone are on the same Tailscale network
 - Run `tailscale ip -4` and verify host in `apps/mobile/.env`
 
 ### `codex` not found
 
 - Ensure `codex` is in `PATH`, or set `CODEX_CLI_BIN` accordingly
+
+### Bridge build fails with `linker 'cc' not found`
+
+- Install system C build tools:
+```bash
+sudo apt-get update && sudo apt-get install -y build-essential
+```
+- Then retry `npm run secure:bridge`.
+- `setup:wizard` now checks and installs this prerequisite automatically.
+
+### iOS bundling error: `Unable to resolve "./BoundingDimensions"`
+
+- `npm run mobile` now performs an automatic runtime integrity check and repair.
+- If the error persists, run manual recovery:
+```bash
+npm install --include=dev --force
+npm install --include=dev --force -w apps/mobile
+npm run -w apps/mobile start -- --clear
+```
+
+### Runtime errors: `[runtime not ready]` / `property is not writable`
+
+- This usually indicates a corrupted React Native install or stale Metro cache.
+- `npm run mobile` now auto-repairs this in most cases.
+- If needed, run manual recovery:
+```bash
+rm -rf node_modules apps/mobile/node_modules
+npm install --include=dev --force
+npm install --include=dev --force -w apps/mobile
+npm run -w apps/mobile start -- --clear
+```
+- Also update Expo Go to the latest version on your phone.
 
 ### Git operations fail
 
@@ -464,7 +589,7 @@ So yes, cloud builds without App Store listing are possible, but still require A
 - Clear Expo cache:
 
 ```bash
-npm run -w clawdex-mobile start -- --clear
+npm run -w apps/mobile start -- --clear
 ```
 
 ### Plan mode errors (`RPC-32600` invalid `collaborationMode`)
@@ -474,7 +599,7 @@ npm run -w clawdex-mobile start -- --clear
 - If you still see this after pull/restart, run the API test suite:
 
 ```bash
-npm run -w clawdex-mobile test -- --runInBand src/api/__tests__/client.test.ts
+npm run -w apps/mobile test -- --runInBand src/api/__tests__/client.test.ts
 ```
 
 ### Stop button does not interrupt a run

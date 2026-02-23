@@ -55,12 +55,12 @@ Two-layer design — the phone talks to the bridge over the network, and the bri
 
 ### P0 — Security
 
-- [x] **Bridge auth token support added** — REST + WS now support bearer token auth (`BRIDGE_AUTH_TOKEN` / `EXPO_PUBLIC_MAC_BRIDGE_TOKEN`).
+- [x] **Bridge auth token support added** — REST + WS now support bearer token auth (`BRIDGE_AUTH_TOKEN` / `EXPO_PUBLIC_HOST_BRIDGE_TOKEN`).
 - [ ] **Pairing flow not added yet** — auth still depends on manual token setup rather than QR/one-time pairing.
 
 ### P1 — Reliability
 
-- [ ] **No WebSocket reconnection** — if the WS drops, it stays dead. Add auto-reconnect with exponential backoff in `MacBridgeWsClient`.
+- [ ] **No WebSocket reconnection** — if the WS drops, it stays dead. Add auto-reconnect with exponential backoff in `HostBridgeWsClient`.
 - [ ] **No Codex process recovery** — if `codex app-server` crashes, the bridge is stuck. Add auto-restart with a health check loop.
 - [ ] **No error recovery** — the bridge doesn't handle the Codex process dying mid-turn.
 
@@ -92,8 +92,8 @@ apps/mobile/
   src/
     config.ts                      Bridge URL from env
     api/
-      client.ts                    MacBridgeApiClient (REST)
-      ws.ts                        MacBridgeWsClient (WebSocket)
+      client.ts                    HostBridgeApiClient (REST)
+      ws.ts                        HostBridgeWsClient (WebSocket)
       types.ts                     Shared TypeScript types
     screens/
       ThreadsScreen.tsx            Chat UI — list + create + reply + streaming

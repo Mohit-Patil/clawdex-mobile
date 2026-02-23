@@ -12,9 +12,9 @@ import {
   View,
 } from 'react-native';
 
-import { MacBridgeApiClient } from './src/api/client';
+import { HostBridgeApiClient } from './src/api/client';
 import type { ApprovalMode, Chat, ReasoningEffort } from './src/api/types';
-import { MacBridgeWsClient } from './src/api/ws';
+import { HostBridgeWsClient } from './src/api/ws';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
 import { GitScreen } from './src/screens/GitScreen';
@@ -39,15 +39,15 @@ const APP_SETTINGS_VERSION = 1;
 export default function App() {
   const ws = useMemo(
     () =>
-      new MacBridgeWsClient(env.macBridgeUrl, {
-        authToken: env.macBridgeToken,
+      new HostBridgeWsClient(env.hostBridgeUrl, {
+        authToken: env.hostBridgeToken,
         allowQueryTokenAuth: env.allowWsQueryTokenAuth
       }),
     []
   );
   const api = useMemo(
     () =>
-      new MacBridgeApiClient({
+      new HostBridgeApiClient({
         ws,
       }),
     [ws]
@@ -373,7 +373,7 @@ export default function App() {
           <SettingsScreen
             api={api}
             ws={ws}
-            bridgeUrl={env.macBridgeUrl}
+            bridgeUrl={env.hostBridgeUrl}
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
             onDefaultModelSettingsChange={handleDefaultModelSettingsChange}

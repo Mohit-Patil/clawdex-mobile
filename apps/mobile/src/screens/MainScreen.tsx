@@ -28,7 +28,7 @@ import {
   View,
 } from 'react-native';
 
-import type { MacBridgeApiClient } from '../api/client';
+import type { HostBridgeApiClient } from '../api/client';
 import type {
   ApprovalMode,
   ApprovalPolicy,
@@ -47,7 +47,7 @@ import type {
   TurnPlanStep,
   ChatMessage as ChatTranscriptMessage,
 } from '../api/types';
-import type { MacBridgeWsClient } from '../api/ws';
+import type { HostBridgeWsClient } from '../api/ws';
 import { ActivityBar, type ActivityTone } from '../components/ActivityBar';
 import { ApprovalBanner } from '../components/ApprovalBanner';
 import { ChatHeader } from '../components/ChatHeader';
@@ -65,8 +65,8 @@ export interface MainScreenHandle {
 }
 
 interface MainScreenProps {
-  api: MacBridgeApiClient;
-  ws: MacBridgeWsClient;
+  api: HostBridgeApiClient;
+  ws: HostBridgeWsClient;
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
   defaultStartCwd?: string | null;

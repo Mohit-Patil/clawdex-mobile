@@ -9,6 +9,9 @@ fi
 
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 BRIDGE_LOG_FILE="$ROOT_DIR/.bridge.log"
+EXPO_LOG_FILE="$ROOT_DIR/.expo.log"
+BRIDGE_PID_FILE="$ROOT_DIR/.bridge.pid"
+EXPO_PID_FILE="$ROOT_DIR/.expo.pid"
 MOBILE_ENV_FILE="$ROOT_DIR/apps/mobile/.env"
 MOBILE_ENV_EXAMPLE="$ROOT_DIR/apps/mobile/.env.example"
 
@@ -99,9 +102,12 @@ else
 fi
 
 print_step "Cleanup generated files"
-if $auto_yes || confirm_prompt "Remove generated secure artifacts (.env.secure, .bridge.log)?"; then
+if $auto_yes || confirm_prompt "Remove generated secure artifacts (.env.secure, .bridge.log, .expo.log, pid files)?"; then
   remove_if_exists "$SECURE_ENV_FILE"
   remove_if_exists "$BRIDGE_LOG_FILE"
+  remove_if_exists "$EXPO_LOG_FILE"
+  remove_if_exists "$BRIDGE_PID_FILE"
+  remove_if_exists "$EXPO_PID_FILE"
 else
   echo "Skipped artifact cleanup."
 fi
@@ -116,7 +122,7 @@ fi
 
 print_step "Tailscale"
 if command -v tailscale >/dev/null 2>&1; then
-  if $auto_yes || confirm_prompt "Bring Tailscale interface down on this Mac (tailscale down)?"; then
+  if $auto_yes || confirm_prompt "Bring Tailscale interface down on this host machine (tailscale down)?"; then
     tailscale down || true
     echo "Requested tailscale down."
   else

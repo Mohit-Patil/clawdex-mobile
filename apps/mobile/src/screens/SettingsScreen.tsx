@@ -13,14 +13,14 @@ import {
   View,
 } from 'react-native';
 
-import type { MacBridgeApiClient } from '../api/client';
+import type { HostBridgeApiClient } from '../api/client';
 import type { ApprovalMode, ModelOption, ReasoningEffort } from '../api/types';
-import type { MacBridgeWsClient } from '../api/ws';
+import type { HostBridgeWsClient } from '../api/ws';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface SettingsScreenProps {
-  api: MacBridgeApiClient;
-  ws: MacBridgeWsClient;
+  api: HostBridgeApiClient;
+  ws: HostBridgeWsClient;
   bridgeUrl: string;
   defaultModelId?: string | null;
   defaultReasoningEffort?: ReasoningEffort | null;

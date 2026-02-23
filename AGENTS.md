@@ -57,12 +57,12 @@ npm run mobile
 
 This runs `expo start` in the `apps/mobile` workspace. It loads `apps/mobile/.env` automatically.
 
-Make sure `EXPO_PUBLIC_MAC_BRIDGE_URL` in `apps/mobile/.env` points to your Mac's LAN IP and the bridge port:
+Make sure `EXPO_PUBLIC_HOST_BRIDGE_URL` in `apps/mobile/.env` points to your host machine's LAN IP and the bridge port:
 ```
-EXPO_PUBLIC_MAC_BRIDGE_URL=http://<YOUR_LAN_IP>:8787
+EXPO_PUBLIC_HOST_BRIDGE_URL=http://<YOUR_LAN_IP>:8787
 ```
 
-Find your LAN IP with `ifconfig en0 | grep inet` (macOS). The phone and the Mac must be on the same network.
+Find your LAN IP with `ifconfig en0 | grep inet` (macOS) or `ip addr` (Linux). The phone and the host machine must be on the same network.
 
 Optionally run on a specific platform:
 - `npm run ios`
@@ -73,10 +73,10 @@ Optionally run on a specific platform:
 - `npm run typecheck` (all workspaces)
 - `npm run build` (all workspaces)
 - `npm run -w @codex/rust-bridge dev` (bridge run mode)
-- `npm run -w clawdex-mobile start` (Expo dev server)
+- `npm run -w apps/mobile start` (Expo dev server)
 
 ## Architecture Notes
-- Mobile app creates one `MacBridgeApiClient` and one `MacBridgeWsClient` in `App.tsx` and passes them to screen components.
+- Mobile app creates one `HostBridgeApiClient` and one `HostBridgeWsClient` in `App.tsx` and passes them to screen components.
 - Threads, Terminal, and Git screens keep local `useState` and call typed API helpers in `apps/mobile/src/api/client.ts`.
 - Bridge exposes:
   - WebSocket JSON-RPC (`/rpc`) for thread, turn, approvals, terminal, and git operations.

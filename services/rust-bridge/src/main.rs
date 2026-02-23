@@ -414,8 +414,8 @@ impl AppServerBridge {
             "method": "initialize",
             "params": {
                 "clientInfo": {
-                    "name": "codex-mobile-rust-bridge",
-                    "title": "Codex Mobile Rust Bridge",
+                    "name": "clawdex-mobile-rust-bridge",
+                    "title": "Clawdex Mobile Rust Bridge",
                     "version": "0.1.0"
                 },
                 "capabilities": {
