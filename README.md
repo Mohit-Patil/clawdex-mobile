@@ -205,6 +205,29 @@ Published CLI equivalent:
 - `npx clawdex init --no-start` — onboarding without launching bridge/expo
 - `npx clawdex init --platform ios` — auto-start with iOS target
 
+## NPM Release Automation
+
+GitHub Actions publishes `clawdex-mobile` to npm from `.github/workflows/npm-release.yml`.
+
+Required repo secret:
+
+- `NPM_TOKEN` (npm automation token with publish access to `clawdex-mobile`)
+  add it in GitHub: `Settings -> Secrets and variables -> Actions -> New repository secret`
+
+Recommended release flow:
+
+```bash
+# from main
+npm version patch
+git push origin main --follow-tags
+```
+
+What happens:
+
+- Workflow triggers on tag push (`v*`) or manual `workflow_dispatch`
+- It verifies `vX.Y.Z` tag matches `package.json` version
+- It runs `npm publish` to the npm registry
+
 ## Advanced Knobs
 
 Optional environment variables:
