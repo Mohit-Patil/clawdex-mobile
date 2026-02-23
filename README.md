@@ -33,20 +33,24 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 If you are using the published CLI package:
 
 ```bash
-npx --yes --package clawdex-mobile@latest clawdex init
+npm install -g clawdex-mobile@latest
+clawdex init
 ```
 
 Recommended lifecycle:
 
 ```bash
-# 1) Run onboarding + start bridge/Expo
-npx --yes --package clawdex-mobile@latest clawdex init
+# 1) Install once
+npm install -g clawdex-mobile@latest
 
-# 2) Scan QR in Expo Go when it appears
-# 3) Press Enter to detach onboarding (services keep running)
+# 2) Run onboarding + start bridge/Expo
+clawdex init
 
-# 4) Stop services later
-npx --yes --package clawdex-mobile@latest clawdex stop
+# 3) Scan QR in Expo Go when it appears
+# 4) Press Enter to detach onboarding (services keep running)
+
+# 5) Stop services later
+clawdex stop
 ```
 
 If you are running directly from this monorepo checkout:
@@ -71,12 +75,12 @@ During step 3, the wizard now explicitly prompts you to install Tailscale on you
 During auto-start, onboarding waits for bridge `/health` before launching Expo (first-time Rust compile may take a few minutes on fresh VPS hosts).
 Expo then streams live output in the terminal; press Enter to exit onboarding while bridge + Expo keep running.
 Installer output for Rust/npm/TypeScript is hidden by default to keep onboarding clean.
-Use `CLAWDEX_SETUP_VERBOSE=true npx --yes --package clawdex-mobile@latest clawdex init` if you want full install logs.
+Use `CLAWDEX_SETUP_VERBOSE=true clawdex init` if you want full install logs.
 
 Skip auto-start when needed:
 
 ```bash
-npx --yes --package clawdex-mobile@latest clawdex init --no-start
+clawdex init --no-start
 # or from repo:
 npm run setup:wizard -- --no-start
 ```
@@ -200,10 +204,11 @@ From repo root:
 
 Published CLI equivalent:
 
-- `npx --yes --package clawdex-mobile@latest clawdex init` — full interactive onboarding + auto-start
-- `npx --yes --package clawdex-mobile@latest clawdex stop` — stop running Expo + bridge for this project
-- `npx --yes --package clawdex-mobile@latest clawdex init --no-start` — onboarding without launching bridge/expo
-- `npx --yes --package clawdex-mobile@latest clawdex init --platform ios` — auto-start with iOS target
+- `npm install -g clawdex-mobile@latest` — install/upgrade the published CLI
+- `clawdex init` — full interactive onboarding + auto-start
+- `clawdex stop` — stop running Expo + bridge for this project
+- `clawdex init --no-start` — onboarding without launching bridge/expo
+- `clawdex init --platform ios` — auto-start with iOS target
 
 ## NPM Release Automation
 
@@ -524,7 +529,7 @@ So yes, cloud builds without App Store listing are possible, but still require A
 - You should see a spinner line like `Waiting for Expo output ...` before logs begin.
 - Tune spinner timeout if needed:
 ```bash
-EXPO_OUTPUT_WAIT_SECS=180 npx --yes --package clawdex-mobile@latest clawdex init
+EXPO_OUTPUT_WAIT_SECS=180 clawdex init
 ```
 - If Expo never emits logs, inspect:
 ```bash
@@ -541,7 +546,7 @@ tail -n 120 .expo.log
 
 - Preferred:
 ```bash
-npx --yes --package clawdex-mobile@latest clawdex stop
+clawdex stop
 ```
 - From repo checkout:
 ```bash
