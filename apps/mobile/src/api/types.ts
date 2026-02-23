@@ -134,11 +134,61 @@ export interface GitStatusResponse {
   branch: string;
   clean: boolean;
   raw: string;
+  files: GitStatusFile[];
   cwd?: string;
+}
+
+export interface GitStatusFile {
+  path: string;
+  originalPath?: string | null;
+  indexStatus: string;
+  worktreeStatus: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
 }
 
 export interface GitDiffResponse {
   diff: string;
+  cwd?: string;
+}
+
+export interface GitFileRequest {
+  path: string;
+  cwd?: string;
+}
+
+export interface GitStageResponse {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  staged: boolean;
+  path: string;
+  cwd?: string;
+}
+
+export interface GitStageAllResponse {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  staged: boolean;
+  cwd?: string;
+}
+
+export interface GitUnstageResponse {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  unstaged: boolean;
+  path: string;
+  cwd?: string;
+}
+
+export interface GitUnstageAllResponse {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  unstaged: boolean;
   cwd?: string;
 }
 

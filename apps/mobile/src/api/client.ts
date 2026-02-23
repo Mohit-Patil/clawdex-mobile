@@ -16,8 +16,13 @@ import type {
   GitCommitRequest,
   GitCommitResponse,
   GitDiffResponse,
+  GitFileRequest,
   GitPushResponse,
+  GitStageAllResponse,
+  GitStageResponse,
   GitStatusResponse,
+  GitUnstageAllResponse,
+  GitUnstageResponse,
   PendingApproval,
   ResolveApprovalResponse,
   ResolveUserInputRequest,
@@ -597,6 +602,44 @@ export class HostBridgeApiClient {
   gitDiff(cwd?: string): Promise<GitDiffResponse> {
     const normalizedCwd = normalizeCwd(cwd);
     return this.ws.request<GitDiffResponse>('bridge/git/diff', {
+      cwd: normalizedCwd ?? null,
+    });
+  }
+
+  gitStage(body: GitFileRequest): Promise<GitStageResponse> {
+    const path = body.path.trim();
+    if (!path) {
+      return Promise.reject(new Error('path must not be empty'));
+    }
+
+    return this.ws.request<GitStageResponse>('bridge/git/stage', {
+      path,
+      cwd: normalizeCwd(body.cwd) ?? null,
+    });
+  }
+
+  gitStageAll(cwd?: string): Promise<GitStageAllResponse> {
+    const normalizedCwd = normalizeCwd(cwd);
+    return this.ws.request<GitStageAllResponse>('bridge/git/stageAll', {
+      cwd: normalizedCwd ?? null,
+    });
+  }
+
+  gitUnstage(body: GitFileRequest): Promise<GitUnstageResponse> {
+    const path = body.path.trim();
+    if (!path) {
+      return Promise.reject(new Error('path must not be empty'));
+    }
+
+    return this.ws.request<GitUnstageResponse>('bridge/git/unstage', {
+      path,
+      cwd: normalizeCwd(body.cwd) ?? null,
+    });
+  }
+
+  gitUnstageAll(cwd?: string): Promise<GitUnstageAllResponse> {
+    const normalizedCwd = normalizeCwd(cwd);
+    return this.ws.request<GitUnstageAllResponse>('bridge/git/unstageAll', {
       cwd: normalizedCwd ?? null,
     });
   }

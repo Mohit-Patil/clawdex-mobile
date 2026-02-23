@@ -919,12 +919,67 @@ struct GitStatusResponse {
     branch: String,
     clean: bool,
     raw: String,
+    files: Vec<GitStatusEntry>,
     cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitStatusEntry {
+    path: String,
+    original_path: Option<String>,
+    index_status: String,
+    worktree_status: String,
+    staged: bool,
+    unstaged: bool,
+    untracked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitDiffResponse {
     diff: String,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitStageResponse {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    staged: bool,
+    path: String,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitStageAllResponse {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    staged: bool,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitUnstageResponse {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    unstaged: bool,
+    path: String,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitUnstageAllResponse {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    unstaged: bool,
     cwd: String,
 }
 
@@ -949,6 +1004,13 @@ struct GitPushResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitQueryRequest {
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitFileRequest {
+    path: String,
     cwd: Option<String>,
 }
 
@@ -1400,6 +1462,102 @@ async fn handle_bridge_method(
                     .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
             let diff = state.git.get_diff(request.cwd.as_deref()).await?;
             serde_json::to_value(diff).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/git/stage" => {
+            let request: GitFileRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let GitFileRequest { path, cwd } = request;
+            if path.trim().is_empty() {
+                return Err(BridgeError::invalid_params("path must not be empty"));
+            }
+
+            let staged = state.git.stage_file(&path, cwd.as_deref()).await?;
+            let staged_value = serde_json::to_value(&staged)
+                .map_err(|error| BridgeError::server(&error.to_string()))?;
+
+            if staged.staged {
+                if let Ok(status) = state.git.get_status(cwd.as_deref()).await {
+                    let status_value = serde_json::to_value(status)
+                        .map_err(|error| BridgeError::server(&error.to_string()))?;
+                    state
+                        .hub
+                        .broadcast_notification("bridge/git/updated", status_value)
+                        .await;
+                }
+            }
+
+            Ok(staged_value)
+        }
+        "bridge/git/stageAll" => {
+            let request: GitQueryRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+
+            let staged = state.git.stage_all(request.cwd.as_deref()).await?;
+            let staged_value = serde_json::to_value(&staged)
+                .map_err(|error| BridgeError::server(&error.to_string()))?;
+
+            if staged.staged {
+                if let Ok(status) = state.git.get_status(request.cwd.as_deref()).await {
+                    let status_value = serde_json::to_value(status)
+                        .map_err(|error| BridgeError::server(&error.to_string()))?;
+                    state
+                        .hub
+                        .broadcast_notification("bridge/git/updated", status_value)
+                        .await;
+                }
+            }
+
+            Ok(staged_value)
+        }
+        "bridge/git/unstage" => {
+            let request: GitFileRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let GitFileRequest { path, cwd } = request;
+            if path.trim().is_empty() {
+                return Err(BridgeError::invalid_params("path must not be empty"));
+            }
+
+            let unstaged = state.git.unstage_file(&path, cwd.as_deref()).await?;
+            let unstaged_value = serde_json::to_value(&unstaged)
+                .map_err(|error| BridgeError::server(&error.to_string()))?;
+
+            if unstaged.unstaged {
+                if let Ok(status) = state.git.get_status(cwd.as_deref()).await {
+                    let status_value = serde_json::to_value(status)
+                        .map_err(|error| BridgeError::server(&error.to_string()))?;
+                    state
+                        .hub
+                        .broadcast_notification("bridge/git/updated", status_value)
+                        .await;
+                }
+            }
+
+            Ok(unstaged_value)
+        }
+        "bridge/git/unstageAll" => {
+            let request: GitQueryRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+
+            let unstaged = state.git.unstage_all(request.cwd.as_deref()).await?;
+            let unstaged_value = serde_json::to_value(&unstaged)
+                .map_err(|error| BridgeError::server(&error.to_string()))?;
+
+            if unstaged.unstaged {
+                if let Ok(status) = state.git.get_status(request.cwd.as_deref()).await {
+                    let status_value = serde_json::to_value(status)
+                        .map_err(|error| BridgeError::server(&error.to_string()))?;
+                    state
+                        .hub
+                        .broadcast_notification("bridge/git/updated", status_value)
+                        .await;
+                }
+            }
+
+            Ok(unstaged_value)
         }
         "bridge/git/commit" => {
             let request: GitCommitRequest =
