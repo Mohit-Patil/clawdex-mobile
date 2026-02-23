@@ -68,6 +68,8 @@ interface MainScreenProps {
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
   defaultStartCwd?: string | null;
+  defaultModelId?: string | null;
+  defaultReasoningEffort?: ReasoningEffort | null;
   onDefaultStartCwdChange?: (cwd: string | null) => void;
   onChatContextChange?: (chat: Chat | null) => void;
   pendingOpenChatId?: string | null;
@@ -127,6 +129,8 @@ const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 10_000;
 const THREAD_RESUME_RETRY_MS = 1_500;
+const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
+const CHAT_MODEL_PREFERENCES_VERSION = 1;
 const INLINE_OPTION_LINE_PATTERN =
   /^(?:[-*+]\s*)?(?:\d{1,2}\s*[.):-]|\(\d{1,2}\)\s*[.):-]?|\[\d{1,2}\]\s*|[A-Ca-c]\s*[.):-]|\([A-Ca-c]\)\s*[.):-]?|option\s+\d{1,2}\s*[.):-]?)\s*(.+)$/i;
 const INLINE_CHOICE_CUE_PHRASES = [
@@ -167,6 +171,12 @@ const CODEX_RUN_FAILURE_EVENT_TYPES = new Set([
   'taskfailed',
   'turnfailed',
 ]);
+
+interface ChatModelPreference {
+  modelId: string | null;
+  effort: ReasoningEffort | null;
+  updatedAt: string;
+}
 
 const SLASH_COMMANDS: SlashCommandDefinition[] = [
   {
@@ -345,6 +355,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       onOpenDrawer,
       onOpenGit,
       defaultStartCwd,
+      defaultModelId,
+      defaultReasoningEffort,
       onDefaultStartCwdChange,
       onChatContextChange,
       pendingOpenChatId,
@@ -436,7 +448,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const threadRuntimeSnapshotsRef = useRef<Record<string, ThreadRuntimeSnapshot>>({});
     const threadReasoningBuffersRef = useRef<Record<string, string>>({});
     const threadResumeLastAttemptAtRef = useRef<Record<string, number>>({});
+    const chatModelPreferencesRef = useRef<Record<string, ChatModelPreference>>({});
+    const [chatModelPreferencesLoaded, setChatModelPreferencesLoaded] = useState(false);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
+    const preferredDefaultModelId = normalizeModelId(defaultModelId);
+    const preferredDefaultEffort = normalizeReasoningEffort(defaultReasoningEffort);
     const attachmentWorkspace = selectedChat?.cwd ?? preferredStartCwd ?? null;
     const slashQuery = parseSlashQuery(draft);
     const slashSuggestions =
@@ -482,6 +498,102 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const clearRunWatchdog = useCallback(() => {
       runWatchdogUntilRef.current = 0;
+    }, []);
+
+    const saveChatModelPreferences = useCallback(
+      async (nextPreferences: Record<string, ChatModelPreference>) => {
+        const preferencesPath = getChatModelPreferencesPath();
+        if (!preferencesPath) {
+          return;
+        }
+
+        const payload = JSON.stringify({
+          version: CHAT_MODEL_PREFERENCES_VERSION,
+          entries: nextPreferences,
+        });
+
+        try {
+          await FileSystem.writeAsStringAsync(preferencesPath, payload);
+        } catch {
+          // Best effort persistence only.
+        }
+      },
+      []
+    );
+
+    const rememberChatModelPreference = useCallback(
+      (
+        chatId: string | null | undefined,
+        modelId: string | null | undefined,
+        effort: ReasoningEffort | null | undefined
+      ) => {
+        const normalizedChatId = typeof chatId === 'string' ? chatId.trim() : '';
+        if (!normalizedChatId) {
+          return;
+        }
+
+        const normalizedModelId = normalizeModelId(modelId);
+        const normalizedEffort = normalizeReasoningEffort(effort);
+        const previous = chatModelPreferencesRef.current[normalizedChatId];
+        if (
+          previous &&
+          previous.modelId === normalizedModelId &&
+          previous.effort === normalizedEffort
+        ) {
+          return;
+        }
+
+        const nextPreferences: Record<string, ChatModelPreference> = {
+          ...chatModelPreferencesRef.current,
+          [normalizedChatId]: {
+            modelId: normalizedModelId,
+            effort: normalizedEffort,
+            updatedAt: new Date().toISOString(),
+          },
+        };
+        chatModelPreferencesRef.current = nextPreferences;
+        if (chatIdRef.current === normalizedChatId) {
+          setSelectedModelId(normalizedModelId);
+          setSelectedEffort(normalizedEffort);
+        }
+        void saveChatModelPreferences(nextPreferences);
+      },
+      [saveChatModelPreferences]
+    );
+
+    useEffect(() => {
+      let cancelled = false;
+
+      const load = async () => {
+        const preferencesPath = getChatModelPreferencesPath();
+        if (!preferencesPath) {
+          if (!cancelled) {
+            setChatModelPreferencesLoaded(true);
+          }
+          return;
+        }
+
+        try {
+          const raw = await FileSystem.readAsStringAsync(preferencesPath);
+          if (cancelled) {
+            return;
+          }
+          chatModelPreferencesRef.current = parseChatModelPreferences(raw);
+        } catch {
+          if (!cancelled) {
+            chatModelPreferencesRef.current = {};
+          }
+        } finally {
+          if (!cancelled) {
+            setChatModelPreferencesLoaded(true);
+          }
+        }
+      };
+
+      void load();
+      return () => {
+        cancelled = true;
+      };
     }, []);
 
     const clearExternalStatusFullSync = useCallback(() => {
@@ -990,8 +1102,35 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       onChatContextChange?.(selectedChat);
     }, [onChatContextChange, selectedChat]);
 
-    const defaultModelId = modelOptions.find((model) => model.isDefault)?.id ?? null;
-    const activeModelId = selectedModelId ?? defaultModelId;
+    useEffect(() => {
+      if (!chatModelPreferencesLoaded) {
+        return;
+      }
+
+      const chatId = selectedChatId?.trim();
+      if (!chatId) {
+        return;
+      }
+
+      const preference = chatModelPreferencesRef.current[chatId];
+      setSelectedModelId(preference?.modelId ?? null);
+      setSelectedEffort(preference?.effort ?? null);
+    }, [chatModelPreferencesLoaded, selectedChatId]);
+
+    useEffect(() => {
+      if (selectedChatId) {
+        return;
+      }
+
+      setSelectedModelId(preferredDefaultModelId);
+      setSelectedEffort(preferredDefaultEffort);
+    }, [preferredDefaultEffort, preferredDefaultModelId, selectedChatId]);
+
+    const serverDefaultModelId = modelOptions.find((model) => model.isDefault)?.id ?? null;
+    const activeModelId =
+      selectedModelId ??
+      (selectedChatId ? null : preferredDefaultModelId) ??
+      serverDefaultModelId;
     const activeModel = activeModelId
       ? modelOptions.find((model) => model.id === activeModelId) ?? null
       : null;
@@ -1002,18 +1141,25 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const effortPickerDefault = effortPickerModel?.defaultReasoningEffort ?? null;
     const activeModelEffortOptions = activeModel?.reasoningEffort ?? [];
     const activeModelDefaultEffort = activeModel?.defaultReasoningEffort ?? null;
-    const activeEffort =
-      selectedEffort && activeModelEffortOptions.some((option) => option.effort === selectedEffort)
-        ? selectedEffort
-        : activeModelDefaultEffort;
+    const requestedEffort =
+      selectedEffort ?? (!selectedChatId ? preferredDefaultEffort : null);
+    const supportsSelectedEffort =
+      requestedEffort &&
+      (!activeModel ||
+        activeModelEffortOptions.length === 0 ||
+        !selectedModelId ||
+        activeModelEffortOptions.some((option) => option.effort === requestedEffort));
+    const activeEffort = supportsSelectedEffort ? requestedEffort : activeModelDefaultEffort;
     const activeModelLabel =
       selectedModelId && activeModel
         ? activeModel.displayName
-        : activeModel
-          ? `Default (${activeModel.displayName})`
-          : 'Default model';
+        : selectedModelId
+          ? selectedModelId
+          : activeModel
+            ? `Default (${activeModel.displayName})`
+            : 'Default model';
     const activeEffortLabel =
-      selectedEffort && activeEffort
+      requestedEffort && activeEffort
         ? formatReasoningEffort(activeEffort)
         : activeModelDefaultEffort
           ? `Default (${formatReasoningEffort(activeModelDefaultEffort)})`
@@ -1039,18 +1185,25 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
+      if (!selectedModelId) {
+        return;
+      }
+
       if (!activeModel) {
-        setSelectedEffort(null);
+        return;
+      }
+
+      const effortOptions = activeModel.reasoningEffort ?? [];
+      if (effortOptions.length === 0) {
         return;
       }
 
       const supportsSelectedEffort =
-        activeModel.reasoningEffort?.some((option) => option.effort === selectedEffort) ??
-        false;
+        effortOptions.some((option) => option.effort === selectedEffort);
       if (!supportsSelectedEffort) {
         setSelectedEffort(null);
       }
-    }, [activeModel, selectedEffort]);
+    }, [activeModel, selectedEffort, selectedModelId]);
 
     const resetComposerState = useCallback(() => {
       clearExternalStatusFullSync();
@@ -1172,11 +1325,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setEffortModalVisible(false);
     }, []);
 
-    const selectEffort = useCallback((effort: ReasoningEffort | null) => {
-      setSelectedEffort(effort);
-      setEffortModalVisible(false);
-      setError(null);
-    }, []);
+    const selectEffort = useCallback(
+      (effort: ReasoningEffort | null) => {
+        setSelectedEffort(effort);
+        setEffortModalVisible(false);
+        setError(null);
+        if (selectedChatId) {
+          rememberChatModelPreference(selectedChatId, activeModelId, effort);
+        }
+      },
+      [activeModelId, rememberChatModelPreference, selectedChatId]
+    );
 
     const selectModel = useCallback(
       (modelId: string | null) => {
@@ -1185,6 +1344,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setSelectedEffort(null);
         setModelModalVisible(false);
         setError(null);
+        if (selectedChatId) {
+          rememberChatModelPreference(selectedChatId, normalizedModelId, null);
+        }
 
         if (normalizedModelId) {
           const model = modelOptions.find((entry) => entry.id === normalizedModelId) ?? null;
@@ -1194,7 +1356,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
         }
       },
-      [modelOptions]
+      [modelOptions, rememberChatModelPreference, selectedChatId]
     );
 
     const loadAttachmentFileCandidates = useCallback(async () => {
@@ -1948,6 +2110,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           setSelectedModelId(match.id);
           setSelectedEffort(null);
+          if (selectedChatId) {
+            rememberChatModelPreference(selectedChatId, match.id, null);
+          }
           if ((match.reasoningEffort?.length ?? 0) > 0) {
             setEffortPickerModelId(match.id);
             setEffortModalVisible(true);
@@ -2048,6 +2213,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               if (autoEnabledPlan) {
                 setSelectedCollaborationMode('plan');
               }
+              rememberChatModelPreference(
+                created.id,
+                activeModelId,
+                selectedEffort ?? activeEffort
+              );
               setSelectedChat(updated);
               setError(null);
               setActivity({
@@ -2108,6 +2278,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }, {
               onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
             });
+            rememberChatModelPreference(
+              selectedChatId,
+              activeModelId,
+              selectedEffort ?? activeEffort
+            );
             setSelectedChat(updated);
             setError(null);
             setActivity({
@@ -2237,6 +2412,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               model: activeModelId ?? undefined,
             });
             setSelectedChatId(forked.id);
+            rememberChatModelPreference(
+              forked.id,
+              activeModelId,
+              selectedEffort ?? activeEffort
+            );
             setSelectedChat(forked);
             setError(null);
             setActivity({
@@ -2288,6 +2468,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         selectedChatId,
         selectedCollaborationMode,
         handleTurnFailure,
+        rememberChatModelPreference,
         startNewChat,
       ]
     );
@@ -2542,6 +2723,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (autoEnabledPlan) {
           setSelectedCollaborationMode('plan');
         }
+        rememberChatModelPreference(
+          created.id,
+          activeModelId,
+          selectedEffort ?? activeEffort
+        );
         setSelectedChat(updated);
         setPendingMentionPaths([]);
         setPendingLocalImagePaths([]);
@@ -2590,6 +2776,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       handleTurnFailure,
       bumpRunWatchdog,
       clearRunWatchdog,
+      rememberChatModelPreference,
     ]);
 
     const sendMessageContent = useCallback(
@@ -2666,6 +2853,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (autoEnabledPlan) {
             setSelectedCollaborationMode('plan');
           }
+          rememberChatModelPreference(
+            selectedChatId,
+            activeModelId,
+            selectedEffort ?? activeEffort
+          );
           setSelectedChat(updated);
           setPendingMentionPaths([]);
           setPendingLocalImagePaths([]);
@@ -2715,6 +2907,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         handleTurnFailure,
         bumpRunWatchdog,
         clearRunWatchdog,
+        rememberChatModelPreference,
       ]
     );
 
@@ -5525,6 +5718,79 @@ function normalizeModelId(value: string | null | undefined): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeReasoningEffort(
+  effort: string | null | undefined
+): ReasoningEffort | null {
+  if (typeof effort !== 'string') {
+    return null;
+  }
+
+  const normalized = effort.trim().toLowerCase();
+  if (
+    normalized === 'none' ||
+    normalized === 'minimal' ||
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh'
+  ) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function getChatModelPreferencesPath(): string | null {
+  const base = FileSystem.documentDirectory;
+  if (typeof base !== 'string' || base.trim().length === 0) {
+    return null;
+  }
+
+  return `${base}${CHAT_MODEL_PREFERENCES_FILE}`;
+}
+
+function parseChatModelPreferences(raw: string): Record<string, ChatModelPreference> {
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const parsedRecord = toRecord(parsed);
+    if (!parsedRecord || parsedRecord.version !== CHAT_MODEL_PREFERENCES_VERSION) {
+      return {};
+    }
+
+    const entries = toRecord(parsedRecord.entries);
+    if (!entries) {
+      return {};
+    }
+
+    const result: Record<string, ChatModelPreference> = {};
+    for (const [chatId, value] of Object.entries(entries)) {
+      const entry = toRecord(value);
+      if (!entry) {
+        continue;
+      }
+
+      const normalizedChatId = chatId.trim();
+      if (!normalizedChatId) {
+        continue;
+      }
+
+      result[normalizedChatId] = {
+        modelId: normalizeModelId(readString(entry.modelId)),
+        effort: normalizeReasoningEffort(readString(entry.effort)),
+        updatedAt: readString(entry.updatedAt) ?? new Date(0).toISOString(),
+      };
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
 }
 
 function formatCollaborationModeLabel(mode: CollaborationMode): string {

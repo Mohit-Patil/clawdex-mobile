@@ -1,5 +1,6 @@
 import 'react-native-gesture-handler';
 
+import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
@@ -12,7 +13,7 @@ import {
 } from 'react-native';
 
 import { MacBridgeApiClient } from './src/api/client';
-import type { Chat } from './src/api/types';
+import type { Chat, ReasoningEffort } from './src/api/types';
 import { MacBridgeWsClient } from './src/api/ws';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
@@ -32,6 +33,8 @@ const SWIPE_OPEN_DISTANCE = 56;
 const SWIPE_CLOSE_DISTANCE = 56;
 const SWIPE_OPEN_VELOCITY = 0.4;
 const SWIPE_CLOSE_VELOCITY = -0.4;
+const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
+const APP_SETTINGS_VERSION = 1;
 
 export default function App() {
   const ws = useMemo(
@@ -57,6 +60,9 @@ export default function App() {
   const [pendingMainChatId, setPendingMainChatId] = useState<string | null>(null);
   const [pendingMainChatSnapshot, setPendingMainChatSnapshot] = useState<Chat | null>(null);
   const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
+  const [defaultReasoningEffort, setDefaultReasoningEffort] =
+    useState<ReasoningEffort | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
@@ -66,6 +72,59 @@ export default function App() {
     ws.connect();
     return () => ws.disconnect();
   }, [ws]);
+
+  const saveAppSettings = useCallback(
+    async (nextModelId: string | null, nextEffort: ReasoningEffort | null) => {
+      const settingsPath = getAppSettingsPath();
+      if (!settingsPath) {
+        return;
+      }
+
+      const payload = JSON.stringify({
+        version: APP_SETTINGS_VERSION,
+        defaultModelId: nextModelId,
+        defaultReasoningEffort: nextEffort,
+      });
+
+      try {
+        await FileSystem.writeAsStringAsync(settingsPath, payload);
+      } catch {
+        // Best effort persistence only.
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSettings = async () => {
+      const settingsPath = getAppSettingsPath();
+      if (!settingsPath) {
+        return;
+      }
+
+      try {
+        const raw = await FileSystem.readAsStringAsync(settingsPath);
+        if (cancelled) {
+          return;
+        }
+        const parsed = parseAppSettings(raw);
+        setDefaultModelId(parsed.defaultModelId);
+        setDefaultReasoningEffort(parsed.defaultReasoningEffort);
+      } catch {
+        if (!cancelled) {
+          setDefaultModelId(null);
+          setDefaultReasoningEffort(null);
+        }
+      }
+    };
+
+    void loadSettings();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const openDrawer = useCallback(() => {
     Keyboard.dismiss();
@@ -207,6 +266,17 @@ export default function App() {
     closeDrawer();
   }, [closeDrawer]);
 
+  const handleDefaultModelSettingsChange = useCallback(
+    (modelId: string | null, effort: ReasoningEffort | null) => {
+      const normalizedModelId = normalizeModelId(modelId);
+      const normalizedEffort = normalizeReasoningEffort(effort);
+      setDefaultModelId(normalizedModelId);
+      setDefaultReasoningEffort(normalizedEffort);
+      void saveAppSettings(normalizedModelId, normalizedEffort);
+    },
+    [saveAppSettings]
+  );
+
   const handleOpenChatGit = useCallback((chat: Chat) => {
     setGitChat(chat);
     setSelectedChatId(chat.id);
@@ -268,6 +338,8 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
+            defaultModelId={defaultModelId}
+            defaultReasoningEffort={defaultReasoningEffort}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
@@ -284,6 +356,9 @@ export default function App() {
             api={api}
             ws={ws}
             bridgeUrl={env.macBridgeUrl}
+            defaultModelId={defaultModelId}
+            defaultReasoningEffort={defaultReasoningEffort}
+            onDefaultModelSettingsChange={handleDefaultModelSettingsChange}
             onOpenDrawer={openDrawer}
             onOpenPrivacy={openPrivacy}
             onOpenTerms={openTerms}
@@ -312,6 +387,8 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
+            defaultModelId={defaultModelId}
+            defaultReasoningEffort={defaultReasoningEffort}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
@@ -368,6 +445,84 @@ export default function App() {
       />
     </View>
   );
+}
+
+function getAppSettingsPath(): string | null {
+  const base = FileSystem.documentDirectory;
+  if (typeof base !== 'string' || base.trim().length === 0) {
+    return null;
+  }
+
+  return `${base}${APP_SETTINGS_FILE}`;
+}
+
+function parseAppSettings(raw: string): {
+  defaultModelId: string | null;
+  defaultReasoningEffort: ReasoningEffort | null;
+} {
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return {
+      defaultModelId: null,
+      defaultReasoningEffort: null,
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      parsed.version !== APP_SETTINGS_VERSION
+    ) {
+      return {
+        defaultModelId: null,
+        defaultReasoningEffort: null,
+      };
+    }
+
+    return {
+      defaultModelId: normalizeModelId(
+        (parsed as { defaultModelId?: unknown }).defaultModelId
+      ),
+      defaultReasoningEffort: normalizeReasoningEffort(
+        (parsed as { defaultReasoningEffort?: unknown }).defaultReasoningEffort
+      ),
+    };
+  } catch {
+    return {
+      defaultModelId: null,
+      defaultReasoningEffort: null,
+    };
+  }
+}
+
+function normalizeModelId(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeReasoningEffort(value: unknown): ReasoningEffort | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === 'none' ||
+    normalized === 'minimal' ||
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh'
+  ) {
+    return normalized;
+  }
+
+  return null;
 }
 
 const styles = StyleSheet.create({
