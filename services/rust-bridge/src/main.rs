@@ -1057,7 +1057,9 @@ impl RolloutTrackedFile {
             originator = Some(meta_originator);
         }
 
-        let offset = metadata.len().saturating_sub(ROLLOUT_LIVE_SYNC_INITIAL_TAIL_BYTES);
+        let offset = metadata
+            .len()
+            .saturating_sub(ROLLOUT_LIVE_SYNC_INITIAL_TAIL_BYTES);
         Ok(Self {
             path,
             offset,
@@ -1174,8 +1176,7 @@ impl RolloutTrackedFile {
             self.thread_id = read_string(payload.get("id")).or_else(|| self.thread_id.clone());
             self.originator =
                 read_string(payload.get("originator")).or_else(|| self.originator.clone());
-            self.include_for_live_sync =
-                self.originator.as_deref() == Some("codex_cli_rs");
+            self.include_for_live_sync = self.originator.as_deref() == Some("codex_cli_rs");
             return None;
         }
 
@@ -1269,7 +1270,8 @@ async fn rollout_live_sync_discover_files(
     }
 
     state.files.retain(|path, tracked| {
-        discovered_set.contains(path) || tracked.last_seen.elapsed() < ROLLOUT_LIVE_SYNC_MAX_FILE_AGE
+        discovered_set.contains(path)
+            || tracked.last_seen.elapsed() < ROLLOUT_LIVE_SYNC_MAX_FILE_AGE
     });
 
     Ok(())
@@ -1354,7 +1356,9 @@ fn is_rollout_file_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-async fn read_rollout_session_meta(path: &Path) -> Result<Option<(String, String)>, std::io::Error> {
+async fn read_rollout_session_meta(
+    path: &Path,
+) -> Result<Option<(String, String)>, std::io::Error> {
     let file = match fs::File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -3405,32 +3409,28 @@ mod tests {
 
     #[test]
     fn rollout_event_msg_mapping_ignores_noise_events() {
-        assert!(
-            build_rollout_event_msg_notification(
-                json!({
-                    "type": "token_count",
-                    "info": {}
-                })
-                .as_object()
-                .expect("event payload object"),
-                "thread-1",
-                None,
-            )
-            .is_none()
-        );
-        assert!(
-            build_rollout_event_msg_notification(
-                json!({
-                    "type": "user_message",
-                    "message": "hello"
-                })
-                .as_object()
-                .expect("event payload object"),
-                "thread-1",
-                None,
-            )
-            .is_none()
-        );
+        assert!(build_rollout_event_msg_notification(
+            json!({
+                "type": "token_count",
+                "info": {}
+            })
+            .as_object()
+            .expect("event payload object"),
+            "thread-1",
+            None,
+        )
+        .is_none());
+        assert!(build_rollout_event_msg_notification(
+            json!({
+                "type": "user_message",
+                "message": "hello"
+            })
+            .as_object()
+            .expect("event payload object"),
+            "thread-1",
+            None,
+        )
+        .is_none());
     }
 
     #[test]
@@ -3452,7 +3452,10 @@ mod tests {
         assert_eq!(exec_command.0, "codex/event/exec_command_begin");
         assert_eq!(exec_command.1["msg"]["type"], "exec_command_begin");
         assert_eq!(exec_command.1["msg"]["thread_id"], "thread-1");
-        assert_eq!(exec_command.1["msg"]["command"], json!(["npm", "run", "test"]));
+        assert_eq!(
+            exec_command.1["msg"]["command"],
+            json!(["npm", "run", "test"])
+        );
 
         let mcp_call = build_rollout_response_item_notification(
             json!({

@@ -474,7 +474,7 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
-  it('resumeThread() retries with legacy payload when modern resume params are rejected', async () => {
+  it('resumeThread() retries with compatibility payload when modern resume params are rejected', async () => {
     const ws = createWsMock();
     ws.request
       .mockRejectedValueOnce(new Error('unknown field `experimentalRawEvents`'))
@@ -498,11 +498,52 @@ describe('HostBridgeApiClient', () => {
       expect.objectContaining({
         threadId: 'thr_resume',
         approvalPolicy: 'on-request',
+        developerInstructions: expect.any(String),
+        experimentalRawEvents: true,
+      })
+    );
+  });
+
+  it('resumeThread() falls back to legacy payload when compatibility retry is rejected', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockRejectedValueOnce(new Error('unknown field `experimentalRawEvents`'))
+      .mockRejectedValueOnce(new Error('invalid params for resume options'))
+      .mockResolvedValueOnce({});
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await expect(client.resumeThread('thr_resume_legacy')).resolves.toBeUndefined();
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      1,
+      'thread/resume',
+      expect.objectContaining({
+        threadId: 'thr_resume_legacy',
+        experimentalRawEvents: true,
+        approvalPolicy: 'untrusted',
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'thread/resume',
+      expect.objectContaining({
+        threadId: 'thr_resume_legacy',
+        approvalPolicy: 'on-request',
+        developerInstructions: expect.any(String),
+        experimentalRawEvents: true,
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(
+      3,
+      'thread/resume',
+      expect.objectContaining({
+        threadId: 'thr_resume_legacy',
+        approvalPolicy: 'on-request',
         developerInstructions: null,
       })
     );
 
-    const legacyPayload = ws.request.mock.calls[1]?.[1] as Record<string, unknown>;
+    const legacyPayload = ws.request.mock.calls[2]?.[1] as Record<string, unknown>;
     expect(legacyPayload).not.toHaveProperty('experimentalRawEvents');
   });
 
