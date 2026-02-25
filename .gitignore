@@ -75,4 +75,5 @@ coverage/
 *.pid
 *.seed
 .claude/
+.clawdex-mobile-attachments/
 /app.json

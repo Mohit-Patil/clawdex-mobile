@@ -1,6 +1,11 @@
 {
   "name": "clawdex-mobile",
-  "version": "1.3.0",
+  "version": "1.3.1",
+  "homepage": "https://github.com/Mohit-Patil/clawdex-mobile#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mohit-Patil/clawdex-mobile.git"
+  },
   "publishConfig": {
     "access": "public"
   },

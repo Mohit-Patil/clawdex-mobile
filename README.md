@@ -1,8 +1,6 @@
 # Clawdex Mobile
 
-<p align="center">
-  <img src="apps/mobile/assets/brand/app-icon.png" alt="Clawdex app icon" width="112" />
-</p>
+![Clawdex app icon](https://raw.githubusercontent.com/Mohit-Patil/clawdex-mobile/main/apps/mobile/assets/brand/app-icon.png)
 
 Control Clawdex from your phone using an Expo React Native app (`apps/mobile`) and a Rust bridge (`services/rust-bridge`) running on your host machine.
 
