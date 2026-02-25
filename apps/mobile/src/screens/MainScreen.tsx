@@ -131,7 +131,6 @@ const RUN_WATCHDOG_MS = 60_000;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
-const THREAD_RESUME_RETRY_MS = 1_500;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
 const INLINE_OPTION_LINE_PATTERN =
@@ -451,7 +450,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const externalStatusFullSyncNextAllowedAtRef = useRef(0);
     const threadRuntimeSnapshotsRef = useRef<Record<string, ThreadRuntimeSnapshot>>({});
     const threadReasoningBuffersRef = useRef<Record<string, string>>({});
-    const threadResumeLastAttemptAtRef = useRef<Record<string, number>>({});
     const chatModelPreferencesRef = useRef<Record<string, ChatModelPreference>>({});
     const [chatModelPreferencesLoaded, setChatModelPreferencesLoaded] = useState(false);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
@@ -611,29 +609,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       externalStatusFullSyncTimerRef.current = null;
       externalStatusFullSyncQueuedThreadRef.current = null;
     }, []);
-
-    const ensureThreadResumeSubscription = useCallback(
-      (threadId: string, options?: { force?: boolean }) => {
-        const normalizedThreadId = threadId.trim();
-        if (!normalizedThreadId) {
-          return;
-        }
-
-        const now = Date.now();
-        const lastAttemptAt = threadResumeLastAttemptAtRef.current[normalizedThreadId] ?? 0;
-        if (!options?.force && now - lastAttemptAt < THREAD_RESUME_RETRY_MS) {
-          return;
-        }
-
-        threadResumeLastAttemptAtRef.current[normalizedThreadId] = now;
-        api
-          .resumeThread(normalizedThreadId, {
-            approvalPolicy: activeApprovalPolicy,
-          })
-          .catch(() => {});
-      },
-      [activeApprovalPolicy, api]
-    );
 
     const drainExternalStatusFullSyncQueue = useCallback(() => {
       if (externalStatusFullSyncInFlightRef.current) {
@@ -4084,10 +4059,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const threadId =
             readString(params?.threadId) ?? readString(params?.thread_id);
           if (threadId && threadId === currentId) {
-            // External clients (CLI/TUI) may start turns without pushing full live
-            // notifications through this app-server process. Force a lightweight
-            // resume attempt to attach to fresh stream state early.
-            ensureThreadResumeSubscription(threadId, { force: true });
             api
               .getChatSummary(threadId)
               .then((summary) => {
@@ -4107,7 +4078,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 });
 
                 if (isChatSummaryLikelyRunning(summary)) {
-                  ensureThreadResumeSubscription(threadId);
                   bumpRunWatchdog();
                   setActivity((prev) =>
                     prev.tone === 'running'
@@ -4176,7 +4146,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       clearRunWatchdog,
       refreshPendingApprovalsForThread,
       scheduleExternalStatusFullSync,
-      ensureThreadResumeSubscription,
       registerTurnStarted,
       pushActiveCommand,
       upsertThreadRuntimeSnapshot,
@@ -4213,12 +4182,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const shouldRunFromChat = isChatLikelyRunning(latest);
           const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
-
-          // Keep a light resume heartbeat even while idle so externally-started
-          // turns are discovered quickly and can stream status/tool updates.
-          ensureThreadResumeSubscription(selectedChatId, {
-            force: shouldRunFromChat,
-          });
 
           if (shouldShowRunning && !hasPendingApproval && !hasPendingUserInput) {
             setActivity((prev) => {
@@ -4304,7 +4267,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingUserInputRequest?.id,
       bumpRunWatchdog,
       clearRunWatchdog,
-      ensureThreadResumeSubscription,
     ]);
 
     const handleResolveApproval = useCallback(
