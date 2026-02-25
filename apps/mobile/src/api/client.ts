@@ -338,21 +338,30 @@ export class HostBridgeApiClient {
       await this.ws.request('thread/resume', primaryRequest);
       return;
     } catch (primaryError) {
-      // Compatibility fallback for older app-server builds that reject
-      // experimentalRawEvents or strict policy combinations on resume.
-      const legacyRequest = {
+      // First fallback: keep raw-event streaming enabled, but relax approval policy.
+      const compatibilityRequest = {
         ...primaryRequest,
         approvalPolicy: fallbackApprovalPolicy,
-        developerInstructions: null,
       };
-      delete (legacyRequest as { experimentalRawEvents?: boolean }).experimentalRawEvents;
       try {
-        await this.ws.request('thread/resume', legacyRequest);
+        await this.ws.request('thread/resume', compatibilityRequest);
         return;
-      } catch (legacyError) {
-        throw new Error(
-          `thread/resume failed: ${(primaryError as Error).message}; fallback failed: ${(legacyError as Error).message}`
-        );
+      } catch (compatibilityError) {
+        // Final compatibility fallback for older app-server builds that reject
+        // experimentalRawEvents/developerInstructions on resume.
+        const legacyRequest = {
+          ...compatibilityRequest,
+          developerInstructions: null,
+        };
+        delete (legacyRequest as { experimentalRawEvents?: boolean }).experimentalRawEvents;
+        try {
+          await this.ws.request('thread/resume', legacyRequest);
+          return;
+        } catch (legacyError) {
+          throw new Error(
+            `thread/resume failed: ${(primaryError as Error).message}; compatibility failed: ${(compatibilityError as Error).message}; legacy fallback failed: ${(legacyError as Error).message}`
+          );
+        }
       }
     }
   }
