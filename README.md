@@ -207,6 +207,10 @@ Published CLI equivalent:
 - `npm install -g clawdex-mobile@latest` — install/upgrade the published CLI
 - `clawdex init` — full interactive onboarding + auto-start
 - `clawdex stop` — stop running Expo + bridge for this project
+- `clawdex upgrade` / `clawdex update` — upgrade global CLI package to latest
+- `clawdex upgrade --version 1.1.2` — upgrade to a specific published version
+- `clawdex upgrade --restart` — stop services, upgrade, then restart via `clawdex init`
+- `clawdex version` — print installed CLI version
 - `clawdex init --no-start` — onboarding without launching bridge/expo
 - `clawdex init --platform ios` — auto-start with iOS target
 
