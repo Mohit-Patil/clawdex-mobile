@@ -1,13 +1,15 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
+    hash::{Hash, Hasher},
+    io::SeekFrom,
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use axum::{
@@ -28,7 +30,7 @@ use serde_json::{json, Value};
 use services::{GitService, TerminalService};
 use tokio::{
     fs,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot, Mutex, RwLock},
     time::timeout,
@@ -38,13 +40,23 @@ mod services;
 
 const APPROVAL_COMMAND_METHOD: &str = "item/commandExecution/requestApproval";
 const APPROVAL_FILE_METHOD: &str = "item/fileChange/requestApproval";
+const LEGACY_APPROVAL_PATCH_METHOD: &str = "applyPatchApproval";
+const LEGACY_APPROVAL_COMMAND_METHOD: &str = "execCommandApproval";
 const REQUEST_USER_INPUT_METHOD: &str = "item/tool/requestUserInput";
 const REQUEST_USER_INPUT_METHOD_ALT: &str = "tool/requestUserInput";
+const DYNAMIC_TOOL_CALL_METHOD: &str = "item/tool/call";
+const ACCOUNT_CHATGPT_TOKENS_REFRESH_METHOD: &str = "account/chatgptAuthTokens/refresh";
 const MOBILE_ATTACHMENTS_DIR: &str = ".clawdex-mobile-attachments";
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
 const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
 const WS_CLIENT_QUEUE_CAPACITY: usize = 256;
+const ROLLOUT_LIVE_SYNC_POLL_INTERVAL_MS: u64 = 900;
+const ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS: u64 = 6;
+const ROLLOUT_LIVE_SYNC_MAX_TRACKED_FILES: usize = 64;
+const ROLLOUT_LIVE_SYNC_MAX_FILE_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 2);
+const ROLLOUT_LIVE_SYNC_INITIAL_TAIL_BYTES: u64 = 64 * 1024;
+const ROLLOUT_LIVE_SYNC_DEDUP_CAPACITY: usize = 8_192;
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -345,9 +357,16 @@ struct PendingRequest {
     client_request_id: Value,
 }
 
+#[derive(Clone, Copy)]
+enum ApprovalResponseFormat {
+    Modern,
+    Legacy,
+}
+
 #[derive(Clone)]
 struct PendingApprovalEntry {
     app_server_request_id: Value,
+    response_format: ApprovalResponseFormat,
     approval: PendingApproval,
 }
 
@@ -598,10 +617,20 @@ impl AppServerBridge {
             return Ok(None);
         };
 
+        let Some(mapped_decision) =
+            approval_decision_to_response_value(decision, pending.response_format)
+        else {
+            self.pending_approvals
+                .lock()
+                .await
+                .insert(approval_id.to_string(), pending.clone());
+            return Err("invalid approval decision payload".to_string());
+        };
+
         let response = json!({
             "id": pending.app_server_request_id,
             "result": {
-                "decision": decision
+                "decision": mapped_decision
             }
         });
 
@@ -696,7 +725,13 @@ impl AppServerBridge {
     }
 
     async fn handle_server_request(&self, method: &str, id: Value, params: Option<Value>) {
-        if method == APPROVAL_COMMAND_METHOD || method == APPROVAL_FILE_METHOD {
+        if matches!(
+            method,
+            APPROVAL_COMMAND_METHOD
+                | APPROVAL_FILE_METHOD
+                | LEGACY_APPROVAL_PATCH_METHOD
+                | LEGACY_APPROVAL_COMMAND_METHOD
+        ) {
             let params_obj = params.as_ref().and_then(Value::as_object);
             let approval_id = format!(
                 "{}-{}",
@@ -704,26 +739,82 @@ impl AppServerBridge {
                 self.approval_counter.fetch_add(1, Ordering::Relaxed)
             );
 
+            let response_format = if matches!(
+                method,
+                LEGACY_APPROVAL_PATCH_METHOD | LEGACY_APPROVAL_COMMAND_METHOD
+            ) {
+                ApprovalResponseFormat::Legacy
+            } else {
+                ApprovalResponseFormat::Modern
+            };
+
+            let kind = if matches!(
+                method,
+                APPROVAL_COMMAND_METHOD | LEGACY_APPROVAL_COMMAND_METHOD
+            ) {
+                "commandExecution".to_string()
+            } else {
+                "fileChange".to_string()
+            };
+
+            let thread_id = if matches!(
+                method,
+                LEGACY_APPROVAL_PATCH_METHOD | LEGACY_APPROVAL_COMMAND_METHOD
+            ) {
+                read_string(params_obj.and_then(|p| p.get("conversationId")))
+                    .unwrap_or_else(|| "unknown-thread".to_string())
+            } else {
+                read_string(params_obj.and_then(|p| p.get("threadId")))
+                    .unwrap_or_else(|| "unknown-thread".to_string())
+            };
+
+            let legacy_call_id = read_string(params_obj.and_then(|p| p.get("callId")));
+            let turn_id = if matches!(
+                method,
+                LEGACY_APPROVAL_PATCH_METHOD | LEGACY_APPROVAL_COMMAND_METHOD
+            ) {
+                legacy_call_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown-turn".to_string())
+            } else {
+                read_string(params_obj.and_then(|p| p.get("turnId")))
+                    .unwrap_or_else(|| "unknown-turn".to_string())
+            };
+
+            let item_id = if method == LEGACY_APPROVAL_COMMAND_METHOD {
+                read_string(params_obj.and_then(|p| p.get("approvalId")))
+                    .or_else(|| legacy_call_id.clone())
+                    .unwrap_or_else(|| "unknown-item".to_string())
+            } else if method == LEGACY_APPROVAL_PATCH_METHOD {
+                legacy_call_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown-item".to_string())
+            } else {
+                read_string(params_obj.and_then(|p| p.get("itemId")))
+                    .unwrap_or_else(|| "unknown-item".to_string())
+            };
+
             let approval = PendingApproval {
                 id: approval_id.clone(),
-                kind: if method == APPROVAL_COMMAND_METHOD {
-                    "commandExecution".to_string()
-                } else {
-                    "fileChange".to_string()
-                },
-                thread_id: read_string(params_obj.and_then(|p| p.get("threadId")))
-                    .unwrap_or_else(|| "unknown-thread".to_string()),
-                turn_id: read_string(params_obj.and_then(|p| p.get("turnId")))
-                    .unwrap_or_else(|| "unknown-turn".to_string()),
-                item_id: read_string(params_obj.and_then(|p| p.get("itemId")))
-                    .unwrap_or_else(|| "unknown-item".to_string()),
+                kind,
+                thread_id,
+                turn_id,
+                item_id,
                 requested_at: now_iso(),
                 reason: read_string(params_obj.and_then(|p| p.get("reason"))),
-                command: read_string(params_obj.and_then(|p| p.get("command"))),
+                command: if method == LEGACY_APPROVAL_COMMAND_METHOD {
+                    read_shell_command(params_obj.and_then(|p| p.get("command")))
+                } else {
+                    read_string(params_obj.and_then(|p| p.get("command")))
+                },
                 cwd: read_string(params_obj.and_then(|p| p.get("cwd"))),
                 grant_root: read_string(params_obj.and_then(|p| p.get("grantRoot"))),
                 proposed_execpolicy_amendment: parse_execpolicy_amendment(
-                    params_obj.and_then(|p| p.get("proposedExecpolicyAmendment")),
+                    if method == APPROVAL_COMMAND_METHOD {
+                        params_obj.and_then(|p| p.get("proposedExecpolicyAmendment"))
+                    } else {
+                        None
+                    },
                 ),
             };
 
@@ -731,6 +822,7 @@ impl AppServerBridge {
                 approval_id,
                 PendingApprovalEntry {
                     app_server_request_id: id,
+                    response_format,
                     approval: approval.clone(),
                 },
             );
@@ -778,6 +870,86 @@ impl AppServerBridge {
                     serde_json::to_value(request).unwrap_or(Value::Null),
                 )
                 .await;
+            return;
+        }
+
+        if method == DYNAMIC_TOOL_CALL_METHOD {
+            self.hub
+                .broadcast_notification(
+                    "bridge/tool.call.unsupported",
+                    json!({
+                        "requestedAt": now_iso(),
+                        "message": "Dynamic tool calls are not supported by clawdex-mobile bridge",
+                        "request": params.clone().unwrap_or(Value::Null),
+                    }),
+                )
+                .await;
+
+            let _ = self
+                .write_json(json!({
+                    "id": id,
+                    "result": {
+                        "success": false,
+                        "contentItems": [
+                            {
+                                "type": "inputText",
+                                "text": "Dynamic tool calls are not supported by clawdex-mobile bridge"
+                            }
+                        ]
+                    }
+                }))
+                .await;
+            return;
+        }
+
+        if method == ACCOUNT_CHATGPT_TOKENS_REFRESH_METHOD {
+            let access_token = read_non_empty_env("BRIDGE_CHATGPT_ACCESS_TOKEN");
+            let account_id = read_non_empty_env("BRIDGE_CHATGPT_ACCOUNT_ID");
+            let plan_type = read_non_empty_env("BRIDGE_CHATGPT_PLAN_TYPE");
+
+            if let (Some(access_token), Some(chatgpt_account_id)) = (access_token, account_id) {
+                let mut result = json!({
+                    "accessToken": access_token,
+                    "chatgptAccountId": chatgpt_account_id,
+                    "chatgptPlanType": Value::Null,
+                });
+
+                if let Some(plan_type) = plan_type {
+                    result["chatgptPlanType"] = json!(plan_type);
+                }
+
+                let _ = self
+                    .write_json(json!({
+                        "id": id,
+                        "result": result
+                    }))
+                    .await;
+            } else {
+                self.hub
+                    .broadcast_notification(
+                        "bridge/account.chatgptAuthTokens.refresh.required",
+                        json!({
+                            "requestedAt": now_iso(),
+                            "reason": params
+                                .as_ref()
+                                .and_then(Value::as_object)
+                                .and_then(|raw| raw.get("reason"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("unauthorized"),
+                        }),
+                    )
+                    .await;
+
+                let _ = self
+                    .write_json(json!({
+                        "id": id,
+                        "error": {
+                            "code": -32001,
+                            "message": "account/chatgptAuthTokens/refresh is not configured (set BRIDGE_CHATGPT_ACCESS_TOKEN and BRIDGE_CHATGPT_ACCOUNT_ID)"
+                        }
+                    }))
+                    .await;
+            }
             return;
         }
 
@@ -851,6 +1023,567 @@ impl AppServerBridge {
         writer.write_all(b"\n").await?;
         writer.flush().await
     }
+}
+
+#[derive(Default)]
+struct RolloutLiveSyncState {
+    files: HashMap<PathBuf, RolloutTrackedFile>,
+    tick: u64,
+}
+
+struct RolloutTrackedFile {
+    path: PathBuf,
+    offset: u64,
+    partial_line: String,
+    drop_first_partial_line: bool,
+    thread_id: Option<String>,
+    originator: Option<String>,
+    include_for_live_sync: bool,
+    last_seen: Instant,
+    recent_line_hashes: VecDeque<u64>,
+    recent_line_hash_set: HashSet<u64>,
+}
+
+impl RolloutTrackedFile {
+    async fn new(path: PathBuf) -> Result<Self, std::io::Error> {
+        let metadata = fs::metadata(&path).await?;
+        let mut thread_id = None;
+        let mut originator = None;
+        let mut include_for_live_sync = false;
+
+        if let Some((meta_thread_id, meta_originator)) = read_rollout_session_meta(&path).await? {
+            include_for_live_sync = meta_originator == "codex_cli_rs";
+            thread_id = Some(meta_thread_id);
+            originator = Some(meta_originator);
+        }
+
+        let offset = metadata
+            .len()
+            .saturating_sub(ROLLOUT_LIVE_SYNC_INITIAL_TAIL_BYTES);
+        Ok(Self {
+            path,
+            offset,
+            partial_line: String::new(),
+            drop_first_partial_line: offset > 0,
+            thread_id,
+            originator,
+            include_for_live_sync,
+            last_seen: Instant::now(),
+            recent_line_hashes: VecDeque::new(),
+            recent_line_hash_set: HashSet::new(),
+        })
+    }
+
+    async fn poll(&mut self, hub: &Arc<ClientHub>) -> Result<(), std::io::Error> {
+        let mut file = match fs::File::open(&self.path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+
+        let metadata = file.metadata().await?;
+        let len = metadata.len();
+
+        if len < self.offset {
+            self.offset = 0;
+            self.partial_line.clear();
+            self.drop_first_partial_line = false;
+            self.recent_line_hashes.clear();
+            self.recent_line_hash_set.clear();
+        }
+
+        if len == self.offset {
+            return Ok(());
+        }
+
+        file.seek(SeekFrom::Start(self.offset)).await?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await?;
+        self.offset = len;
+        self.last_seen = Instant::now();
+
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        let chunk = String::from_utf8_lossy(&bytes);
+        let mut combined = String::with_capacity(self.partial_line.len() + chunk.len());
+        combined.push_str(&self.partial_line);
+        combined.push_str(&chunk);
+        self.partial_line.clear();
+
+        if self.drop_first_partial_line {
+            if let Some(index) = combined.find('\n') {
+                combined = combined[(index + 1)..].to_string();
+                self.drop_first_partial_line = false;
+            } else {
+                self.partial_line = combined;
+                return Ok(());
+            }
+        }
+
+        let has_trailing_newline = combined.ends_with('\n');
+        let mut lines = combined.split('\n').map(str::to_string).collect::<Vec<_>>();
+        if !has_trailing_newline {
+            self.partial_line = lines.pop().unwrap_or_default();
+        }
+
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let line_hash = hash_rollout_line(trimmed);
+            if !self.remember_line_hash(line_hash) {
+                continue;
+            }
+
+            if let Some((method, params)) = self.to_notification(trimmed) {
+                hub.broadcast_notification(&method, params).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn remember_line_hash(&mut self, line_hash: u64) -> bool {
+        if self.recent_line_hash_set.contains(&line_hash) {
+            return false;
+        }
+
+        self.recent_line_hash_set.insert(line_hash);
+        self.recent_line_hashes.push_back(line_hash);
+        while self.recent_line_hashes.len() > ROLLOUT_LIVE_SYNC_DEDUP_CAPACITY {
+            if let Some(oldest) = self.recent_line_hashes.pop_front() {
+                self.recent_line_hash_set.remove(&oldest);
+            }
+        }
+
+        true
+    }
+
+    fn to_notification(&mut self, line: &str) -> Option<(String, Value)> {
+        let parsed = serde_json::from_str::<Value>(line).ok()?;
+        let parsed_object = parsed.as_object()?;
+        let record_type = read_string(parsed_object.get("type"))?;
+        let timestamp = read_string(parsed_object.get("timestamp"));
+        let payload = parsed_object.get("payload")?.as_object()?;
+
+        if record_type == "session_meta" {
+            self.thread_id = read_string(payload.get("id")).or_else(|| self.thread_id.clone());
+            self.originator =
+                read_string(payload.get("originator")).or_else(|| self.originator.clone());
+            self.include_for_live_sync = self.originator.as_deref() == Some("codex_cli_rs");
+            return None;
+        }
+
+        if !self.include_for_live_sync {
+            return None;
+        }
+
+        let thread_id = self.thread_id.as_deref()?;
+        if record_type == "event_msg" {
+            return build_rollout_event_msg_notification(payload, thread_id, timestamp.as_deref());
+        }
+
+        if record_type == "response_item" {
+            return build_rollout_response_item_notification(
+                payload,
+                thread_id,
+                timestamp.as_deref(),
+            );
+        }
+
+        None
+    }
+}
+
+fn spawn_rollout_live_sync(hub: Arc<ClientHub>) {
+    tokio::spawn(async move {
+        let Some(sessions_root) = resolve_codex_sessions_root() else {
+            return;
+        };
+
+        let mut state = RolloutLiveSyncState::default();
+        let mut ticker =
+            tokio::time::interval(Duration::from_millis(ROLLOUT_LIVE_SYNC_POLL_INTERVAL_MS));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            ticker.tick().await;
+            state.tick = state.tick.wrapping_add(1);
+
+            if state.tick % ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS == 1 {
+                if let Err(error) =
+                    rollout_live_sync_discover_files(&sessions_root, &mut state).await
+                {
+                    eprintln!("rollout live sync discovery failed: {error}");
+                }
+            }
+
+            if let Err(error) = rollout_live_sync_poll_files(&hub, &mut state).await {
+                eprintln!("rollout live sync poll failed: {error}");
+            }
+        }
+    });
+}
+
+fn resolve_codex_sessions_root() -> Option<PathBuf> {
+    if let Some(codex_home) = read_non_empty_env("CODEX_HOME") {
+        let root = PathBuf::from(codex_home).join("sessions");
+        if root.is_dir() {
+            return Some(root);
+        }
+    }
+
+    let home = read_non_empty_env("HOME")?;
+    let root = PathBuf::from(home).join(".codex").join("sessions");
+    if root.is_dir() {
+        Some(root)
+    } else {
+        None
+    }
+}
+
+async fn rollout_live_sync_discover_files(
+    sessions_root: &Path,
+    state: &mut RolloutLiveSyncState,
+) -> Result<(), std::io::Error> {
+    let discovered_paths = discover_recent_rollout_files(sessions_root).await?;
+    let discovered_set = discovered_paths.iter().cloned().collect::<HashSet<_>>();
+
+    for path in discovered_paths {
+        if state.files.contains_key(&path) {
+            continue;
+        }
+
+        match RolloutTrackedFile::new(path.clone()).await {
+            Ok(tracked) => {
+                state.files.insert(path, tracked);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    state.files.retain(|path, tracked| {
+        discovered_set.contains(path)
+            || tracked.last_seen.elapsed() < ROLLOUT_LIVE_SYNC_MAX_FILE_AGE
+    });
+
+    Ok(())
+}
+
+async fn rollout_live_sync_poll_files(
+    hub: &Arc<ClientHub>,
+    state: &mut RolloutLiveSyncState,
+) -> Result<(), std::io::Error> {
+    let tracked_paths = state.files.keys().cloned().collect::<Vec<_>>();
+    let mut removed_paths = Vec::new();
+
+    for path in tracked_paths {
+        let Some(tracked) = state.files.get_mut(&path) else {
+            continue;
+        };
+
+        match tracked.poll(hub).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                removed_paths.push(path.clone());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    for path in removed_paths {
+        state.files.remove(&path);
+    }
+
+    Ok(())
+}
+
+async fn discover_recent_rollout_files(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let now = SystemTime::now();
+    let mut stack = vec![root.to_path_buf()];
+    let mut matches = Vec::<(PathBuf, SystemTime)>::new();
+
+    while let Some(dir) = stack.pop() {
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let metadata = entry.metadata().await?;
+
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if !metadata.is_file() || !is_rollout_file_path(&path) {
+                continue;
+            }
+
+            let modified = metadata.modified().unwrap_or(now);
+            if now
+                .duration_since(modified)
+                .unwrap_or_else(|_| Duration::from_secs(0))
+                > ROLLOUT_LIVE_SYNC_MAX_FILE_AGE
+            {
+                continue;
+            }
+
+            matches.push((path, modified));
+        }
+    }
+
+    matches.sort_by(|left, right| right.1.cmp(&left.1));
+    matches.truncate(ROLLOUT_LIVE_SYNC_MAX_TRACKED_FILES);
+
+    Ok(matches.into_iter().map(|(path, _)| path).collect())
+}
+
+fn is_rollout_file_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+        .unwrap_or(false)
+}
+
+async fn read_rollout_session_meta(
+    path: &Path,
+) -> Result<Option<(String, String)>, std::io::Error> {
+    let file = match fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let mut lines = BufReader::new(file).lines();
+    let Some(first_line) = lines.next_line().await? else {
+        return Ok(None);
+    };
+
+    let parsed = match serde_json::from_str::<Value>(&first_line) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(None),
+    };
+
+    let parsed_object = match parsed.as_object() {
+        Some(object) => object,
+        None => return Ok(None),
+    };
+
+    if read_string(parsed_object.get("type")).as_deref() != Some("session_meta") {
+        return Ok(None);
+    }
+
+    let payload = match parsed_object.get("payload").and_then(Value::as_object) {
+        Some(payload) => payload,
+        None => return Ok(None),
+    };
+
+    let thread_id = match read_string(payload.get("id")) {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    let originator = match read_string(payload.get("originator")) {
+        Some(originator) => originator,
+        None => return Ok(None),
+    };
+
+    Ok(Some((thread_id, originator)))
+}
+
+fn hash_rollout_line(line: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    line.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn build_rollout_event_msg_notification(
+    payload: &serde_json::Map<String, Value>,
+    thread_id: &str,
+    timestamp: Option<&str>,
+) -> Option<(String, Value)> {
+    let raw_type = read_string(payload.get("type"))?;
+    if matches!(
+        raw_type.as_str(),
+        "token_count" | "user_message" | "context_compacted"
+    ) {
+        return None;
+    }
+
+    let mut msg = payload.clone();
+    msg.entry("thread_id".to_string())
+        .or_insert_with(|| json!(thread_id));
+    msg.entry("threadId".to_string())
+        .or_insert_with(|| json!(thread_id));
+    if let Some(timestamp) = timestamp {
+        msg.entry("timestamp".to_string())
+            .or_insert_with(|| json!(timestamp));
+    }
+
+    if raw_type == "agent_reasoning" {
+        let delta = read_string(payload.get("text"))?;
+        if delta.trim().is_empty() {
+            return None;
+        }
+        msg.insert("type".to_string(), json!("agent_reasoning_delta"));
+        msg.insert("delta".to_string(), json!(delta));
+        return Some((
+            "codex/event/agent_reasoning_delta".to_string(),
+            json!({ "msg": Value::Object(msg) }),
+        ));
+    }
+
+    if raw_type == "agent_message" {
+        let delta = read_string(payload.get("message"))?;
+        if delta.trim().is_empty() {
+            return None;
+        }
+        msg.insert("type".to_string(), json!("agent_message_delta"));
+        msg.insert("delta".to_string(), json!(delta));
+        return Some((
+            "codex/event/agent_message_delta".to_string(),
+            json!({ "msg": Value::Object(msg) }),
+        ));
+    }
+
+    Some((
+        format!("codex/event/{raw_type}"),
+        json!({ "msg": Value::Object(msg) }),
+    ))
+}
+
+fn build_rollout_response_item_notification(
+    payload: &serde_json::Map<String, Value>,
+    thread_id: &str,
+    timestamp: Option<&str>,
+) -> Option<(String, Value)> {
+    let item_type = read_string(payload.get("type"))?;
+    if item_type != "function_call" {
+        return None;
+    }
+
+    let name = read_string(payload.get("name"))?;
+    let arguments = parse_rollout_function_call_arguments(payload.get("arguments"));
+
+    if name == "exec_command" {
+        let command = arguments
+            .as_object()
+            .and_then(|object| read_shell_command(object.get("cmd")));
+        let command = command?.trim().to_string();
+        if command.is_empty() {
+            return None;
+        }
+
+        let command_parts = shlex::split(&command).unwrap_or_else(|| vec![command.clone()]);
+        let mut msg = serde_json::Map::new();
+        msg.insert("type".to_string(), json!("exec_command_begin"));
+        msg.insert("thread_id".to_string(), json!(thread_id));
+        msg.insert("threadId".to_string(), json!(thread_id));
+        msg.insert("command".to_string(), json!(command_parts));
+        if let Some(call_id) = read_string(payload.get("call_id")) {
+            msg.insert("call_id".to_string(), json!(call_id));
+        }
+        if let Some(timestamp) = timestamp {
+            msg.insert("timestamp".to_string(), json!(timestamp));
+        }
+        return Some((
+            "codex/event/exec_command_begin".to_string(),
+            json!({ "msg": Value::Object(msg) }),
+        ));
+    }
+
+    if let Some((server, tool)) = parse_rollout_mcp_tool_name(&name) {
+        let mut msg = serde_json::Map::new();
+        msg.insert("type".to_string(), json!("mcp_tool_call_begin"));
+        msg.insert("thread_id".to_string(), json!(thread_id));
+        msg.insert("threadId".to_string(), json!(thread_id));
+        msg.insert("server".to_string(), json!(server));
+        msg.insert("tool".to_string(), json!(tool));
+        if let Some(timestamp) = timestamp {
+            msg.insert("timestamp".to_string(), json!(timestamp));
+        }
+        return Some((
+            "codex/event/mcp_tool_call_begin".to_string(),
+            json!({ "msg": Value::Object(msg) }),
+        ));
+    }
+
+    if name == "search_query" || name == "image_query" {
+        let query = extract_rollout_search_query(&arguments)?;
+        if query.trim().is_empty() {
+            return None;
+        }
+        let mut msg = serde_json::Map::new();
+        msg.insert("type".to_string(), json!("web_search_begin"));
+        msg.insert("thread_id".to_string(), json!(thread_id));
+        msg.insert("threadId".to_string(), json!(thread_id));
+        msg.insert("query".to_string(), json!(query));
+        if let Some(timestamp) = timestamp {
+            msg.insert("timestamp".to_string(), json!(timestamp));
+        }
+        return Some((
+            "codex/event/web_search_begin".to_string(),
+            json!({ "msg": Value::Object(msg) }),
+        ));
+    }
+
+    None
+}
+
+fn parse_rollout_function_call_arguments(raw_arguments: Option<&Value>) -> Value {
+    if let Some(text_arguments) = raw_arguments.and_then(Value::as_str) {
+        return serde_json::from_str::<Value>(text_arguments).unwrap_or(Value::Null);
+    }
+
+    raw_arguments.cloned().unwrap_or(Value::Null)
+}
+
+fn parse_rollout_mcp_tool_name(name: &str) -> Option<(String, String)> {
+    if !name.starts_with("mcp__") {
+        return None;
+    }
+
+    let raw = name.trim_start_matches("mcp__");
+    let mut segments = raw.split("__");
+    let server = segments.next()?.trim();
+    if server.is_empty() {
+        return None;
+    }
+
+    let tool = segments.collect::<Vec<_>>().join("__");
+    if tool.trim().is_empty() {
+        return None;
+    }
+
+    Some((server.to_string(), tool))
+}
+
+fn extract_rollout_search_query(arguments: &Value) -> Option<String> {
+    let object = arguments.as_object()?;
+
+    let entries = object
+        .get("search_query")
+        .and_then(Value::as_array)
+        .or_else(|| object.get("image_query").and_then(Value::as_array))?;
+
+    for entry in entries {
+        let query = read_string(entry.as_object().and_then(|item| item.get("q")));
+        if let Some(query) = query.filter(|query| !query.trim().is_empty()) {
+            return Some(query);
+        }
+    }
+
+    None
 }
 
 #[derive(Debug)]
@@ -1168,6 +1901,7 @@ async fn main() {
         terminal,
         git,
     });
+    spawn_rollout_live_sync(state.hub.clone());
 
     let app = Router::new()
         .route("/rpc", get(ws_handler))
@@ -1619,7 +2353,7 @@ async fn handle_bridge_method(
 
             if !is_valid_approval_decision(&request.decision) {
                 return Err(BridgeError::invalid_params(
-                    "decision must be one of: accept, acceptForSession, decline, cancel, or acceptWithExecpolicyAmendment",
+                    "decision must be one of: accept/approved, acceptForSession/approved_for_session, decline/denied, cancel/abort, or an execpolicy amendment object",
                 ));
             }
 
@@ -1747,6 +2481,13 @@ fn parse_bool_env_with_default(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn read_non_empty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn constant_time_eq(left: &str, right: &str) -> bool {
     let left_bytes = left.as_bytes();
     let right_bytes = right.as_bytes();
@@ -1777,58 +2518,133 @@ fn parse_csv_env(name: &str, fallback: &[&str]) -> HashSet<String> {
 fn is_forwarded_method(method: &str) -> bool {
     matches!(
         method,
-        "thread/start"
-            | "thread/resume"
-            | "thread/read"
-            | "thread/list"
-            | "thread/name/set"
-            | "thread/fork"
-            | "thread/archive"
-            | "thread/unarchive"
-            | "thread/rollback"
-            | "thread/compact/start"
-            | "turn/start"
-            | "turn/steer"
-            | "turn/interrupt"
+        "account/login/cancel"
+            | "account/login/start"
+            | "account/logout"
+            | "account/rateLimits/read"
+            | "account/read"
+            | "app/list"
+            | "collaborationMode/list"
+            | "command/exec"
+            | "config/batchWrite"
+            | "config/mcpServer/reload"
+            | "config/read"
+            | "config/value/write"
+            | "configRequirements/read"
+            | "experimentalFeature/list"
+            | "feedback/upload"
+            | "fuzzyFileSearch/sessionStart"
+            | "fuzzyFileSearch/sessionStop"
+            | "fuzzyFileSearch/sessionUpdate"
+            | "mcpServer/oauth/login"
+            | "mcpServerStatus/list"
+            | "mock/experimentalMethod"
             | "model/list"
             | "review/start"
+            | "skills/config/write"
             | "skills/list"
-            | "app/list"
-            | "command/exec"
+            | "skills/remote/export"
+            | "skills/remote/list"
+            | "thread/archive"
+            | "thread/backgroundTerminals/clean"
+            | "thread/compact/start"
+            | "thread/fork"
+            | "thread/list"
             | "thread/loaded/list"
+            | "thread/name/set"
+            | "thread/read"
+            | "thread/resume"
+            | "thread/rollback"
+            | "thread/start"
+            | "thread/unarchive"
+            | "turn/interrupt"
+            | "turn/start"
+            | "turn/steer"
     )
 }
 
+#[derive(Clone)]
+enum ApprovalDecisionCanonical {
+    Accept,
+    AcceptForSession,
+    Decline,
+    Cancel,
+    AcceptWithExecpolicyAmendment(Vec<String>),
+}
+
 fn is_valid_approval_decision(value: &Value) -> bool {
+    parse_approval_decision(value).is_some()
+}
+
+fn parse_approval_decision(value: &Value) -> Option<ApprovalDecisionCanonical> {
     if let Some(raw) = value.as_str() {
-        return matches!(raw, "accept" | "acceptForSession" | "decline" | "cancel");
+        return match raw {
+            "accept" | "approved" => Some(ApprovalDecisionCanonical::Accept),
+            "acceptForSession" | "approved_for_session" => {
+                Some(ApprovalDecisionCanonical::AcceptForSession)
+            }
+            "decline" | "denied" => Some(ApprovalDecisionCanonical::Decline),
+            "cancel" | "abort" => Some(ApprovalDecisionCanonical::Cancel),
+            _ => None,
+        };
     }
 
-    let Some(object) = value.as_object() else {
-        return false;
-    };
+    let object = value.as_object()?;
 
-    let Some(amendment) = object.get("acceptWithExecpolicyAmendment") else {
-        return false;
-    };
-
-    let Some(amendment_object) = amendment.as_object() else {
-        return false;
-    };
-
-    let Some(execpolicy_amendment) = amendment_object.get("execpolicy_amendment") else {
-        return false;
-    };
-
-    let Some(tokens) = execpolicy_amendment.as_array() else {
-        return false;
-    };
-
-    if tokens.is_empty() {
-        return false;
+    if let Some(amendment) = object.get("acceptWithExecpolicyAmendment") {
+        let tokens = amendment
+            .as_object()
+            .and_then(|entry| parse_string_array_strict(entry.get("execpolicy_amendment")))?;
+        return Some(ApprovalDecisionCanonical::AcceptWithExecpolicyAmendment(
+            tokens,
+        ));
     }
 
-    tokens.iter().all(|token| token.as_str().is_some())
+    if let Some(amendment) = object.get("approved_execpolicy_amendment") {
+        let tokens = amendment.as_object().and_then(|entry| {
+            parse_string_array_strict(entry.get("proposed_execpolicy_amendment"))
+        })?;
+        return Some(ApprovalDecisionCanonical::AcceptWithExecpolicyAmendment(
+            tokens,
+        ));
+    }
+
+    None
+}
+
+fn approval_decision_to_response_value(
+    decision: &Value,
+    response_format: ApprovalResponseFormat,
+) -> Option<Value> {
+    let parsed = parse_approval_decision(decision)?;
+    match response_format {
+        ApprovalResponseFormat::Modern => Some(match parsed {
+            ApprovalDecisionCanonical::Accept => json!("accept"),
+            ApprovalDecisionCanonical::AcceptForSession => json!("acceptForSession"),
+            ApprovalDecisionCanonical::Decline => json!("decline"),
+            ApprovalDecisionCanonical::Cancel => json!("cancel"),
+            ApprovalDecisionCanonical::AcceptWithExecpolicyAmendment(tokens) => {
+                json!({
+                    "acceptWithExecpolicyAmendment": {
+                        "execpolicy_amendment": tokens
+                    }
+                })
+            }
+        }),
+        ApprovalResponseFormat::Legacy => Some(match parsed {
+            ApprovalDecisionCanonical::Accept => json!("approved"),
+            ApprovalDecisionCanonical::AcceptForSession => json!("approved_for_session"),
+            ApprovalDecisionCanonical::Decline => json!("denied"),
+            ApprovalDecisionCanonical::Cancel => json!("abort"),
+            ApprovalDecisionCanonical::AcceptWithExecpolicyAmendment(tokens) => {
+                json!({
+                    "approved_execpolicy_amendment": {
+                        "proposed_execpolicy_amendment": tokens
+                    }
+                })
+            }
+        }),
+    }
 }
 
 fn parse_internal_id(value: Option<&Value>) -> Option<u64> {
@@ -1855,30 +2671,47 @@ fn read_string(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_string)
 }
 
+fn parse_string_array_strict(value: Option<&Value>) -> Option<Vec<String>> {
+    let entries = value.and_then(Value::as_array)?;
+    if entries.is_empty() {
+        return None;
+    }
+
+    let mut parsed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let text = entry.as_str()?;
+        parsed.push(text.to_string());
+    }
+
+    Some(parsed)
+}
+
+fn read_string_array(value: Option<&Value>) -> Option<Vec<String>> {
+    parse_string_array_strict(value)
+}
+
+fn read_shell_command(value: Option<&Value>) -> Option<String> {
+    if let Some(command) = read_string(value) {
+        return Some(command);
+    }
+
+    read_string_array(value).map(|parts| parts.join(" "))
+}
+
 fn read_bool(value: Option<&Value>) -> Option<bool> {
     value.and_then(Value::as_bool)
 }
 
 fn parse_execpolicy_amendment(value: Option<&Value>) -> Option<Vec<String>> {
-    let array = if let Some(array) = value.and_then(Value::as_array) {
-        array
-    } else if let Some(object) = value.and_then(Value::as_object) {
-        object.get("execpolicy_amendment")?.as_array()?
-    } else {
-        return None;
-    };
-
-    let tokens = array
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    if tokens.is_empty() {
-        None
-    } else {
-        Some(tokens)
+    if let Some(array) = parse_string_array_strict(value) {
+        return Some(array);
     }
+
+    if let Some(object) = value.and_then(Value::as_object) {
+        return parse_string_array_strict(object.get("execpolicy_amendment"));
+    }
+
+    None
 }
 
 fn parse_user_input_questions(value: Option<&Value>) -> Vec<PendingUserInputQuestion> {
@@ -2393,6 +3226,9 @@ mod tests {
     fn forwarded_method_allowlist_matches_expected() {
         assert!(is_forwarded_method("thread/start"));
         assert!(is_forwarded_method("turn/start"));
+        assert!(is_forwarded_method("account/read"));
+        assert!(is_forwarded_method("mcpServer/oauth/login"));
+        assert!(is_forwarded_method("thread/backgroundTerminals/clean"));
         assert!(is_forwarded_method("thread/loaded/list"));
         assert!(!is_forwarded_method("bridge/terminal/exec"));
         assert!(!is_forwarded_method("thread/delete"));
@@ -2404,9 +3240,18 @@ mod tests {
         assert!(is_valid_approval_decision(&json!("acceptForSession")));
         assert!(is_valid_approval_decision(&json!("decline")));
         assert!(is_valid_approval_decision(&json!("cancel")));
+        assert!(is_valid_approval_decision(&json!("approved")));
+        assert!(is_valid_approval_decision(&json!("approved_for_session")));
+        assert!(is_valid_approval_decision(&json!("denied")));
+        assert!(is_valid_approval_decision(&json!("abort")));
         assert!(is_valid_approval_decision(&json!({
             "acceptWithExecpolicyAmendment": {
                 "execpolicy_amendment": ["--allow-network", "git"]
+            }
+        })));
+        assert!(is_valid_approval_decision(&json!({
+            "approved_execpolicy_amendment": {
+                "proposed_execpolicy_amendment": ["npm", "test"]
             }
         })));
     }
@@ -2427,6 +3272,53 @@ mod tests {
         assert!(!is_valid_approval_decision(&json!({
             "acceptWithExecpolicyAmendment": {}
         })));
+        assert!(!is_valid_approval_decision(&json!({
+            "approved_execpolicy_amendment": {
+                "proposed_execpolicy_amendment": []
+            }
+        })));
+    }
+
+    #[test]
+    fn approval_decision_response_mapping_supports_modern_and_legacy_shapes() {
+        assert_eq!(
+            approval_decision_to_response_value(&json!("accept"), ApprovalResponseFormat::Modern),
+            Some(json!("accept"))
+        );
+        assert_eq!(
+            approval_decision_to_response_value(&json!("accept"), ApprovalResponseFormat::Legacy),
+            Some(json!("approved"))
+        );
+        assert_eq!(
+            approval_decision_to_response_value(
+                &json!({
+                    "acceptWithExecpolicyAmendment": {
+                        "execpolicy_amendment": ["git", "status"]
+                    }
+                }),
+                ApprovalResponseFormat::Legacy,
+            ),
+            Some(json!({
+                "approved_execpolicy_amendment": {
+                    "proposed_execpolicy_amendment": ["git", "status"]
+                }
+            }))
+        );
+        assert_eq!(
+            approval_decision_to_response_value(
+                &json!({
+                    "approved_execpolicy_amendment": {
+                        "proposed_execpolicy_amendment": ["npm", "test"]
+                    }
+                }),
+                ApprovalResponseFormat::Modern,
+            ),
+            Some(json!({
+                "acceptWithExecpolicyAmendment": {
+                    "execpolicy_amendment": ["npm", "test"]
+                }
+            }))
+        );
     }
 
     #[test]
@@ -2464,6 +3356,158 @@ mod tests {
             None
         );
         assert_eq!(parse_execpolicy_amendment(Some(&json!(null))), None);
+    }
+
+    #[test]
+    fn read_shell_command_supports_string_and_array_forms() {
+        assert_eq!(
+            read_shell_command(Some(&json!("git status"))),
+            Some("git status".to_string())
+        );
+        assert_eq!(
+            read_shell_command(Some(&json!(["npm", "test", "--watch"]))),
+            Some("npm test --watch".to_string())
+        );
+        assert_eq!(read_shell_command(Some(&json!([]))), None);
+    }
+
+    #[test]
+    fn rollout_event_msg_mapping_converts_reasoning_and_message_to_delta_events() {
+        let reasoning = build_rollout_event_msg_notification(
+            json!({
+                "type": "agent_reasoning",
+                "text": "**Inspecting workspace**"
+            })
+            .as_object()
+            .expect("event payload object"),
+            "thread-1",
+            Some("2026-02-25T00:00:00Z"),
+        )
+        .expect("reasoning notification");
+
+        assert_eq!(reasoning.0, "codex/event/agent_reasoning_delta");
+        assert_eq!(reasoning.1["msg"]["type"], "agent_reasoning_delta");
+        assert_eq!(reasoning.1["msg"]["delta"], "**Inspecting workspace**");
+        assert_eq!(reasoning.1["msg"]["thread_id"], "thread-1");
+
+        let agent_message = build_rollout_event_msg_notification(
+            json!({
+                "type": "agent_message",
+                "message": "Running checks"
+            })
+            .as_object()
+            .expect("event payload object"),
+            "thread-1",
+            Some("2026-02-25T00:00:01Z"),
+        )
+        .expect("agent message notification");
+
+        assert_eq!(agent_message.0, "codex/event/agent_message_delta");
+        assert_eq!(agent_message.1["msg"]["type"], "agent_message_delta");
+        assert_eq!(agent_message.1["msg"]["delta"], "Running checks");
+    }
+
+    #[test]
+    fn rollout_event_msg_mapping_ignores_noise_events() {
+        assert!(build_rollout_event_msg_notification(
+            json!({
+                "type": "token_count",
+                "info": {}
+            })
+            .as_object()
+            .expect("event payload object"),
+            "thread-1",
+            None,
+        )
+        .is_none());
+        assert!(build_rollout_event_msg_notification(
+            json!({
+                "type": "user_message",
+                "message": "hello"
+            })
+            .as_object()
+            .expect("event payload object"),
+            "thread-1",
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rollout_response_item_mapping_builds_exec_command_and_mcp_notifications() {
+        let exec_command = build_rollout_response_item_notification(
+            json!({
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"npm run test\"}",
+                "call_id": "call_1"
+            })
+            .as_object()
+            .expect("response item payload object"),
+            "thread-1",
+            None,
+        )
+        .expect("exec command notification");
+
+        assert_eq!(exec_command.0, "codex/event/exec_command_begin");
+        assert_eq!(exec_command.1["msg"]["type"], "exec_command_begin");
+        assert_eq!(exec_command.1["msg"]["thread_id"], "thread-1");
+        assert_eq!(
+            exec_command.1["msg"]["command"],
+            json!(["npm", "run", "test"])
+        );
+
+        let mcp_call = build_rollout_response_item_notification(
+            json!({
+                "type": "function_call",
+                "name": "mcp__openaiDeveloperDocs__search_openai_docs",
+                "arguments": "{\"query\":\"codex\"}"
+            })
+            .as_object()
+            .expect("response item payload object"),
+            "thread-2",
+            None,
+        )
+        .expect("mcp notification");
+
+        assert_eq!(mcp_call.0, "codex/event/mcp_tool_call_begin");
+        assert_eq!(mcp_call.1["msg"]["server"], "openaiDeveloperDocs");
+        assert_eq!(mcp_call.1["msg"]["tool"], "search_openai_docs");
+    }
+
+    #[test]
+    fn parse_rollout_mcp_tool_name_handles_expected_shapes() {
+        assert_eq!(
+            parse_rollout_mcp_tool_name("mcp__server__tool_name"),
+            Some(("server".to_string(), "tool_name".to_string()))
+        );
+        assert_eq!(
+            parse_rollout_mcp_tool_name("mcp__server__namespace__tool"),
+            Some(("server".to_string(), "namespace__tool".to_string()))
+        );
+        assert_eq!(parse_rollout_mcp_tool_name("exec_command"), None);
+        assert_eq!(parse_rollout_mcp_tool_name("mcp____tool"), None);
+    }
+
+    #[test]
+    fn extract_rollout_search_query_supports_search_and_image_query_shapes() {
+        assert_eq!(
+            extract_rollout_search_query(&json!({
+                "search_query": [
+                    { "q": "codex cli live mode" }
+                ]
+            })),
+            Some("codex cli live mode".to_string())
+        );
+        assert_eq!(
+            extract_rollout_search_query(&json!({
+                "image_query": [
+                    { "q": "sunset" }
+                ]
+            })),
+            Some("sunset".to_string())
+        );
+        assert_eq!(extract_rollout_search_query(&json!({})), None);
     }
 
     #[test]
@@ -2766,6 +3810,72 @@ mod tests {
         assert_eq!(payload_b["error"]["code"], -32000);
 
         shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn handle_server_request_item_tool_call_returns_structured_unsupported_result() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let capture_path = env::temp_dir().join(format!("clawdex-tool-call-capture-{nonce}.jsonl"));
+        let shell_command = format!("cat > {}", capture_path.to_string_lossy());
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(shell_command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn capture process");
+        let writer = child.stdin.take().expect("capture stdin available");
+
+        let hub = Arc::new(ClientHub::new());
+        let bridge = Arc::new(AppServerBridge {
+            child: Mutex::new(child),
+            writer: Mutex::new(writer),
+            pending_requests: Mutex::new(HashMap::new()),
+            internal_waiters: Mutex::new(HashMap::new()),
+            pending_approvals: Mutex::new(HashMap::new()),
+            pending_user_inputs: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
+            approval_counter: AtomicU64::new(1),
+            user_input_counter: AtomicU64::new(1),
+            hub: hub.clone(),
+        });
+
+        let (_client_id, mut rx) = add_test_client(&hub).await;
+
+        bridge
+            .handle_server_request(
+                DYNAMIC_TOOL_CALL_METHOD,
+                json!("tool-call-1"),
+                Some(json!({
+                    "callId": "call_demo_1",
+                    "threadId": "thr_demo_1",
+                    "turnId": "turn_demo_1",
+                    "tool": "demo_tool",
+                    "arguments": { "hello": "world" }
+                })),
+            )
+            .await;
+
+        let notification = recv_client_json(&mut rx).await;
+        assert_eq!(notification["method"], "bridge/tool.call.unsupported");
+        assert_eq!(notification["params"]["request"]["tool"], "demo_tool");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        shutdown_test_bridge(&bridge).await;
+
+        let captured = std::fs::read_to_string(&capture_path).expect("capture file exists");
+        std::fs::remove_file(&capture_path).ok();
+
+        println!("captured_app_server_response={captured}");
+
+        assert!(captured.contains("\"id\":\"tool-call-1\""));
+        assert!(captured.contains("\"success\":false"));
+        assert!(captured.contains("Dynamic tool calls are not supported by clawdex-mobile bridge"));
     }
 
     #[tokio::test]

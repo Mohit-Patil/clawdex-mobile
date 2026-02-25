@@ -130,7 +130,7 @@ const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
-const IDLE_CHAT_SYNC_INTERVAL_MS = 10_000;
+const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
 const THREAD_RESUME_RETRY_MS = 1_500;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
@@ -4084,6 +4084,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const threadId =
             readString(params?.threadId) ?? readString(params?.thread_id);
           if (threadId && threadId === currentId) {
+            // External clients (CLI/TUI) may start turns without pushing full live
+            // notifications through this app-server process. Force a lightweight
+            // resume attempt to attach to fresh stream state early.
+            ensureThreadResumeSubscription(threadId, { force: true });
             api
               .getChatSummary(threadId)
               .then((summary) => {
@@ -4210,11 +4214,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
 
-          if (shouldRunFromChat) {
-            // Only attach a live subscription when the server-reported status
-            // is actively running; avoid resuming idle historical chats.
-            ensureThreadResumeSubscription(selectedChatId);
-          }
+          // Keep a light resume heartbeat even while idle so externally-started
+          // turns are discovered quickly and can stream status/tool updates.
+          ensureThreadResumeSubscription(selectedChatId, {
+            force: shouldRunFromChat,
+          });
 
           if (shouldShowRunning && !hasPendingApproval && !hasPendingUserInput) {
             setActivity((prev) => {
