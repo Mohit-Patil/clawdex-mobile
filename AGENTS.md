@@ -116,5 +116,5 @@ Optionally run on a specific platform:
 - On real devices, use LAN host for bridge URL instead of localhost.
 - Endpoint changes must be mirrored in mobile `src/api/types.ts` + client methods.
 - Keep environment handling explicit; avoid relying on implicit cwd assumptions.
-- If Expo Go shows a Worklets JS/native mismatch, align Expo-compatible versions (`react-native-reanimated@4.1.1` with `react-native-worklets@0.5.1`) and reinstall cleanly.
+- If Expo Go shows a Worklets JS/native mismatch, run `npx expo install --fix` in `apps/mobile` and reinstall cleanly.
 - If Expo shows `Failed to create a worklet`, ensure `apps/mobile/babel.config.js` includes `plugins: ['react-native-reanimated/plugin']` and restart with `expo start --clear`.

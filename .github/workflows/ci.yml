@@ -47,6 +47,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck -w "${{ matrix.workspace }}"
 
+      - name: Expo Doctor
+        if: matrix.workspace == 'clawdex-mobile'
+        working-directory: apps/mobile
+        run: npx expo-doctor
+
       - name: Test
         run: npm run test -w "${{ matrix.workspace }}"
 

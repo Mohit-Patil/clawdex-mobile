@@ -617,7 +617,7 @@ npm run -w apps/mobile start -- --clear
 
 ### Worklets/Reanimated mismatch
 
-- Keep pinned versions aligned (`react-native-reanimated@4.1.1`, `react-native-worklets@0.5.1`)
+- Keep Expo-managed versions aligned by running `npx expo install --fix` in `apps/mobile`
 - Clear Expo cache:
 
 ```bash

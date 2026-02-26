@@ -17,8 +17,7 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/brand/adaptive-icon.png",
         "backgroundColor": "#000000"
-      },
-      "edgeToEdgeEnabled": true
+      }
     },
     "web": {
       "favicon": "./assets/brand/favicon.png"
@@ -28,6 +27,9 @@
       "android",
       "web"
     ],
+    "experiments": {
+      "reactCompiler": true
+    },
     "jsEngine": "hermes"
   }
 }

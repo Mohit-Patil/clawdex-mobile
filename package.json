@@ -33,20 +33,10 @@
     "teardown": "./scripts/teardown.sh"
   },
   "dependencies": {
-    "@types/react": "19.1.10",
-    "react": "19.1.0",
-    "react-native": "0.81.5",
-    "expo": "54.0.33"
-  },
-  "overrides": {
-    "minimatch": "10.2.2",
-    "@react-navigation/drawer": {
-      "react-native-reanimated": "4.1.1"
-    },
-    "react-native-drawer-layout": {
-      "react-native-reanimated": "4.1.1"
-    },
-    "react-native-reanimated": "4.1.1",
-    "react-native-worklets": "0.5.1"
+    "@types/react": "~19.2.10",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "0.83.2",
+    "expo": "^55.0.2"
   }
 }

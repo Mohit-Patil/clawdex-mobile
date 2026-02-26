@@ -15,6 +15,7 @@ import {
   ActionSheetIOS,
   ActivityIndicator,
   Alert,
+  FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -424,7 +425,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       tone: 'idle',
       title: 'Ready',
     });
-    const scrollRef = useRef<ScrollView>(null);
+    const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
     const loadChatRequestRef = useRef(0);
 
     // Ref so the WS handler always reads the latest chat ID without
@@ -5060,55 +5061,85 @@ function ChatView({
   activePlan: ActivePlanState | null;
   activeCommands: RunEvent[];
   streamingText: string | null;
-  scrollRef: React.RefObject<ScrollView | null>;
+  scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
   isStreaming: boolean;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
 }) {
   const { height: windowHeight } = useWindowDimensions();
-  const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
+  const visibleToolBlocks = useMemo(
+    () => activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS),
+    [activeCommands]
+  );
   const toolPanelMaxHeight = Math.floor(windowHeight * 0.5);
-  const liveTimelineText = toLiveTimelineText(activeCommands);
+  const liveTimelineText = useMemo(() => toLiveTimelineText(activeCommands), [activeCommands]);
   const shouldShowToolPanel = visibleToolBlocks.length > 0 && !liveTimelineText;
 
-  const filtered = chat.messages.filter((msg) => {
-    const text = msg.content || '';
-    if (msg.role === 'system') return false;
-    if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
-    if (text.includes('Current working directory is:')) return false;
-    if (text.includes('You are operating in task worktree')) return false;
-    if (msg.role === 'assistant' && !text.trim()) return false;
-    return true;
-  });
+  const visibleMessages = useMemo(() => {
+    const filtered = chat.messages.filter((msg) => {
+      const text = msg.content || '';
+      if (msg.role === 'system') return false;
+      if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
+      if (text.includes('Current working directory is:')) return false;
+      if (text.includes('You are operating in task worktree')) return false;
+      if (msg.role === 'assistant' && !text.trim()) return false;
+      return true;
+    });
 
-  // For each consecutive run of assistant messages, only keep the last
-  // one (the final answer). Earlier ones are intermediate thinking.
-  const visibleMessages = filtered.filter((msg, i) => {
-    if (msg.role !== 'assistant') return true;
-    const next = filtered[i + 1];
-    return !next || next.role !== 'assistant';
-  });
-  const inlineChoiceSet = inlineChoicesEnabled
-    ? findInlineChoiceSet(visibleMessages)
-    : null;
-  const streamingPreviewText = toStreamingPreviewText(streamingText, visibleMessages);
+    // For each consecutive run of assistant messages, only keep the last
+    // one (the final answer). Earlier ones are intermediate thinking.
+    return filtered.filter((msg, i) => {
+      if (msg.role !== 'assistant') return true;
+      const next = filtered[i + 1];
+      return !next || next.role !== 'assistant';
+    });
+  }, [chat.messages]);
+  const inlineChoiceSet = useMemo(
+    () => (inlineChoicesEnabled ? findInlineChoiceSet(visibleMessages) : null),
+    [inlineChoicesEnabled, visibleMessages]
+  );
+  const streamingPreviewText = useMemo(
+    () => toStreamingPreviewText(streamingText, visibleMessages),
+    [streamingText, visibleMessages]
+  );
+  const initialBottomSyncChatIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (initialBottomSyncChatIdRef.current === chat.id) {
+      return;
+    }
+    if (!activePlan && visibleMessages.length === 0 && !liveTimelineText && !streamingPreviewText) {
+      return;
+    }
+
+    initialBottomSyncChatIdRef.current = chat.id;
+    const scrollToBottom = () => scrollRef.current?.scrollToEnd({ animated: false });
+    const frame = requestAnimationFrame(scrollToBottom);
+    const timeout = setTimeout(scrollToBottom, 120);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timeout);
+    };
+  }, [
+    activePlan,
+    chat.id,
+    liveTimelineText,
+    scrollRef,
+    streamingPreviewText,
+    visibleMessages.length,
+  ]);
 
   return (
-    <ScrollView
+    <FlatList
+      key={chat.id}
       ref={scrollRef}
-      style={styles.messageList}
-      contentContainerStyle={styles.messageListContent}
-      showsVerticalScrollIndicator={false}
-      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-      keyboardShouldPersistTaps="handled"
-      onScrollBeginDrag={Keyboard.dismiss}
-      onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
-    >
-      {activePlan ? <PlanCard plan={activePlan} /> : null}
-      {visibleMessages.map((msg, messageIndex) => {
+      data={visibleMessages}
+      keyExtractor={(msg, messageIndex) => `${msg.id}-${String(messageIndex)}`}
+      renderItem={({ item: msg }) => {
         const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
         return (
-          <View key={`${msg.id}-${String(messageIndex)}`} style={styles.chatMessageBlock}>
+          <View style={styles.chatMessageBlock}>
             <ChatMessage message={msg} />
             {showInlineChoices ? (
               <View style={styles.inlineChoiceOptions}>
@@ -5139,49 +5170,67 @@ function ChatView({
             ) : null}
           </View>
         );
-      })}
-      {liveTimelineText ? (
-        <View style={styles.chatMessageBlock}>
-          <ChatMessage
-            message={{
-              id: `live-timeline-${chat.id}`,
-              role: 'system',
-              content: liveTimelineText,
-              createdAt: new Date().toISOString(),
-            }}
-          />
-        </View>
-      ) : null}
-      {streamingPreviewText ? (
-        <Text style={styles.streamingText} numberOfLines={4}>
-          {streamingPreviewText}
-        </Text>
-      ) : null}
-      {shouldShowToolPanel ? (
-        <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
-          <ScrollView
-            nestedScrollEnabled
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.toolPanelContent}
-          >
-            {visibleToolBlocks.map((cmd) => {
-              const tool = toToolBlockState(cmd);
-              if (!tool) {
-                return null;
-              }
-              return (
-                <ToolBlock
-                  key={cmd.id}
-                  command={tool.command}
-                  status={tool.status}
-                />
-              );
-            })}
-          </ScrollView>
-        </View>
-      ) : null}
-      {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? <TypingIndicator /> : null}
-    </ScrollView>
+      }}
+      style={styles.messageList}
+      contentContainerStyle={styles.messageListContent}
+      showsVerticalScrollIndicator={false}
+      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+      keyboardShouldPersistTaps="handled"
+      onScrollBeginDrag={Keyboard.dismiss}
+      onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+      initialNumToRender={16}
+      maxToRenderPerBatch={12}
+      windowSize={11}
+      removeClippedSubviews={Platform.OS === 'android'}
+      ListHeaderComponent={activePlan ? <PlanCard plan={activePlan} /> : null}
+      ListFooterComponent={
+        <>
+          {liveTimelineText ? (
+            <View style={styles.chatMessageBlock}>
+              <ChatMessage
+                message={{
+                  id: `live-timeline-${chat.id}`,
+                  role: 'system',
+                  content: liveTimelineText,
+                  createdAt: new Date().toISOString(),
+                }}
+              />
+            </View>
+          ) : null}
+          {streamingPreviewText ? (
+            <Text style={styles.streamingText} numberOfLines={4}>
+              {streamingPreviewText}
+            </Text>
+          ) : null}
+          {shouldShowToolPanel ? (
+            <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
+              <ScrollView
+                nestedScrollEnabled
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={styles.toolPanelContent}
+              >
+                {visibleToolBlocks.map((cmd) => {
+                  const tool = toToolBlockState(cmd);
+                  if (!tool) {
+                    return null;
+                  }
+                  return (
+                    <ToolBlock
+                      key={cmd.id}
+                      command={tool.command}
+                      status={tool.status}
+                    />
+                  );
+                })}
+              </ScrollView>
+            </View>
+          ) : null}
+          {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? (
+            <TypingIndicator />
+          ) : null}
+        </>
+      }
+    />
   );
 }
 
@@ -6782,6 +6831,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   messageListContent: {
+    flexGrow: 1,
+    justifyContent: 'flex-end',
     padding: spacing.lg,
     paddingTop: spacing.lg,
     paddingBottom: spacing.xl,
