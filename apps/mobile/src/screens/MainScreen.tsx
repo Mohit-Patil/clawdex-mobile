@@ -131,6 +131,7 @@ const RUN_WATCHDOG_MS = 60_000;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
+const IMAGE_UPLOAD_MIME_TYPE = 'image/jpeg';
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
 const INLINE_OPTION_LINE_PATTERN =
@@ -1534,18 +1535,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           quality: 1,
           base64: true,
           allowsMultipleSelection: false,
+          preferredAssetRepresentationMode:
+            ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
         });
         if (result.canceled || !result.assets[0]) {
           return;
         }
 
         const image = result.assets[0];
+        const imageBase64 = image.base64?.trim();
+        if (!imageBase64) {
+          setError('Unable to process the selected image. Please try another photo.');
+          return;
+        }
+
         await uploadMobileAttachment({
           uri: image.uri,
-          fileName: image.fileName ?? undefined,
-          mimeType: image.mimeType ?? undefined,
+          fileName: toJpegAttachmentFileName(image.fileName),
+          mimeType: IMAGE_UPLOAD_MIME_TYPE,
           kind: 'image',
-          dataBase64: image.base64 ?? undefined,
+          dataBase64: imageBase64,
         });
       } catch (err) {
         setError((err as Error).message);
@@ -5599,6 +5608,21 @@ function normalizeAttachmentPath(value: string | null | undefined): string | nul
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function toJpegAttachmentFileName(value: string | null | undefined): string {
+  if (typeof value !== 'string') {
+    return 'image.jpg';
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return 'image.jpg';
+  }
+
+  const baseName = trimmed.split(/[\\/]/).filter(Boolean).pop() ?? '';
+  const stem = baseName.replace(/\.[^.]+$/, '').trim();
+  return `${stem || 'image'}.jpg`;
 }
 
 function toMentionInput(path: string): MentionInput {

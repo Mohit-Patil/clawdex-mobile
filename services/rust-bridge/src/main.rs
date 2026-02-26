@@ -2810,11 +2810,23 @@ async fn save_uploaded_attachment(
 
     let normalized_kind =
         normalize_attachment_kind(request.kind.as_deref(), request.mime_type.as_deref());
-    let file_name = build_attachment_file_name(
+    let detected_image_format =
+        if normalized_kind == "image" {
+            Some(detect_uploaded_image_format(&bytes).ok_or_else(|| {
+                BridgeError::invalid_params("image attachments must be JPEG or PNG")
+            })?)
+        } else {
+            None
+        };
+
+    let mut file_name = build_attachment_file_name(
         request.file_name.as_deref(),
         request.mime_type.as_deref(),
         normalized_kind,
     );
+    if let Some(image_format) = detected_image_format {
+        file_name = force_file_extension(&file_name, image_format.extension());
+    }
 
     let mut attachment_dir = state.config.workdir.join(MOBILE_ATTACHMENTS_DIR);
     if let Some(thread_id) = request.thread_id.as_deref() {
@@ -2842,15 +2854,21 @@ async fn save_uploaded_attachment(
         .await
         .map_err(|error| BridgeError::server(&format!("failed to persist attachment: {error}")))?;
 
-    Ok(AttachmentUploadResponse {
-        path: normalized_target.to_string_lossy().to_string(),
-        file_name,
-        mime_type: request
+    let mime_type = if let Some(image_format) = detected_image_format {
+        Some(image_format.mime_type().to_string())
+    } else {
+        request
             .mime_type
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(str::to_string),
+            .map(str::to_string)
+    };
+
+    Ok(AttachmentUploadResponse {
+        path: normalized_target.to_string_lossy().to_string(),
+        file_name,
+        mime_type,
         size_bytes: bytes.len(),
         kind: normalized_kind.to_string(),
     })
@@ -2895,6 +2913,41 @@ fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
         .map_err(|error| {
             BridgeError::invalid_params(&format!("invalid base64 attachment payload: {error}"))
         })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadedImageFormat {
+    Jpeg,
+    Png,
+}
+
+impl UploadedImageFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            UploadedImageFormat::Jpeg => "jpg",
+            UploadedImageFormat::Png => "png",
+        }
+    }
+
+    fn mime_type(self) -> &'static str {
+        match self {
+            UploadedImageFormat::Jpeg => "image/jpeg",
+            UploadedImageFormat::Png => "image/png",
+        }
+    }
+}
+
+fn detect_uploaded_image_format(bytes: &[u8]) -> Option<UploadedImageFormat> {
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return Some(UploadedImageFormat::Jpeg);
+    }
+
+    const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if bytes.starts_with(&PNG_SIGNATURE) {
+        return Some(UploadedImageFormat::Png);
+    }
+
+    None
 }
 
 fn normalize_attachment_kind(kind: Option<&str>, mime_type: Option<&str>) -> &'static str {
@@ -2944,6 +2997,16 @@ fn build_attachment_file_name(
     }
 
     sanitized
+}
+
+fn force_file_extension(file_name: &str, extension: &str) -> String {
+    let base = file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name)
+        .trim_matches('.');
+    let normalized_base = if base.is_empty() { "image" } else { base };
+    format!("{normalized_base}.{extension}")
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -3665,6 +3728,31 @@ mod tests {
             build_attachment_file_name(Some("notes"), Some("application/json"), "file"),
             "notes.json"
         );
+    }
+
+    #[test]
+    fn uploaded_image_format_detection_accepts_only_jpeg_and_png() {
+        assert_eq!(
+            detect_uploaded_image_format(&[0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x43]),
+            Some(UploadedImageFormat::Jpeg)
+        );
+        assert_eq!(
+            detect_uploaded_image_format(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+            Some(UploadedImageFormat::Png)
+        );
+        assert_eq!(
+            detect_uploaded_image_format(&[
+                0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'h', b'e', b'i', b'c'
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn force_file_extension_replaces_existing_or_missing_extension() {
+        assert_eq!(force_file_extension("IMG_2769.heic", "jpg"), "IMG_2769.jpg");
+        assert_eq!(force_file_extension("image", "png"), "image.png");
+        assert_eq!(force_file_extension(".hidden", "jpg"), "image.jpg");
     }
 
     #[test]
