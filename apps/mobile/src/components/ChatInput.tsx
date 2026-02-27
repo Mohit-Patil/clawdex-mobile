@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   type NativeSyntheticEvent,
@@ -43,6 +44,16 @@ export function ChatInput({
   isStopping = false,
   placeholder = 'Message Codex...',
 }: ChatInputProps) {
+  const INPUT_TEXT_MIN_HEIGHT = 20;
+  const INPUT_TEXT_MAX_HEIGHT = 96;
+  const [inputHeight, setInputHeight] = useState(INPUT_TEXT_MIN_HEIGHT);
+
+  useEffect(() => {
+    if (!value && inputHeight !== INPUT_TEXT_MIN_HEIGHT) {
+      setInputHeight(INPUT_TEXT_MIN_HEIGHT);
+    }
+  }, [inputHeight, value]);
+
   const canSend = value.trim().length > 0 && !isLoading;
   const canStop = Boolean(showStopButton && onStop);
   const shouldShowActionButton = canStop || canSend || isLoading;
@@ -91,13 +102,22 @@ export function ChatInput({
 
         <View style={styles.inputWrapper}>
           <TextInput
-            style={styles.input}
+            style={[styles.input, { height: inputHeight }]}
             value={value}
             onChangeText={onChangeText}
             onFocus={onFocus}
             placeholder={placeholder}
             placeholderTextColor={colors.textMuted}
             multiline
+            onContentSizeChange={(event) => {
+              const nextHeight = Math.max(
+                INPUT_TEXT_MIN_HEIGHT,
+                Math.min(INPUT_TEXT_MAX_HEIGHT, Math.ceil(event.nativeEvent.contentSize.height))
+              );
+              if (nextHeight !== inputHeight) {
+                setInputHeight(nextHeight);
+              }
+            }}
             onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
               const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
                 shiftKey?: boolean;
