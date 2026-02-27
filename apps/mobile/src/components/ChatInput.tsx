@@ -13,6 +13,7 @@ import {
   View,
 } from 'react-native';
 
+import type { VoiceState } from '../hooks/useVoiceRecorder';
 import { colors, radius, spacing } from '../theme';
 
 interface ChatInputProps {
@@ -28,6 +29,8 @@ interface ChatInputProps {
   showStopButton?: boolean;
   isStopping?: boolean;
   placeholder?: string;
+  onVoiceToggle?: () => void;
+  voiceState?: VoiceState;
 }
 
 export function ChatInput({
@@ -43,6 +46,8 @@ export function ChatInput({
   showStopButton = false,
   isStopping = false,
   placeholder = 'Message Codex...',
+  onVoiceToggle,
+  voiceState = 'idle',
 }: ChatInputProps) {
   const INPUT_TEXT_MIN_HEIGHT = 20;
   const INPUT_TEXT_MAX_HEIGHT = 96;
@@ -56,7 +61,9 @@ export function ChatInput({
 
   const canSend = value.trim().length > 0 && !isLoading;
   const canStop = Boolean(showStopButton && onStop);
-  const shouldShowActionButton = canStop || canSend || isLoading;
+  const showVoiceButton =
+    !canSend && !canStop && !isLoading && voiceState !== 'transcribing' && Boolean(onVoiceToggle);
+  const shouldShowActionButton = canStop || canSend || isLoading || showVoiceButton || voiceState !== 'idle';
 
   return (
     <View style={styles.container}>
@@ -133,26 +140,46 @@ export function ChatInput({
             }}
           />
           {shouldShowActionButton ? (
-            <Pressable
-              onPress={canStop ? onStop : canSend ? onSubmit : undefined}
-              style={styles.sendBtn}
-              disabled={canStop ? isStopping : !canSend}
-            >
-              {canStop ? (
-                <View style={styles.stopButtonContent}>
-                  <Ionicons name="square" size={10} color={colors.textPrimary} />
-                  <ActivityIndicator
-                    size="small"
-                    color={colors.textMuted}
-                    style={styles.stopButtonSpinner}
-                  />
-                </View>
-              ) : isLoading ? (
+            voiceState === 'transcribing' ? (
+              <View style={styles.sendBtn}>
                 <ActivityIndicator size="small" color={colors.textMuted} />
-              ) : (
-                <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
-              )}
-            </Pressable>
+              </View>
+            ) : voiceState === 'recording' ? (
+              <Pressable
+                onPress={onVoiceToggle}
+                style={[styles.sendBtn, styles.micBtnRecording]}
+              >
+                <Ionicons name="mic" size={14} color={colors.error} />
+              </Pressable>
+            ) : showVoiceButton ? (
+              <Pressable
+                onPress={onVoiceToggle}
+                style={styles.sendBtn}
+              >
+                <Ionicons name="mic-outline" size={14} color={colors.textMuted} />
+              </Pressable>
+            ) : (
+              <Pressable
+                onPress={canStop ? onStop : canSend ? onSubmit : undefined}
+                style={styles.sendBtn}
+                disabled={canStop ? isStopping : !canSend}
+              >
+                {canStop ? (
+                  <View style={styles.stopButtonContent}>
+                    <Ionicons name="square" size={10} color={colors.textPrimary} />
+                    <ActivityIndicator
+                      size="small"
+                      color={colors.textMuted}
+                      style={styles.stopButtonSpinner}
+                    />
+                  </View>
+                ) : isLoading ? (
+                  <ActivityIndicator size="small" color={colors.textMuted} />
+                ) : (
+                  <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
+                )}
+              </Pressable>
+            )
           ) : null}
         </View>
       </View>
@@ -243,6 +270,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: spacing.xs,
+  },
+  micBtnRecording: {
+    borderWidth: 1.5,
+    borderColor: colors.error,
   },
   stopButtonContent: {
     width: 20,

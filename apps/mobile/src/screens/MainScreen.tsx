@@ -58,6 +58,7 @@ import { BrandMark } from '../components/BrandMark';
 import { ToolBlock } from '../components/ToolBlock';
 import { TypingIndicator } from '../components/TypingIndicator';
 import { env } from '../config';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { colors, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
@@ -428,6 +429,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
     const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const loadChatRequestRef = useRef(0);
+
+    const voiceRecorder = useVoiceRecorder({
+      transcribe: (dataBase64, prompt) => api.transcribeVoice({ dataBase64, prompt }),
+      composerContext: draft,
+      onTranscript: (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text)),
+      onError: (msg) => setError(msg),
+    });
 
     const clearPendingScrollRetries = useCallback(() => {
       for (const timeoutId of scrollRetryTimeoutsRef.current) {
@@ -4547,6 +4555,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               onRemoveAttachment={removeComposerAttachment}
               isLoading={isLoading}
               placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
+              voiceState={voiceRecorder.voiceState}
+              onVoiceToggle={voiceRecorder.toggleRecording}
             />
           </View>
         </KeyboardAvoidingView>

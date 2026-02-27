@@ -11,13 +11,19 @@
       "backgroundColor": "#000000"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Clawdex uses the microphone for voice-to-text input."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/brand/adaptive-icon.png",
         "backgroundColor": "#000000"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/brand/favicon.png"
@@ -30,6 +36,9 @@
     "experiments": {
       "reactCompiler": true
     },
-    "jsEngine": "hermes"
+    "jsEngine": "hermes",
+    "plugins": [
+      "expo-audio"
+    ]
   }
 }

@@ -1781,6 +1781,19 @@ struct AttachmentUploadResponse {
     kind: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceTranscribeRequest {
+    data_base64: String,
+    prompt: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceTranscribeResponse {
+    text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingApproval {
@@ -2413,9 +2426,169 @@ async fn handle_bridge_method(
                 "request": user_input_request,
             }))
         }
+        "bridge/voice/transcribe" => {
+            let request: VoiceTranscribeRequest = serde_json::from_value(
+                params.unwrap_or_else(|| json!({})),
+            )
+            .map_err(|e| BridgeError::invalid_params(&e.to_string()))?;
+            transcribe_voice(request).await
+        }
         _ => Err(BridgeError::method_not_found(&format!(
             "Unknown bridge method: {method}"
         ))),
+    }
+}
+
+async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, BridgeError> {
+    let audio_bytes = decode_base64_payload(&request.data_base64)?;
+
+    // Minimum ~16KB — roughly 0.5s at 16kHz 16-bit mono.
+    if audio_bytes.len() < 16_000 {
+        return Err(BridgeError::invalid_params(
+            "audio payload too short (minimum ~0.5 seconds required)",
+        ));
+    }
+
+    // Resolve auth: env vars first, then ~/.codex/auth.json.
+    let (endpoint, bearer_token, include_model) = resolve_transcription_auth()?;
+
+    let file_part = reqwest::multipart::Part::bytes(audio_bytes)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")
+        .map_err(|e| BridgeError::server(&e.to_string()))?;
+
+    let mut form = reqwest::multipart::Form::new().part("file", file_part);
+
+    if include_model {
+        form = form.text("model", "gpt-4o-transcribe");
+    }
+
+    if let Some(prompt) = request.prompt {
+        let trimmed = prompt.trim().to_string();
+        if !trimmed.is_empty() {
+            form = form.text("prompt", trimmed);
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(&bearer_token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| BridgeError::server(&e.to_string()))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_string());
+        return Err(BridgeError {
+            code: -32000,
+            message: format!("transcription API returned HTTP {status}"),
+            data: Some(json!({ "status": status, "body": body })),
+        });
+    }
+
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| BridgeError::server(&e.to_string()))?;
+
+    let text = body["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    Ok(serde_json::to_value(VoiceTranscribeResponse { text })
+        .map_err(|e| BridgeError::server(&e.to_string()))?)
+}
+
+fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
+    // Path 1: OPENAI_API_KEY env var → OpenAI direct API.
+    if let Some(api_key) = read_non_empty_env("OPENAI_API_KEY") {
+        return Ok((
+            "https://api.openai.com/v1/audio/transcriptions".to_string(),
+            api_key,
+            true,
+        ));
+    }
+
+    // Path 2: BRIDGE_CHATGPT_ACCESS_TOKEN env var → ChatGPT backend.
+    if let Some(access_token) = read_non_empty_env("BRIDGE_CHATGPT_ACCESS_TOKEN") {
+        return Ok((
+            "https://chatgpt.com/backend-api/transcribe".to_string(),
+            access_token,
+            false,
+        ));
+    }
+
+    // Fall back to ~/.codex/auth.json.
+    let auth_path = resolve_codex_auth_json_path();
+    if let Some(path) = auth_path {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Ok(auth) = serde_json::from_str::<Value>(&contents) {
+                // Check for OPENAI_API_KEY field.
+                if let Some(key) = auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) {
+                    let trimmed = key.trim();
+                    if !trimmed.is_empty() {
+                        return Ok((
+                            "https://api.openai.com/v1/audio/transcriptions".to_string(),
+                            trimmed.to_string(),
+                            true,
+                        ));
+                    }
+                }
+
+                // Check for chatgpt auth mode with access_token.
+                let is_chatgpt_mode = auth
+                    .get("auth_mode")
+                    .and_then(|v| v.as_str())
+                    .map(|m| m == "chatgpt")
+                    .unwrap_or(false);
+
+                if is_chatgpt_mode {
+                    if let Some(token) = auth
+                        .get("tokens")
+                        .and_then(|t| t.get("access_token"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let trimmed = token.trim();
+                        if !trimmed.is_empty() {
+                            return Ok((
+                                "https://chatgpt.com/backend-api/transcribe".to_string(),
+                                trimmed.to_string(),
+                                false,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(BridgeError {
+        code: -32002,
+        message: "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN".to_string(),
+        data: None,
+    })
+}
+
+fn resolve_codex_auth_json_path() -> Option<PathBuf> {
+    if let Some(codex_home) = read_non_empty_env("CODEX_HOME") {
+        let path = PathBuf::from(codex_home).join("auth.json");
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let home = read_non_empty_env("HOME")?;
+    let path = PathBuf::from(home).join(".codex").join("auth.json");
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
     }
 }
 

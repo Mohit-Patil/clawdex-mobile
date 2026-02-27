@@ -310,6 +310,15 @@ export interface RunEvent {
   detail?: string;
 }
 
+export interface VoiceTranscribeRequest {
+  dataBase64: string;
+  prompt?: string;
+}
+
+export interface VoiceTranscribeResponse {
+  text: string;
+}
+
 export interface RpcNotification {
   method: string;
   params: Record<string, unknown> | null;
