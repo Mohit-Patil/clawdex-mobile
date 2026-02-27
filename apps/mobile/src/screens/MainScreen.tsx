@@ -4419,7 +4419,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         <KeyboardAvoidingView
           style={styles.keyboardAvoiding}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          enabled={Platform.OS === 'ios'}
         >
           {selectedChat && !isOpeningDifferentChat ? (
             <ChatView
