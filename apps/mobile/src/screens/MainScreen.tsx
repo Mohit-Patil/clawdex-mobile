@@ -426,7 +426,38 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       title: 'Ready',
     });
     const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
+    const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const loadChatRequestRef = useRef(0);
+
+    const clearPendingScrollRetries = useCallback(() => {
+      for (const timeoutId of scrollRetryTimeoutsRef.current) {
+        clearTimeout(timeoutId);
+      }
+      scrollRetryTimeoutsRef.current = [];
+    }, []);
+
+    const scrollToBottomReliable = useCallback(
+      (animated = true) => {
+        clearPendingScrollRetries();
+        const delays = [0, 70, 180, 320];
+        scrollRetryTimeoutsRef.current = delays.map((delay, index) =>
+          setTimeout(() => {
+            requestAnimationFrame(() => {
+              scrollRef.current?.scrollToEnd({
+                animated: index === 0 ? animated : false,
+              });
+            });
+          }, delay)
+        );
+      },
+      [clearPendingScrollRetries]
+    );
+
+    useEffect(() => {
+      return () => {
+        clearPendingScrollRetries();
+      };
+    }, [clearPendingScrollRetries]);
 
     // Ref so the WS handler always reads the latest chat ID without
     // needing to re-subscribe on every change.
@@ -1847,9 +1878,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ],
           };
         });
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+        scrollToBottomReliable(true);
       },
-      [selectedChatId]
+      [scrollToBottomReliable, selectedChatId]
     );
 
     const appendLocalSystemMessage = useCallback(
@@ -1880,9 +1911,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ],
           };
         });
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+        scrollToBottomReliable(true);
       },
-      [selectedChatId]
+      [scrollToBottomReliable, selectedChatId]
     );
 
     const appendStopSystemMessageIfNeeded = useCallback(() => {
@@ -2239,7 +2270,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               messages: [...prev.messages, optimisticMessage],
             };
           });
-          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+          scrollToBottomReliable(true);
 
           try {
             setSending(true);
@@ -2459,6 +2490,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         selectedCollaborationMode,
         handleTurnFailure,
         rememberChatModelPreference,
+        scrollToBottomReliable,
         startNewChat,
       ]
     );
@@ -2688,6 +2720,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           lastMessagePreview: content.slice(0, 50),
           messages: [...created.messages, optimisticMessage],
         });
+        scrollToBottomReliable(true);
 
         setActivity({
           tone: 'running',
@@ -2770,6 +2803,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       bumpRunWatchdog,
       clearRunWatchdog,
       rememberChatModelPreference,
+      scrollToBottomReliable,
     ]);
 
     const sendMessageContent = useCallback(
@@ -2810,7 +2844,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             messages: [...prev.messages, optimisticMessage],
           };
         });
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+        scrollToBottomReliable(true);
 
         try {
           setSending(true);
@@ -2903,6 +2937,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         bumpRunWatchdog,
         clearRunWatchdog,
         rememberChatModelPreference,
+        scrollToBottomReliable,
       ]
     );
 
@@ -4345,9 +4380,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const handleComposerFocus = useCallback(() => {
       requestAnimationFrame(() => {
-        scrollRef.current?.scrollToEnd({ animated: true });
+        scrollToBottomReliable(true);
       });
-    }, []);
+    }, [scrollToBottomReliable]);
 
     const handleSubmit = selectedChat ? sendMessage : createChat;
     const isTurnLoading = sending || creating;
