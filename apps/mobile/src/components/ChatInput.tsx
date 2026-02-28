@@ -59,12 +59,12 @@ export function ChatInput({
     }
   }, [inputHeight, value]);
 
-  const canSend = value.trim().length > 0 && !isLoading && voiceState === 'idle';
+  const canSend = value.trim().length > 0 && voiceState === 'idle';
   const canStop = Boolean(showStopButton && onStop);
   const showVoiceButton = Boolean(onVoiceToggle) && !canStop && !isLoading;
-  const showPrimaryActionButton = canStop || canSend || isLoading;
+  const showSendButton = canSend || isLoading;
   const shouldShowActionButton =
-    showPrimaryActionButton || showVoiceButton || voiceState !== 'idle';
+    canStop || showSendButton || showVoiceButton || voiceState !== 'idle';
 
   return (
     <View style={styles.container}>
@@ -163,22 +163,29 @@ export function ChatInput({
                   </Pressable>
                 )
               ) : null}
-              {showPrimaryActionButton ? (
+              {canStop ? (
                 <Pressable
-                  onPress={canStop ? onStop : canSend ? onSubmit : undefined}
+                  onPress={onStop}
                   style={styles.sendBtn}
-                  disabled={canStop ? isStopping : !canSend}
+                  disabled={isStopping}
                 >
-                  {canStop ? (
-                    <View style={styles.stopButtonContent}>
-                      <Ionicons name="square" size={10} color={colors.textPrimary} />
-                      <ActivityIndicator
-                        size="small"
-                        color={colors.textMuted}
-                        style={styles.stopButtonSpinner}
-                      />
-                    </View>
-                  ) : isLoading ? (
+                  <View style={styles.stopButtonContent}>
+                    <Ionicons name="square" size={10} color={colors.textPrimary} />
+                    <ActivityIndicator
+                      size="small"
+                      color={colors.textMuted}
+                      style={styles.stopButtonSpinner}
+                    />
+                  </View>
+                </Pressable>
+              ) : null}
+              {showSendButton ? (
+                <Pressable
+                  onPress={canSend ? onSubmit : undefined}
+                  style={styles.sendBtn}
+                  disabled={!canSend}
+                >
+                  {isLoading && !canSend ? (
                     <ActivityIndicator size="small" color={colors.textMuted} />
                   ) : (
                     <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />

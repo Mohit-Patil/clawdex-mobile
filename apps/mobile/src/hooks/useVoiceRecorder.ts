@@ -87,6 +87,30 @@ async function deleteRecordingFile(uri: string | null | undefined): Promise<void
   await FileSystem.deleteAsync(normalized, { idempotent: true }).catch(() => {});
 }
 
+function safeGetRecorderUri(recorder: AudioRecorder): string | null {
+  try {
+    return recorder.uri ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function safeIsRecording(recorder: AudioRecorder): boolean {
+  try {
+    return recorder.isRecording;
+  } catch {
+    return false;
+  }
+}
+
+async function safeStopRecorder(recorder: AudioRecorder): Promise<void> {
+  try {
+    await recorder.stop();
+  } catch {
+    // Ignore stale/released recorder objects and already-stopped recordings.
+  }
+}
+
 export function useVoiceRecorder({
   transcribe,
   composerContext,
@@ -126,7 +150,7 @@ export function useVoiceRecorder({
 
   const stopRecordingAndTranscribe = useCallback(async () => {
     const currentRecorder = recorderRef.current;
-    if (!currentRecorder.isRecording) {
+    if (!safeIsRecording(currentRecorder)) {
       setVoiceState('idle');
       return;
     }
@@ -135,7 +159,7 @@ export function useVoiceRecorder({
 
     try {
       const elapsed = Date.now() - startTimeRef.current;
-      await currentRecorder.stop();
+      await safeStopRecorder(currentRecorder);
 
       await setAudioModeAsync({
         allowsRecording: false,
@@ -147,7 +171,7 @@ export function useVoiceRecorder({
         return;
       }
 
-      const uri = currentRecorder.uri;
+      const uri = safeGetRecorderUri(currentRecorder);
       if (!uri) {
         onError('Recording failed — no audio file produced.');
         setVoiceState('idle');
@@ -197,13 +221,8 @@ export function useVoiceRecorder({
 
   const cancelRecording = useCallback(async () => {
     const currentRecorder = recorderRef.current;
-    let recordingUri = currentRecorder.uri;
-    try {
-      await currentRecorder.stop();
-      recordingUri = currentRecorder.uri ?? recordingUri;
-    } catch {
-      // Best effort — recording may already be stopped.
-    }
+    const recordingUri = safeGetRecorderUri(currentRecorder);
+    await safeStopRecorder(currentRecorder);
 
     await setAudioModeAsync({
       allowsRecording: false,
@@ -225,13 +244,8 @@ export function useVoiceRecorder({
     return () => {
       const currentRecorder = recorderRef.current;
       void (async () => {
-        let recordingUri = currentRecorder.uri;
-        try {
-          await currentRecorder.stop();
-          recordingUri = currentRecorder.uri ?? recordingUri;
-        } catch {
-          // Best effort on unmount.
-        }
+        const recordingUri = safeGetRecorderUri(currentRecorder);
+        await safeStopRecorder(currentRecorder);
         await deleteRecordingFile(recordingUri);
       })();
       void setAudioModeAsync({

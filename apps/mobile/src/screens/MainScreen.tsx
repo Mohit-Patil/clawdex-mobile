@@ -118,6 +118,13 @@ interface ComposerAttachmentChip {
   label: string;
 }
 
+interface QueuedChatMessage {
+  content: string;
+  mentions: MentionInput[];
+  localImages: LocalImageInput[];
+  collaborationMode: CollaborationMode;
+}
+
 interface SlashCommandDefinition {
   name: string;
   summary: string;
@@ -420,6 +427,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
     const [selectedCollaborationMode, setSelectedCollaborationMode] =
       useState<CollaborationMode>('default');
+    const [keyboardVisible, setKeyboardVisible] = useState(false);
+    const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
+    const [queueDispatching, setQueueDispatching] = useState(false);
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
     const [activity, setActivity] = useState<ActivityState>({
@@ -468,6 +478,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         clearPendingScrollRetries();
       };
     }, [clearPendingScrollRetries]);
+
+    useEffect(() => {
+      const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+      const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+      const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
+      const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+      return () => {
+        showSub.remove();
+        hideSub.remove();
+      };
+    }, []);
 
     // Ref so the WS handler always reads the latest chat ID without
     // needing to re-subscribe on every change.
@@ -1259,6 +1280,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setUploadingAttachment(false);
       setActiveTurnId(null);
       setStoppingTurn(false);
+      setQueuedMessages([]);
+      setQueueDispatching(false);
       setActivity({
         tone: 'idle',
         title: 'Ready',
@@ -2603,6 +2626,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setActivePlan(null);
         setActiveTurnId(null);
         setStoppingTurn(false);
+        setQueuedMessages([]);
+        setQueueDispatching(false);
         stopRequestedRef.current = false;
         stopSystemMessageLoggedRef.current = false;
 
@@ -2822,21 +2847,29 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         options?: {
           allowSlashCommands?: boolean;
           collaborationMode?: CollaborationMode;
+          mentions?: MentionInput[];
+          localImages?: LocalImageInput[];
+          clearComposer?: boolean;
         }
       ) => {
         const content = rawContent.trim();
         if (!selectedChatId || !content) {
-          return;
+          return false;
         }
 
+        const shouldClearComposer = options?.clearComposer ?? true;
         if (options?.allowSlashCommands && (await handleSlashCommand(content))) {
-          setDraft('');
-          return;
+          if (shouldClearComposer) {
+            setDraft('');
+          }
+          return true;
         }
         const resolvedCollaborationMode =
           options?.collaborationMode ?? selectedCollaborationMode;
-        const turnMentions = pendingMentionPaths.map((path) => toMentionInput(path));
-        const turnLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
+        const turnMentions =
+          options?.mentions ?? pendingMentionPaths.map((path) => toMentionInput(path));
+        const turnLocalImages =
+          options?.localImages ?? pendingLocalImagePaths.map((path) => ({ path }));
         const optimisticContent = toOptimisticUserContent(content, turnMentions, turnLocalImages);
 
         const optimisticMessage: ChatTranscriptMessage = {
@@ -2846,7 +2879,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           createdAt: new Date().toISOString(),
         };
 
-        setDraft('');
+        if (shouldClearComposer) {
+          setDraft('');
+        }
         setSelectedChat((prev) => {
           if (!prev) return prev;
           return {
@@ -2897,8 +2932,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             selectedEffort ?? activeEffort
           );
           setSelectedChat(updated);
-          setPendingMentionPaths([]);
-          setPendingLocalImagePaths([]);
+          if (shouldClearComposer) {
+            setPendingMentionPaths([]);
+            setPendingLocalImagePaths([]);
+          }
           setError(null);
           if (updated.status === 'complete') {
             setActivity({
@@ -2927,9 +2964,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
         } catch (err) {
           handleTurnFailure(err);
+          return false;
         } finally {
           setSending(false);
         }
+
+        return true;
       },
       [
         activeEffort,
@@ -2952,8 +2992,113 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
 
     const sendMessage = useCallback(async () => {
-      await sendMessageContent(draft, { allowSlashCommands: true });
-    }, [draft, sendMessageContent]);
+      const content = draft.trim();
+      if (!content) {
+        return;
+      }
+
+      if (uploadingAttachment) {
+        setError('Please wait for attachments to finish uploading.');
+        return;
+      }
+
+      if (await handleSlashCommand(content)) {
+        setDraft('');
+        return;
+      }
+
+      const isTurnBlocked =
+        sending ||
+        creating ||
+        stoppingTurn ||
+        Boolean(activeTurnIdRef.current) ||
+        Boolean(pendingApproval?.id) ||
+        Boolean(pendingUserInputRequest?.id) ||
+        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+
+      if (isTurnBlocked) {
+        const queuedMentions = pendingMentionPaths.map((path) => toMentionInput(path));
+        const queuedLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
+        setQueuedMessages((prev) => [
+          ...prev,
+          {
+            content,
+            mentions: queuedMentions,
+            localImages: queuedLocalImages,
+            collaborationMode: selectedCollaborationMode,
+          },
+        ]);
+        setDraft('');
+        setPendingMentionPaths([]);
+        setPendingLocalImagePaths([]);
+        setError(null);
+        return;
+      }
+
+      await sendMessageContent(content, { allowSlashCommands: false });
+    }, [
+      creating,
+      draft,
+      handleSlashCommand,
+      pendingApproval?.id,
+      pendingLocalImagePaths,
+      pendingMentionPaths,
+      pendingUserInputRequest?.id,
+      selectedChat,
+      selectedCollaborationMode,
+      sendMessageContent,
+      sending,
+      stoppingTurn,
+      uploadingAttachment,
+    ]);
+
+    useEffect(() => {
+      if (!selectedChatId || queuedMessages.length === 0 || queueDispatching) {
+        return;
+      }
+
+      const isTurnBlocked =
+        sending ||
+        creating ||
+        stoppingTurn ||
+        uploadingAttachment ||
+        Boolean(activeTurnId) ||
+        Boolean(pendingApproval?.id) ||
+        Boolean(pendingUserInputRequest?.id) ||
+        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+      if (isTurnBlocked) {
+        return;
+      }
+
+      const nextMessage = queuedMessages[0];
+      setQueueDispatching(true);
+      void (async () => {
+        const sent = await sendMessageContent(nextMessage.content, {
+          allowSlashCommands: false,
+          collaborationMode: nextMessage.collaborationMode,
+          mentions: nextMessage.mentions,
+          localImages: nextMessage.localImages,
+          clearComposer: false,
+        });
+        if (sent) {
+          setQueuedMessages((prev) => prev.slice(1));
+        }
+        setQueueDispatching(false);
+      })();
+    }, [
+      activeTurnId,
+      creating,
+      pendingApproval?.id,
+      pendingUserInputRequest?.id,
+      queueDispatching,
+      queuedMessages,
+      selectedChat,
+      selectedChatId,
+      sendMessageContent,
+      sending,
+      stoppingTurn,
+      uploadingAttachment,
+    ]);
 
     const handleInlineOptionSelect = useCallback(
       (value: string) => {
@@ -2966,8 +3111,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           !selectedChatId ||
           sending ||
           creating ||
+          stoppingTurn ||
+          Boolean(activeTurnId) ||
           Boolean(pendingApproval?.id) ||
-          Boolean(pendingUserInputRequest?.id);
+          Boolean(pendingUserInputRequest?.id) ||
+          (selectedChat ? isChatLikelyRunning(selectedChat) : false);
         if (cannotAutoSend) {
           setDraft(option);
           return;
@@ -2977,11 +3125,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
       [
         creating,
+        activeTurnId,
         pendingApproval?.id,
         pendingUserInputRequest?.id,
+        selectedChat,
         selectedChatId,
         sendMessageContent,
         sending,
+        stoppingTurn,
       ]
     );
 
@@ -4403,12 +4554,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       Boolean(openingChatId) && selectedChat?.id !== openingChatId;
     const isTurnLikelyRunning =
       Boolean(activeTurnId) || (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+    const queuedMessagesDetail =
+      queuedMessages.length > 0 ? `${String(queuedMessages.length)} queued` : undefined;
+    const activityDetail = queuedMessagesDetail
+      ? activity.detail
+        ? `${activity.detail} · ${queuedMessagesDetail}`
+        : queuedMessagesDetail
+      : activity.detail;
     const showActivity =
       isLoading ||
       isOpeningChat ||
+      Boolean(queuedMessagesDetail) ||
       activity.tone !== 'idle' ||
       activity.title !== 'Ready' ||
-      Boolean(activity.detail);
+      Boolean(activityDetail);
     const headerTitle = isOpeningDifferentChat
       ? 'Opening chat'
       : selectedChat?.title?.trim() || 'New chat';
@@ -4495,7 +4654,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           )}
 
-          <View style={styles.composerContainer}>
+          <View
+            style={[
+              styles.composerContainer,
+              !keyboardVisible ? styles.composerContainerResting : null,
+            ]}
+          >
             {error ? <Text style={styles.errorText}>{error}</Text> : null}
             {pendingApproval ? (
               <ApprovalBanner
@@ -4506,7 +4670,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             {showActivity ? (
               <ActivityBar
                 title={activity.title}
-                detail={activity.detail}
+                detail={activityDetail}
                 tone={activity.tone}
               />
             ) : null}
@@ -6344,6 +6508,9 @@ const styles = StyleSheet.create({
   },
   composerContainer: {
     backgroundColor: colors.bgMain,
+  },
+  composerContainerResting: {
+    marginBottom: spacing.xs,
   },
   sessionMetaRow: {
     flexDirection: 'row',
