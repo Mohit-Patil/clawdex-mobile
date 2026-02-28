@@ -1143,7 +1143,8 @@ impl RolloutTrackedFile {
             }
 
             if let Some((method, params)) = self.to_notification(trimmed) {
-                if let Some(status_payload) = build_rollout_thread_status_notification(&method, &params)
+                if let Some(status_payload) =
+                    build_rollout_thread_status_notification(&method, &params)
                 {
                     hub.broadcast_notification("thread/status/changed", status_payload)
                         .await;
@@ -1183,8 +1184,8 @@ impl RolloutTrackedFile {
                 extract_rollout_thread_id(payload, true).or_else(|| self.thread_id.clone());
             self.originator =
                 read_string(payload.get("originator")).or_else(|| self.originator.clone());
-            self.include_for_live_sync = self.thread_id.is_some()
-                && rollout_originator_allowed(self.originator.as_deref());
+            self.include_for_live_sync =
+                self.thread_id.is_some() && rollout_originator_allowed(self.originator.as_deref());
             return None;
         }
 
@@ -1477,9 +1478,7 @@ fn build_rollout_thread_status_notification(method: &str, params: &Value) -> Opt
         "task_started" | "taskstarted" => "running",
         "task_complete" | "taskcomplete" => "completed",
         "task_failed" | "taskfailed" | "turn_failed" | "turnfailed" => "failed",
-        "task_interrupted" | "taskinterrupted" | "turn_aborted" | "turnaborted" => {
-            "interrupted"
-        }
+        "task_interrupted" | "taskinterrupted" | "turn_aborted" | "turnaborted" => "interrupted",
         _ => return None,
     };
 
@@ -3823,10 +3822,11 @@ mod tests {
                 .expect("interrupted status");
         assert_eq!(interrupted["status"], "interrupted");
 
-        assert!(
-            build_rollout_thread_status_notification("codex/event/agent_message_delta", &params)
-                .is_none()
-        );
+        assert!(build_rollout_thread_status_notification(
+            "codex/event/agent_message_delta",
+            &params
+        )
+        .is_none());
     }
 
     #[test]
