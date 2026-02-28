@@ -29,7 +29,7 @@ npm run secure:setup
 Creates/updates:
 
 - `.env.secure` (bridge runtime config + token)
-- `apps/mobile/.env` (bridge URL/token for mobile app)
+- `apps/mobile/.env` (mobile token + optional runtime knobs)
 
 ### 3) Start bridge
 
@@ -44,6 +44,8 @@ npm run mobile
 ```
 
 `npm run mobile` uses `scripts/start-expo.sh`, which sets `REACT_NATIVE_PACKAGER_HOSTNAME` from your secure config so QR resolution is predictable.
+
+On first app launch, onboarding will ask for your bridge URL (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). This URL is stored on-device and can be changed later in Settings.
 
 ## Advanced Knobs
 
@@ -92,7 +94,6 @@ npm run teardown -- --yes
 
 | Variable | Purpose |
 |---|---|
-| `EXPO_PUBLIC_HOST_BRIDGE_URL` | bridge base URL |
 | `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` | token sent by mobile client |
 | `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH` | web query-token behavior |
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
@@ -117,7 +118,8 @@ npm run teardown -- --yes
 ### Bridge health
 
 ```bash
-curl "$(awk -F= '/^EXPO_PUBLIC_HOST_BRIDGE_URL=/{print $2}' apps/mobile/.env)/health"
+source .env.secure
+curl "http://$BRIDGE_HOST:$BRIDGE_PORT/health"
 ```
 
 Expected response contains `"status":"ok"`.

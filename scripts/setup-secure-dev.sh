@@ -149,10 +149,8 @@ EOT
 
 chmod 600 "$SECURE_ENV_FILE"
 
-upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_HOST_BRIDGE_URL" "http://$BRIDGE_HOST:$BRIDGE_PORT"
 upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_HOST_BRIDGE_TOKEN" "$BRIDGE_TOKEN"
-# Backward compatibility for older app builds that still read MAC_BRIDGE keys.
-upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_MAC_BRIDGE_URL" "http://$BRIDGE_HOST:$BRIDGE_PORT"
+# Backward compatibility for older app builds that still read MAC_BRIDGE token key.
 upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_MAC_BRIDGE_TOKEN" "$BRIDGE_TOKEN"
 upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH" "false"
 upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE" "true"

@@ -57,9 +57,9 @@ npm run mobile
 
 This runs `expo start` in the `apps/mobile` workspace. It loads `apps/mobile/.env` automatically.
 
-Make sure `EXPO_PUBLIC_HOST_BRIDGE_URL` in `apps/mobile/.env` points to your host machine's LAN IP and the bridge port:
+On first app launch, onboarding will ask for your bridge URL. Enter your host machine LAN/Tailscale URL:
 ```
-EXPO_PUBLIC_HOST_BRIDGE_URL=http://<YOUR_LAN_IP>:8787
+http://<YOUR_LAN_IP>:8787
 ```
 
 Find your LAN IP with `ifconfig en0 | grep inet` (macOS) or `ip addr` (Linux). The phone and the host machine must be on the same network.

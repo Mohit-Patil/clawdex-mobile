@@ -57,10 +57,15 @@ BRIDGE_CORS_ORIGINS=http://localhost:19006,http://localhost:8081
 - In `apps/mobile/.env`, set:
 
 ```env
-EXPO_PUBLIC_HOST_BRIDGE_URL=http://<mac-lan-ip>:8787
 EXPO_PUBLIC_HOST_BRIDGE_TOKEN=<review-token>
 EXPO_PUBLIC_PRIVACY_POLICY_URL=https://<your-policy-url>
 EXPO_PUBLIC_TERMS_OF_SERVICE_URL=https://<your-terms-url>
+```
+
+- In app onboarding, enter:
+
+```text
+http://<mac-lan-ip>:8787
 ```
 
 ## Reviewer Walkthrough

@@ -1,7 +1,10 @@
-const hostBridgeUrl =
-  process.env.EXPO_PUBLIC_HOST_BRIDGE_URL?.replace(/\/$/, '') ??
-  process.env.EXPO_PUBLIC_MAC_BRIDGE_URL?.replace(/\/$/, '') ??
-  'http://127.0.0.1:8787';
+import { isInsecureRemoteUrl, normalizeBridgeUrlInput } from './bridgeUrl';
+
+const legacyHostBridgeUrl = normalizeBridgeUrlInput(
+  process.env.EXPO_PUBLIC_HOST_BRIDGE_URL ??
+    process.env.EXPO_PUBLIC_MAC_BRIDGE_URL ??
+    ''
+);
 const hostBridgeToken =
   process.env.EXPO_PUBLIC_HOST_BRIDGE_TOKEN?.trim() ||
   process.env.EXPO_PUBLIC_MAC_BRIDGE_TOKEN?.trim() ||
@@ -19,16 +22,17 @@ const externalStatusFullSyncDebounceMs = parseNonNegativeIntEnv(
   450
 );
 
-if (isInsecureRemoteUrl(hostBridgeUrl) && !allowInsecureRemoteBridge) {
+if (legacyHostBridgeUrl && isInsecureRemoteUrl(legacyHostBridgeUrl) && !allowInsecureRemoteBridge) {
   console.warn(
-    'EXPO_PUBLIC_HOST_BRIDGE_URL uses http:// for a non-local host. Prefer https:// for remote host bridge access.'
+    'Using build-time bridge URL fallback from env. Configure bridge URL in-app from onboarding/settings when possible.'
   );
 }
 
 export const env = {
-  hostBridgeUrl,
+  legacyHostBridgeUrl,
   hostBridgeToken,
   allowWsQueryTokenAuth,
+  allowInsecureRemoteBridge,
   externalStatusFullSyncDebounceMs,
   privacyPolicyUrl,
   termsOfServiceUrl
@@ -50,26 +54,4 @@ function parseNonNegativeIntEnv(value: string | undefined, fallback: number): nu
   }
 
   return parsed;
-}
-
-function isInsecureRemoteUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:') {
-      return false;
-    }
-
-    return !isLocalHost(parsed.hostname);
-  } catch {
-    return false;
-  }
-}
-
-function isLocalHost(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase();
-  return (
-    normalized === 'localhost' ||
-    normalized === '127.0.0.1' ||
-    normalized === '::1'
-  );
 }

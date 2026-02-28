@@ -3,6 +3,7 @@ import 'react-native-gesture-handler';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Animated,
   Keyboard,
   PanResponder,
@@ -16,16 +17,20 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { HostBridgeApiClient } from './src/api/client';
 import type { ApprovalMode, Chat, ReasoningEffort } from './src/api/types';
 import { HostBridgeWsClient } from './src/api/ws';
+import { normalizeBridgeUrlInput } from './src/bridgeUrl';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
 import { GitScreen } from './src/screens/GitScreen';
 import { MainScreen, type MainScreenHandle } from './src/screens/MainScreen';
+import { OnboardingScreen } from './src/screens/OnboardingScreen';
 import { PrivacyScreen } from './src/screens/PrivacyScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TermsScreen } from './src/screens/TermsScreen';
 import { colors } from './src/theme';
 
-type Screen = 'Main' | 'ChatGit' | 'Settings' | 'Privacy' | 'Terms';
+type AppScreen = 'Main' | 'ChatGit' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = AppScreen | 'Onboarding';
+type OnboardingMode = 'initial' | 'edit';
 
 const DRAWER_WIDTH = 280;
 const EDGE_SWIPE_WIDTH = 24;
@@ -34,22 +39,31 @@ const SWIPE_CLOSE_DISTANCE = 56;
 const SWIPE_OPEN_VELOCITY = 0.4;
 const SWIPE_CLOSE_VELOCITY = -0.4;
 const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
-const APP_SETTINGS_VERSION = 1;
+const APP_SETTINGS_VERSION = 2;
 
 export default function App() {
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [bridgeUrl, setBridgeUrl] = useState<string | null>(null);
+  const [onboardingMode, setOnboardingMode] = useState<OnboardingMode>('initial');
+  const [onboardingReturnScreen, setOnboardingReturnScreen] =
+    useState<AppScreen>('Settings');
   const ws = useMemo(
     () =>
-      new HostBridgeWsClient(env.hostBridgeUrl, {
-        authToken: env.hostBridgeToken,
-        allowQueryTokenAuth: env.allowWsQueryTokenAuth
-      }),
-    []
+      bridgeUrl
+        ? new HostBridgeWsClient(bridgeUrl, {
+            authToken: env.hostBridgeToken,
+            allowQueryTokenAuth: env.allowWsQueryTokenAuth
+          })
+        : null,
+    [bridgeUrl]
   );
   const api = useMemo(
     () =>
-      new HostBridgeApiClient({
-        ws,
-      }),
+      ws
+        ? new HostBridgeApiClient({
+            ws,
+          })
+        : null,
     [ws]
   );
   const mainRef = useRef<MainScreenHandle>(null);
@@ -70,12 +84,17 @@ export default function App() {
   const { width: screenWidth } = useWindowDimensions();
 
   useEffect(() => {
+    if (!ws) {
+      return;
+    }
+
     ws.connect();
     return () => ws.disconnect();
   }, [ws]);
 
   const saveAppSettings = useCallback(
     async (
+      nextBridgeUrl: string | null,
       nextModelId: string | null,
       nextEffort: ReasoningEffort | null,
       nextApprovalMode: ApprovalMode
@@ -87,6 +106,7 @@ export default function App() {
 
       const payload = JSON.stringify({
         version: APP_SETTINGS_VERSION,
+        bridgeUrl: nextBridgeUrl,
         defaultModelId: nextModelId,
         defaultReasoningEffort: nextEffort,
         approvalMode: nextApprovalMode,
@@ -104,9 +124,20 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
 
+    const resetToDefaults = () => {
+      setDefaultModelId(null);
+      setDefaultReasoningEffort(null);
+      setApprovalMode('normal');
+    };
+
     const loadSettings = async () => {
       const settingsPath = getAppSettingsPath();
       if (!settingsPath) {
+        if (!cancelled) {
+          resetToDefaults();
+          setBridgeUrl(null);
+          setSettingsLoaded(true);
+        }
         return;
       }
 
@@ -116,14 +147,19 @@ export default function App() {
           return;
         }
         const parsed = parseAppSettings(raw);
+        const resolvedBridgeUrl = parsed.bridgeUrl ?? null;
+        setBridgeUrl(resolvedBridgeUrl);
         setDefaultModelId(parsed.defaultModelId);
         setDefaultReasoningEffort(parsed.defaultReasoningEffort);
         setApprovalMode(parsed.approvalMode);
       } catch {
         if (!cancelled) {
-          setDefaultModelId(null);
-          setDefaultReasoningEffort(null);
-          setApprovalMode('normal');
+          resetToDefaults();
+          setBridgeUrl(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setSettingsLoaded(true);
         }
       }
     };
@@ -280,19 +316,79 @@ export default function App() {
       const normalizedEffort = normalizeReasoningEffort(effort);
       setDefaultModelId(normalizedModelId);
       setDefaultReasoningEffort(normalizedEffort);
-      void saveAppSettings(normalizedModelId, normalizedEffort, approvalMode);
+      void saveAppSettings(bridgeUrl, normalizedModelId, normalizedEffort, approvalMode);
     },
-    [approvalMode, saveAppSettings]
+    [approvalMode, bridgeUrl, saveAppSettings]
   );
 
   const handleApprovalModeChange = useCallback(
     (nextMode: ApprovalMode) => {
       const normalizedMode = normalizeApprovalMode(nextMode);
       setApprovalMode(normalizedMode);
-      void saveAppSettings(defaultModelId, defaultReasoningEffort, normalizedMode);
+      void saveAppSettings(bridgeUrl, defaultModelId, defaultReasoningEffort, normalizedMode);
     },
-    [defaultModelId, defaultReasoningEffort, saveAppSettings]
+    [bridgeUrl, defaultModelId, defaultReasoningEffort, saveAppSettings]
   );
+
+  const handleBridgeUrlSaved = useCallback(
+    (nextBridgeUrl: string) => {
+      const normalized = normalizeBridgeUrlInput(nextBridgeUrl);
+      if (!normalized) {
+        return;
+      }
+
+      setBridgeUrl(normalized);
+      setSelectedChatId(null);
+      setActiveChat(null);
+      setGitChat(null);
+      setPendingMainChatId(null);
+      setPendingMainChatSnapshot(null);
+      void saveAppSettings(normalized, defaultModelId, defaultReasoningEffort, approvalMode);
+      setCurrentScreen(onboardingMode === 'edit' ? onboardingReturnScreen : 'Main');
+      setOnboardingMode('edit');
+      closeDrawer();
+    },
+    [
+      approvalMode,
+      closeDrawer,
+      defaultModelId,
+      defaultReasoningEffort,
+      onboardingMode,
+      onboardingReturnScreen,
+      saveAppSettings,
+    ]
+  );
+
+  const handleOpenBridgeUrlSettings = useCallback(() => {
+    setOnboardingMode(bridgeUrl ? 'edit' : 'initial');
+    setOnboardingReturnScreen(currentScreen === 'Onboarding' ? 'Settings' : currentScreen);
+    setCurrentScreen('Onboarding');
+    closeDrawer();
+  }, [bridgeUrl, closeDrawer, currentScreen]);
+
+  const handleResetOnboarding = useCallback(() => {
+    setBridgeUrl(null);
+    setSelectedChatId(null);
+    setActiveChat(null);
+    setGitChat(null);
+    setPendingMainChatId(null);
+    setPendingMainChatSnapshot(null);
+    setOnboardingMode('initial');
+    setOnboardingReturnScreen('Main');
+    setCurrentScreen('Onboarding');
+    void saveAppSettings(null, defaultModelId, defaultReasoningEffort, approvalMode);
+    closeDrawer();
+  }, [
+    approvalMode,
+    closeDrawer,
+    defaultModelId,
+    defaultReasoningEffort,
+    saveAppSettings,
+  ]);
+
+  const handleCancelOnboarding = useCallback(() => {
+    setCurrentScreen(onboardingReturnScreen);
+  }, [onboardingReturnScreen]);
 
   const handleOpenChatGit = useCallback((chat: Chat) => {
     setGitChat(chat);
@@ -335,12 +431,42 @@ export default function App() {
     setCurrentScreen('Terms');
   }, []);
 
+  if (!settingsLoaded) {
+    return (
+      <SafeAreaProvider>
+        <View style={styles.loadingRoot}>
+          <ActivityIndicator size="large" color={colors.textMuted} />
+        </View>
+      </SafeAreaProvider>
+    );
+  }
+
+  if (!bridgeUrl || !api || !ws || currentScreen === 'Onboarding') {
+    const initialUrl = bridgeUrl ?? env.legacyHostBridgeUrl ?? '';
+    const mode: OnboardingMode = bridgeUrl ? onboardingMode : 'initial';
+    const canCancel = mode === 'edit' && Boolean(bridgeUrl);
+    return (
+      <SafeAreaProvider>
+        <OnboardingScreen
+          mode={mode}
+          initialBridgeUrl={initialUrl}
+          allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
+          onSave={handleBridgeUrlSaved}
+          onCancel={canCancel ? handleCancelOnboarding : undefined}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  const activeApi = api;
+  const activeWs = ws;
+
   const renderScreen = () => {
     switch (currentScreen) {
       case 'ChatGit':
         return gitChat ? (
           <GitScreen
-            api={api}
+            api={activeApi}
             chat={gitChat}
             onBack={handleCloseGit}
             onChatUpdated={handleGitChatUpdated}
@@ -348,8 +474,8 @@ export default function App() {
         ) : (
           <MainScreen
             ref={mainRef}
-            api={api}
-            ws={ws}
+            api={activeApi}
+            ws={activeWs}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
@@ -369,14 +495,16 @@ export default function App() {
       case 'Settings':
         return (
           <SettingsScreen
-            api={api}
-            ws={ws}
-            bridgeUrl={env.hostBridgeUrl}
+            api={activeApi}
+            ws={activeWs}
+            bridgeUrl={bridgeUrl}
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
             onDefaultModelSettingsChange={handleDefaultModelSettingsChange}
             approvalMode={approvalMode}
             onApprovalModeChange={handleApprovalModeChange}
+            onEditBridgeUrl={handleOpenBridgeUrlSettings}
+            onResetOnboarding={handleResetOnboarding}
             onOpenDrawer={openDrawer}
             onOpenPrivacy={openPrivacy}
             onOpenTerms={openTerms}
@@ -400,8 +528,8 @@ export default function App() {
         return (
           <MainScreen
             ref={mainRef}
-            api={api}
-            ws={ws}
+            api={activeApi}
+            ws={activeWs}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
@@ -447,8 +575,8 @@ export default function App() {
           ]}
         >
           <DrawerContent
-            api={api}
-            ws={ws}
+            api={activeApi}
+            ws={activeWs}
             selectedChatId={selectedChatId}
             selectedDefaultCwd={defaultStartCwd}
             onSelectDefaultCwd={setDefaultStartCwd}
@@ -478,12 +606,14 @@ function getAppSettingsPath(): string | null {
 }
 
 function parseAppSettings(raw: string): {
+  bridgeUrl: string | null;
   defaultModelId: string | null;
   defaultReasoningEffort: ReasoningEffort | null;
   approvalMode: ApprovalMode;
 } {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return {
+      bridgeUrl: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
@@ -495,9 +625,11 @@ function parseAppSettings(raw: string): {
     if (
       !parsed ||
       typeof parsed !== 'object' ||
-      parsed.version !== APP_SETTINGS_VERSION
+      (((parsed as { version?: unknown }).version !== 1) &&
+        (parsed as { version?: unknown }).version !== APP_SETTINGS_VERSION)
     ) {
       return {
+        bridgeUrl: null,
         defaultModelId: null,
         defaultReasoningEffort: null,
         approvalMode: 'normal',
@@ -505,6 +637,7 @@ function parseAppSettings(raw: string): {
     }
 
     return {
+      bridgeUrl: normalizeBridgeUrl((parsed as { bridgeUrl?: unknown }).bridgeUrl),
       defaultModelId: normalizeModelId(
         (parsed as { defaultModelId?: unknown }).defaultModelId
       ),
@@ -517,11 +650,20 @@ function parseAppSettings(raw: string): {
     };
   } catch {
     return {
+      bridgeUrl: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
     };
   }
+}
+
+function normalizeBridgeUrl(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  return normalizeBridgeUrlInput(value);
 }
 
 function normalizeModelId(value: unknown): string | null {
@@ -560,6 +702,12 @@ function normalizeApprovalMode(value: unknown): ApprovalMode {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
+    backgroundColor: colors.bgMain,
+  },
+  loadingRoot: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.bgMain,
   },
   screen: {
