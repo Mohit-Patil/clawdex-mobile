@@ -222,6 +222,32 @@ describe('HostBridgeWsClient', () => {
     await expect(waitPromise).resolves.toBeUndefined();
   });
 
+  it('waitForTurnCompletion resolves from codex event using source parent_thread_id', async () => {
+    const client = new HostBridgeWsClient('http://localhost:8787');
+    client.connect();
+
+    const waitPromise = client.waitForTurnCompletion('thr_5', 'turn_5', 100);
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'codex/event/task_complete',
+        params: {
+          msg: {
+            type: 'task_complete',
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: 'thr_5',
+                },
+              },
+            },
+          },
+        },
+      })
+    );
+
+    await expect(waitPromise).resolves.toBeUndefined();
+  });
+
   it('deduplicates notifications by eventId', () => {
     const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();

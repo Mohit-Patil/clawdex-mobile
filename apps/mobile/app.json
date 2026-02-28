@@ -2,23 +2,36 @@
   "expo": {
     "name": "Clawdex Mobile",
     "slug": "clawdex-mobile",
-    "version": "1.0.0",
+    "version": "1.3.2",
     "orientation": "portrait",
     "icon": "./assets/brand/app-icon.png",
     "splash": {
-      "image": "./assets/brand/splash-icon.png",
+      "image": "./assets/brand/splash-icon-white.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Clawdex uses the camera to scan bridge pairing QR codes.",
+        "NSMicrophoneUsageDescription": "Clawdex uses the microphone for voice-to-text input.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.mohitpatil973.clawdexmobile"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/brand/adaptive-icon.png",
         "backgroundColor": "#000000"
       },
-      "edgeToEdgeEnabled": true
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
+      "package": "com.mohitpatil973.clawdexmobile"
     },
     "web": {
       "favicon": "./assets/brand/favicon.png"
@@ -28,6 +41,17 @@
       "android",
       "web"
     ],
-    "jsEngine": "hermes"
+    "experiments": {
+      "reactCompiler": true
+    },
+    "jsEngine": "hermes",
+    "plugins": [
+      "expo-audio"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "07937be8-e2f7-4731-8ea4-cefae952df79"
+      }
+    }
   }
 }

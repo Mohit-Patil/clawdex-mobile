@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { colors, spacing, typography } from '../theme';
 
@@ -46,29 +47,47 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
   const text = `${title}${suffix}${dots}`;
 
   return (
-    <View style={styles.container}>
-      {tone === 'running' ? (
-        <ActivityIndicator size="small" color={color} />
-      ) : (
-        <Ionicons name={ICON_BY_TONE[tone]} size={14} color={color} />
-      )}
-      <Text style={styles.text} numberOfLines={1}>
-        {text}
-      </Text>
-    </View>
+    <BlurView
+      intensity={42}
+      tint={Platform.OS === 'ios' ? 'systemUltraThinMaterialDark' : 'dark'}
+      blurMethod="dimezisBlurViewSdk31Plus"
+      style={styles.container}
+    >
+      <View style={styles.content}>
+        {tone === 'running' ? (
+          <ActivityIndicator size="small" color={color} />
+        ) : (
+          <Ionicons name={ICON_BY_TONE[tone]} size={13} color={color} />
+        )}
+        <Text style={styles.text} numberOfLines={1}>
+          {text}
+        </Text>
+      </View>
+    </BlurView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: 'rgba(18, 22, 28, 0.16)',
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.xs / 2,
+  },
+  content: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
-    marginHorizontal: spacing.lg,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 3,
   },
   text: {
     ...typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
     fontWeight: '600',
     color: colors.textPrimary,
     flex: 1,

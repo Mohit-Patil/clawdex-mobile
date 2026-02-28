@@ -15,6 +15,7 @@ import {
   ActionSheetIOS,
   ActivityIndicator,
   Alert,
+  FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -24,9 +25,13 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type ListRenderItem,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import type {
@@ -57,6 +62,7 @@ import { BrandMark } from '../components/BrandMark';
 import { ToolBlock } from '../components/ToolBlock';
 import { TypingIndicator } from '../components/TypingIndicator';
 import { env } from '../config';
+import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { colors, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
@@ -116,6 +122,13 @@ interface ComposerAttachmentChip {
   label: string;
 }
 
+interface QueuedChatMessage {
+  content: string;
+  mentions: MentionInput[];
+  localImages: LocalImageInput[];
+  collaborationMode: CollaborationMode;
+}
+
 interface SlashCommandDefinition {
   name: string;
   summary: string;
@@ -128,25 +141,27 @@ interface SlashCommandDefinition {
 const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
+const CHAT_OPEN_REVEAL_DELAY_MS = 260;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
+const UNANSWERED_USER_RUNNING_TTL_MS = 90_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
 const INLINE_OPTION_LINE_PATTERN =
   /^(?:[-*+]\s*)?(?:\d{1,2}\s*[.):-]|\(\d{1,2}\)\s*[.):-]?|\[\d{1,2}\]\s*|[A-Ca-c]\s*[.):-]|\([A-Ca-c]\)\s*[.):-]?|option\s+\d{1,2}\s*[.):-]?)\s*(.+)$/i;
-const INLINE_CHOICE_CUE_PHRASES = [
-  'choose',
-  'select',
-  'pick',
-  'which',
-  'what',
-  'prefer',
-  'option',
-  'let me know',
-  'would you like',
-  'should i',
-  'confirm',
+const INLINE_CHOICE_CUE_PATTERNS = [
+  /\bchoose\b/i,
+  /\bselect\b/i,
+  /\bpick\b/i,
+  /\bwould you like\b/i,
+  /\bshould i\b/i,
+  /\bprefer\b/i,
+  /\bconfirm\b/i,
+  /\b(?:reply|respond)\s+with\b/i,
+  /\blet me know\b.*\b(which|what|option|one)\b/i,
+  /\bwhich\b.*\b(option|one)\b/i,
+  /\bwhat\b.*\b(option|one)\b/i,
 ];
 const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'taskstarted',
@@ -172,6 +187,25 @@ const CODEX_RUN_ABORT_EVENT_TYPES = new Set([
 const CODEX_RUN_FAILURE_EVENT_TYPES = new Set([
   'taskfailed',
   'turnfailed',
+]);
+const EXTERNAL_RUNNING_STATUS_HINTS = new Set([
+  'running',
+  'inprogress',
+  'active',
+  'queued',
+  'pending',
+]);
+const EXTERNAL_ERROR_STATUS_HINTS = new Set([
+  'failed',
+  'error',
+  'interrupted',
+  'aborted',
+]);
+const EXTERNAL_COMPLETE_STATUS_HINTS = new Set([
+  'complete',
+  'completed',
+  'success',
+  'succeeded',
 ]);
 
 interface ChatModelPreference {
@@ -418,14 +452,71 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
     const [selectedCollaborationMode, setSelectedCollaborationMode] =
       useState<CollaborationMode>('default');
+    const [keyboardVisible, setKeyboardVisible] = useState(false);
+    const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
+    const [queueDispatching, setQueueDispatching] = useState(false);
+    const [queuePaused, setQueuePaused] = useState(false);
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
     const [activity, setActivity] = useState<ActivityState>({
       tone: 'idle',
       title: 'Ready',
     });
-    const scrollRef = useRef<ScrollView>(null);
+    const [composerHeight, setComposerHeight] = useState(spacing.xxl * 4);
+    const safeAreaInsets = useSafeAreaInsets();
+    const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
+    const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const loadChatRequestRef = useRef(0);
+
+    const voiceRecorder = useVoiceRecorder({
+      transcribe: (dataBase64, prompt, options) =>
+        api.transcribeVoice({ dataBase64, prompt, ...options }),
+      composerContext: draft,
+      onTranscript: (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text)),
+      onError: (msg) => setError(msg),
+    });
+    const canUseVoiceInput = Platform.OS !== 'web';
+
+    const clearPendingScrollRetries = useCallback(() => {
+      for (const timeoutId of scrollRetryTimeoutsRef.current) {
+        clearTimeout(timeoutId);
+      }
+      scrollRetryTimeoutsRef.current = [];
+    }, []);
+
+    const scrollToBottomReliable = useCallback(
+      (animated = true) => {
+        clearPendingScrollRetries();
+        const delays = [0, 70, 180, 320];
+        scrollRetryTimeoutsRef.current = delays.map((delay, index) =>
+          setTimeout(() => {
+            requestAnimationFrame(() => {
+              scrollRef.current?.scrollToEnd({
+                animated: index === 0 ? animated : false,
+              });
+            });
+          }, delay)
+        );
+      },
+      [clearPendingScrollRetries]
+    );
+
+    useEffect(() => {
+      return () => {
+        clearPendingScrollRetries();
+      };
+    }, [clearPendingScrollRetries]);
+
+    useEffect(() => {
+      const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+      const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+      const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
+      const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+      return () => {
+        showSub.remove();
+        hideSub.remove();
+      };
+    }, []);
 
     // Ref so the WS handler always reads the latest chat ID without
     // needing to re-subscribe on every change.
@@ -1217,6 +1308,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setUploadingAttachment(false);
       setActiveTurnId(null);
       setStoppingTurn(false);
+      setQueuedMessages([]);
+      setQueueDispatching(false);
+      setQueuePaused(false);
       setActivity({
         tone: 'idle',
         title: 'Ready',
@@ -1846,9 +1940,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ],
           };
         });
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+        scrollToBottomReliable(true);
       },
-      [selectedChatId]
+      [scrollToBottomReliable, selectedChatId]
     );
 
     const appendLocalSystemMessage = useCallback(
@@ -1879,9 +1973,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ],
           };
         });
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+        scrollToBottomReliable(true);
       },
-      [selectedChatId]
+      [scrollToBottomReliable, selectedChatId]
     );
 
     const appendStopSystemMessageIfNeeded = useCallback(() => {
@@ -2238,7 +2332,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               messages: [...prev.messages, optimisticMessage],
             };
           });
-          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+          scrollToBottomReliable(true);
 
           try {
             setSending(true);
@@ -2458,6 +2552,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         selectedCollaborationMode,
         handleTurnFailure,
         rememberChatModelPreference,
+        scrollToBottomReliable,
         startNewChat,
       ]
     );
@@ -2466,11 +2561,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       async (chatId: string) => {
         const requestId = loadChatRequestRef.current + 1;
         loadChatRequestRef.current = requestId;
+        let loadedSuccessfully = false;
         try {
           const chat = await api.getChat(chatId);
           if (requestId !== loadChatRequestRef.current) {
             return;
           }
+          loadedSuccessfully = true;
           setSelectedChatId(chatId);
           setSelectedChat(chat);
           setError(null);
@@ -2523,7 +2620,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             detail: (err as Error).message,
           });
         } finally {
-          if (requestId === loadChatRequestRef.current) {
+          if (requestId !== loadChatRequestRef.current) {
+            return;
+          }
+
+          if (loadedSuccessfully) {
+            // Keep spinner visible until initial bottom sync settles for long threads.
+            scrollToBottomReliable(false);
+            setTimeout(() => {
+              if (requestId === loadChatRequestRef.current) {
+                setOpeningChatId(null);
+              }
+            }, CHAT_OPEN_REVEAL_DELAY_MS);
+          } else {
             setOpeningChatId(null);
           }
         }
@@ -2534,18 +2643,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         bumpRunWatchdog,
         clearRunWatchdog,
         refreshPendingApprovalsForThread,
+        scrollToBottomReliable,
       ]
     );
 
     const openChatThread = useCallback(
       (id: string, optimisticChat?: Chat | null) => {
-        const canReuseSnapshot = Boolean(
+        const hasSnapshot = Boolean(
           optimisticChat &&
             optimisticChat.id === id &&
             optimisticChat.messages.length > 0
         );
 
         setSelectedChatId(id);
+        setOpeningChatId(id);
         setSending(false);
         setCreating(false);
         setError(null);
@@ -2560,41 +2671,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setActivePlan(null);
         setActiveTurnId(null);
         setStoppingTurn(false);
+        setQueuedMessages([]);
+        setQueueDispatching(false);
+        setQueuePaused(false);
         stopRequestedRef.current = false;
         stopSystemMessageLoggedRef.current = false;
 
-        if (canReuseSnapshot && optimisticChat) {
+        if (hasSnapshot && optimisticChat) {
           setSelectedChat(optimisticChat);
-          setOpeningChatId(null);
-          setActivity(
-            optimisticChat.status === 'running'
-              ? {
-                  tone: 'running',
-                  title: 'Working',
-                }
-              : optimisticChat.status === 'complete'
-                ? {
-                    tone: 'complete',
-                    title: 'Turn completed',
-                  }
-                : optimisticChat.status === 'error'
-                  ? {
-                      tone: 'error',
-                      title: 'Turn failed',
-                      detail: optimisticChat.lastError ?? undefined,
-                    }
-                  : {
-                      tone: 'idle',
-                      title: 'Ready',
-                    }
-          );
-        } else {
-          setOpeningChatId(id);
-          setActivity({
-            tone: 'running',
-            title: 'Opening chat',
-          });
         }
+        setActivity({
+          tone: 'running',
+          title: 'Opening chat',
+        });
 
         applyThreadRuntimeSnapshot(id);
         void refreshPendingApprovalsForThread(id);
@@ -2687,6 +2776,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           lastMessagePreview: content.slice(0, 50),
           messages: [...created.messages, optimisticMessage],
         });
+        scrollToBottomReliable(true);
 
         setActivity({
           tone: 'running',
@@ -2769,6 +2859,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       bumpRunWatchdog,
       clearRunWatchdog,
       rememberChatModelPreference,
+      scrollToBottomReliable,
     ]);
 
     const sendMessageContent = useCallback(
@@ -2777,21 +2868,29 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         options?: {
           allowSlashCommands?: boolean;
           collaborationMode?: CollaborationMode;
+          mentions?: MentionInput[];
+          localImages?: LocalImageInput[];
+          clearComposer?: boolean;
         }
       ) => {
         const content = rawContent.trim();
         if (!selectedChatId || !content) {
-          return;
+          return false;
         }
 
+        const shouldClearComposer = options?.clearComposer ?? true;
         if (options?.allowSlashCommands && (await handleSlashCommand(content))) {
-          setDraft('');
-          return;
+          if (shouldClearComposer) {
+            setDraft('');
+          }
+          return true;
         }
         const resolvedCollaborationMode =
           options?.collaborationMode ?? selectedCollaborationMode;
-        const turnMentions = pendingMentionPaths.map((path) => toMentionInput(path));
-        const turnLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
+        const turnMentions =
+          options?.mentions ?? pendingMentionPaths.map((path) => toMentionInput(path));
+        const turnLocalImages =
+          options?.localImages ?? pendingLocalImagePaths.map((path) => ({ path }));
         const optimisticContent = toOptimisticUserContent(content, turnMentions, turnLocalImages);
 
         const optimisticMessage: ChatTranscriptMessage = {
@@ -2801,7 +2900,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           createdAt: new Date().toISOString(),
         };
 
-        setDraft('');
+        if (shouldClearComposer) {
+          setDraft('');
+        }
         setSelectedChat((prev) => {
           if (!prev) return prev;
           return {
@@ -2809,7 +2910,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             messages: [...prev.messages, optimisticMessage],
           };
         });
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+        scrollToBottomReliable(true);
 
         try {
           setSending(true);
@@ -2852,8 +2953,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             selectedEffort ?? activeEffort
           );
           setSelectedChat(updated);
-          setPendingMentionPaths([]);
-          setPendingLocalImagePaths([]);
+          if (shouldClearComposer) {
+            setPendingMentionPaths([]);
+            setPendingLocalImagePaths([]);
+          }
           setError(null);
           if (updated.status === 'complete') {
             setActivity({
@@ -2882,9 +2985,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
         } catch (err) {
           handleTurnFailure(err);
+          return false;
         } finally {
           setSending(false);
         }
+
+        return true;
       },
       [
         activeEffort,
@@ -2902,12 +3008,124 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         bumpRunWatchdog,
         clearRunWatchdog,
         rememberChatModelPreference,
+        scrollToBottomReliable,
       ]
     );
 
     const sendMessage = useCallback(async () => {
-      await sendMessageContent(draft, { allowSlashCommands: true });
-    }, [draft, sendMessageContent]);
+      const content = draft.trim();
+      if (!content) {
+        return;
+      }
+
+      setQueuePaused(false);
+
+      if (uploadingAttachment) {
+        setError('Please wait for attachments to finish uploading.');
+        return;
+      }
+
+      if (await handleSlashCommand(content)) {
+        setDraft('');
+        return;
+      }
+
+      const isTurnBlocked =
+        sending ||
+        creating ||
+        stoppingTurn ||
+        Boolean(activeTurnIdRef.current) ||
+        Boolean(pendingApproval?.id) ||
+        Boolean(pendingUserInputRequest?.id) ||
+        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+
+      if (isTurnBlocked) {
+        const queuedMentions = pendingMentionPaths.map((path) => toMentionInput(path));
+        const queuedLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
+        setQueuedMessages((prev) => [
+          ...prev,
+          {
+            content,
+            mentions: queuedMentions,
+            localImages: queuedLocalImages,
+            collaborationMode: selectedCollaborationMode,
+          },
+        ]);
+        setDraft('');
+        setPendingMentionPaths([]);
+        setPendingLocalImagePaths([]);
+        setError(null);
+        return;
+      }
+
+      await sendMessageContent(content, { allowSlashCommands: false });
+    }, [
+      creating,
+      draft,
+      handleSlashCommand,
+      pendingApproval?.id,
+      pendingLocalImagePaths,
+      pendingMentionPaths,
+      pendingUserInputRequest?.id,
+      selectedChat,
+      selectedCollaborationMode,
+      sendMessageContent,
+      sending,
+      stoppingTurn,
+      setQueuePaused,
+      uploadingAttachment,
+    ]);
+
+    useEffect(() => {
+      if (!selectedChatId || queuedMessages.length === 0 || queueDispatching || queuePaused) {
+        return;
+      }
+
+      const isTurnBlocked =
+        sending ||
+        creating ||
+        stoppingTurn ||
+        uploadingAttachment ||
+        Boolean(activeTurnId) ||
+        Boolean(pendingApproval?.id) ||
+        Boolean(pendingUserInputRequest?.id) ||
+        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+      if (isTurnBlocked) {
+        return;
+      }
+
+      const nextMessage = queuedMessages[0];
+      setQueueDispatching(true);
+      void (async () => {
+        const sent = await sendMessageContent(nextMessage.content, {
+          allowSlashCommands: false,
+          collaborationMode: nextMessage.collaborationMode,
+          mentions: nextMessage.mentions,
+          localImages: nextMessage.localImages,
+          clearComposer: false,
+        });
+        if (sent) {
+          setQueuedMessages((prev) => prev.slice(1));
+        } else {
+          setQueuePaused(true);
+        }
+        setQueueDispatching(false);
+      })();
+    }, [
+      activeTurnId,
+      creating,
+      pendingApproval?.id,
+      pendingUserInputRequest?.id,
+      queueDispatching,
+      queuePaused,
+      queuedMessages,
+      selectedChat,
+      selectedChatId,
+      sendMessageContent,
+      sending,
+      stoppingTurn,
+      uploadingAttachment,
+    ]);
 
     const handleInlineOptionSelect = useCallback(
       (value: string) => {
@@ -2920,8 +3138,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           !selectedChatId ||
           sending ||
           creating ||
+          stoppingTurn ||
+          Boolean(activeTurnId) ||
           Boolean(pendingApproval?.id) ||
-          Boolean(pendingUserInputRequest?.id);
+          Boolean(pendingUserInputRequest?.id) ||
+          (selectedChat ? isChatLikelyRunning(selectedChat) : false);
         if (cannotAutoSend) {
           setDraft(option);
           return;
@@ -2931,11 +3152,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
       [
         creating,
+        activeTurnId,
         pendingApproval?.id,
         pendingUserInputRequest?.id,
+        selectedChat,
         selectedChatId,
         sendMessageContent,
         sending,
+        stoppingTurn,
       ]
     );
 
@@ -2948,7 +3172,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'thread/name/updated') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
+          const threadId = extractNotificationThreadId(params);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -2979,15 +3203,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!codexEventType) {
             return;
           }
-          const threadId =
-            readString(msg?.thread_id) ??
-            readString(msg?.threadId) ??
-            readString(params?.thread_id) ??
-            readString(params?.threadId) ??
-            readString(params?.conversationId) ??
-            readString(msg?.conversation_id);
+          const threadId = extractNotificationThreadId(params, msg);
 
           if (!currentId) {
+            if (threadId) {
+              cacheCodexRuntimeForThread(threadId, codexEventType, msg);
+            }
             return;
           }
 
@@ -3077,7 +3298,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Thinking',
                   }
             );
-            setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+            scrollToBottomReliable(true);
             return;
           }
 
@@ -3271,7 +3492,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   title: 'Thinking',
                 }
           );
-          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+          scrollToBottomReliable(true);
           return;
         }
 
@@ -4056,9 +4277,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         // wipe streaming text, active commands, and the watchdog.
         if (event.method === 'thread/status/changed') {
           const params = toRecord(event.params);
-          const threadId =
-            readString(params?.threadId) ?? readString(params?.thread_id);
+          const threadId = extractNotificationThreadId(params);
+          const statusHint = extractExternalStatusHint(params);
+          const hasExplicitRunningStatus = Boolean(
+            statusHint && EXTERNAL_RUNNING_STATUS_HINTS.has(statusHint)
+          );
+          const hasExplicitTerminalStatus = Boolean(
+            statusHint &&
+              (EXTERNAL_ERROR_STATUS_HINTS.has(statusHint) ||
+                EXTERNAL_COMPLETE_STATUS_HINTS.has(statusHint))
+          );
           if (threadId && threadId === currentId) {
+            if (!hasExplicitTerminalStatus) {
+              bumpRunWatchdog();
+              setActivity((prev) =>
+                prev.tone === 'running'
+                  ? prev
+                  : { tone: 'running', title: 'Working' }
+              );
+            }
+
             api
               .getChatSummary(threadId)
               .then((summary) => {
@@ -4077,26 +4315,79 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   };
                 });
 
-                if (isChatSummaryLikelyRunning(summary)) {
+                const shouldPreserveRunning =
+                  !hasExplicitTerminalStatus &&
+                  runWatchdogUntilRef.current > Date.now();
+                const shouldShowRunning =
+                  hasExplicitRunningStatus ||
+                  isChatSummaryLikelyRunning(summary) ||
+                  shouldPreserveRunning;
+
+                if (shouldShowRunning) {
                   bumpRunWatchdog();
                   setActivity((prev) =>
                     prev.tone === 'running'
                       ? prev
                       : { tone: 'running', title: 'Working' }
                   );
+                } else {
+                  clearRunWatchdog();
+                  setActiveTurnId(null);
+                  setStoppingTurn(false);
+                  if (!pendingApprovalId && !pendingUserInputRequestId) {
+                    setActiveCommands([]);
+                    setStreamingText(null);
+                    reasoningSummaryRef.current = {};
+                    codexReasoningBufferRef.current = '';
+                    hadCommandRef.current = false;
+                    setActivity(() => {
+                      if (statusHint && EXTERNAL_ERROR_STATUS_HINTS.has(statusHint)) {
+                        return {
+                          tone: 'error',
+                          title: 'Turn failed',
+                          detail: summary.lastError ?? undefined,
+                        };
+                      }
+
+                      if (statusHint && EXTERNAL_COMPLETE_STATUS_HINTS.has(statusHint)) {
+                        return {
+                          tone: 'complete',
+                          title: 'Turn completed',
+                        };
+                      }
+
+                      return summary.status === 'error'
+                        ? {
+                            tone: 'error',
+                            title: 'Turn failed',
+                            detail: summary.lastError ?? undefined,
+                          }
+                        : summary.status === 'complete'
+                          ? {
+                              tone: 'complete',
+                              title: 'Turn completed',
+                            }
+                          : {
+                              tone: 'idle',
+                              title: 'Ready',
+                            };
+                    });
+                  }
                 }
               })
               .catch(() => {});
 
             scheduleExternalStatusFullSync(threadId);
           } else if (threadId) {
-            cacheThreadTurnState(threadId, {
-              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
-            });
-            cacheThreadActivity(threadId, {
-              tone: 'running',
-              title: 'Working',
-            });
+            if (!hasExplicitTerminalStatus) {
+              cacheThreadTurnState(threadId, {
+                runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+              });
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Working',
+              });
+            }
             void refreshPendingApprovalsForThread(threadId);
           }
           return;
@@ -4148,6 +4439,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       scheduleExternalStatusFullSync,
       registerTurnStarted,
       pushActiveCommand,
+      scrollToBottomReliable,
       upsertThreadRuntimeSnapshot,
     ]);
 
@@ -4179,9 +4471,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return isUnchanged ? prev : latest;
           });
 
-          const shouldRunFromChat = isChatLikelyRunning(latest);
+          const hasAssistantProgress = didAssistantMessageProgress(selectedChat, latest);
+          const hasPendingUserMessage = hasRecentUnansweredUserTurn(latest);
+          const shouldRunFromChat =
+            isChatLikelyRunning(latest) ||
+            hasAssistantProgress ||
+            hasPendingUserMessage;
           const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
+          const shouldRefreshWatchdog = shouldRunFromChat;
+          const watchdogDurationMs =
+            hasAssistantProgress && !isChatLikelyRunning(latest)
+              ? Math.floor(RUN_WATCHDOG_MS / 4)
+              : RUN_WATCHDOG_MS;
 
           if (shouldShowRunning && !hasPendingApproval && !hasPendingUserInput) {
             setActivity((prev) => {
@@ -4194,13 +4496,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               ) {
                 return prev;
               }
-              bumpRunWatchdog();
+              if (shouldRefreshWatchdog) {
+                bumpRunWatchdog(watchdogDurationMs);
+              }
               return prev.tone === 'running'
                 ? prev
-                : { tone: 'running', title: 'Working' };
+                : { tone: 'running', title: hasAssistantProgress ? 'Thinking' : 'Working' };
             });
           } else if (!hasPendingApproval && !hasPendingUserInput) {
             clearRunWatchdog();
+            setActiveCommands([]);
+            setStreamingText(null);
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            reasoningSummaryRef.current = {};
+            codexReasoningBufferRef.current = '';
+            hadCommandRef.current = false;
             setActivity((prev) => {
               if (latest.status === 'error') {
                 return {
@@ -4344,32 +4655,52 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const handleComposerFocus = useCallback(() => {
       requestAnimationFrame(() => {
-        scrollRef.current?.scrollToEnd({ animated: true });
+        scrollToBottomReliable(true);
       });
-    }, []);
+    }, [scrollToBottomReliable]);
 
     const handleSubmit = selectedChat ? sendMessage : createChat;
     const isTurnLoading = sending || creating;
     const isLoading = isTurnLoading || uploadingAttachment;
     const isStreaming = sending || creating || Boolean(streamingText);
     const isOpeningChat = Boolean(openingChatId);
-    const isOpeningDifferentChat =
-      Boolean(openingChatId) && selectedChat?.id !== openingChatId;
+    const shouldShowComposer = !isOpeningChat;
     const isTurnLikelyRunning =
       Boolean(activeTurnId) || (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+    const queuedMessagesDetail =
+      queuedMessages.length > 0
+        ? queuePaused
+          ? `${String(queuedMessages.length)} queued (paused)`
+          : `${String(queuedMessages.length)} queued`
+        : undefined;
+    const activityDetail = queuedMessagesDetail
+      ? activity.detail
+        ? `${activity.detail} · ${queuedMessagesDetail}`
+        : queuedMessagesDetail
+      : activity.detail;
     const showActivity =
       isLoading ||
       isOpeningChat ||
+      Boolean(queuedMessagesDetail) ||
       activity.tone !== 'idle' ||
-      activity.title !== 'Ready' ||
-      Boolean(activity.detail);
-    const headerTitle = isOpeningDifferentChat
-      ? 'Opening chat'
-      : selectedChat?.title?.trim() || 'New chat';
+      Boolean(activityDetail);
+    const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
+    const showFloatingActivity =
+      showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
+    const chatBottomInset = shouldShowComposer
+      ? spacing.lg + (showFloatingActivity ? spacing.xxl + spacing.sm : 0)
+      : Math.max(spacing.xxl, safeAreaInsets.bottom + spacing.lg);
+
+    useEffect(() => {
+      if (!selectedChat || isOpeningChat || !showActivity) {
+        return;
+      }
+      scrollToBottomReliable(false);
+    }, [isOpeningChat, scrollToBottomReliable, selectedChat, showActivity]);
 
     return (
       <View style={styles.container}>
@@ -4381,7 +4712,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onRightActionPress={selectedChat ? handleOpenGit : undefined}
         />
 
-        {selectedChat ? (
+        {selectedChat && !isOpeningChat ? (
           <View style={styles.sessionMetaRow}>
             <Pressable style={styles.workspaceBar} onPress={handleOpenGit}>
               <Ionicons name="folder-open-outline" size={14} color={colors.textMuted} />
@@ -4418,9 +4749,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         <KeyboardAvoidingView
           style={styles.keyboardAvoiding}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          enabled={Platform.OS === 'ios'}
         >
-          {selectedChat && !isOpeningDifferentChat ? (
+          {selectedChat && !isOpeningChat ? (
             <ChatView
               chat={selectedChat}
               activePlan={activePlan?.threadId === selectedChat.id ? activePlan : null}
@@ -4430,6 +4762,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               isStreaming={isStreaming}
               inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
               onInlineOptionSelect={handleInlineOptionSelect}
+              onAutoScroll={scrollToBottomReliable}
+              bottomInset={chatBottomInset}
             />
           ) : isOpeningChat ? (
             <View style={styles.chatLoadingContainer}>
@@ -4448,70 +4782,96 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           )}
 
-          <View style={styles.composerContainer}>
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-            {pendingApproval ? (
-              <ApprovalBanner
-                approval={pendingApproval}
-                onResolve={handleResolveApproval}
-              />
-            ) : null}
-            {showActivity ? (
+          {showFloatingActivity ? (
+            <View
+              pointerEvents="none"
+              style={[
+                styles.activityOverlay,
+                { bottom: composerHeight + spacing.sm },
+              ]}
+            >
               <ActivityBar
                 title={activity.title}
-                detail={activity.detail}
+                detail={activityDetail}
                 tone={activity.tone}
               />
-            ) : null}
-            {showSlashSuggestions ? (
-              <ScrollView
-                style={[
-                  styles.slashSuggestions,
-                  { maxHeight: slashSuggestionsMaxHeight },
-                ]}
-                contentContainerStyle={styles.slashSuggestionsContent}
-                keyboardShouldPersistTaps="handled"
-                nestedScrollEnabled
-              >
-                {slashSuggestions.map((command, index) => {
-                  const suffix = command.argsHint ? ` ${command.argsHint}` : '';
-                  return (
-                    <Pressable
-                      key={`${command.name}-${String(index)}`}
-                      onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
-                      style={({ pressed }) => [
-                        styles.slashSuggestionItem,
-                        index === slashSuggestions.length - 1 &&
-                          styles.slashSuggestionItemLast,
-                        pressed && styles.slashSuggestionItemPressed,
-                      ]}
-                    >
-                      <Text style={styles.slashSuggestionTitle}>{`/${command.name}${suffix}`}</Text>
-                      <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
-                        {command.mobileSupported
-                          ? command.summary
-                          : `${command.summary} · CLI only`}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-            ) : null}
-            <ChatInput
-              value={draft}
-              onChangeText={setDraft}
-              onFocus={handleComposerFocus}
-              onSubmit={() => void handleSubmit()}
-              onStop={() => handleStopTurn()}
-              showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
-              isStopping={stoppingTurn}
-              onAttachPress={openAttachmentMenu}
-              attachments={composerAttachments}
-              onRemoveAttachment={removeComposerAttachment}
-              isLoading={isLoading}
-              placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
-            />
-          </View>
+            </View>
+          ) : null}
+
+          {shouldShowComposer ? (
+            <View
+              style={[
+                styles.composerContainer,
+                !keyboardVisible ? styles.composerContainerResting : null,
+              ]}
+              onLayout={(event) => {
+                const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+                setComposerHeight((previousHeight) =>
+                  previousHeight === nextHeight ? previousHeight : nextHeight
+                );
+              }}
+            >
+              {error ? <Text style={styles.errorText}>{error}</Text> : null}
+              {pendingApproval ? (
+                <ApprovalBanner
+                  approval={pendingApproval}
+                  onResolve={handleResolveApproval}
+                />
+              ) : null}
+              {showSlashSuggestions ? (
+                <ScrollView
+                  style={[
+                    styles.slashSuggestions,
+                    { maxHeight: slashSuggestionsMaxHeight },
+                  ]}
+                  contentContainerStyle={styles.slashSuggestionsContent}
+                  keyboardShouldPersistTaps="handled"
+                  nestedScrollEnabled
+                >
+                  {slashSuggestions.map((command, index) => {
+                    const suffix = command.argsHint ? ` ${command.argsHint}` : '';
+                    return (
+                      <Pressable
+                        key={`${command.name}-${String(index)}`}
+                        onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
+                        style={({ pressed }) => [
+                          styles.slashSuggestionItem,
+                          index === slashSuggestions.length - 1 &&
+                            styles.slashSuggestionItemLast,
+                          pressed && styles.slashSuggestionItemPressed,
+                        ]}
+                      >
+                        <Text style={styles.slashSuggestionTitle}>{`/${command.name}${suffix}`}</Text>
+                        <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
+                          {command.mobileSupported
+                            ? command.summary
+                            : `${command.summary} · CLI only`}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              ) : null}
+              <ChatInput
+                value={draft}
+                onChangeText={setDraft}
+                onFocus={handleComposerFocus}
+                onSubmit={() => void handleSubmit()}
+                onStop={() => handleStopTurn()}
+                showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
+                isStopping={stoppingTurn}
+                onAttachPress={openAttachmentMenu}
+                attachments={composerAttachments}
+                onRemoveAttachment={removeComposerAttachment}
+                isLoading={isLoading}
+                placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
+                voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
+                onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
+                safeAreaBottomInset={safeAreaInsets.bottom}
+                keyboardVisible={keyboardVisible}
+              />
+            </View>
+          ) : null}
         </KeyboardAvoidingView>
 
         <Modal
@@ -5055,133 +5415,218 @@ function ChatView({
   isStreaming,
   inlineChoicesEnabled,
   onInlineOptionSelect,
+  onAutoScroll,
+  bottomInset,
 }: {
   chat: Chat;
   activePlan: ActivePlanState | null;
   activeCommands: RunEvent[];
   streamingText: string | null;
-  scrollRef: React.RefObject<ScrollView | null>;
+  scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
   isStreaming: boolean;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
+  onAutoScroll: (animated?: boolean) => void;
+  bottomInset: number;
 }) {
   const { height: windowHeight } = useWindowDimensions();
-  const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
+  const shouldStickToBottomRef = useRef(true);
+  const visibleToolBlocks = useMemo(
+    () => activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS),
+    [activeCommands]
+  );
   const toolPanelMaxHeight = Math.floor(windowHeight * 0.5);
-  const liveTimelineText = toLiveTimelineText(activeCommands);
+  const liveTimelineText = useMemo(() => toLiveTimelineText(activeCommands), [activeCommands]);
   const shouldShowToolPanel = visibleToolBlocks.length > 0 && !liveTimelineText;
 
-  const filtered = chat.messages.filter((msg) => {
-    const text = msg.content || '';
-    if (msg.role === 'system') return false;
-    if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
-    if (text.includes('Current working directory is:')) return false;
-    if (text.includes('You are operating in task worktree')) return false;
-    if (msg.role === 'assistant' && !text.trim()) return false;
-    return true;
-  });
+  const visibleMessages = useMemo(() => {
+    const filtered = chat.messages.filter((msg) => {
+      const text = msg.content || '';
+      if (msg.role === 'system') return false;
+      if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
+      if (text.includes('Current working directory is:')) return false;
+      if (text.includes('You are operating in task worktree')) return false;
+      if (msg.role === 'assistant' && !text.trim()) return false;
+      return true;
+    });
 
-  // For each consecutive run of assistant messages, only keep the last
-  // one (the final answer). Earlier ones are intermediate thinking.
-  const visibleMessages = filtered.filter((msg, i) => {
-    if (msg.role !== 'assistant') return true;
-    const next = filtered[i + 1];
-    return !next || next.role !== 'assistant';
-  });
-  const inlineChoiceSet = inlineChoicesEnabled
-    ? findInlineChoiceSet(visibleMessages)
-    : null;
-  const streamingPreviewText = toStreamingPreviewText(streamingText, visibleMessages);
+    // For each consecutive run of assistant messages, only keep the last
+    // one (the final answer). Earlier ones are intermediate thinking.
+    return filtered.filter((msg, i) => {
+      if (msg.role !== 'assistant') return true;
+      const next = filtered[i + 1];
+      return !next || next.role !== 'assistant';
+    });
+  }, [chat.messages]);
+  const inlineChoiceSet = useMemo(
+    () => (inlineChoicesEnabled ? findInlineChoiceSet(visibleMessages) : null),
+    [inlineChoicesEnabled, visibleMessages]
+  );
+  const streamingPreviewText = useMemo(
+    () => toStreamingPreviewText(streamingText, visibleMessages),
+    [streamingText, visibleMessages]
+  );
+  const initialBottomSyncChatIdRef = useRef<string | null>(null);
+  const handleScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      const distanceFromBottom =
+        contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      shouldStickToBottomRef.current = distanceFromBottom <= spacing.xl * 2;
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (initialBottomSyncChatIdRef.current === chat.id) {
+      return;
+    }
+    if (!activePlan && visibleMessages.length === 0 && !liveTimelineText && !streamingPreviewText) {
+      return;
+    }
+
+    initialBottomSyncChatIdRef.current = chat.id;
+    const scrollToBottom = () => onAutoScroll(false);
+    const frame = requestAnimationFrame(scrollToBottom);
+    const timeout = setTimeout(scrollToBottom, 120);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timeout);
+    };
+  }, [
+    activePlan,
+    chat.id,
+    liveTimelineText,
+    onAutoScroll,
+    scrollRef,
+    streamingPreviewText,
+    visibleMessages.length,
+  ]);
+
+  useEffect(() => {
+    shouldStickToBottomRef.current = true;
+  }, [chat.id]);
+
+  const messageListContentStyle = useMemo(
+    () => [styles.messageListContent, { paddingBottom: bottomInset }],
+    [bottomInset]
+  );
+  const keyExtractor = useCallback((msg: ChatTranscriptMessage) => msg.id, []);
+  const renderMessageItem = useCallback<ListRenderItem<ChatTranscriptMessage>>(
+    ({ item: msg }) => {
+      const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
+      return (
+        <View style={styles.chatMessageBlock}>
+          <ChatMessage message={msg} />
+          {showInlineChoices ? (
+            <View style={styles.inlineChoiceOptions}>
+              {inlineChoiceSet.options.map((option, index) => (
+                <Pressable
+                  key={`${msg.id}-${index}-${option.label}`}
+                  style={({ pressed }) => [
+                    styles.inlineChoiceOptionButton,
+                    pressed && styles.inlineChoiceOptionButtonPressed,
+                  ]}
+                  onPress={() => onInlineOptionSelect(option.label)}
+                >
+                  <View style={styles.inlineChoiceOptionRow}>
+                    <Text style={styles.inlineChoiceOptionIndex}>{`${String(index + 1)}.`}</Text>
+                    <Text style={styles.inlineChoiceOptionLabel}>{option.label}</Text>
+                  </View>
+                  {option.description.trim() ? (
+                    <Text style={styles.inlineChoiceOptionDescription}>
+                      {option.description}
+                    </Text>
+                  ) : null}
+                </Pressable>
+              ))}
+              <Text style={styles.inlineChoiceHint}>
+                Tap an option to fill the reply box.
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      );
+    },
+    [inlineChoiceSet, onInlineOptionSelect]
+  );
 
   return (
-    <ScrollView
-      ref={scrollRef}
-      style={styles.messageList}
-      contentContainerStyle={styles.messageListContent}
-      showsVerticalScrollIndicator={false}
-      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-      keyboardShouldPersistTaps="handled"
-      onScrollBeginDrag={Keyboard.dismiss}
-      onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
-    >
-      {activePlan ? <PlanCard plan={activePlan} /> : null}
-      {visibleMessages.map((msg, messageIndex) => {
-        const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
-        return (
-          <View key={`${msg.id}-${String(messageIndex)}`} style={styles.chatMessageBlock}>
-            <ChatMessage message={msg} />
-            {showInlineChoices ? (
-              <View style={styles.inlineChoiceOptions}>
-                {inlineChoiceSet.options.map((option, index) => (
-                  <Pressable
-                    key={`${msg.id}-${index}-${option.label}`}
-                    style={({ pressed }) => [
-                      styles.inlineChoiceOptionButton,
-                      pressed && styles.inlineChoiceOptionButtonPressed,
-                    ]}
-                    onPress={() => onInlineOptionSelect(option.label)}
-                  >
-                    <View style={styles.inlineChoiceOptionRow}>
-                      <Text style={styles.inlineChoiceOptionIndex}>{`${String(index + 1)}.`}</Text>
-                      <Text style={styles.inlineChoiceOptionLabel}>{option.label}</Text>
-                    </View>
-                    {option.description.trim() ? (
-                      <Text style={styles.inlineChoiceOptionDescription}>
-                        {option.description}
-                      </Text>
-                    ) : null}
-                  </Pressable>
-                ))}
-                <Text style={styles.inlineChoiceHint}>
-                  Tap an option to fill the reply box.
-                </Text>
+    <View style={styles.messageListShell}>
+      <FlatList
+        key={chat.id}
+        ref={scrollRef}
+        data={visibleMessages}
+        keyExtractor={keyExtractor}
+        renderItem={renderMessageItem}
+        style={styles.messageList}
+        contentContainerStyle={messageListContentStyle}
+        showsVerticalScrollIndicator={false}
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        keyboardShouldPersistTaps="handled"
+        onScrollBeginDrag={Keyboard.dismiss}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        onContentSizeChange={() => {
+          if (shouldStickToBottomRef.current) {
+            onAutoScroll(false);
+          }
+        }}
+        initialNumToRender={16}
+        maxToRenderPerBatch={12}
+        windowSize={11}
+        removeClippedSubviews={Platform.OS === 'android'}
+        ListHeaderComponent={activePlan ? <PlanCard plan={activePlan} /> : null}
+        ListFooterComponent={
+          <>
+            {liveTimelineText ? (
+              <View style={styles.chatMessageBlock}>
+                <ChatMessage
+                  message={{
+                    id: `live-timeline-${chat.id}`,
+                    role: 'system',
+                    content: liveTimelineText,
+                    createdAt: new Date().toISOString(),
+                  }}
+                />
               </View>
             ) : null}
-          </View>
-        );
-      })}
-      {liveTimelineText ? (
-        <View style={styles.chatMessageBlock}>
-          <ChatMessage
-            message={{
-              id: `live-timeline-${chat.id}`,
-              role: 'system',
-              content: liveTimelineText,
-              createdAt: new Date().toISOString(),
-            }}
-          />
-        </View>
-      ) : null}
-      {streamingPreviewText ? (
-        <Text style={styles.streamingText} numberOfLines={4}>
-          {streamingPreviewText}
-        </Text>
-      ) : null}
-      {shouldShowToolPanel ? (
-        <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
-          <ScrollView
-            nestedScrollEnabled
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.toolPanelContent}
-          >
-            {visibleToolBlocks.map((cmd) => {
-              const tool = toToolBlockState(cmd);
-              if (!tool) {
-                return null;
-              }
-              return (
-                <ToolBlock
-                  key={cmd.id}
-                  command={tool.command}
-                  status={tool.status}
-                />
-              );
-            })}
-          </ScrollView>
-        </View>
-      ) : null}
-      {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? <TypingIndicator /> : null}
-    </ScrollView>
+            {streamingPreviewText ? (
+              <Text style={styles.streamingText} numberOfLines={4}>
+                {streamingPreviewText}
+              </Text>
+            ) : null}
+            {shouldShowToolPanel ? (
+              <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
+                <ScrollView
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={styles.toolPanelContent}
+                >
+                  {visibleToolBlocks.map((cmd) => {
+                    const tool = toToolBlockState(cmd);
+                    if (!tool) {
+                      return null;
+                    }
+                    return (
+                      <ToolBlock
+                        key={cmd.id}
+                        command={tool.command}
+                        status={tool.status}
+                      />
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            ) : null}
+            {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? (
+              <TypingIndicator />
+            ) : null}
+          </>
+        }
+      />
+    </View>
   );
 }
 
@@ -5450,10 +5895,10 @@ function findInlineChoiceSet(messages: ChatTranscriptMessage[]): {
       continue;
     }
 
-    const cueSource = `${parsed.question}\n${message.content}`.toLowerCase();
+    const cueSource = parsed.question.trim();
     const hasCue =
       cueSource.includes('?') ||
-      INLINE_CHOICE_CUE_PHRASES.some((phrase) => cueSource.includes(phrase));
+      INLINE_CHOICE_CUE_PATTERNS.some((pattern) => pattern.test(cueSource));
     if (!hasCue) {
       continue;
     }
@@ -6135,6 +6580,110 @@ function isCodexRunHeartbeatEvent(codexEventType: string): boolean {
   return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType);
 }
 
+function normalizeExternalStatusHint(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalized.length > 0 ? normalized : null;
+}
+
+function extractNotificationThreadId(
+  params: Record<string, unknown> | null,
+  msgArg?: Record<string, unknown> | null
+): string | null {
+  if (!params && !msgArg) {
+    return null;
+  }
+
+  const msg = msgArg ?? toRecord(params?.msg);
+  const threadRecord =
+    toRecord(params?.thread) ??
+    toRecord(params?.threadState) ??
+    toRecord(params?.thread_state) ??
+    toRecord(msg?.thread);
+  const turnRecord = toRecord(params?.turn) ?? toRecord(msg?.turn);
+  const sourceRecord = toRecord(params?.source) ?? toRecord(msg?.source);
+  const subagentThreadSpawnRecord = toRecord(
+    toRecord(sourceRecord?.subagent)?.thread_spawn
+  );
+
+  return (
+    readString(msg?.thread_id) ??
+    readString(msg?.threadId) ??
+    readString(msg?.conversation_id) ??
+    readString(msg?.conversationId) ??
+    readString(params?.thread_id) ??
+    readString(params?.threadId) ??
+    readString(params?.conversation_id) ??
+    readString(params?.conversationId) ??
+    readString(threadRecord?.id) ??
+    readString(threadRecord?.thread_id) ??
+    readString(threadRecord?.threadId) ??
+    readString(threadRecord?.conversation_id) ??
+    readString(threadRecord?.conversationId) ??
+    readString(turnRecord?.thread_id) ??
+    readString(turnRecord?.threadId) ??
+    readString(sourceRecord?.thread_id) ??
+    readString(sourceRecord?.threadId) ??
+    readString(sourceRecord?.conversation_id) ??
+    readString(sourceRecord?.conversationId) ??
+    readString(sourceRecord?.parent_thread_id) ??
+    readString(sourceRecord?.parentThreadId) ??
+    readString(subagentThreadSpawnRecord?.parent_thread_id) ??
+    null
+  );
+}
+
+function extractExternalStatusHint(
+  params: Record<string, unknown> | null
+): string | null {
+  if (!params) {
+    return null;
+  }
+
+  const directCandidates: unknown[] = [
+    params.status,
+    params.threadStatus,
+    params.thread_status,
+    params.state,
+    params.phase,
+  ];
+  for (const candidate of directCandidates) {
+    const direct = normalizeExternalStatusHint(readString(candidate));
+    if (direct) {
+      return direct;
+    }
+
+    const candidateRecord = toRecord(candidate);
+    const typed = normalizeExternalStatusHint(
+      readString(candidateRecord?.type) ??
+        readString(candidateRecord?.status) ??
+        readString(candidateRecord?.state) ??
+        readString(candidateRecord?.phase)
+    );
+    if (typed) {
+      return typed;
+    }
+  }
+
+  const threadRecord =
+    toRecord(params.thread) ?? toRecord(params.threadState) ?? toRecord(params.thread_state);
+  if (!threadRecord) {
+    return null;
+  }
+
+  const nestedThreadStatus = normalizeExternalStatusHint(
+    readString(threadRecord.status) ??
+      readString(toRecord(threadRecord.status)?.type) ??
+      readString(threadRecord.state) ??
+      readString(threadRecord.phase) ??
+      readString(toRecord(threadRecord.lifecycle)?.status)
+  );
+  return nestedThreadStatus;
+}
+
 function isChatSummaryLikelyRunning(chat: ChatSummary): boolean {
   return chat.status === 'running';
 }
@@ -6160,6 +6709,70 @@ function isChatLikelyRunning(chat: Chat): boolean {
   }
 
   return Date.now() - updatedAtMs < LIKELY_RUNNING_RECENT_UPDATE_MS;
+}
+
+function hasRecentUnansweredUserTurn(chat: Chat): boolean {
+  let lastUserIndex = -1;
+  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
+    if (chat.messages[index].role === 'user') {
+      lastUserIndex = index;
+      break;
+    }
+  }
+
+  if (lastUserIndex < 0) {
+    return false;
+  }
+
+  for (let index = lastUserIndex + 1; index < chat.messages.length; index += 1) {
+    if (chat.messages[index].role === 'assistant') {
+      return false;
+    }
+  }
+
+  const lastUser = chat.messages[lastUserIndex];
+  const userCreatedAtMs = Date.parse(lastUser.createdAt);
+  if (!Number.isFinite(userCreatedAtMs)) {
+    return false;
+  }
+
+  return Date.now() - userCreatedAtMs < UNANSWERED_USER_RUNNING_TTL_MS;
+}
+
+function didAssistantMessageProgress(previous: Chat | null, next: Chat): boolean {
+  if (!previous || previous.id !== next.id) {
+    return false;
+  }
+
+  const previousLatestAssistant = latestAssistantMessage(previous.messages);
+  const nextLatestAssistant = latestAssistantMessage(next.messages);
+
+  if (!nextLatestAssistant) {
+    return false;
+  }
+
+  if (!previousLatestAssistant) {
+    return nextLatestAssistant.content.trim().length > 0;
+  }
+
+  if (nextLatestAssistant.id === previousLatestAssistant.id) {
+    return nextLatestAssistant.content.length > previousLatestAssistant.content.length;
+  }
+
+  return (
+    next.messages.length > previous.messages.length &&
+    nextLatestAssistant.content.trim().length > 0
+  );
+}
+
+function latestAssistantMessage(messages: ChatTranscriptMessage[]): ChatTranscriptMessage | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === 'assistant') {
+      return message;
+    }
+  }
+  return null;
 }
 
 function extractFirstBoldSnippet(
@@ -6247,6 +6860,15 @@ const styles = StyleSheet.create({
   },
   composerContainer: {
     backgroundColor: colors.bgMain,
+  },
+  composerContainerResting: {
+    marginBottom: spacing.xs,
+  },
+  activityOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 3,
   },
   sessionMetaRow: {
     flexDirection: 'row',
@@ -6778,10 +7400,15 @@ const styles = StyleSheet.create({
   },
 
   // Chat
+  messageListShell: {
+    flex: 1,
+  },
   messageList: {
     flex: 1,
   },
   messageListContent: {
+    flexGrow: 1,
+    justifyContent: 'flex-end',
     padding: spacing.lg,
     paddingTop: spacing.lg,
     paddingBottom: spacing.xl,

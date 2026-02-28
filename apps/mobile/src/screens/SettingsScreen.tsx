@@ -6,12 +6,12 @@ import {
   ActivityIndicator,
   Modal,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import type { ApprovalMode, ModelOption, ReasoningEffort } from '../api/types';
@@ -30,6 +30,8 @@ interface SettingsScreenProps {
     effort: ReasoningEffort | null
   ) => void;
   onApprovalModeChange?: (mode: ApprovalMode) => void;
+  onEditBridgeUrl?: () => void;
+  onResetOnboarding?: () => void;
   onOpenDrawer: () => void;
   onOpenPrivacy: () => void;
   onOpenTerms: () => void;
@@ -44,6 +46,8 @@ export function SettingsScreen({
   approvalMode,
   onDefaultModelSettingsChange,
   onApprovalModeChange,
+  onEditBridgeUrl,
+  onResetOnboarding,
   onOpenDrawer,
   onOpenPrivacy,
   onOpenTerms,
@@ -301,6 +305,26 @@ export function SettingsScreen({
             <Text selectable style={styles.valueText}>
               {bridgeUrl}
             </Text>
+            <Pressable
+              onPress={onEditBridgeUrl}
+              style={({ pressed }) => [
+                styles.bridgeEditBtn,
+                pressed && styles.bridgeEditBtnPressed,
+              ]}
+            >
+              <Ionicons name="swap-horizontal-outline" size={15} color={colors.textPrimary} />
+              <Text style={styles.bridgeEditBtnText}>Change bridge URL</Text>
+            </Pressable>
+            <Pressable
+              onPress={onResetOnboarding}
+              style={({ pressed }) => [
+                styles.bridgeResetBtn,
+                pressed && styles.bridgeResetBtnPressed,
+              ]}
+            >
+              <Ionicons name="refresh-circle-outline" size={15} color={colors.error} />
+              <Text style={styles.bridgeResetBtnText}>Reset onboarding</Text>
+            </Pressable>
           </BlurView>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Health</Text>
@@ -568,6 +592,46 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     paddingVertical: spacing.md,
     fontSize: 14,
+  },
+  bridgeEditBtn: {
+    marginBottom: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+  },
+  bridgeEditBtnPressed: {
+    opacity: 0.82,
+  },
+  bridgeEditBtnText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  bridgeResetBtn: {
+    marginBottom: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.error,
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+  },
+  bridgeResetBtnPressed: {
+    opacity: 0.82,
+  },
+  bridgeResetBtnText: {
+    ...typography.caption,
+    color: colors.error,
+    fontWeight: '700',
   },
   row: {
     flexDirection: 'row',
