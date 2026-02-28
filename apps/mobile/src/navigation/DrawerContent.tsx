@@ -6,7 +6,6 @@ import {
   Modal,
   Pressable,
   RefreshControl,
-  SafeAreaView,
   SectionList,
   ScrollView,
   type StyleProp,
@@ -15,6 +14,7 @@ import {
   type ViewStyle,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';

@@ -1,13 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Platform, StyleSheet, Text, View, Image } from 'react-native';
+import { memo } from 'react';
+import { Image, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
 import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
 
-import type { ChatMessage } from '../api/types';
+import type { ChatMessage as ApiChatMessage } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface ChatMessageProps {
-  message: ChatMessage;
+  message: ApiChatMessage;
 }
 
 interface TimelineEntry {
@@ -15,7 +16,7 @@ interface TimelineEntry {
   details: string[];
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+function ChatMessageComponent({ message }: ChatMessageProps) {
   const isUser = message.role === 'user';
 
   if (isUser) {
@@ -97,6 +98,28 @@ export function ChatMessage({ message }: ChatMessageProps) {
   );
 }
 
+function areChatMessagePropsEqual(
+  prevProps: ChatMessageProps,
+  nextProps: ChatMessageProps
+): boolean {
+  const previous = prevProps.message;
+  const next = nextProps.message;
+
+  if (previous === next) {
+    return true;
+  }
+
+  return (
+    previous.id === next.id &&
+    previous.role === next.role &&
+    previous.content === next.content &&
+    previous.createdAt === next.createdAt
+  );
+}
+
+export const ChatMessage = memo(ChatMessageComponent, areChatMessagePropsEqual);
+ChatMessage.displayName = 'ChatMessage';
+
 const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
 const markdownStyles = StyleSheet.create({
@@ -164,6 +187,35 @@ const markdownStyles = StyleSheet.create({
 });
 
 const markdownRules: RenderRules = {
+  link: (node, children, _parent, styles, onLinkPress) => {
+    const href = readMarkdownAttr(node.attributes.href);
+    if (!href) {
+      return (
+        <Text key={node.key} style={styles.link}>
+          {children}
+        </Text>
+      );
+    }
+
+    const localFileReference = toLocalFileReferenceLabel(href);
+    if (localFileReference) {
+      return (
+        <Text key={node.key} style={styles.code_inline}>
+          {localFileReference}
+        </Text>
+      );
+    }
+
+    return (
+      <Text
+        key={node.key}
+        style={styles.link}
+        onPress={() => openMarkdownLink(href, onLinkPress)}
+      >
+        {children}
+      </Text>
+    );
+  },
   image: (
     node,
     _children,
@@ -282,6 +334,58 @@ const styles = StyleSheet.create({
 
 function readMarkdownAttr(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function openMarkdownLink(
+  href: string,
+  onLinkPress?: (url: string) => boolean
+): void {
+  const shouldOpen = onLinkPress ? onLinkPress(href) !== false : true;
+  if (!shouldOpen) {
+    return;
+  }
+  void Linking.openURL(href).catch(() => {});
+}
+
+function toLocalFileReferenceLabel(href: string): string | null {
+  let normalizedHref = href.trim();
+  if (!normalizedHref) {
+    return null;
+  }
+
+  try {
+    normalizedHref = decodeURIComponent(normalizedHref);
+  } catch {
+    // Keep original href when decode fails.
+  }
+
+  if (normalizedHref.startsWith('file://')) {
+    normalizedHref = normalizedHref.replace(/^file:\/\//, '');
+  }
+
+  const isPosixPath = normalizedHref.startsWith('/');
+  const isWindowsPath = /^[A-Za-z]:[\\/]/.test(normalizedHref);
+  if (!isPosixPath && !isWindowsPath) {
+    return null;
+  }
+
+  const anchorLineMatch = normalizedHref.match(/#L(\d+)(?:C\d+)?$/i);
+  const suffixLineMatch = normalizedHref.match(/:(\d+)(?::\d+)?$/);
+
+  const line = anchorLineMatch?.[1] ?? suffixLineMatch?.[1] ?? null;
+  let pathOnly = normalizedHref;
+  if (anchorLineMatch) {
+    pathOnly = normalizedHref.slice(0, normalizedHref.length - anchorLineMatch[0].length);
+  } else if (suffixLineMatch) {
+    pathOnly = normalizedHref.slice(0, normalizedHref.length - suffixLineMatch[0].length);
+  }
+
+  const basename = pathOnly.split(/[\\/]/).filter(Boolean).pop();
+  if (!basename) {
+    return line ? `line ${line}` : null;
+  }
+
+  return line ? `${basename}:${line}` : basename;
 }
 
 function parseTimelineEntries(content: string): TimelineEntry[] | null {

@@ -25,6 +25,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type ListRenderItem,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   useWindowDimensions,
@@ -5507,50 +5508,60 @@ function ChatView({
     shouldStickToBottomRef.current = true;
   }, [chat.id]);
 
+  const messageListContentStyle = useMemo(
+    () => [styles.messageListContent, { paddingBottom: bottomInset }],
+    [bottomInset]
+  );
+  const keyExtractor = useCallback((msg: ChatTranscriptMessage) => msg.id, []);
+  const renderMessageItem = useCallback<ListRenderItem<ChatTranscriptMessage>>(
+    ({ item: msg }) => {
+      const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
+      return (
+        <View style={styles.chatMessageBlock}>
+          <ChatMessage message={msg} />
+          {showInlineChoices ? (
+            <View style={styles.inlineChoiceOptions}>
+              {inlineChoiceSet.options.map((option, index) => (
+                <Pressable
+                  key={`${msg.id}-${index}-${option.label}`}
+                  style={({ pressed }) => [
+                    styles.inlineChoiceOptionButton,
+                    pressed && styles.inlineChoiceOptionButtonPressed,
+                  ]}
+                  onPress={() => onInlineOptionSelect(option.label)}
+                >
+                  <View style={styles.inlineChoiceOptionRow}>
+                    <Text style={styles.inlineChoiceOptionIndex}>{`${String(index + 1)}.`}</Text>
+                    <Text style={styles.inlineChoiceOptionLabel}>{option.label}</Text>
+                  </View>
+                  {option.description.trim() ? (
+                    <Text style={styles.inlineChoiceOptionDescription}>
+                      {option.description}
+                    </Text>
+                  ) : null}
+                </Pressable>
+              ))}
+              <Text style={styles.inlineChoiceHint}>
+                Tap an option to fill the reply box.
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      );
+    },
+    [inlineChoiceSet, onInlineOptionSelect]
+  );
+
   return (
     <View style={styles.messageListShell}>
       <FlatList
         key={chat.id}
         ref={scrollRef}
         data={visibleMessages}
-        keyExtractor={(msg) => msg.id}
-        renderItem={({ item: msg }) => {
-          const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
-          return (
-            <View style={styles.chatMessageBlock}>
-              <ChatMessage message={msg} />
-              {showInlineChoices ? (
-                <View style={styles.inlineChoiceOptions}>
-                  {inlineChoiceSet.options.map((option, index) => (
-                    <Pressable
-                      key={`${msg.id}-${index}-${option.label}`}
-                      style={({ pressed }) => [
-                        styles.inlineChoiceOptionButton,
-                        pressed && styles.inlineChoiceOptionButtonPressed,
-                      ]}
-                      onPress={() => onInlineOptionSelect(option.label)}
-                    >
-                      <View style={styles.inlineChoiceOptionRow}>
-                        <Text style={styles.inlineChoiceOptionIndex}>{`${String(index + 1)}.`}</Text>
-                        <Text style={styles.inlineChoiceOptionLabel}>{option.label}</Text>
-                      </View>
-                      {option.description.trim() ? (
-                        <Text style={styles.inlineChoiceOptionDescription}>
-                          {option.description}
-                        </Text>
-                      ) : null}
-                    </Pressable>
-                  ))}
-                  <Text style={styles.inlineChoiceHint}>
-                    Tap an option to fill the reply box.
-                  </Text>
-                </View>
-              ) : null}
-            </View>
-          );
-        }}
+        keyExtractor={keyExtractor}
+        renderItem={renderMessageItem}
         style={styles.messageList}
-        contentContainerStyle={[styles.messageListContent, { paddingBottom: bottomInset }]}
+        contentContainerStyle={messageListContentStyle}
         showsVerticalScrollIndicator={false}
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         keyboardShouldPersistTaps="handled"
