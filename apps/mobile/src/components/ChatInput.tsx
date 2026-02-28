@@ -10,6 +10,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type TextLayoutEventData,
   type TextInputKeyPressEventData,
   View,
 } from 'react-native';
@@ -54,9 +55,21 @@ export function ChatInput({
   safeAreaBottomInset = 0,
   keyboardVisible = false,
 }: ChatInputProps) {
+  const INPUT_TEXT_LINE_HEIGHT = 20;
+  const INPUT_TEXT_VERTICAL_PADDING = Platform.OS === 'ios' ? 2 : 0;
   const INPUT_TEXT_MIN_HEIGHT = 20;
   const INPUT_TEXT_MAX_HEIGHT = 96;
   const [inputHeight, setInputHeight] = useState(INPUT_TEXT_MIN_HEIGHT);
+  const [inputWidth, setInputWidth] = useState(0);
+  const updateInputHeight = (height: number) => {
+    const nextHeight = Math.max(
+      INPUT_TEXT_MIN_HEIGHT,
+      Math.min(INPUT_TEXT_MAX_HEIGHT, Math.ceil(height))
+    );
+    setInputHeight((previousHeight) =>
+      previousHeight === nextHeight ? previousHeight : nextHeight
+    );
+  };
 
   useEffect(() => {
     if (!value && inputHeight !== INPUT_TEXT_MIN_HEIGHT) {
@@ -68,6 +81,7 @@ export function ChatInput({
   const canStop = Boolean(showStopButton && onStop);
   const showVoiceButton = Boolean(onVoiceToggle);
   const showSendButton = canSend || isLoading;
+  const inputScrollEnabled = inputHeight >= INPUT_TEXT_MAX_HEIGHT;
   const shouldShowActionButton =
     canStop || showSendButton || showVoiceButton || voiceState !== 'idle';
   const baseBottomPadding =
@@ -136,22 +150,56 @@ export function ChatInput({
           </Pressable>
 
           <View style={styles.inputWrapper}>
+            <Text
+              pointerEvents="none"
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+              style={[
+                styles.inputMeasure,
+                {
+                  width: inputWidth,
+                  lineHeight: INPUT_TEXT_LINE_HEIGHT,
+                  paddingVertical: INPUT_TEXT_VERTICAL_PADDING,
+                },
+              ]}
+              onTextLayout={(event: NativeSyntheticEvent<TextLayoutEventData>) => {
+                if (inputWidth <= 0) {
+                  return;
+                }
+                const lineCount = Math.max(1, event.nativeEvent.lines.length);
+                const measuredHeight =
+                  lineCount * INPUT_TEXT_LINE_HEIGHT + INPUT_TEXT_VERTICAL_PADDING * 2;
+                updateInputHeight(measuredHeight);
+              }}
+            >
+              {value.length > 0 ? `${value}\u200b` : ' '}
+            </Text>
             <TextInput
               style={[styles.input, { height: inputHeight }]}
               value={value}
               onChangeText={onChangeText}
+              onLayout={(event) => {
+                const nextWidth = Math.floor(event.nativeEvent.layout.width);
+                setInputWidth((previousWidth) =>
+                  previousWidth === nextWidth ? previousWidth : nextWidth
+                );
+              }}
+              onChange={(event: NativeSyntheticEvent<unknown>) => {
+                const nativeEvent = event.nativeEvent as {
+                  contentSize?: { height?: number };
+                };
+                const contentHeight = nativeEvent.contentSize?.height;
+                if (typeof contentHeight === 'number' && Number.isFinite(contentHeight)) {
+                  updateInputHeight(contentHeight);
+                }
+              }}
               onFocus={onFocus}
               placeholder={placeholder}
               placeholderTextColor={colors.textMuted}
               multiline
+              scrollEnabled={inputScrollEnabled}
               onContentSizeChange={(event) => {
-                const nextHeight = Math.max(
-                  INPUT_TEXT_MIN_HEIGHT,
-                  Math.min(INPUT_TEXT_MAX_HEIGHT, Math.ceil(event.nativeEvent.contentSize.height))
-                );
-                if (nextHeight !== inputHeight) {
-                  setInputHeight(nextHeight);
-                }
+                updateInputHeight(event.nativeEvent.contentSize.height);
               }}
               onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
                 const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
@@ -303,7 +351,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     paddingVertical: Platform.OS === 'ios' ? 2 : 0,
-    textAlignVertical: 'center',
+    textAlignVertical: 'top',
+  },
+  inputMeasure: {
+    position: 'absolute',
+    opacity: 0,
+    color: colors.textPrimary,
+    fontSize: 14,
+    left: spacing.md,
+    top: spacing.xs,
   },
   actionButtons: {
     flexDirection: 'row',
