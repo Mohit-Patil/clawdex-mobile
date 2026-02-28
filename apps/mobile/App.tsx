@@ -39,11 +39,12 @@ const SWIPE_CLOSE_DISTANCE = 56;
 const SWIPE_OPEN_VELOCITY = 0.4;
 const SWIPE_CLOSE_VELOCITY = -0.4;
 const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
-const APP_SETTINGS_VERSION = 2;
+const APP_SETTINGS_VERSION = 3;
 
 export default function App() {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [bridgeUrl, setBridgeUrl] = useState<string | null>(null);
+  const [bridgeToken, setBridgeToken] = useState<string | null>(env.hostBridgeToken);
   const [onboardingMode, setOnboardingMode] = useState<OnboardingMode>('initial');
   const [onboardingReturnScreen, setOnboardingReturnScreen] =
     useState<AppScreen>('Settings');
@@ -51,11 +52,11 @@ export default function App() {
     () =>
       bridgeUrl
         ? new HostBridgeWsClient(bridgeUrl, {
-            authToken: env.hostBridgeToken,
+            authToken: bridgeToken ?? env.hostBridgeToken,
             allowQueryTokenAuth: env.allowWsQueryTokenAuth
           })
         : null,
-    [bridgeUrl]
+    [bridgeToken, bridgeUrl]
   );
   const api = useMemo(
     () =>
@@ -95,6 +96,7 @@ export default function App() {
   const saveAppSettings = useCallback(
     async (
       nextBridgeUrl: string | null,
+      nextBridgeToken: string | null,
       nextModelId: string | null,
       nextEffort: ReasoningEffort | null,
       nextApprovalMode: ApprovalMode
@@ -107,6 +109,7 @@ export default function App() {
       const payload = JSON.stringify({
         version: APP_SETTINGS_VERSION,
         bridgeUrl: nextBridgeUrl,
+        bridgeToken: nextBridgeToken,
         defaultModelId: nextModelId,
         defaultReasoningEffort: nextEffort,
         approvalMode: nextApprovalMode,
@@ -136,6 +139,7 @@ export default function App() {
         if (!cancelled) {
           resetToDefaults();
           setBridgeUrl(null);
+          setBridgeToken(env.hostBridgeToken);
           setSettingsLoaded(true);
         }
         return;
@@ -149,6 +153,7 @@ export default function App() {
         const parsed = parseAppSettings(raw);
         const resolvedBridgeUrl = parsed.bridgeUrl ?? null;
         setBridgeUrl(resolvedBridgeUrl);
+        setBridgeToken(parsed.bridgeToken ?? env.hostBridgeToken);
         setDefaultModelId(parsed.defaultModelId);
         setDefaultReasoningEffort(parsed.defaultReasoningEffort);
         setApprovalMode(parsed.approvalMode);
@@ -156,6 +161,7 @@ export default function App() {
         if (!cancelled) {
           resetToDefaults();
           setBridgeUrl(null);
+          setBridgeToken(env.hostBridgeToken);
         }
       } finally {
         if (!cancelled) {
@@ -316,34 +322,53 @@ export default function App() {
       const normalizedEffort = normalizeReasoningEffort(effort);
       setDefaultModelId(normalizedModelId);
       setDefaultReasoningEffort(normalizedEffort);
-      void saveAppSettings(bridgeUrl, normalizedModelId, normalizedEffort, approvalMode);
+      void saveAppSettings(
+        bridgeUrl,
+        bridgeToken,
+        normalizedModelId,
+        normalizedEffort,
+        approvalMode
+      );
     },
-    [approvalMode, bridgeUrl, saveAppSettings]
+    [approvalMode, bridgeToken, bridgeUrl, saveAppSettings]
   );
 
   const handleApprovalModeChange = useCallback(
     (nextMode: ApprovalMode) => {
       const normalizedMode = normalizeApprovalMode(nextMode);
       setApprovalMode(normalizedMode);
-      void saveAppSettings(bridgeUrl, defaultModelId, defaultReasoningEffort, normalizedMode);
+      void saveAppSettings(
+        bridgeUrl,
+        bridgeToken,
+        defaultModelId,
+        defaultReasoningEffort,
+        normalizedMode
+      );
     },
-    [bridgeUrl, defaultModelId, defaultReasoningEffort, saveAppSettings]
+    [bridgeToken, bridgeUrl, defaultModelId, defaultReasoningEffort, saveAppSettings]
   );
 
   const handleBridgeUrlSaved = useCallback(
-    (nextBridgeUrl: string) => {
+    (nextBridgeUrl: string, nextBridgeToken: string | null) => {
       const normalized = normalizeBridgeUrlInput(nextBridgeUrl);
       if (!normalized) {
         return;
       }
 
       setBridgeUrl(normalized);
+      setBridgeToken(normalizeBridgeToken(nextBridgeToken));
       setSelectedChatId(null);
       setActiveChat(null);
       setGitChat(null);
       setPendingMainChatId(null);
       setPendingMainChatSnapshot(null);
-      void saveAppSettings(normalized, defaultModelId, defaultReasoningEffort, approvalMode);
+      void saveAppSettings(
+        normalized,
+        normalizeBridgeToken(nextBridgeToken),
+        defaultModelId,
+        defaultReasoningEffort,
+        approvalMode
+      );
       setCurrentScreen(onboardingMode === 'edit' ? onboardingReturnScreen : 'Main');
       setOnboardingMode('edit');
       closeDrawer();
@@ -368,6 +393,7 @@ export default function App() {
 
   const handleResetOnboarding = useCallback(() => {
     setBridgeUrl(null);
+    setBridgeToken(null);
     setSelectedChatId(null);
     setActiveChat(null);
     setGitChat(null);
@@ -376,7 +402,7 @@ export default function App() {
     setOnboardingMode('initial');
     setOnboardingReturnScreen('Main');
     setCurrentScreen('Onboarding');
-    void saveAppSettings(null, defaultModelId, defaultReasoningEffort, approvalMode);
+    void saveAppSettings(null, null, defaultModelId, defaultReasoningEffort, approvalMode);
     closeDrawer();
   }, [
     approvalMode,
@@ -443,6 +469,7 @@ export default function App() {
 
   if (!bridgeUrl || !api || !ws || currentScreen === 'Onboarding') {
     const initialUrl = bridgeUrl ?? env.legacyHostBridgeUrl ?? '';
+    const initialToken = bridgeToken ?? env.hostBridgeToken ?? '';
     const mode: OnboardingMode = bridgeUrl ? onboardingMode : 'initial';
     const canCancel = mode === 'edit' && Boolean(bridgeUrl);
     return (
@@ -450,6 +477,7 @@ export default function App() {
         <OnboardingScreen
           mode={mode}
           initialBridgeUrl={initialUrl}
+          initialBridgeToken={initialToken}
           allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
           onSave={handleBridgeUrlSaved}
           onCancel={canCancel ? handleCancelOnboarding : undefined}
@@ -607,6 +635,7 @@ function getAppSettingsPath(): string | null {
 
 function parseAppSettings(raw: string): {
   bridgeUrl: string | null;
+  bridgeToken: string | null;
   defaultModelId: string | null;
   defaultReasoningEffort: ReasoningEffort | null;
   approvalMode: ApprovalMode;
@@ -614,6 +643,7 @@ function parseAppSettings(raw: string): {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return {
       bridgeUrl: null,
+      bridgeToken: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
@@ -622,14 +652,17 @@ function parseAppSettings(raw: string): {
 
   try {
     const parsed = JSON.parse(raw);
+    const parsedVersion = (parsed as { version?: unknown }).version;
     if (
       !parsed ||
       typeof parsed !== 'object' ||
-      (((parsed as { version?: unknown }).version !== 1) &&
-        (parsed as { version?: unknown }).version !== APP_SETTINGS_VERSION)
+      (parsedVersion !== 1 &&
+        parsedVersion !== 2 &&
+        parsedVersion !== APP_SETTINGS_VERSION)
     ) {
       return {
         bridgeUrl: null,
+        bridgeToken: null,
         defaultModelId: null,
         defaultReasoningEffort: null,
         approvalMode: 'normal',
@@ -638,6 +671,7 @@ function parseAppSettings(raw: string): {
 
     return {
       bridgeUrl: normalizeBridgeUrl((parsed as { bridgeUrl?: unknown }).bridgeUrl),
+      bridgeToken: normalizeBridgeToken((parsed as { bridgeToken?: unknown }).bridgeToken),
       defaultModelId: normalizeModelId(
         (parsed as { defaultModelId?: unknown }).defaultModelId
       ),
@@ -651,6 +685,7 @@ function parseAppSettings(raw: string): {
   } catch {
     return {
       bridgeUrl: null,
+      bridgeToken: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
@@ -664,6 +699,15 @@ function normalizeBridgeUrl(value: unknown): string | null {
   }
 
   return normalizeBridgeUrlInput(value);
+}
+
+function normalizeBridgeToken(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function normalizeModelId(value: unknown): string | null {

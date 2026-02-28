@@ -26,8 +26,9 @@ type OnboardingMode = 'initial' | 'edit';
 interface OnboardingScreenProps {
   mode?: OnboardingMode;
   initialBridgeUrl?: string | null;
+  initialBridgeToken?: string | null;
   allowInsecureRemoteBridge?: boolean;
-  onSave: (bridgeUrl: string) => void;
+  onSave: (bridgeUrl: string, bridgeToken: string | null) => void;
   onCancel?: () => void;
 }
 
@@ -44,6 +45,7 @@ const LOOPBACK_EXAMPLE_URL = 'http://127.0.0.1:8787';
 export function OnboardingScreen({
   mode = 'initial',
   initialBridgeUrl,
+  initialBridgeToken,
   allowInsecureRemoteBridge = false,
   onSave,
   onCancel,
@@ -52,6 +54,8 @@ export function OnboardingScreen({
     mode === 'initial' ? 'intro' : 'connect'
   );
   const [urlInput, setUrlInput] = useState(initialBridgeUrl ?? '');
+  const [tokenInput, setTokenInput] = useState(initialBridgeToken ?? '');
+  const [tokenHidden, setTokenHidden] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
   const [checkingConnection, setCheckingConnection] = useState(false);
   const [connectionCheck, setConnectionCheck] = useState<ConnectionCheck>({ kind: 'idle' });
@@ -63,6 +67,10 @@ export function OnboardingScreen({
   useEffect(() => {
     setUrlInput(initialBridgeUrl ?? '');
   }, [initialBridgeUrl]);
+
+  useEffect(() => {
+    setTokenInput(initialBridgeToken ?? '');
+  }, [initialBridgeToken]);
 
   const showIntroStep = mode === 'initial' && onboardingStep === 'intro';
 
@@ -97,12 +105,21 @@ export function OnboardingScreen({
     return normalized;
   }, [urlInput]);
 
-  const runConnectionCheck = useCallback(async (normalized: string): Promise<boolean> => {
+  const normalizeTokenInput = useCallback((value: string): string | null => {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }, []);
+
+  const runConnectionCheck = useCallback(
+    async (normalized: string, token: string | null): Promise<boolean> => {
     setCheckingConnection(true);
     setConnectionCheck({ kind: 'idle' });
 
     try {
-      const response = await fetch(toBridgeHealthUrl(normalized), { method: 'GET' });
+      const headers: Record<string, string> | undefined = token
+        ? { Authorization: `Bearer ${token}` }
+        : undefined;
+      const response = await fetch(toBridgeHealthUrl(normalized), { method: 'GET', headers });
       if (response.status !== 200) {
         throw new Error(`health returned ${response.status}`);
       }
@@ -122,7 +139,9 @@ export function OnboardingScreen({
     } finally {
       setCheckingConnection(false);
     }
-  }, []);
+    },
+    []
+  );
 
   const handleSave = useCallback(async () => {
     const normalized = validateInput();
@@ -130,13 +149,14 @@ export function OnboardingScreen({
       return;
     }
 
-    const ok = await runConnectionCheck(normalized);
+    const normalizedToken = normalizeTokenInput(tokenInput);
+    const ok = await runConnectionCheck(normalized, normalizedToken);
     if (!ok) {
       return;
     }
 
-    onSave(normalized);
-  }, [onSave, runConnectionCheck, validateInput]);
+    onSave(normalized, normalizedToken);
+  }, [normalizeTokenInput, onSave, runConnectionCheck, tokenInput, validateInput]);
 
   const handleConnectionCheck = useCallback(async () => {
     const normalized = validateInput();
@@ -145,8 +165,9 @@ export function OnboardingScreen({
       return;
     }
 
-    await runConnectionCheck(normalized);
-  }, [runConnectionCheck, validateInput]);
+    const normalizedToken = normalizeTokenInput(tokenInput);
+    await runConnectionCheck(normalized, normalizedToken);
+  }, [normalizeTokenInput, runConnectionCheck, tokenInput, validateInput]);
 
   const applyPreset = useCallback((value: string) => {
     setUrlInput(value);
@@ -282,8 +303,48 @@ export function OnboardingScreen({
                       void handleSave();
                     }}
                   />
+                  <View style={styles.tokenHeaderRow}>
+                    <Text style={styles.label}>Bridge Token</Text>
+                    <Text style={styles.optionalLabel}>Optional in no-auth mode</Text>
+                  </View>
+                  <View style={styles.tokenInputWrap}>
+                    <TextInput
+                      value={tokenInput}
+                      onChangeText={(value) => {
+                        setTokenInput(value);
+                        setConnectionCheck({ kind: 'idle' });
+                      }}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType="default"
+                      placeholder="Paste bridge token"
+                      placeholderTextColor={colors.textMuted}
+                      style={[styles.input, styles.tokenInput]}
+                      secureTextEntry={tokenHidden}
+                      returnKeyType="done"
+                      onSubmitEditing={() => {
+                        void handleSave();
+                      }}
+                    />
+                    <Pressable
+                      onPress={() => setTokenHidden((prev) => !prev)}
+                      style={({ pressed }) => [
+                        styles.tokenRevealBtn,
+                        pressed && styles.tokenRevealBtnPressed,
+                      ]}
+                    >
+                      <Ionicons
+                        name={tokenHidden ? 'eye-outline' : 'eye-off-outline'}
+                        size={16}
+                        color={colors.textSecondary}
+                      />
+                      <Text style={styles.tokenRevealBtnText}>
+                        {tokenHidden ? 'Show' : 'Hide'}
+                      </Text>
+                    </Pressable>
+                  </View>
                   <Text style={styles.helperText}>
-                    Supports `http`, `https`, `ws`, and `wss`. `/rpc` is added automatically.
+                    URL supports `http`, `https`, `ws`, and `wss`. `/rpc` is added automatically.
                   </Text>
 
                   <View style={styles.presetRow}>
@@ -577,6 +638,23 @@ const styles = StyleSheet.create({
     letterSpacing: 0.9,
     color: colors.textMuted,
   },
+  tokenHeaderRow: {
+    marginTop: spacing.xs,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  optionalLabel: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 11,
+  },
+  tokenInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
   input: {
     ...typography.body,
     color: colors.textPrimary,
@@ -586,6 +664,30 @@ const styles = StyleSheet.create({
     backgroundColor: colors.black,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
+  },
+  tokenInput: {
+    flex: 1,
+  },
+  tokenRevealBtn: {
+    minWidth: 74,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  tokenRevealBtnPressed: {
+    opacity: 0.8,
+  },
+  tokenRevealBtnText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
   },
   helperText: {
     ...typography.caption,
