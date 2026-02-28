@@ -13,6 +13,7 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
+        "NSCameraUsageDescription": "Clawdex uses the camera to scan bridge pairing QR codes.",
         "NSMicrophoneUsageDescription": "Clawdex uses the microphone for voice-to-text input.",
         "ITSAppUsesNonExemptEncryption": false
       },
@@ -24,6 +25,7 @@
         "backgroundColor": "#000000"
       },
       "permissions": [
+        "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.FOREGROUND_SERVICE",

@@ -1,8 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { CameraView, type BarcodeScanningResult, useCameraPermissions } from 'expo-camera';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -18,6 +20,7 @@ import {
   normalizeBridgeUrlInput,
   toBridgeHealthUrl,
 } from '../bridgeUrl';
+import { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
 import { colors, radius, spacing, typography } from '../theme';
 
@@ -28,6 +31,7 @@ interface OnboardingScreenProps {
   initialBridgeUrl?: string | null;
   initialBridgeToken?: string | null;
   allowInsecureRemoteBridge?: boolean;
+  allowQueryTokenAuth?: boolean;
   onSave: (bridgeUrl: string, bridgeToken: string | null) => void;
   onCancel?: () => void;
 }
@@ -37,16 +41,18 @@ type ConnectionCheck =
   | { kind: 'success'; message: string }
   | { kind: 'error'; message: string };
 type OnboardingStep = 'intro' | 'connect';
+type PairingPayload = { bridgeToken: string; bridgeUrl?: string };
+type BridgeModePreset = 'local' | 'tailscale';
 
 const LOCAL_EXAMPLE_URL = 'http://192.168.1.20:8787';
 const TAILSCALE_EXAMPLE_URL = 'http://100.101.102.103:8787';
-const LOOPBACK_EXAMPLE_URL = 'http://127.0.0.1:8787';
 
 export function OnboardingScreen({
   mode = 'initial',
   initialBridgeUrl,
   initialBridgeToken,
   allowInsecureRemoteBridge = false,
+  allowQueryTokenAuth = false,
   onSave,
   onCancel,
 }: OnboardingScreenProps) {
@@ -59,6 +65,10 @@ export function OnboardingScreen({
   const [formError, setFormError] = useState<string | null>(null);
   const [checkingConnection, setCheckingConnection] = useState(false);
   const [connectionCheck, setConnectionCheck] = useState<ConnectionCheck>({ kind: 'idle' });
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [scannerVisible, setScannerVisible] = useState(false);
+  const [scannerError, setScannerError] = useState<string | null>(null);
+  const [scannerLocked, setScannerLocked] = useState(false);
 
   useEffect(() => {
     setOnboardingStep(mode === 'initial' ? 'intro' : 'connect');
@@ -94,16 +104,22 @@ export function OnboardingScreen({
       ? 'Switch to another host bridge without rebuilding the app.'
       : 'Set the host bridge URL once, then use Codex from LAN, VPN, or Tailscale.';
 
-  const validateInput = useCallback((): string | null => {
+  const validateInput = useCallback((): { bridgeUrl: string; bridgeToken: string } | null => {
     const normalized = normalizeBridgeUrlInput(urlInput);
     if (!normalized) {
       setFormError('Enter a valid URL. Example: http://100.101.102.103:8787');
       return null;
     }
 
+    const normalizedToken = tokenInput.trim();
+    if (!normalizedToken) {
+      setFormError('Bridge token is required.');
+      return null;
+    }
+
     setFormError(null);
-    return normalized;
-  }, [urlInput]);
+    return { bridgeUrl: normalized, bridgeToken: normalizedToken };
+  }, [tokenInput, urlInput]);
 
   const normalizeTokenInput = useCallback((value: string): string | null => {
     const trimmed = value.trim();
@@ -115,6 +131,7 @@ export function OnboardingScreen({
     setCheckingConnection(true);
     setConnectionCheck({ kind: 'idle' });
 
+    let probeClient: HostBridgeWsClient | null = null;
     try {
       const headers: Record<string, string> | undefined = token
         ? { Authorization: `Bearer ${token}` }
@@ -124,50 +141,61 @@ export function OnboardingScreen({
         throw new Error(`health returned ${response.status}`);
       }
 
+      probeClient = new HostBridgeWsClient(normalized, {
+        authToken: token,
+        allowQueryTokenAuth,
+        requestTimeoutMs: 10_000,
+      });
+      const rpcHealth = await probeClient.request<{ status?: string }>('bridge/health/read');
+      if (rpcHealth?.status !== 'ok') {
+        throw new Error('authenticated RPC probe returned unexpected response');
+      }
+
       setConnectionCheck({
         kind: 'success',
-        message: `Connected (${response.status})`,
+        message: 'Connected. URL and token both verified.',
       });
       return true;
     } catch (error) {
       const message = (error as Error).message || 'request failed';
       setConnectionCheck({
         kind: 'error',
-        message: `Could not reach bridge: ${message}`,
+        message: `Bridge verification failed: ${message}`,
       });
       return false;
     } finally {
+      probeClient?.disconnect();
       setCheckingConnection(false);
     }
     },
-    []
+    [allowQueryTokenAuth]
   );
 
   const handleSave = useCallback(async () => {
-    const normalized = validateInput();
-    if (!normalized) {
+    const validated = validateInput();
+    if (!validated) {
       return;
     }
 
-    const normalizedToken = normalizeTokenInput(tokenInput);
-    const ok = await runConnectionCheck(normalized, normalizedToken);
+    const normalizedToken = normalizeTokenInput(validated.bridgeToken);
+    const ok = await runConnectionCheck(validated.bridgeUrl, normalizedToken);
     if (!ok) {
       return;
     }
 
-    onSave(normalized, normalizedToken);
-  }, [normalizeTokenInput, onSave, runConnectionCheck, tokenInput, validateInput]);
+    onSave(validated.bridgeUrl, normalizedToken);
+  }, [normalizeTokenInput, onSave, runConnectionCheck, validateInput]);
 
   const handleConnectionCheck = useCallback(async () => {
-    const normalized = validateInput();
-    if (!normalized) {
+    const validated = validateInput();
+    if (!validated) {
       setConnectionCheck({ kind: 'idle' });
       return;
     }
 
-    const normalizedToken = normalizeTokenInput(tokenInput);
-    await runConnectionCheck(normalized, normalizedToken);
-  }, [normalizeTokenInput, runConnectionCheck, tokenInput, validateInput]);
+    const normalizedToken = normalizeTokenInput(validated.bridgeToken);
+    await runConnectionCheck(validated.bridgeUrl, normalizedToken);
+  }, [normalizeTokenInput, runConnectionCheck, validateInput]);
 
   const applyPreset = useCallback((value: string) => {
     setUrlInput(value);
@@ -175,9 +203,69 @@ export function OnboardingScreen({
     setConnectionCheck({ kind: 'idle' });
   }, []);
 
+  const applyModePreset = useCallback((preset: BridgeModePreset) => {
+    applyPreset(preset === 'local' ? LOCAL_EXAMPLE_URL : TAILSCALE_EXAMPLE_URL);
+  }, [applyPreset]);
+
   const goToConnectStep = useCallback(() => {
     setOnboardingStep('connect');
   }, []);
+
+  const closeScanner = useCallback(() => {
+    setScannerVisible(false);
+    setScannerLocked(false);
+    setScannerError(null);
+  }, []);
+
+  const openScanner = useCallback(async () => {
+    setFormError(null);
+    setConnectionCheck({ kind: 'idle' });
+    setScannerError(null);
+
+    if (!cameraPermission?.granted) {
+      const result = await requestCameraPermission();
+      if (!result.granted) {
+        setFormError('Camera permission is required to scan bridge QR.');
+        return;
+      }
+    }
+
+    setScannerLocked(false);
+    setScannerVisible(true);
+  }, [cameraPermission?.granted, requestCameraPermission]);
+
+  const applyPairingPayload = useCallback((pairing: PairingPayload) => {
+    if (pairing.bridgeUrl) {
+      setUrlInput(pairing.bridgeUrl);
+    }
+    setTokenInput(pairing.bridgeToken);
+    setFormError(null);
+    setConnectionCheck({ kind: 'idle' });
+    setScannerError(null);
+    setScannerLocked(false);
+    setScannerVisible(false);
+  }, []);
+
+  const handleBarcodeScanned = useCallback(
+    (result: BarcodeScanningResult) => {
+      if (scannerLocked) {
+        return;
+      }
+
+      setScannerLocked(true);
+      const pairing = parsePairingPayload(result.data);
+      if (!pairing) {
+        setScannerError('QR code is not a valid Clawdex bridge pairing code.');
+        setTimeout(() => {
+          setScannerLocked(false);
+        }, 1200);
+        return;
+      }
+
+      applyPairingPayload(pairing);
+    },
+    [applyPairingPayload, scannerLocked]
+  );
 
   return (
     <View style={styles.container}>
@@ -284,6 +372,33 @@ export function OnboardingScreen({
                 </View>
 
                 <View style={styles.formCard}>
+                  <Text style={styles.label}>Bridge Mode</Text>
+                  <View style={styles.modeRow}>
+                    <Pressable
+                      onPress={() => applyModePreset('local')}
+                      style={({ pressed }) => [
+                        styles.modeButton,
+                        pressed && styles.modeButtonPressed,
+                      ]}
+                    >
+                      <Ionicons name="wifi-outline" size={16} color={colors.textPrimary} />
+                      <Text style={styles.modeButtonText}>Local (LAN)</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => applyModePreset('tailscale')}
+                      style={({ pressed }) => [
+                        styles.modeButton,
+                        pressed && styles.modeButtonPressed,
+                      ]}
+                    >
+                      <Ionicons name="shield-outline" size={16} color={colors.textPrimary} />
+                      <Text style={styles.modeButtonText}>Tailscale</Text>
+                    </Pressable>
+                  </View>
+                  <Text style={styles.helperText}>
+                    Pick the same mode used while starting the bridge, then adjust the IP if needed.
+                  </Text>
+
                   <Text style={styles.label}>Bridge URL</Text>
                   <TextInput
                     value={urlInput}
@@ -305,7 +420,7 @@ export function OnboardingScreen({
                   />
                   <View style={styles.tokenHeaderRow}>
                     <Text style={styles.label}>Bridge Token</Text>
-                    <Text style={styles.optionalLabel}>Optional in no-auth mode</Text>
+                    <Text style={styles.optionalLabel}>Required</Text>
                   </View>
                   <View style={styles.tokenInputWrap}>
                     <TextInput
@@ -343,15 +458,21 @@ export function OnboardingScreen({
                       </Text>
                     </Pressable>
                   </View>
+                  <Pressable
+                    onPress={() => {
+                      void openScanner();
+                    }}
+                    style={({ pressed }) => [
+                      styles.scanButton,
+                      pressed && styles.scanButtonPressed,
+                    ]}
+                  >
+                    <Ionicons name="qr-code-outline" size={16} color={colors.textPrimary} />
+                    <Text style={styles.scanButtonText}>Scan Bridge QR</Text>
+                  </Pressable>
                   <Text style={styles.helperText}>
                     URL supports `http`, `https`, `ws`, and `wss`. `/rpc` is added automatically.
                   </Text>
-
-                  <View style={styles.presetRow}>
-                    <PresetChip label="LAN" onPress={() => applyPreset(LOCAL_EXAMPLE_URL)} />
-                    <PresetChip label="Tailscale" onPress={() => applyPreset(TAILSCALE_EXAMPLE_URL)} />
-                    <PresetChip label="Localhost" onPress={() => applyPreset(LOOPBACK_EXAMPLE_URL)} />
-                  </View>
 
                   {normalizedBridgeUrl ? (
                     <View style={styles.previewWrap}>
@@ -418,26 +539,58 @@ export function OnboardingScreen({
 
                 <View style={styles.hintCard}>
                   <Text style={styles.hintTitle}>Quick Setup</Text>
-                  <Text style={styles.hintText}>1. Start the bridge on your machine (port 8787 by default).</Text>
-                  <Text style={styles.hintText}>2. Use your LAN or Tailscale IP in the URL above.</Text>
-                  <Text style={styles.hintText}>3. Keep phone and host on the same private network.</Text>
+                  <Text style={styles.hintText}>1. Start the bridge in Local (LAN) or Tailscale mode.</Text>
+                  <Text style={styles.hintText}>2. Pick Local or Tailscale above, then confirm bridge URL.</Text>
+                  <Text style={styles.hintText}>3. Scan bridge QR, then test connection and continue.</Text>
                 </View>
             </ScrollView>
           )}
+          <Modal
+            animationType="slide"
+            visible={scannerVisible}
+            transparent
+            onRequestClose={closeScanner}
+          >
+            <View style={styles.scannerModalRoot}>
+              <View style={styles.scannerSheet}>
+                <View style={styles.scannerHeader}>
+                  <Text style={styles.scannerTitle}>Scan Bridge QR</Text>
+                  <Pressable
+                    onPress={closeScanner}
+                    hitSlop={8}
+                    style={({ pressed }) => [
+                      styles.scannerCloseBtn,
+                      pressed && styles.scannerCloseBtnPressed,
+                    ]}
+                  >
+                    <Ionicons name="close" size={18} color={colors.textPrimary} />
+                  </Pressable>
+                </View>
+                <View style={styles.scannerCameraFrame}>
+                  {cameraPermission?.granted ? (
+                    <CameraView
+                      style={styles.scannerCamera}
+                      barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+                      onBarcodeScanned={scannerLocked ? undefined : handleBarcodeScanned}
+                    />
+                  ) : (
+                    <View style={styles.scannerPermissionWrap}>
+                      <Text style={styles.scannerPermissionText}>
+                        Camera permission is required to scan bridge QR.
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.scannerHintText}>
+                  Scan the bridge QR to autofill URL and token (or token-only fallback).
+                </Text>
+                {scannerError ? <Text style={styles.errorText}>{scannerError}</Text> : null}
+              </View>
+            </View>
+          </Modal>
         </KeyboardAvoidingView>
       </SafeAreaView>
     </View>
-  );
-}
-
-function PresetChip({ label, onPress }: { label: string; onPress: () => void }) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [styles.presetChip, pressed && styles.presetChipPressed]}
-    >
-      <Text style={styles.presetChipText}>{label}</Text>
-    </Pressable>
   );
 }
 
@@ -461,6 +614,72 @@ function IntroFeatureRow({
       </View>
     </View>
   );
+}
+
+function parsePairingPayload(rawValue: string): PairingPayload | null {
+  const raw = rawValue.trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as {
+      type?: unknown;
+      bridgeUrl?: unknown;
+      url?: unknown;
+      bridgeToken?: unknown;
+      token?: unknown;
+    };
+    const type = typeof parsed.type === 'string' ? parsed.type.trim().toLowerCase() : '';
+    const bridgeUrlRaw =
+      typeof parsed.bridgeUrl === 'string'
+        ? parsed.bridgeUrl
+        : typeof parsed.url === 'string'
+          ? parsed.url
+          : '';
+    const bridgeTokenRaw =
+      typeof parsed.bridgeToken === 'string'
+        ? parsed.bridgeToken
+        : typeof parsed.token === 'string'
+          ? parsed.token
+          : '';
+    const bridgeUrl = normalizeBridgeUrlInput(bridgeUrlRaw) ?? undefined;
+    const bridgeToken = bridgeTokenRaw.trim();
+    if (
+      bridgeToken &&
+      (
+        type === 'clawdex-bridge-pair' ||
+        type === 'clawdex/bridge-pair' ||
+        type === 'clawdex-bridge-token' ||
+        type === 'clawdex/bridge-token' ||
+        !type
+      )
+    ) {
+      return bridgeUrl ? { bridgeToken, bridgeUrl } : { bridgeToken };
+    }
+  } catch {
+    // Try URI form fallback below.
+  }
+
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'clawdex:') {
+      return null;
+    }
+    const bridgeUrl =
+      normalizeBridgeUrlInput(
+        parsed.searchParams.get('bridgeUrl') ?? parsed.searchParams.get('url') ?? ''
+      ) ?? undefined;
+    const bridgeToken = (
+      parsed.searchParams.get('bridgeToken') ?? parsed.searchParams.get('token') ?? ''
+    ).trim();
+    if (!bridgeToken) {
+      return null;
+    }
+    return bridgeUrl ? { bridgeToken, bridgeUrl } : { bridgeToken };
+  } catch {
+    return null;
+  }
 }
 
 const styles = StyleSheet.create({
@@ -689,32 +908,56 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: '600',
   },
-  helperText: {
-    ...typography.caption,
-    color: colors.textMuted,
-  },
-  presetRow: {
+  modeRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: spacing.sm,
-    marginTop: spacing.xs,
     marginBottom: spacing.xs,
   },
-  presetChip: {
-    borderRadius: radius.full,
+  modeButton: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.bgMain,
     paddingHorizontal: spacing.md,
-    paddingVertical: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
   },
-  presetChipPressed: {
-    opacity: 0.78,
+  modeButtonPressed: {
+    opacity: 0.82,
   },
-  presetChipText: {
+  modeButtonText: {
     ...typography.caption,
-    color: colors.textSecondary,
-    fontWeight: '600',
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  scanButton: {
+    marginTop: spacing.xs,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+    minHeight: 44,
+    paddingHorizontal: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+  },
+  scanButtonPressed: {
+    opacity: 0.82,
+  },
+  scanButtonText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  helperText: {
+    ...typography.caption,
+    color: colors.textMuted,
   },
   previewWrap: {
     borderRadius: radius.md,
@@ -794,6 +1037,69 @@ const styles = StyleSheet.create({
     ...typography.headline,
     color: colors.black,
     fontWeight: '700',
+  },
+  scannerModalRoot: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.94)',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  scannerSheet: {
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.black,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  scannerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  scannerTitle: {
+    ...typography.headline,
+    color: colors.textPrimary,
+  },
+  scannerCloseBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgMain,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scannerCloseBtnPressed: {
+    opacity: 0.75,
+  },
+  scannerCameraFrame: {
+    width: '100%',
+    aspectRatio: 1,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgMain,
+  },
+  scannerCamera: {
+    flex: 1,
+  },
+  scannerPermissionWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  scannerPermissionText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: 'center',
+  },
+  scannerHintText: {
+    ...typography.caption,
+    color: colors.textMuted,
   },
   hintCard: {
     borderRadius: radius.md,

@@ -34,5 +34,11 @@ set -a
 source "$SECURE_ENV_FILE"
 set +a
 
+BRIDGE_RUN_MODE="${BRIDGE_RUN_MODE:-release}"
+
 cd "$ROOT_DIR"
-exec npm run -w @codex/rust-bridge dev
+if [[ "$BRIDGE_RUN_MODE" == "dev" ]]; then
+  exec npm run -w @codex/rust-bridge dev
+fi
+
+exec npm run -w @codex/rust-bridge start

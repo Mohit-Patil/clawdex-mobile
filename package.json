@@ -25,6 +25,7 @@
     "stop:services": "./scripts/stop-services.sh",
     "secure:setup": "./scripts/setup-secure-dev.sh",
     "secure:bridge": "./scripts/start-bridge-secure.sh",
+    "secure:bridge:dev": "BRIDGE_RUN_MODE=dev ./scripts/start-bridge-secure.sh",
     "bridge:ts": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "build": "npm run --workspaces build",
     "typecheck": "npm run --workspaces typecheck",

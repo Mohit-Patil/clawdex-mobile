@@ -479,6 +479,7 @@ export default function App() {
           initialBridgeUrl={initialUrl}
           initialBridgeToken={initialToken}
           allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
+          allowQueryTokenAuth={env.allowWsQueryTokenAuth}
           onSave={handleBridgeUrlSaved}
           onCancel={canCancel ? handleCancelOnboarding : undefined}
         />

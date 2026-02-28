@@ -28,13 +28,27 @@ npm install -g clawdex-mobile@latest
 clawdex init
 ```
 
+This is the primary starting point.
+
+`clawdex init` guides you through:
+
+1. bridge mode selection: `Local (LAN)` or `Tailscale`
+2. secure bridge config generation (`.env.secure`)
+3. phone readiness checks for selected mode
+4. optional bridge launch in the foreground (release build)
+
+When the bridge starts, it prints a pairing QR:
+
+- preferred: QR contains both `bridgeUrl + bridgeToken` (one-scan onboarding)
+- fallback: token-only QR if host is not a phone-connectable address
+
 Typical lifecycle:
 
 ```bash
 # install/update once
 npm install -g clawdex-mobile@latest
 
-# onboarding + start bridge/expo
+# onboarding + start bridge
 clawdex init
 
 # stop services later
@@ -48,7 +62,7 @@ npm install
 npm run setup:wizard
 ```
 
-Use `npm run setup:wizard -- --no-start` to skip auto-start.
+Use `npm run setup:wizard -- --no-start` to configure only (no bridge start).
 
 ## Project Layout
 
@@ -65,8 +79,8 @@ Use `npm run setup:wizard -- --no-start` to skip auto-start.
 - npm 10+
 - `codex` CLI in `PATH`
 - `git` in `PATH`
-- Tailscale on host + phone (recommended)
-- Expo Go on phone (for non-standalone flow)
+- iOS app installed (TestFlight/App Store/dev build)
+- Tailscale on host + phone (recommended for remote/private networking)
 
 Optional for simulators/emulators:
 
@@ -77,10 +91,11 @@ Optional for simulators/emulators:
 
 From repo root:
 
-- `npm run setup:wizard` — guided setup + optional auto-start
-- `npm run stop:services` — stop running Expo + bridge
+- `npm run setup:wizard` — guided secure setup + optional bridge start
+- `npm run stop:services` — stop running bridge (and Expo if running)
 - `npm run secure:setup` — generate/update secure env
-- `npm run secure:bridge` — start rust bridge from `.env.secure`
+- `npm run secure:bridge` — start rust bridge from `.env.secure` (release profile)
+- `npm run secure:bridge:dev` — start rust bridge in dev profile
 - `npm run mobile` — start Expo
 - `npm run ios` — start Expo (iOS target)
 - `npm run android` — start Expo (Android target)
@@ -93,6 +108,15 @@ Published CLI:
 - `clawdex stop`
 - `clawdex upgrade` / `clawdex update`
 - `clawdex version`
+
+## Onboarding In App
+
+On first launch (or after reset):
+
+1. choose mode (`Local` or `Tailscale`)
+2. scan bridge QR to autofill URL + token
+3. use `Test Connection` (health + authenticated RPC check)
+4. tap `Continue`
 
 ## EAS Builds (Short)
 

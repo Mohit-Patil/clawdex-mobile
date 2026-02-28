@@ -77,6 +77,34 @@ ensure_tailscale_cli() {
   return 0
 }
 
+is_ipv4() {
+  local ip="$1"
+  local part=""
+  local -a octets=()
+
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r -a octets <<<"$ip"
+  if [[ "${#octets[@]}" -ne 4 ]]; then
+    return 1
+  fi
+
+  for part in "${octets[@]}"; do
+    if (( part < 0 || part > 255 )); then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+is_non_loopback_ipv4() {
+  local ip="$1"
+  if ! is_ipv4 "$ip"; then
+    return 1
+  fi
+  [[ "$ip" != 127.* ]]
+}
+
 resolve_tailscale_ipv4() {
   local ip
   ip="$(tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
@@ -100,6 +128,77 @@ resolve_tailscale_ipv4() {
   printf '%s' "$ip"
 }
 
+current_local_ipv4() {
+  local candidate=""
+  local iface=""
+
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v ipconfig >/dev/null 2>&1; then
+    for iface in en0 en1; do
+      candidate="$(ipconfig getifaddr "$iface" 2>/dev/null | tr -d '[:space:]' || true)"
+      if is_non_loopback_ipv4 "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done
+  fi
+
+  if command -v hostname >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+      candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+      if is_non_loopback_ipv4 "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n' || true)
+  fi
+
+  if command -v ip >/dev/null 2>&1; then
+    candidate="$(ip route get 1.1.1.1 2>/dev/null | awk '{ for (i=1; i<=NF; i++) if ($i=="src") { print $(i+1); exit } }')"
+    candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+    if is_non_loopback_ipv4 "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+
+  if command -v ifconfig >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+      candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+      if is_non_loopback_ipv4 "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done < <(ifconfig 2>/dev/null | awk '/inet /{print $2}' || true)
+  fi
+
+  return 1
+}
+
+resolve_local_ipv4() {
+  local ip=""
+  ip="$(current_local_ipv4 || true)"
+
+  if [[ -n "$ip" ]]; then
+    printf '%s' "$ip"
+    return 0
+  fi
+
+  echo "No active local/LAN IPv4 found automatically."
+  if ! confirm_prompt "Enter bridge host IP manually?"; then
+    echo "error: unable to resolve LAN IPv4. Connect to LAN and retry." >&2
+    return 1
+  fi
+
+  read -r -p "Bridge host IP: " ip
+  ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
+  if ! is_non_loopback_ipv4 "$ip"; then
+    echo "error: invalid IPv4 '$ip'." >&2
+    return 1
+  fi
+
+  printf '%s' "$ip"
+}
+
 if ! command -v openssl >/dev/null 2>&1; then
   echo "error: openssl not found. Install OpenSSL first." >&2
   exit 1
@@ -117,13 +216,28 @@ fi
 
 BRIDGE_HOST="${BRIDGE_HOST_OVERRIDE:-}"
 HOST_SOURCE=""
+BRIDGE_NETWORK_MODE="${BRIDGE_NETWORK_MODE:-tailscale}"
+
+case "$BRIDGE_NETWORK_MODE" in
+  tailscale|local)
+    ;;
+  *)
+    echo "error: BRIDGE_NETWORK_MODE must be 'tailscale' or 'local'." >&2
+    exit 1
+    ;;
+esac
 
 if [[ -n "$BRIDGE_HOST" ]]; then
   HOST_SOURCE="override"
 else
-  ensure_tailscale_cli
-  BRIDGE_HOST="$(resolve_tailscale_ipv4)"
-  HOST_SOURCE="tailscale"
+  if [[ "$BRIDGE_NETWORK_MODE" == "tailscale" ]]; then
+    ensure_tailscale_cli
+    BRIDGE_HOST="$(resolve_tailscale_ipv4)"
+    HOST_SOURCE="tailscale"
+  else
+    BRIDGE_HOST="$(resolve_local_ipv4)"
+    HOST_SOURCE="local"
+  fi
 fi
 
 BRIDGE_PORT="${BRIDGE_PORT_OVERRIDE:-8787}"
@@ -139,6 +253,7 @@ if [[ -z "$BRIDGE_TOKEN" ]]; then
 fi
 
 cat > "$SECURE_ENV_FILE" <<EOT
+BRIDGE_NETWORK_MODE=$BRIDGE_NETWORK_MODE
 BRIDGE_HOST=$BRIDGE_HOST
 BRIDGE_PORT=$BRIDGE_PORT
 BRIDGE_AUTH_TOKEN=$BRIDGE_TOKEN
@@ -157,6 +272,7 @@ upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE" "tr
 
 echo "Secure dev setup complete."
 echo ""
+echo "Bridge network mode: $BRIDGE_NETWORK_MODE"
 echo "Bridge host: $BRIDGE_HOST ($HOST_SOURCE)"
 echo "Bridge port: $BRIDGE_PORT"
 echo "Token source: $SECURE_ENV_FILE"

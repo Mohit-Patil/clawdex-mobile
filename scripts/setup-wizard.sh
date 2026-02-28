@@ -24,6 +24,7 @@ fi
 
 FLOW="quickstart"
 CONFIG_ACTION="configure"
+NETWORK_MODE=""
 TAILSCALE_IP=""
 BRIDGE_HOST=""
 BRIDGE_PORT=""
@@ -125,8 +126,7 @@ print_usage() {
 Usage: $(basename "$0") [options]
 
 Options:
-  --no-start               Configure everything but do not start bridge/Expo
-  --platform <name>        Auto-start platform: mobile|ios|android (default: mobile)
+  --no-start               Configure everything but do not start bridge
   -h, --help               Show this help
 EOF
 }
@@ -137,15 +137,6 @@ parse_args() {
       --no-start)
         AUTO_START="false"
         shift
-        ;;
-      --platform)
-        if [[ $# -lt 2 ]]; then
-          echo "error: --platform requires a value" >&2
-          print_usage >&2
-          exit 1
-        fi
-        TARGET_PLATFORM="$2"
-        shift 2
         ;;
       -h|--help)
         print_usage
@@ -158,15 +149,6 @@ parse_args() {
         ;;
     esac
   done
-
-  case "$TARGET_PLATFORM" in
-    mobile|ios|android)
-      ;;
-    *)
-      echo "error: invalid --platform '$TARGET_PLATFORM' (expected mobile|ios|android)" >&2
-      exit 1
-      ;;
-  esac
 }
 
 run_with_privilege() {
@@ -558,6 +540,79 @@ current_tailscale_ip() {
   done < <(tailscale ip -4 2>/dev/null || true)
 }
 
+is_non_loopback_ipv4() {
+  local ip="$1"
+  if ! is_ipv4 "$ip"; then
+    return 1
+  fi
+  [[ "$ip" != 127.* ]]
+}
+
+current_lan_ip() {
+  local candidate=""
+  local iface=""
+
+  if [[ "$OS_NAME" == "Darwin" ]] && command -v ipconfig >/dev/null 2>&1; then
+    for iface in en0 en1; do
+      candidate="$(ipconfig getifaddr "$iface" 2>/dev/null | tr -d '[:space:]' || true)"
+      if is_non_loopback_ipv4 "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done
+  fi
+
+  if command -v hostname >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+      candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+      if is_non_loopback_ipv4 "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n' || true)
+  fi
+
+  if command -v ip >/dev/null 2>&1; then
+    candidate="$(ip route get 1.1.1.1 2>/dev/null | awk '{ for (i=1; i<=NF; i++) if ($i=="src") { print $(i+1); exit } }')"
+    candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+    if is_non_loopback_ipv4 "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+
+  if command -v ifconfig >/dev/null 2>&1; then
+    while IFS= read -r candidate; do
+      candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
+      if is_non_loopback_ipv4 "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done < <(ifconfig 2>/dev/null | awk '/inet /{print $2}' || true)
+  fi
+}
+
+prompt_manual_ipv4() {
+  local prompt="$1"
+  local ip=""
+
+  while true; do
+    rail_echo "$prompt"
+    IFS= read -r ip
+    ip="$(printf '%s' "$ip" | tr -d '[:space:]')"
+
+    if is_non_loopback_ipv4 "$ip"; then
+      printf '%s' "$ip"
+      return 0
+    fi
+
+    warn "Invalid IPv4 '$ip'."
+    if ! confirm_prompt "Try entering host IP again?" "Y"; then
+      return 1
+    fi
+  done
+}
+
 extract_env_value() {
   local file="$1"
   local key="$2"
@@ -623,6 +678,7 @@ print_existing_setup_summary() {
   local host=""
   local port=""
   local token=""
+  local network_mode=""
   local source_path=""
 
   if [[ ! -f "$SECURE_ENV_FILE" ]]; then
@@ -632,6 +688,7 @@ print_existing_setup_summary() {
   host="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
   port="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
   token="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
+  network_mode="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
 
   if [[ -z "$host" ]] && [[ -z "$port" ]] && [[ -z "$token" ]]; then
     return 1
@@ -644,6 +701,9 @@ print_existing_setup_summary() {
 
   echo "bridge.host: $host"
   echo "bridge.port: $port"
+  if [[ -n "$network_mode" ]]; then
+    echo "bridge.networkMode: $network_mode"
+  fi
   if [[ -n "$token" ]]; then
     echo "bridge.token: present"
   fi
@@ -707,6 +767,33 @@ choose_config_action() {
       abort_wizard "Unexpected config action."
       ;;
   esac
+}
+
+choose_bridge_network_mode() {
+  menu_select "Bridge network mode" "Local (LAN)" "Tailscale"
+  case "$MENU_RESULT" in
+    "Local (LAN)")
+      NETWORK_MODE="local"
+      info "Local (LAN) mode selected."
+      ;;
+    "Tailscale")
+      NETWORK_MODE="tailscale"
+      info "Tailscale mode selected."
+      ;;
+    *)
+      abort_wizard "Unexpected bridge network mode."
+      ;;
+  esac
+}
+
+infer_network_mode_from_host() {
+  local host="$1"
+  host="$(printf '%s' "$host" | tr -d '[:space:]')"
+  if [[ "$host" == 100.* ]]; then
+    printf '%s' "tailscale"
+    return 0
+  fi
+  printf '%s' "local"
 }
 
 ensure_core_tools() {
@@ -847,6 +934,77 @@ resolve_tailscale_ip() {
   resolve_tailscale_ip_manual
 }
 
+resolve_local_ip_quickstart() {
+  local ip=""
+  ip="$(current_lan_ip || true)"
+
+  while [[ -z "$ip" ]]; do
+    warn "No active local/LAN IPv4 detected."
+    if confirm_prompt "Enter bridge host IP manually?" "Y"; then
+      ip="$(prompt_manual_ipv4 "Enter LAN IP for this machine (example: 192.168.1.30):" || true)"
+    fi
+
+    if [[ -n "$ip" ]]; then
+      break
+    fi
+
+    if ! confirm_prompt "Retry LAN IP detection?" "Y"; then
+      abort_wizard "Connect this machine to LAN/VPN, then rerun: npm run setup:wizard"
+    fi
+    ip="$(current_lan_ip || true)"
+  done
+
+  printf '%s' "$ip"
+}
+
+resolve_local_ip_manual() {
+  local ip=""
+  ip="$(current_lan_ip || true)"
+
+  while [[ -z "$ip" ]]; do
+    warn "No active local/LAN IPv4 detected."
+    menu_select "Local network action" "Retry auto-detect" "Enter host IP manually" "Show network interfaces" "Abort"
+
+    case "$MENU_RESULT" in
+      "Retry auto-detect")
+        ;;
+      "Enter host IP manually")
+        ip="$(prompt_manual_ipv4 "Enter LAN IP for this machine (example: 192.168.1.30):" || true)"
+        ;;
+      "Show network interfaces")
+        if command -v ifconfig >/dev/null 2>&1; then
+          ifconfig || true
+        elif command -v ip >/dev/null 2>&1; then
+          ip addr || true
+        else
+          warn "No network interface command available."
+        fi
+        press_enter_to_continue
+        ;;
+      "Abort")
+        abort_wizard "Resolve host LAN IP, then rerun: npm run setup:wizard"
+        ;;
+      *)
+        ;;
+    esac
+
+    if [[ -z "$ip" ]]; then
+      ip="$(current_lan_ip || true)"
+    fi
+  done
+
+  printf '%s' "$ip"
+}
+
+resolve_local_ip() {
+  if [[ "$FLOW" == "quickstart" ]]; then
+    resolve_local_ip_quickstart
+    return 0
+  fi
+
+  resolve_local_ip_manual
+}
+
 print_phone_tailscale_note() {
   print_note_box "Phone setup (Tailscale)" "Install Tailscale on your phone and sign in to the same Tailscale account as this machine.
 
@@ -940,6 +1098,100 @@ confirm_phone_tailscale_ready() {
   confirm_phone_tailscale_manual
 }
 
+print_phone_local_note() {
+  print_note_box "Phone setup (Local LAN)" "Connect your phone and this machine to the same local network.
+
+Steps:
+- Ensure both are on the same Wi-Fi (or same private VPN segment).
+- Keep the bridge running on this machine.
+- Use the shown LAN bridge URL in app onboarding.
+- Scan the bridge token QR from the bridge terminal."
+}
+
+confirm_phone_local_quickstart() {
+  local note_shown="false"
+
+  while true; do
+    if [[ "$note_shown" == "false" ]]; then
+      print_phone_local_note
+      note_shown="true"
+    fi
+
+    if confirm_prompt "Is your phone on the same local network as this machine?" "Y"; then
+      return 0
+    fi
+
+    warn "Connect both devices to the same network, then continue."
+    if ! confirm_prompt "Retry phone local network check?" "Y"; then
+      abort_wizard "Connect phone to same network, then rerun: npm run setup:wizard"
+    fi
+  done
+}
+
+confirm_phone_local_manual() {
+  local show_note="true"
+
+  while true; do
+    if [[ "$show_note" == "true" ]]; then
+      print_phone_local_note
+      show_note="false"
+    fi
+
+    menu_select "Phone local network status" \
+      "Phone is ready (same network)" \
+      "Show instructions again" \
+      "Show host network interfaces" \
+      "Abort"
+
+    case "$MENU_RESULT" in
+      "Phone is ready (same network)")
+        return 0
+        ;;
+      "Show instructions again")
+        show_note="true"
+        ;;
+      "Show host network interfaces")
+        if command -v ifconfig >/dev/null 2>&1; then
+          ifconfig || true
+        elif command -v ip >/dev/null 2>&1; then
+          ip addr || true
+        else
+          warn "No network interface command available."
+        fi
+        press_enter_to_continue
+        ;;
+      "Abort")
+        abort_wizard "Connect phone to same network, then rerun: npm run setup:wizard"
+        ;;
+      *)
+        ;;
+    esac
+  done
+}
+
+confirm_phone_local_ready() {
+  if [[ "$FLOW" == "quickstart" ]]; then
+    confirm_phone_local_quickstart
+    return 0
+  fi
+
+  confirm_phone_local_manual
+}
+
+confirm_phone_network_ready() {
+  case "$NETWORK_MODE" in
+    tailscale)
+      confirm_phone_tailscale_ready
+      ;;
+    local)
+      confirm_phone_local_ready
+      ;;
+    *)
+      abort_wizard "Unknown network mode '$NETWORK_MODE'."
+      ;;
+  esac
+}
+
 has_mobile_react_native_runtime() {
   local root_touchable="$ROOT_DIR/node_modules/react-native/Libraries/Components/Touchable/BoundingDimensions.js"
   local workspace_touchable="$ROOT_DIR/apps/mobile/node_modules/react-native/Libraries/Components/Touchable/BoundingDimensions.js"
@@ -968,21 +1220,16 @@ install_project_dependencies() {
   local should_install="false"
   local need_install="false"
 
-  if [[ ! -d "$ROOT_DIR/node_modules" ]] || [[ ! -d "$ROOT_DIR/node_modules/expo" ]]; then
+  if [[ ! -d "$ROOT_DIR/node_modules" ]] || [[ ! -d "$ROOT_DIR/node_modules/@codex" ]]; then
     need_install="true"
   fi
 
   if [[ "$need_install" == "true" ]]; then
-    if [[ "$AUTO_START" == "true" ]]; then
-      info "Project dependencies are missing. Installing automatically for one-stop onboarding..."
+    if confirm_prompt "Install project npm dependencies now?" "Y"; then
       should_install="true"
     else
-      if confirm_prompt "Install project npm dependencies now? (required for full onboarding)" "Y"; then
-        should_install="true"
-      else
-        if [[ "$AUTO_START" == "true" ]]; then
-          abort_wizard "Dependencies are required for auto-start. Re-run with --no-start or allow install."
-        fi
+      if [[ "$AUTO_START" == "true" ]]; then
+        abort_wizard "Dependencies are required before starting the bridge."
       fi
     fi
   else
@@ -995,36 +1242,6 @@ install_project_dependencies() {
     info "Installing npm dependencies (including dev tooling; this can take a few minutes)..."
     run_quiet_command "Project dependency install" bash -lc "cd \"$ROOT_DIR\" && npm install --include=dev && npm dedupe"
     ok "Dependencies installed."
-  fi
-
-  # Expo may prompt to install TypeScript if dev deps were skipped in prior installs.
-  # Ensure mobile workspace tooling is present before auto-start.
-  if [[ "$AUTO_START" == "true" ]]; then
-    if ! node -e "require.resolve('typescript/package.json', { paths: ['$ROOT_DIR/apps/mobile', '$ROOT_DIR'] })" >/dev/null 2>&1; then
-      info "Installing missing mobile TypeScript tooling..."
-      run_quiet_command "Mobile TypeScript tooling install" bash -lc "cd \"$ROOT_DIR\" && npm install --include=dev -w apps/mobile && npm dedupe"
-      ok "Mobile TypeScript tooling installed."
-    fi
-  fi
-
-  if [[ "$AUTO_START" == "true" ]] && ! has_mobile_react_native_runtime; then
-    warn "React Native runtime appears incomplete (missing core runtime files)."
-    if [[ "$FLOW" == "quickstart" ]]; then
-      info "Running automatic dependency repair for QuickStart..."
-      repair_mobile_runtime_dependencies
-    elif confirm_prompt "Attempt dependency repair now?" "Y"; then
-      repair_mobile_runtime_dependencies
-    else
-      abort_wizard "Cannot auto-start Expo with incomplete React Native deps. Re-run setup and allow dependency repair."
-    fi
-  fi
-
-  if [[ "$AUTO_START" == "true" ]] && [[ ! -d "$ROOT_DIR/node_modules/expo" ]]; then
-    abort_wizard "Expo dependency not found after installation step."
-  fi
-
-  if [[ "$AUTO_START" == "true" ]] && ! has_mobile_react_native_runtime; then
-    abort_wizard "React Native runtime is still incomplete after repair. Run: npm install --include=dev --force && npm install --include=dev --force -w apps/mobile"
   fi
 }
 
@@ -1159,57 +1376,14 @@ start_expo_background() {
   stream_expo_output_until_enter
 }
 
-start_bridge_and_expo() {
-  trap cleanup_bridge EXIT INT TERM
-
-  info "Starting bridge in background..."
+start_bridge_foreground() {
+  rail_echo "Starting bridge in foreground."
+  rail_echo "Press Ctrl+C to stop the bridge."
+  echo ""
   (
     cd "$ROOT_DIR"
     npm run secure:bridge
-  ) >"$BRIDGE_LOG" 2>&1 &
-  BRIDGE_PID="$!"
-
-  sleep 1
-  if ! kill -0 "$BRIDGE_PID" >/dev/null 2>&1; then
-    fail "Bridge failed to start. Recent logs:"
-    tail -n 80 "$BRIDGE_LOG" || true
-    exit 1
-  fi
-
-  echo "$BRIDGE_PID" > "$BRIDGE_PID_FILE"
-
-  if [[ -n "$BRIDGE_HOST" ]] && [[ -n "$BRIDGE_PORT" ]]; then
-    local health_status=0
-    while true; do
-      if wait_for_bridge_health "$BRIDGE_HOST" "$BRIDGE_PORT"; then
-        ok "Bridge health check passed."
-        break
-      fi
-
-      health_status=$?
-      if [[ "$health_status" -eq 1 ]]; then
-        fail "Bridge process exited before becoming healthy. Recent logs:"
-        tail -n 80 "$BRIDGE_LOG" || true
-        exit 1
-      fi
-
-      warn "Bridge health check has not passed yet (timeout reached)."
-      warn "Initial Rust compile on fresh hosts can take several minutes."
-      if confirm_prompt "Keep waiting for bridge health before starting Expo?" "Y"; then
-        continue
-      fi
-
-      warn "Continuing to Expo before bridge is healthy."
-      warn "If app requests fail, wait for bridge compile to finish and retry."
-      break
-    done
-  fi
-
-  ok "Bridge is running in background (pid $BRIDGE_PID)."
-  info "Bridge logs: $BRIDGE_LOG"
-  echo ""
-  start_expo_background
-  return 0
+  )
 }
 
 parse_args "$@"
@@ -1220,7 +1394,7 @@ if [[ ! -t 0 ]]; then
 fi
 
 echo "${BOLD}Clawdex onboarding${RESET}"
-rail_echo "Guided setup for secure bridge + mobile launch."
+rail_echo "Guided setup for secure bridge launch."
 rail_echo "Project root: $ROOT_DIR"
 rail_echo "${DIM}Use Up/Down (or j/k) and Enter to select.${RESET}"
 
@@ -1248,20 +1422,64 @@ if [[ "$CONFIG_ACTION" == "reset" ]]; then
 fi
 
 if [[ "$CONFIG_ACTION" != "keep" ]]; then
-  section "Tailscale connectivity"
-  ensure_tailscale_cli
-  TAILSCALE_IP="$(resolve_tailscale_ip)"
-  ok "Tailscale IPv4 detected: $TAILSCALE_IP"
+  section "Bridge network mode"
+  choose_bridge_network_mode
+
+  case "$NETWORK_MODE" in
+    tailscale)
+      section "Tailscale connectivity"
+      ensure_tailscale_cli
+      TAILSCALE_IP="$(resolve_tailscale_ip)"
+      BRIDGE_HOST="$TAILSCALE_IP"
+      ok "Tailscale IPv4 detected: $TAILSCALE_IP"
+      ;;
+    local)
+      section "Local network connectivity"
+      BRIDGE_HOST="$(resolve_local_ip)"
+      ok "Local LAN IPv4 detected: $BRIDGE_HOST"
+      ;;
+    *)
+      abort_wizard "Unknown network mode '$NETWORK_MODE'."
+      ;;
+  esac
 
   section "Write secure config"
-  BRIDGE_HOST_OVERRIDE="$TAILSCALE_IP" "$SCRIPT_DIR/setup-secure-dev.sh"
+  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" "$SCRIPT_DIR/setup-secure-dev.sh"
 else
   ok "Keeping existing secure config."
+  NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
+  BRIDGE_HOST="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
+  if [[ -z "$NETWORK_MODE" ]]; then
+    NETWORK_MODE="$(infer_network_mode_from_host "$BRIDGE_HOST")"
+  fi
+
+  if [[ "$BRIDGE_HOST" == "0.0.0.0" ]] || [[ "$BRIDGE_HOST" == "::" ]] || [[ "$BRIDGE_HOST" == "[::]" ]]; then
+    warn "Existing BRIDGE_HOST=$BRIDGE_HOST is a bind address, not a phone-connectable host."
+    if [[ "$NETWORK_MODE" == "tailscale" ]]; then
+      section "Tailscale connectivity"
+      ensure_tailscale_cli
+      BRIDGE_HOST="$(resolve_tailscale_ip)"
+      TAILSCALE_IP="$BRIDGE_HOST"
+      ok "Tailscale IPv4 detected: $BRIDGE_HOST"
+    else
+      NETWORK_MODE="local"
+      section "Local network connectivity"
+      BRIDGE_HOST="$(resolve_local_ip)"
+      ok "Local LAN IPv4 detected: $BRIDGE_HOST"
+    fi
+
+    section "Write secure config"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" "$SCRIPT_DIR/setup-secure-dev.sh"
+  fi
 fi
 
 section "Phone pairing"
-confirm_phone_tailscale_ready
-ok "Phone Tailscale readiness confirmed."
+confirm_phone_network_ready
+if [[ "$NETWORK_MODE" == "tailscale" ]]; then
+  ok "Phone Tailscale readiness confirmed."
+else
+  ok "Phone local network readiness confirmed."
+fi
 
 if [[ ! -f "$SECURE_ENV_FILE" ]]; then
   fail "error: $SECURE_ENV_FILE not found."
@@ -1271,32 +1489,34 @@ fi
 
 BRIDGE_HOST="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
 BRIDGE_PORT="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
+NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
+if [[ -z "$NETWORK_MODE" ]]; then
+  NETWORK_MODE="$(infer_network_mode_from_host "$BRIDGE_HOST")"
+fi
 BRIDGE_HOST="${BRIDGE_HOST:-${TAILSCALE_IP:-127.0.0.1}}"
 BRIDGE_PORT="${BRIDGE_PORT:-8787}"
 
 section "Summary"
+rail_echo "Bridge mode: $NETWORK_MODE"
 rail_echo "Bridge endpoint: http://$BRIDGE_HOST:$BRIDGE_PORT"
 rail_echo "Secure env: $SECURE_ENV_FILE"
-rail_echo "Bridge logs: $BRIDGE_LOG"
 if [[ "$FLOW" == "quickstart" ]]; then
   rail_echo "${DIM}Tip: re-run with Manual mode for full control at each step.${RESET}"
 fi
 
 section "Hatch"
 if [[ "$AUTO_START" == "true" ]]; then
-  EXPO_MODE="$TARGET_PLATFORM"
   rail_echo "Auto-start enabled."
-  rail_echo "Launching bridge + Expo ($EXPO_MODE)..."
-  start_bridge_and_expo
+  rail_echo "Launching bridge in foreground..."
+  start_bridge_foreground
   exit $?
 else
   rail_echo "Auto-start disabled by --no-start."
-  rail_echo "Skipping bridge/Expo launch."
+  rail_echo "Skipping bridge launch."
 fi
 
 section "Next steps"
 rail_echo "1) cd $ROOT_DIR && npm run secure:bridge"
-rail_echo "2) cd $ROOT_DIR && npm run mobile"
-rail_echo "3) Optional: npm run ios   (or)   npm run android"
+rail_echo "2) Open the iOS app and use onboarding to connect (mode + URL + token QR)."
 rail_blank
 rail_echo "${DIM}You can rerun this anytime: npm run setup:wizard${RESET}"

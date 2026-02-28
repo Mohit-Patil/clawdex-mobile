@@ -72,6 +72,7 @@ struct BridgeConfig {
     allow_outside_root_cwd: bool,
     disable_terminal_exec: bool,
     terminal_allowed_commands: HashSet<String>,
+    show_pairing_qr: bool,
 }
 
 impl BridgeConfig {
@@ -106,6 +107,7 @@ impl BridgeConfig {
         let allow_outside_root_cwd =
             parse_bool_env_with_default("BRIDGE_ALLOW_OUTSIDE_ROOT_CWD", true);
         let disable_terminal_exec = parse_bool_env("BRIDGE_DISABLE_TERMINAL_EXEC");
+        let show_pairing_qr = parse_bool_env_with_default("BRIDGE_SHOW_PAIRING_QR", true);
 
         let terminal_allowed_commands = parse_csv_env(
             "BRIDGE_TERMINAL_ALLOWED_COMMANDS",
@@ -124,6 +126,7 @@ impl BridgeConfig {
             allow_outside_root_cwd,
             disable_terminal_exec,
             terminal_allowed_commands,
+            show_pairing_qr,
         })
     }
 
@@ -2023,6 +2026,7 @@ async fn main() {
     };
 
     println!("rust-bridge listening on {bind_addr}");
+    maybe_print_pairing_qr(&config);
 
     if let Err(error) = axum::serve(listener, app).await {
         eprintln!("server error: {error}");
@@ -2739,6 +2743,86 @@ fn resolve_bridge_workdir(raw_workdir: PathBuf) -> Result<PathBuf, String> {
     Ok(normalize_path(&canonical))
 }
 
+fn is_unspecified_bind_host(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "0.0.0.0" | "::" | "[::]"
+    )
+}
+
+fn format_host_for_url(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.contains(':') && !trimmed.starts_with('[') && !trimmed.ends_with(']') {
+        return format!("[{}]", trimmed);
+    }
+    trimmed.to_string()
+}
+
+fn build_pairing_payload(config: &BridgeConfig) -> Option<String> {
+    if is_unspecified_bind_host(&config.host) {
+        return None;
+    }
+
+    let bridge_token = config.auth_token.clone()?;
+    let bridge_url = format!("http://{}:{}", format_host_for_url(&config.host), config.port);
+
+    Some(
+        json!({
+            "type": "clawdex-bridge-pair",
+            "bridgeUrl": bridge_url,
+            "bridgeToken": bridge_token,
+        })
+        .to_string(),
+    )
+}
+
+fn build_token_only_pairing_payload(config: &BridgeConfig) -> Option<String> {
+    let bridge_token = config.auth_token.clone()?;
+
+    Some(
+        json!({
+            "type": "clawdex-bridge-token",
+            "bridgeToken": bridge_token,
+        })
+        .to_string(),
+    )
+}
+
+fn maybe_print_pairing_qr(config: &BridgeConfig) {
+    if !config.show_pairing_qr {
+        return;
+    }
+
+    if let Some(payload) = build_pairing_payload(config) {
+        println!();
+        println!("Bridge pairing QR (scan from mobile onboarding):");
+        if let Err(error) = qr2term::print_qr(payload.as_bytes()) {
+            eprintln!("failed to render pairing QR: {error}");
+            return;
+        }
+        println!("QR contains bridge URL + token for one-tap onboarding.");
+        println!();
+        return;
+    }
+
+    let Some(payload) = build_token_only_pairing_payload(config) else {
+        eprintln!("bridge token QR skipped because BRIDGE_AUTH_TOKEN is not set");
+        return;
+    };
+
+    println!();
+    println!("Bridge token QR fallback (scan from mobile onboarding):");
+    if let Err(error) = qr2term::print_qr(payload.as_bytes()) {
+        eprintln!("failed to render pairing QR: {error}");
+        return;
+    }
+    println!(
+        "Full pairing QR unavailable because BRIDGE_HOST={} is a bind address. Enter URL manually in onboarding.",
+        config.host
+    );
+    println!();
+}
+
 fn parse_bool_env(name: &str) -> bool {
     env::var(name)
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
@@ -3430,6 +3514,7 @@ mod tests {
             allow_outside_root_cwd: false,
             disable_terminal_exec: true,
             terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: false,
         });
 
         let hub = Arc::new(ClientHub::new());
@@ -4218,6 +4303,7 @@ mod tests {
             allow_outside_root_cwd: false,
             disable_terminal_exec: false,
             terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: false,
         };
 
         let mut headers = HeaderMap::new();
