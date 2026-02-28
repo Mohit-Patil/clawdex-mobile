@@ -48,6 +48,7 @@ const DYNAMIC_TOOL_CALL_METHOD: &str = "item/tool/call";
 const ACCOUNT_CHATGPT_TOKENS_REFRESH_METHOD: &str = "account/chatgptAuthTokens/refresh";
 const MOBILE_ATTACHMENTS_DIR: &str = ".clawdex-mobile-attachments";
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const DEFAULT_MAX_VOICE_TRANSCRIPTION_BYTES: usize = 100 * 1024 * 1024;
 const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
 const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
 const WS_CLIENT_QUEUE_CAPACITY: usize = 256;
@@ -1786,6 +1787,8 @@ struct AttachmentUploadResponse {
 struct VoiceTranscribeRequest {
     data_base64: String,
     prompt: Option<String>,
+    file_name: Option<String>,
+    mime_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2427,10 +2430,9 @@ async fn handle_bridge_method(
             }))
         }
         "bridge/voice/transcribe" => {
-            let request: VoiceTranscribeRequest = serde_json::from_value(
-                params.unwrap_or_else(|| json!({})),
-            )
-            .map_err(|e| BridgeError::invalid_params(&e.to_string()))?;
+            let request: VoiceTranscribeRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|e| BridgeError::invalid_params(&e.to_string()))?;
             transcribe_voice(request).await
         }
         _ => Err(BridgeError::method_not_found(&format!(
@@ -2440,6 +2442,14 @@ async fn handle_bridge_method(
 }
 
 async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, BridgeError> {
+    let max_voice_transcription_bytes = resolve_max_voice_transcription_bytes();
+    let estimated_size = estimate_base64_decoded_size(&request.data_base64)?;
+    if estimated_size > max_voice_transcription_bytes {
+        return Err(BridgeError::invalid_params(&format!(
+            "audio payload exceeds max size of {max_voice_transcription_bytes} bytes",
+        )));
+    }
+
     let audio_bytes = decode_base64_payload(&request.data_base64)?;
 
     // Minimum ~16KB — roughly 0.5s at 16kHz 16-bit mono.
@@ -2448,13 +2458,21 @@ async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, Brid
             "audio payload too short (minimum ~0.5 seconds required)",
         ));
     }
+    if audio_bytes.len() > max_voice_transcription_bytes {
+        return Err(BridgeError::invalid_params(&format!(
+            "audio payload exceeds max size of {max_voice_transcription_bytes} bytes",
+        )));
+    }
 
     // Resolve auth: env vars first, then ~/.codex/auth.json.
     let (endpoint, bearer_token, include_model) = resolve_transcription_auth()?;
+    let normalized_mime_type = normalize_transcription_mime_type(request.mime_type.as_deref());
+    let normalized_file_name =
+        normalize_transcription_file_name(request.file_name.as_deref(), &normalized_mime_type);
 
     let file_part = reqwest::multipart::Part::bytes(audio_bytes)
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
+        .file_name(normalized_file_name)
+        .mime_str(&normalized_mime_type)
         .map_err(|e| BridgeError::server(&e.to_string()))?;
 
     let mut form = reqwest::multipart::Form::new().part("file", file_part);
@@ -2497,10 +2515,7 @@ async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, Brid
         .await
         .map_err(|e| BridgeError::server(&e.to_string()))?;
 
-    let text = body["text"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let text = body["text"].as_str().unwrap_or("").to_string();
 
     Ok(serde_json::to_value(VoiceTranscribeResponse { text })
         .map_err(|e| BridgeError::server(&e.to_string()))?)
@@ -2571,7 +2586,9 @@ fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
 
     Err(BridgeError {
         code: -32002,
-        message: "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN".to_string(),
+        message:
+            "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN"
+                .to_string(),
         data: None,
     })
 }
@@ -2659,6 +2676,13 @@ fn read_non_empty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn resolve_max_voice_transcription_bytes() -> usize {
+    read_non_empty_env("BRIDGE_MAX_VOICE_TRANSCRIPTION_BYTES")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_VOICE_TRANSCRIPTION_BYTES)
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
@@ -3068,6 +3092,62 @@ fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
         .map_err(|error| {
             BridgeError::invalid_params(&format!("invalid base64 attachment payload: {error}"))
         })
+}
+
+fn normalize_transcription_mime_type(raw_mime_type: Option<&str>) -> String {
+    let Some(raw_mime_type) = raw_mime_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return "audio/wav".to_string();
+    };
+
+    let base_mime = raw_mime_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    match base_mime.as_str() {
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "audio/wav".to_string(),
+        "audio/mp4" => "audio/mp4".to_string(),
+        "audio/m4a" | "audio/x-m4a" => "audio/m4a".to_string(),
+        "audio/aac" => "audio/aac".to_string(),
+        "audio/mpeg" | "audio/mp3" | "audio/mpga" => "audio/mpeg".to_string(),
+        "audio/webm" => "audio/webm".to_string(),
+        "audio/ogg" => "audio/ogg".to_string(),
+        "audio/flac" | "audio/x-flac" => "audio/flac".to_string(),
+        _ => "audio/wav".to_string(),
+    }
+}
+
+fn normalize_transcription_file_name(raw_name: Option<&str>, mime_type: &str) -> String {
+    let mut file_name = raw_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(sanitize_filename)
+        .unwrap_or_else(|| "audio".to_string());
+
+    if !file_name.contains('.') {
+        file_name.push('.');
+        file_name.push_str(infer_transcription_extension_from_mime(mime_type));
+    }
+
+    file_name
+}
+
+fn infer_transcription_extension_from_mime(mime_type: &str) -> &'static str {
+    match mime_type {
+        "audio/wav" => "wav",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/aac" => "aac",
+        "audio/mpeg" => "mp3",
+        "audio/webm" => "webm",
+        "audio/ogg" => "ogg",
+        "audio/flac" => "flac",
+        _ => "wav",
+    }
 }
 
 fn normalize_attachment_kind(kind: Option<&str>, mime_type: Option<&str>) -> &'static str {
@@ -3864,6 +3944,71 @@ mod tests {
         assert_eq!(infer_extension_from_mime(Some("image/JPEG")), Some("jpg"));
         assert_eq!(infer_extension_from_mime(Some("text/plain")), Some("txt"));
         assert_eq!(infer_extension_from_mime(Some("application/zip")), None);
+    }
+
+    #[test]
+    fn transcription_mime_normalization_accepts_known_values_and_falls_back() {
+        assert_eq!(
+            normalize_transcription_mime_type(Some(" audio/MP4 ")),
+            "audio/mp4".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(Some("audio/webm;codecs=opus")),
+            "audio/webm".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(Some("audio/mpga")),
+            "audio/mpeg".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(Some("application/octet-stream")),
+            "audio/wav".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(None),
+            "audio/wav".to_string()
+        );
+    }
+
+    #[test]
+    fn voice_transcribe_request_deserializes_legacy_and_extended_shapes() {
+        let legacy: VoiceTranscribeRequest = serde_json::from_value(json!({
+            "dataBase64": "YQ==",
+            "prompt": "hello"
+        }))
+        .expect("deserialize legacy request shape");
+        assert_eq!(legacy.data_base64, "YQ==");
+        assert_eq!(legacy.prompt.as_deref(), Some("hello"));
+        assert!(legacy.file_name.is_none());
+        assert!(legacy.mime_type.is_none());
+
+        let extended: VoiceTranscribeRequest = serde_json::from_value(json!({
+            "dataBase64": "YQ==",
+            "prompt": "hello",
+            "fileName": "audio.m4a",
+            "mimeType": "audio/mp4"
+        }))
+        .expect("deserialize extended request shape");
+        assert_eq!(extended.data_base64, "YQ==");
+        assert_eq!(extended.prompt.as_deref(), Some("hello"));
+        assert_eq!(extended.file_name.as_deref(), Some("audio.m4a"));
+        assert_eq!(extended.mime_type.as_deref(), Some("audio/mp4"));
+    }
+
+    #[test]
+    fn transcription_file_name_normalization_sanitizes_and_sets_extension() {
+        assert_eq!(
+            normalize_transcription_file_name(Some("../voice note"), "audio/mp4"),
+            "voice_note.m4a".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_file_name(None, "audio/wav"),
+            "audio.wav".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_file_name(Some("meeting"), "audio/webm"),
+            "meeting.webm".to_string()
+        );
     }
 
     #[test]

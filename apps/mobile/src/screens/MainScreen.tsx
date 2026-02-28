@@ -431,11 +431,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const loadChatRequestRef = useRef(0);
 
     const voiceRecorder = useVoiceRecorder({
-      transcribe: (dataBase64, prompt) => api.transcribeVoice({ dataBase64, prompt }),
+      transcribe: (dataBase64, prompt, options) =>
+        api.transcribeVoice({ dataBase64, prompt, ...options }),
       composerContext: draft,
       onTranscript: (text) => setDraft((prev) => (prev ? `${prev} ${text}` : text)),
       onError: (msg) => setError(msg),
     });
+    const canUseVoiceInput = Platform.OS !== 'web';
 
     const clearPendingScrollRetries = useCallback(() => {
       for (const timeoutId of scrollRetryTimeoutsRef.current) {
@@ -4555,8 +4557,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               onRemoveAttachment={removeComposerAttachment}
               isLoading={isLoading}
               placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
-              voiceState={voiceRecorder.voiceState}
-              onVoiceToggle={voiceRecorder.toggleRecording}
+              voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
+              onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
             />
           </View>
         </KeyboardAvoidingView>

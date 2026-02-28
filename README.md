@@ -508,6 +508,7 @@ So yes, cloud builds without App Store listing are possible, but still require A
 - `bridge/health/read`
 - `bridge/terminal/exec`
 - `bridge/attachments/upload`
+- `bridge/voice/transcribe`
 - `bridge/git/status`
 - `bridge/git/diff`
 - `bridge/git/commit`

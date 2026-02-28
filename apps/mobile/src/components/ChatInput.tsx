@@ -59,11 +59,12 @@ export function ChatInput({
     }
   }, [inputHeight, value]);
 
-  const canSend = value.trim().length > 0 && !isLoading;
+  const canSend = value.trim().length > 0 && !isLoading && voiceState === 'idle';
   const canStop = Boolean(showStopButton && onStop);
-  const showVoiceButton =
-    !canSend && !canStop && !isLoading && voiceState !== 'transcribing' && Boolean(onVoiceToggle);
-  const shouldShowActionButton = canStop || canSend || isLoading || showVoiceButton || voiceState !== 'idle';
+  const showVoiceButton = Boolean(onVoiceToggle) && !canStop && !isLoading;
+  const showPrimaryActionButton = canStop || canSend || isLoading;
+  const shouldShowActionButton =
+    showPrimaryActionButton || showVoiceButton || voiceState !== 'idle';
 
   return (
     <View style={styles.container}>
@@ -140,46 +141,51 @@ export function ChatInput({
             }}
           />
           {shouldShowActionButton ? (
-            voiceState === 'transcribing' ? (
-              <View style={styles.sendBtn}>
-                <ActivityIndicator size="small" color={colors.textMuted} />
-              </View>
-            ) : voiceState === 'recording' ? (
-              <Pressable
-                onPress={onVoiceToggle}
-                style={[styles.sendBtn, styles.micBtnRecording]}
-              >
-                <Ionicons name="mic" size={14} color={colors.error} />
-              </Pressable>
-            ) : showVoiceButton ? (
-              <Pressable
-                onPress={onVoiceToggle}
-                style={styles.sendBtn}
-              >
-                <Ionicons name="mic-outline" size={14} color={colors.textMuted} />
-              </Pressable>
-            ) : (
-              <Pressable
-                onPress={canStop ? onStop : canSend ? onSubmit : undefined}
-                style={styles.sendBtn}
-                disabled={canStop ? isStopping : !canSend}
-              >
-                {canStop ? (
-                  <View style={styles.stopButtonContent}>
-                    <Ionicons name="square" size={10} color={colors.textPrimary} />
-                    <ActivityIndicator
-                      size="small"
-                      color={colors.textMuted}
-                      style={styles.stopButtonSpinner}
-                    />
+            <View style={styles.actionButtons}>
+              {showVoiceButton || voiceState !== 'idle' ? (
+                voiceState === 'transcribing' ? (
+                  <View style={styles.sendBtn}>
+                    <ActivityIndicator size="small" color={colors.textMuted} />
                   </View>
-                ) : isLoading ? (
-                  <ActivityIndicator size="small" color={colors.textMuted} />
+                ) : voiceState === 'recording' ? (
+                  <Pressable
+                    onPress={onVoiceToggle}
+                    style={[styles.sendBtn, styles.micBtnRecording]}
+                  >
+                    <Ionicons name="mic" size={14} color={colors.error} />
+                  </Pressable>
                 ) : (
-                  <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
-                )}
-              </Pressable>
-            )
+                  <Pressable
+                    onPress={onVoiceToggle}
+                    style={styles.sendBtn}
+                  >
+                    <Ionicons name="mic-outline" size={14} color={colors.textMuted} />
+                  </Pressable>
+                )
+              ) : null}
+              {showPrimaryActionButton ? (
+                <Pressable
+                  onPress={canStop ? onStop : canSend ? onSubmit : undefined}
+                  style={styles.sendBtn}
+                  disabled={canStop ? isStopping : !canSend}
+                >
+                  {canStop ? (
+                    <View style={styles.stopButtonContent}>
+                      <Ionicons name="square" size={10} color={colors.textPrimary} />
+                      <ActivityIndicator
+                        size="small"
+                        color={colors.textMuted}
+                        style={styles.stopButtonSpinner}
+                      />
+                    </View>
+                  ) : isLoading ? (
+                    <ActivityIndicator size="small" color={colors.textMuted} />
+                  ) : (
+                    <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
+                  )}
+                </Pressable>
+              ) : null}
+            </View>
           ) : null}
         </View>
       </View>
@@ -262,6 +268,12 @@ const styles = StyleSheet.create({
     paddingVertical: Platform.OS === 'ios' ? 2 : 0,
     textAlignVertical: 'center',
   },
+  actionButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: spacing.xs,
+    gap: spacing.xs,
+  },
   sendBtn: {
     width: 28,
     height: 28,
@@ -269,7 +281,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bgItem,
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: spacing.xs,
   },
   micBtnRecording: {
     borderWidth: 1.5,

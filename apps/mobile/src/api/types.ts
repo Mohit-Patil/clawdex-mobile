@@ -313,6 +313,8 @@ export interface RunEvent {
 export interface VoiceTranscribeRequest {
   dataBase64: string;
   prompt?: string;
+  fileName?: string;
+  mimeType?: string;
 }
 
 export interface VoiceTranscribeResponse {

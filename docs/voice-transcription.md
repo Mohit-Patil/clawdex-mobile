@@ -6,7 +6,8 @@ Voice-to-text input for the mobile composer. Tap the mic button to record, tap a
 
 ```
 Phone (expo-audio)        Rust Bridge              OpenAI
-  record WAV 16kHz mono --> base64 over WebSocket --> POST /v1/audio/transcriptions
+  record 16kHz mono       --> base64 over WebSocket --> POST /v1/audio/transcriptions
+  (iOS WAV, Android M4A)
   insert text in composer <-- { text: "..." }    <-- gpt-4o-transcribe response
 ```
 
@@ -46,9 +47,15 @@ The bridge resolves transcription credentials in order:
 
 - Sample rate: 16,000 Hz
 - Channels: 1 (mono)
-- Format: LINEARPCM 16-bit (iOS), default WAV (Android)
-- Extension: `.wav`
-- Minimum duration: 1 second
+- Format:
+  - iOS: LINEARPCM 16-bit (`audio/wav`)
+  - Android: MPEG-4 AAC (`audio/mp4`, `.m4a`)
+- Minimum duration:
+  - Mobile guard: 1 second
+  - Bridge raw payload guard: ~0.5 seconds (16KB minimum)
+- Maximum payload size:
+  - Mobile guard: 20MB
+  - Bridge guard: 100MB by default (override with `BRIDGE_MAX_VOICE_TRANSCRIPTION_BYTES`)
 
 ## UI States
 
@@ -62,6 +69,8 @@ The mic button occupies the send button slot when the composer is empty and no t
 
 Interaction: tap to start recording, tap again to stop and transcribe. The transcribed text is appended to the current draft.
 
+Voice input is enabled on iOS and Android. The mic button is hidden on web.
+
 ## Dependencies
 
 - **`expo-audio`** — Recording via `useAudioRecorder` hook. Works in Expo Go (unlike `expo-av` which requires a dev build in SDK 55).
@@ -72,5 +81,7 @@ Interaction: tap to start recording, tap again to stop and transcribe. The trans
 - Mic permission denied → error message, stays idle
 - Recording < 1 second → "Recording too short" error, discarded
 - Audio payload < 16KB → bridge rejects with `invalid_params`
+- Audio payload > 20MB → mobile rejects before upload
+- Audio payload > bridge max bytes (default 100MB) → bridge rejects with `invalid_params`
 - No credentials found → bridge returns error code `-32002`
 - Transcription API HTTP error → bridge returns status + body in error data
