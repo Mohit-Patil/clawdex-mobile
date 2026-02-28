@@ -137,6 +137,7 @@ interface SlashCommandDefinition {
 const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
+const CHAT_OPEN_REVEAL_DELAY_MS = 260;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
@@ -2534,11 +2535,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       async (chatId: string) => {
         const requestId = loadChatRequestRef.current + 1;
         loadChatRequestRef.current = requestId;
+        let loadedSuccessfully = false;
         try {
           const chat = await api.getChat(chatId);
           if (requestId !== loadChatRequestRef.current) {
             return;
           }
+          loadedSuccessfully = true;
           setSelectedChatId(chatId);
           setSelectedChat(chat);
           setError(null);
@@ -2591,7 +2594,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             detail: (err as Error).message,
           });
         } finally {
-          if (requestId === loadChatRequestRef.current) {
+          if (requestId !== loadChatRequestRef.current) {
+            return;
+          }
+
+          if (loadedSuccessfully) {
+            // Keep spinner visible until initial bottom sync settles for long threads.
+            scrollToBottomReliable(false);
+            setTimeout(() => {
+              if (requestId === loadChatRequestRef.current) {
+                setOpeningChatId(null);
+              }
+            }, CHAT_OPEN_REVEAL_DELAY_MS);
+          } else {
             setOpeningChatId(null);
           }
         }
@@ -2602,18 +2617,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         bumpRunWatchdog,
         clearRunWatchdog,
         refreshPendingApprovalsForThread,
+        scrollToBottomReliable,
       ]
     );
 
     const openChatThread = useCallback(
       (id: string, optimisticChat?: Chat | null) => {
-        const canReuseSnapshot = Boolean(
+        const hasSnapshot = Boolean(
           optimisticChat &&
             optimisticChat.id === id &&
             optimisticChat.messages.length > 0
         );
 
         setSelectedChatId(id);
+        setOpeningChatId(id);
         setSending(false);
         setCreating(false);
         setError(null);
@@ -2634,38 +2651,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         stopRequestedRef.current = false;
         stopSystemMessageLoggedRef.current = false;
 
-        if (canReuseSnapshot && optimisticChat) {
+        if (hasSnapshot && optimisticChat) {
           setSelectedChat(optimisticChat);
-          setOpeningChatId(null);
-          setActivity(
-            optimisticChat.status === 'running'
-              ? {
-                  tone: 'running',
-                  title: 'Working',
-                }
-              : optimisticChat.status === 'complete'
-                ? {
-                    tone: 'complete',
-                    title: 'Turn completed',
-                  }
-                : optimisticChat.status === 'error'
-                  ? {
-                      tone: 'error',
-                      title: 'Turn failed',
-                      detail: optimisticChat.lastError ?? undefined,
-                    }
-                  : {
-                      tone: 'idle',
-                      title: 'Ready',
-                    }
-          );
-        } else {
-          setOpeningChatId(id);
-          setActivity({
-            tone: 'running',
-            title: 'Opening chat',
-          });
         }
+        setActivity({
+          tone: 'running',
+          title: 'Opening chat',
+        });
 
         applyThreadRuntimeSnapshot(id);
         void refreshPendingApprovalsForThread(id);
@@ -3283,7 +3275,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Thinking',
                   }
             );
-            setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+            scrollToBottomReliable(true);
             return;
           }
 
@@ -3477,7 +3469,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   title: 'Thinking',
                 }
           );
-          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+          scrollToBottomReliable(true);
           return;
         }
 
@@ -4382,6 +4374,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       scheduleExternalStatusFullSync,
       registerTurnStarted,
       pushActiveCommand,
+      scrollToBottomReliable,
       upsertThreadRuntimeSnapshot,
     ]);
 
@@ -4615,11 +4608,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       activity.tone !== 'idle' ||
       activity.title !== 'Ready' ||
       Boolean(activityDetail);
+    const chatBottomInset = showActivity ? spacing.xxl * 2 : spacing.xxl;
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
+
+    useEffect(() => {
+      if (!selectedChat || isOpeningChat || !showActivity) {
+        return;
+      }
+      scrollToBottomReliable(false);
+    }, [isOpeningChat, scrollToBottomReliable, selectedChat, showActivity]);
 
     return (
       <View style={styles.container}>
@@ -4681,6 +4682,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               isStreaming={isStreaming}
               inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
               onInlineOptionSelect={handleInlineOptionSelect}
+              onAutoScroll={scrollToBottomReliable}
+              bottomInset={chatBottomInset}
             />
           ) : isOpeningChat ? (
             <View style={styles.chatLoadingContainer}>
@@ -5315,6 +5318,8 @@ function ChatView({
   isStreaming,
   inlineChoicesEnabled,
   onInlineOptionSelect,
+  onAutoScroll,
+  bottomInset,
 }: {
   chat: Chat;
   activePlan: ActivePlanState | null;
@@ -5324,6 +5329,8 @@ function ChatView({
   isStreaming: boolean;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
+  onAutoScroll: (animated?: boolean) => void;
+  bottomInset: number;
 }) {
   const { height: windowHeight } = useWindowDimensions();
   const visibleToolBlocks = useMemo(
@@ -5372,7 +5379,7 @@ function ChatView({
     }
 
     initialBottomSyncChatIdRef.current = chat.id;
-    const scrollToBottom = () => scrollRef.current?.scrollToEnd({ animated: false });
+    const scrollToBottom = () => onAutoScroll(false);
     const frame = requestAnimationFrame(scrollToBottom);
     const timeout = setTimeout(scrollToBottom, 120);
 
@@ -5384,6 +5391,7 @@ function ChatView({
     activePlan,
     chat.id,
     liveTimelineText,
+    onAutoScroll,
     scrollRef,
     streamingPreviewText,
     visibleMessages.length,
@@ -5394,7 +5402,7 @@ function ChatView({
       key={chat.id}
       ref={scrollRef}
       data={visibleMessages}
-      keyExtractor={(msg, messageIndex) => `${msg.id}-${String(messageIndex)}`}
+      keyExtractor={(msg) => msg.id}
       renderItem={({ item: msg }) => {
         const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
         return (
@@ -5431,12 +5439,12 @@ function ChatView({
         );
       }}
       style={styles.messageList}
-      contentContainerStyle={styles.messageListContent}
+      contentContainerStyle={[styles.messageListContent, { paddingBottom: bottomInset }]}
       showsVerticalScrollIndicator={false}
       keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
       keyboardShouldPersistTaps="handled"
       onScrollBeginDrag={Keyboard.dismiss}
-      onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+      onContentSizeChange={() => onAutoScroll(false)}
       initialNumToRender={16}
       maxToRenderPerBatch={12}
       windowSize={11}
