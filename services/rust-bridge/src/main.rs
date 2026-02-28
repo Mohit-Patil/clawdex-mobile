@@ -2764,7 +2764,11 @@ fn build_pairing_payload(config: &BridgeConfig) -> Option<String> {
     }
 
     let bridge_token = config.auth_token.clone()?;
-    let bridge_url = format!("http://{}:{}", format_host_for_url(&config.host), config.port);
+    let bridge_url = format!(
+        "http://{}:{}",
+        format_host_for_url(&config.host),
+        config.port
+    );
 
     Some(
         json!({
