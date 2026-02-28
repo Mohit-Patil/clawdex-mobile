@@ -25,9 +25,12 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import type {
@@ -139,24 +142,25 @@ const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
 const CHAT_OPEN_REVEAL_DELAY_MS = 260;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
+const UNANSWERED_USER_RUNNING_TTL_MS = 90_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
 const INLINE_OPTION_LINE_PATTERN =
   /^(?:[-*+]\s*)?(?:\d{1,2}\s*[.):-]|\(\d{1,2}\)\s*[.):-]?|\[\d{1,2}\]\s*|[A-Ca-c]\s*[.):-]|\([A-Ca-c]\)\s*[.):-]?|option\s+\d{1,2}\s*[.):-]?)\s*(.+)$/i;
-const INLINE_CHOICE_CUE_PHRASES = [
-  'choose',
-  'select',
-  'pick',
-  'which',
-  'what',
-  'prefer',
-  'option',
-  'let me know',
-  'would you like',
-  'should i',
-  'confirm',
+const INLINE_CHOICE_CUE_PATTERNS = [
+  /\bchoose\b/i,
+  /\bselect\b/i,
+  /\bpick\b/i,
+  /\bwould you like\b/i,
+  /\bshould i\b/i,
+  /\bprefer\b/i,
+  /\bconfirm\b/i,
+  /\b(?:reply|respond)\s+with\b/i,
+  /\blet me know\b.*\b(which|what|option|one)\b/i,
+  /\bwhich\b.*\b(option|one)\b/i,
+  /\bwhat\b.*\b(option|one)\b/i,
 ];
 const CODEX_RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'taskstarted',
@@ -182,6 +186,25 @@ const CODEX_RUN_ABORT_EVENT_TYPES = new Set([
 const CODEX_RUN_FAILURE_EVENT_TYPES = new Set([
   'taskfailed',
   'turnfailed',
+]);
+const EXTERNAL_RUNNING_STATUS_HINTS = new Set([
+  'running',
+  'inprogress',
+  'active',
+  'queued',
+  'pending',
+]);
+const EXTERNAL_ERROR_STATUS_HINTS = new Set([
+  'failed',
+  'error',
+  'interrupted',
+  'aborted',
+]);
+const EXTERNAL_COMPLETE_STATUS_HINTS = new Set([
+  'complete',
+  'completed',
+  'success',
+  'succeeded',
 ]);
 
 interface ChatModelPreference {
@@ -439,6 +462,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       title: 'Ready',
     });
     const [composerHeight, setComposerHeight] = useState(spacing.xxl * 4);
+    const safeAreaInsets = useSafeAreaInsets();
     const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
     const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const loadChatRequestRef = useRef(0);
@@ -3147,7 +3171,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (event.method === 'thread/name/updated') {
           const params = toRecord(event.params);
-          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
+          const threadId = extractNotificationThreadId(params);
           if (!threadId || threadId !== currentId) {
             return;
           }
@@ -3178,15 +3202,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!codexEventType) {
             return;
           }
-          const threadId =
-            readString(msg?.thread_id) ??
-            readString(msg?.threadId) ??
-            readString(params?.thread_id) ??
-            readString(params?.threadId) ??
-            readString(params?.conversationId) ??
-            readString(msg?.conversation_id);
+          const threadId = extractNotificationThreadId(params, msg);
 
           if (!currentId) {
+            if (threadId) {
+              cacheCodexRuntimeForThread(threadId, codexEventType, msg);
+            }
             return;
           }
 
@@ -4255,9 +4276,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         // wipe streaming text, active commands, and the watchdog.
         if (event.method === 'thread/status/changed') {
           const params = toRecord(event.params);
-          const threadId =
-            readString(params?.threadId) ?? readString(params?.thread_id);
+          const threadId = extractNotificationThreadId(params);
+          const statusHint = extractExternalStatusHint(params);
+          const hasExplicitRunningStatus = Boolean(
+            statusHint && EXTERNAL_RUNNING_STATUS_HINTS.has(statusHint)
+          );
+          const hasExplicitTerminalStatus = Boolean(
+            statusHint &&
+              (EXTERNAL_ERROR_STATUS_HINTS.has(statusHint) ||
+                EXTERNAL_COMPLETE_STATUS_HINTS.has(statusHint))
+          );
           if (threadId && threadId === currentId) {
+            if (!hasExplicitTerminalStatus) {
+              bumpRunWatchdog();
+              setActivity((prev) =>
+                prev.tone === 'running'
+                  ? prev
+                  : { tone: 'running', title: 'Working' }
+              );
+            }
+
             api
               .getChatSummary(threadId)
               .then((summary) => {
@@ -4276,7 +4314,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   };
                 });
 
-                if (isChatSummaryLikelyRunning(summary)) {
+                const shouldPreserveRunning =
+                  !hasExplicitTerminalStatus &&
+                  runWatchdogUntilRef.current > Date.now();
+                const shouldShowRunning =
+                  hasExplicitRunningStatus ||
+                  isChatSummaryLikelyRunning(summary) ||
+                  shouldPreserveRunning;
+
+                if (shouldShowRunning) {
                   bumpRunWatchdog();
                   setActivity((prev) =>
                     prev.tone === 'running'
@@ -4293,8 +4339,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     reasoningSummaryRef.current = {};
                     codexReasoningBufferRef.current = '';
                     hadCommandRef.current = false;
-                    setActivity(
-                      summary.status === 'error'
+                    setActivity(() => {
+                      if (statusHint && EXTERNAL_ERROR_STATUS_HINTS.has(statusHint)) {
+                        return {
+                          tone: 'error',
+                          title: 'Turn failed',
+                          detail: summary.lastError ?? undefined,
+                        };
+                      }
+
+                      if (statusHint && EXTERNAL_COMPLETE_STATUS_HINTS.has(statusHint)) {
+                        return {
+                          tone: 'complete',
+                          title: 'Turn completed',
+                        };
+                      }
+
+                      return summary.status === 'error'
                         ? {
                             tone: 'error',
                             title: 'Turn failed',
@@ -4308,8 +4369,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                           : {
                               tone: 'idle',
                               title: 'Ready',
-                            }
-                    );
+                            };
+                    });
                   }
                 }
               })
@@ -4317,13 +4378,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
             scheduleExternalStatusFullSync(threadId);
           } else if (threadId) {
-            cacheThreadTurnState(threadId, {
-              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
-            });
-            cacheThreadActivity(threadId, {
-              tone: 'running',
-              title: 'Working',
-            });
+            if (!hasExplicitTerminalStatus) {
+              cacheThreadTurnState(threadId, {
+                runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+              });
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Working',
+              });
+            }
             void refreshPendingApprovalsForThread(threadId);
           }
           return;
@@ -4407,9 +4470,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return isUnchanged ? prev : latest;
           });
 
-          const shouldRunFromChat = isChatLikelyRunning(latest);
+          const hasAssistantProgress = didAssistantMessageProgress(selectedChat, latest);
+          const hasPendingUserMessage = hasRecentUnansweredUserTurn(latest);
+          const shouldRunFromChat =
+            isChatLikelyRunning(latest) ||
+            hasAssistantProgress ||
+            hasPendingUserMessage;
           const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
+          const shouldRefreshWatchdog = shouldRunFromChat;
+          const watchdogDurationMs =
+            hasAssistantProgress && !isChatLikelyRunning(latest)
+              ? Math.floor(RUN_WATCHDOG_MS / 4)
+              : RUN_WATCHDOG_MS;
 
           if (shouldShowRunning && !hasPendingApproval && !hasPendingUserInput) {
             setActivity((prev) => {
@@ -4422,10 +4495,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               ) {
                 return prev;
               }
-              bumpRunWatchdog();
+              if (shouldRefreshWatchdog) {
+                bumpRunWatchdog(watchdogDurationMs);
+              }
               return prev.tone === 'running'
                 ? prev
-                : { tone: 'running', title: 'Working' };
+                : { tone: 'running', title: hasAssistantProgress ? 'Thinking' : 'Working' };
             });
           } else if (!hasPendingApproval && !hasPendingUserInput) {
             clearRunWatchdog();
@@ -4607,11 +4682,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       isOpeningChat ||
       Boolean(queuedMessagesDetail) ||
       activity.tone !== 'idle' ||
-      activity.title !== 'Ready' ||
       Boolean(activityDetail);
-    const chatBottomInset = shouldShowComposer
-      ? Math.max(spacing.xxl, composerHeight + spacing.sm)
-      : spacing.xxl;
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
     const defaultStartWorkspaceLabel =
@@ -4619,6 +4690,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
     const showFloatingActivity =
       showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
+    const chatBottomInset = shouldShowComposer
+      ? spacing.lg + (showFloatingActivity ? spacing.xxl + spacing.sm : 0)
+      : Math.max(spacing.xxl, safeAreaInsets.bottom + spacing.lg);
 
     useEffect(() => {
       if (!selectedChat || isOpeningChat || !showActivity) {
@@ -4710,7 +4784,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           {showFloatingActivity ? (
             <View
               pointerEvents="none"
-              style={[styles.activityOverlay, { bottom: composerHeight + spacing.sm }]}
+              style={[
+                styles.activityOverlay,
+                { bottom: composerHeight + spacing.sm },
+              ]}
             >
               <ActivityBar
                 title={activity.title}
@@ -4789,6 +4866,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
                 voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
                 onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
+                safeAreaBottomInset={safeAreaInsets.bottom}
+                keyboardVisible={keyboardVisible}
               />
             </View>
           ) : null}
@@ -5350,6 +5429,7 @@ function ChatView({
   bottomInset: number;
 }) {
   const { height: windowHeight } = useWindowDimensions();
+  const shouldStickToBottomRef = useRef(true);
   const visibleToolBlocks = useMemo(
     () => activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS),
     [activeCommands]
@@ -5386,6 +5466,15 @@ function ChatView({
     [streamingText, visibleMessages]
   );
   const initialBottomSyncChatIdRef = useRef<string | null>(null);
+  const handleScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+      const distanceFromBottom =
+        contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      shouldStickToBottomRef.current = distanceFromBottom <= spacing.xl * 2;
+    },
+    []
+  );
 
   useEffect(() => {
     if (initialBottomSyncChatIdRef.current === chat.id) {
@@ -5414,107 +5503,119 @@ function ChatView({
     visibleMessages.length,
   ]);
 
+  useEffect(() => {
+    shouldStickToBottomRef.current = true;
+  }, [chat.id]);
+
   return (
-    <FlatList
-      key={chat.id}
-      ref={scrollRef}
-      data={visibleMessages}
-      keyExtractor={(msg) => msg.id}
-      renderItem={({ item: msg }) => {
-        const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
-        return (
-          <View style={styles.chatMessageBlock}>
-            <ChatMessage message={msg} />
-            {showInlineChoices ? (
-              <View style={styles.inlineChoiceOptions}>
-                {inlineChoiceSet.options.map((option, index) => (
-                  <Pressable
-                    key={`${msg.id}-${index}-${option.label}`}
-                    style={({ pressed }) => [
-                      styles.inlineChoiceOptionButton,
-                      pressed && styles.inlineChoiceOptionButtonPressed,
-                    ]}
-                    onPress={() => onInlineOptionSelect(option.label)}
-                  >
-                    <View style={styles.inlineChoiceOptionRow}>
-                      <Text style={styles.inlineChoiceOptionIndex}>{`${String(index + 1)}.`}</Text>
-                      <Text style={styles.inlineChoiceOptionLabel}>{option.label}</Text>
-                    </View>
-                    {option.description.trim() ? (
-                      <Text style={styles.inlineChoiceOptionDescription}>
-                        {option.description}
-                      </Text>
-                    ) : null}
-                  </Pressable>
-                ))}
-                <Text style={styles.inlineChoiceHint}>
-                  Tap an option to fill the reply box.
-                </Text>
+    <View style={styles.messageListShell}>
+      <FlatList
+        key={chat.id}
+        ref={scrollRef}
+        data={visibleMessages}
+        keyExtractor={(msg) => msg.id}
+        renderItem={({ item: msg }) => {
+          const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
+          return (
+            <View style={styles.chatMessageBlock}>
+              <ChatMessage message={msg} />
+              {showInlineChoices ? (
+                <View style={styles.inlineChoiceOptions}>
+                  {inlineChoiceSet.options.map((option, index) => (
+                    <Pressable
+                      key={`${msg.id}-${index}-${option.label}`}
+                      style={({ pressed }) => [
+                        styles.inlineChoiceOptionButton,
+                        pressed && styles.inlineChoiceOptionButtonPressed,
+                      ]}
+                      onPress={() => onInlineOptionSelect(option.label)}
+                    >
+                      <View style={styles.inlineChoiceOptionRow}>
+                        <Text style={styles.inlineChoiceOptionIndex}>{`${String(index + 1)}.`}</Text>
+                        <Text style={styles.inlineChoiceOptionLabel}>{option.label}</Text>
+                      </View>
+                      {option.description.trim() ? (
+                        <Text style={styles.inlineChoiceOptionDescription}>
+                          {option.description}
+                        </Text>
+                      ) : null}
+                    </Pressable>
+                  ))}
+                  <Text style={styles.inlineChoiceHint}>
+                    Tap an option to fill the reply box.
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+          );
+        }}
+        style={styles.messageList}
+        contentContainerStyle={[styles.messageListContent, { paddingBottom: bottomInset }]}
+        showsVerticalScrollIndicator={false}
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        keyboardShouldPersistTaps="handled"
+        onScrollBeginDrag={Keyboard.dismiss}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+        onContentSizeChange={() => {
+          if (shouldStickToBottomRef.current) {
+            onAutoScroll(false);
+          }
+        }}
+        initialNumToRender={16}
+        maxToRenderPerBatch={12}
+        windowSize={11}
+        removeClippedSubviews={Platform.OS === 'android'}
+        ListHeaderComponent={activePlan ? <PlanCard plan={activePlan} /> : null}
+        ListFooterComponent={
+          <>
+            {liveTimelineText ? (
+              <View style={styles.chatMessageBlock}>
+                <ChatMessage
+                  message={{
+                    id: `live-timeline-${chat.id}`,
+                    role: 'system',
+                    content: liveTimelineText,
+                    createdAt: new Date().toISOString(),
+                  }}
+                />
               </View>
             ) : null}
-          </View>
-        );
-      }}
-      style={styles.messageList}
-      contentContainerStyle={[styles.messageListContent, { paddingBottom: bottomInset }]}
-      showsVerticalScrollIndicator={false}
-      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-      keyboardShouldPersistTaps="handled"
-      onScrollBeginDrag={Keyboard.dismiss}
-      onContentSizeChange={() => onAutoScroll(false)}
-      initialNumToRender={16}
-      maxToRenderPerBatch={12}
-      windowSize={11}
-      removeClippedSubviews={Platform.OS === 'android'}
-      ListHeaderComponent={activePlan ? <PlanCard plan={activePlan} /> : null}
-      ListFooterComponent={
-        <>
-          {liveTimelineText ? (
-            <View style={styles.chatMessageBlock}>
-              <ChatMessage
-                message={{
-                  id: `live-timeline-${chat.id}`,
-                  role: 'system',
-                  content: liveTimelineText,
-                  createdAt: new Date().toISOString(),
-                }}
-              />
-            </View>
-          ) : null}
-          {streamingPreviewText ? (
-            <Text style={styles.streamingText} numberOfLines={4}>
-              {streamingPreviewText}
-            </Text>
-          ) : null}
-          {shouldShowToolPanel ? (
-            <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
-              <ScrollView
-                nestedScrollEnabled
-                showsVerticalScrollIndicator={false}
-                contentContainerStyle={styles.toolPanelContent}
-              >
-                {visibleToolBlocks.map((cmd) => {
-                  const tool = toToolBlockState(cmd);
-                  if (!tool) {
-                    return null;
-                  }
-                  return (
-                    <ToolBlock
-                      key={cmd.id}
-                      command={tool.command}
-                      status={tool.status}
-                    />
-                  );
-                })}
-              </ScrollView>
-            </View>
-          ) : null}
-          {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? (
-            <TypingIndicator />
-          ) : null}
-        </>
-      }
-    />
+            {streamingPreviewText ? (
+              <Text style={styles.streamingText} numberOfLines={4}>
+                {streamingPreviewText}
+              </Text>
+            ) : null}
+            {shouldShowToolPanel ? (
+              <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
+                <ScrollView
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={styles.toolPanelContent}
+                >
+                  {visibleToolBlocks.map((cmd) => {
+                    const tool = toToolBlockState(cmd);
+                    if (!tool) {
+                      return null;
+                    }
+                    return (
+                      <ToolBlock
+                        key={cmd.id}
+                        command={tool.command}
+                        status={tool.status}
+                      />
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            ) : null}
+            {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? (
+              <TypingIndicator />
+            ) : null}
+          </>
+        }
+      />
+    </View>
   );
 }
 
@@ -5783,10 +5884,10 @@ function findInlineChoiceSet(messages: ChatTranscriptMessage[]): {
       continue;
     }
 
-    const cueSource = `${parsed.question}\n${message.content}`.toLowerCase();
+    const cueSource = parsed.question.trim();
     const hasCue =
       cueSource.includes('?') ||
-      INLINE_CHOICE_CUE_PHRASES.some((phrase) => cueSource.includes(phrase));
+      INLINE_CHOICE_CUE_PATTERNS.some((pattern) => pattern.test(cueSource));
     if (!hasCue) {
       continue;
     }
@@ -6468,6 +6569,110 @@ function isCodexRunHeartbeatEvent(codexEventType: string): boolean {
   return CODEX_RUN_HEARTBEAT_EVENT_TYPES.has(codexEventType);
 }
 
+function normalizeExternalStatusHint(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalized.length > 0 ? normalized : null;
+}
+
+function extractNotificationThreadId(
+  params: Record<string, unknown> | null,
+  msgArg?: Record<string, unknown> | null
+): string | null {
+  if (!params && !msgArg) {
+    return null;
+  }
+
+  const msg = msgArg ?? toRecord(params?.msg);
+  const threadRecord =
+    toRecord(params?.thread) ??
+    toRecord(params?.threadState) ??
+    toRecord(params?.thread_state) ??
+    toRecord(msg?.thread);
+  const turnRecord = toRecord(params?.turn) ?? toRecord(msg?.turn);
+  const sourceRecord = toRecord(params?.source) ?? toRecord(msg?.source);
+  const subagentThreadSpawnRecord = toRecord(
+    toRecord(sourceRecord?.subagent)?.thread_spawn
+  );
+
+  return (
+    readString(msg?.thread_id) ??
+    readString(msg?.threadId) ??
+    readString(msg?.conversation_id) ??
+    readString(msg?.conversationId) ??
+    readString(params?.thread_id) ??
+    readString(params?.threadId) ??
+    readString(params?.conversation_id) ??
+    readString(params?.conversationId) ??
+    readString(threadRecord?.id) ??
+    readString(threadRecord?.thread_id) ??
+    readString(threadRecord?.threadId) ??
+    readString(threadRecord?.conversation_id) ??
+    readString(threadRecord?.conversationId) ??
+    readString(turnRecord?.thread_id) ??
+    readString(turnRecord?.threadId) ??
+    readString(sourceRecord?.thread_id) ??
+    readString(sourceRecord?.threadId) ??
+    readString(sourceRecord?.conversation_id) ??
+    readString(sourceRecord?.conversationId) ??
+    readString(sourceRecord?.parent_thread_id) ??
+    readString(sourceRecord?.parentThreadId) ??
+    readString(subagentThreadSpawnRecord?.parent_thread_id) ??
+    null
+  );
+}
+
+function extractExternalStatusHint(
+  params: Record<string, unknown> | null
+): string | null {
+  if (!params) {
+    return null;
+  }
+
+  const directCandidates: unknown[] = [
+    params.status,
+    params.threadStatus,
+    params.thread_status,
+    params.state,
+    params.phase,
+  ];
+  for (const candidate of directCandidates) {
+    const direct = normalizeExternalStatusHint(readString(candidate));
+    if (direct) {
+      return direct;
+    }
+
+    const candidateRecord = toRecord(candidate);
+    const typed = normalizeExternalStatusHint(
+      readString(candidateRecord?.type) ??
+        readString(candidateRecord?.status) ??
+        readString(candidateRecord?.state) ??
+        readString(candidateRecord?.phase)
+    );
+    if (typed) {
+      return typed;
+    }
+  }
+
+  const threadRecord =
+    toRecord(params.thread) ?? toRecord(params.threadState) ?? toRecord(params.thread_state);
+  if (!threadRecord) {
+    return null;
+  }
+
+  const nestedThreadStatus = normalizeExternalStatusHint(
+    readString(threadRecord.status) ??
+      readString(toRecord(threadRecord.status)?.type) ??
+      readString(threadRecord.state) ??
+      readString(threadRecord.phase) ??
+      readString(toRecord(threadRecord.lifecycle)?.status)
+  );
+  return nestedThreadStatus;
+}
+
 function isChatSummaryLikelyRunning(chat: ChatSummary): boolean {
   return chat.status === 'running';
 }
@@ -6493,6 +6698,70 @@ function isChatLikelyRunning(chat: Chat): boolean {
   }
 
   return Date.now() - updatedAtMs < LIKELY_RUNNING_RECENT_UPDATE_MS;
+}
+
+function hasRecentUnansweredUserTurn(chat: Chat): boolean {
+  let lastUserIndex = -1;
+  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
+    if (chat.messages[index].role === 'user') {
+      lastUserIndex = index;
+      break;
+    }
+  }
+
+  if (lastUserIndex < 0) {
+    return false;
+  }
+
+  for (let index = lastUserIndex + 1; index < chat.messages.length; index += 1) {
+    if (chat.messages[index].role === 'assistant') {
+      return false;
+    }
+  }
+
+  const lastUser = chat.messages[lastUserIndex];
+  const userCreatedAtMs = Date.parse(lastUser.createdAt);
+  if (!Number.isFinite(userCreatedAtMs)) {
+    return false;
+  }
+
+  return Date.now() - userCreatedAtMs < UNANSWERED_USER_RUNNING_TTL_MS;
+}
+
+function didAssistantMessageProgress(previous: Chat | null, next: Chat): boolean {
+  if (!previous || previous.id !== next.id) {
+    return false;
+  }
+
+  const previousLatestAssistant = latestAssistantMessage(previous.messages);
+  const nextLatestAssistant = latestAssistantMessage(next.messages);
+
+  if (!nextLatestAssistant) {
+    return false;
+  }
+
+  if (!previousLatestAssistant) {
+    return nextLatestAssistant.content.trim().length > 0;
+  }
+
+  if (nextLatestAssistant.id === previousLatestAssistant.id) {
+    return nextLatestAssistant.content.length > previousLatestAssistant.content.length;
+  }
+
+  return (
+    next.messages.length > previous.messages.length &&
+    nextLatestAssistant.content.trim().length > 0
+  );
+}
+
+function latestAssistantMessage(messages: ChatTranscriptMessage[]): ChatTranscriptMessage | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === 'assistant') {
+      return message;
+    }
+  }
+  return null;
 }
 
 function extractFirstBoldSnippet(
@@ -7120,6 +7389,9 @@ const styles = StyleSheet.create({
   },
 
   // Chat
+  messageListShell: {
+    flex: 1,
+  },
   messageList: {
     flex: 1,
   },

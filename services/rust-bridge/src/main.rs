@@ -53,7 +53,7 @@ const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
 const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
 const WS_CLIENT_QUEUE_CAPACITY: usize = 256;
 const ROLLOUT_LIVE_SYNC_POLL_INTERVAL_MS: u64 = 900;
-const ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS: u64 = 6;
+const ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS: u64 = 1;
 const ROLLOUT_LIVE_SYNC_MAX_TRACKED_FILES: usize = 64;
 const ROLLOUT_LIVE_SYNC_MAX_FILE_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 2);
 const ROLLOUT_LIVE_SYNC_INITIAL_TAIL_BYTES: u64 = 64 * 1024;
@@ -1053,9 +1053,9 @@ impl RolloutTrackedFile {
         let mut include_for_live_sync = false;
 
         if let Some((meta_thread_id, meta_originator)) = read_rollout_session_meta(&path).await? {
-            include_for_live_sync = meta_originator == "codex_cli_rs";
+            include_for_live_sync = rollout_originator_allowed(meta_originator.as_deref());
             thread_id = Some(meta_thread_id);
-            originator = Some(meta_originator);
+            originator = meta_originator;
         }
 
         let offset = metadata
@@ -1143,6 +1143,11 @@ impl RolloutTrackedFile {
             }
 
             if let Some((method, params)) = self.to_notification(trimmed) {
+                if let Some(status_payload) = build_rollout_thread_status_notification(&method, &params)
+                {
+                    hub.broadcast_notification("thread/status/changed", status_payload)
+                        .await;
+                }
                 hub.broadcast_notification(&method, params).await;
             }
         }
@@ -1174,15 +1179,21 @@ impl RolloutTrackedFile {
         let payload = parsed_object.get("payload")?.as_object()?;
 
         if record_type == "session_meta" {
-            self.thread_id = read_string(payload.get("id")).or_else(|| self.thread_id.clone());
+            self.thread_id =
+                extract_rollout_thread_id(payload, true).or_else(|| self.thread_id.clone());
             self.originator =
                 read_string(payload.get("originator")).or_else(|| self.originator.clone());
-            self.include_for_live_sync = self.originator.as_deref() == Some("codex_cli_rs");
+            self.include_for_live_sync = self.thread_id.is_some()
+                && rollout_originator_allowed(self.originator.as_deref());
             return None;
         }
 
         if !self.include_for_live_sync {
             return None;
+        }
+
+        if let Some(payload_thread_id) = extract_rollout_thread_id(payload, false) {
+            self.thread_id = Some(payload_thread_id);
         }
 
         let thread_id = self.thread_id.as_deref()?;
@@ -1217,7 +1228,10 @@ fn spawn_rollout_live_sync(hub: Arc<ClientHub>) {
             ticker.tick().await;
             state.tick = state.tick.wrapping_add(1);
 
-            if state.tick % ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS == 1 {
+            if should_run_rollout_discovery_tick(
+                state.tick,
+                ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS,
+            ) {
                 if let Err(error) =
                     rollout_live_sync_discover_files(&sessions_root, &mut state).await
                 {
@@ -1359,7 +1373,7 @@ fn is_rollout_file_path(path: &Path) -> bool {
 
 async fn read_rollout_session_meta(
     path: &Path,
-) -> Result<Option<(String, String)>, std::io::Error> {
+) -> Result<Option<(String, Option<String>)>, std::io::Error> {
     let file = match fs::File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1390,22 +1404,98 @@ async fn read_rollout_session_meta(
         None => return Ok(None),
     };
 
-    let thread_id = match read_string(payload.get("id")) {
+    let thread_id = match extract_rollout_thread_id(payload, true) {
         Some(id) => id,
         None => return Ok(None),
     };
-    let originator = match read_string(payload.get("originator")) {
-        Some(originator) => originator,
-        None => return Ok(None),
-    };
+    let originator = read_string(payload.get("originator"));
 
     Ok(Some((thread_id, originator)))
+}
+
+fn extract_rollout_thread_id(
+    payload: &serde_json::Map<String, Value>,
+    allow_session_id_fallback: bool,
+) -> Option<String> {
+    let source = payload.get("source").and_then(Value::as_object);
+    let source_subagent = source
+        .and_then(|value| value.get("subagent"))
+        .and_then(Value::as_object);
+    let source_thread_spawn = source_subagent
+        .and_then(|value| value.get("thread_spawn"))
+        .and_then(Value::as_object);
+
+    read_string(payload.get("thread_id"))
+        .or_else(|| read_string(payload.get("threadId")))
+        .or_else(|| read_string(payload.get("conversation_id")))
+        .or_else(|| read_string(payload.get("conversationId")))
+        .or_else(|| source.and_then(|value| read_string(value.get("thread_id"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("threadId"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("conversation_id"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("conversationId"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("parent_thread_id"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("parentThreadId"))))
+        .or_else(|| {
+            source_thread_spawn.and_then(|value| read_string(value.get("parent_thread_id")))
+        })
+        .or_else(|| {
+            if allow_session_id_fallback {
+                read_string(payload.get("id"))
+            } else {
+                None
+            }
+        })
 }
 
 fn hash_rollout_line(line: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     line.hash(&mut hasher);
     hasher.finish()
+}
+
+fn should_run_rollout_discovery_tick(tick: u64, interval_ticks: u64) -> bool {
+    if interval_ticks <= 1 {
+        return true;
+    }
+
+    tick == 1 || tick % interval_ticks == 0
+}
+
+fn rollout_originator_allowed(originator: Option<&str>) -> bool {
+    match originator {
+        Some(value) => {
+            let normalized = value.to_ascii_lowercase();
+            normalized.contains("codex") || normalized.contains("clawdex")
+        }
+        None => true,
+    }
+}
+
+fn build_rollout_thread_status_notification(method: &str, params: &Value) -> Option<Value> {
+    let codex_event_type = method.strip_prefix("codex/event/")?;
+    let status = match codex_event_type {
+        "task_started" | "taskstarted" => "running",
+        "task_complete" | "taskcomplete" => "completed",
+        "task_failed" | "taskfailed" | "turn_failed" | "turnfailed" => "failed",
+        "task_interrupted" | "taskinterrupted" | "turn_aborted" | "turnaborted" => {
+            "interrupted"
+        }
+        _ => return None,
+    };
+
+    let msg = params
+        .as_object()
+        .and_then(|value| value.get("msg"))
+        .and_then(Value::as_object)?;
+    let thread_id =
+        read_string(msg.get("thread_id")).or_else(|| read_string(msg.get("threadId")))?;
+
+    Some(json!({
+        "threadId": thread_id,
+        "thread_id": thread_id,
+        "status": status,
+        "source": "rollout_live_sync",
+    }))
 }
 
 fn build_rollout_event_msg_notification(
@@ -3687,6 +3777,68 @@ mod tests {
     }
 
     #[test]
+    fn extract_rollout_thread_id_prefers_parent_thread_id_from_source() {
+        let payload = json!({
+            "id": "session-123",
+            "source": {
+                "subagent": {
+                    "thread_spawn": {
+                        "parent_thread_id": "thread-parent"
+                    }
+                }
+            }
+        });
+        let payload_object = payload.as_object().expect("payload object");
+
+        assert_eq!(
+            extract_rollout_thread_id(payload_object, true),
+            Some("thread-parent".to_string())
+        );
+    }
+
+    #[test]
+    fn rollout_thread_status_notification_maps_task_lifecycle_events() {
+        let params = json!({
+            "msg": {
+                "thread_id": "thread-1"
+            }
+        });
+
+        let running = build_rollout_thread_status_notification("codex/event/task_started", &params)
+            .expect("running status");
+        assert_eq!(running["threadId"], "thread-1");
+        assert_eq!(running["status"], "running");
+
+        let completed =
+            build_rollout_thread_status_notification("codex/event/task_complete", &params)
+                .expect("complete status");
+        assert_eq!(completed["status"], "completed");
+
+        let failed = build_rollout_thread_status_notification("codex/event/task_failed", &params)
+            .expect("failed status");
+        assert_eq!(failed["status"], "failed");
+
+        let interrupted =
+            build_rollout_thread_status_notification("codex/event/task_interrupted", &params)
+                .expect("interrupted status");
+        assert_eq!(interrupted["status"], "interrupted");
+
+        assert!(
+            build_rollout_thread_status_notification("codex/event/agent_message_delta", &params)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rollout_originator_filter_allows_codex_and_clawdex_origins() {
+        assert!(rollout_originator_allowed(Some("codex_cli_rs")));
+        assert!(rollout_originator_allowed(Some(
+            "clawdex-mobile-rust-bridge"
+        )));
+        assert!(!rollout_originator_allowed(Some("some_other_originator")));
+    }
+
+    #[test]
     fn rollout_response_item_mapping_builds_exec_command_and_mcp_notifications() {
         let exec_command = build_rollout_response_item_notification(
             json!({
@@ -3761,6 +3913,21 @@ mod tests {
             Some("sunset".to_string())
         );
         assert_eq!(extract_rollout_search_query(&json!({})), None);
+    }
+
+    #[test]
+    fn rollout_discovery_tick_scheduler_handles_one_tick_interval() {
+        assert!(should_run_rollout_discovery_tick(1, 1));
+        assert!(should_run_rollout_discovery_tick(10, 1));
+        assert!(should_run_rollout_discovery_tick(5, 0));
+    }
+
+    #[test]
+    fn rollout_discovery_tick_scheduler_handles_multi_tick_intervals() {
+        assert!(should_run_rollout_discovery_tick(1, 3));
+        assert!(!should_run_rollout_discovery_tick(2, 3));
+        assert!(should_run_rollout_discovery_tick(3, 3));
+        assert!(should_run_rollout_discovery_tick(6, 3));
     }
 
     #[test]

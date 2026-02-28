@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -31,6 +32,8 @@ interface ChatInputProps {
   placeholder?: string;
   onVoiceToggle?: () => void;
   voiceState?: VoiceState;
+  safeAreaBottomInset?: number;
+  keyboardVisible?: boolean;
 }
 
 export function ChatInput({
@@ -48,6 +51,8 @@ export function ChatInput({
   placeholder = 'Message Codex...',
   onVoiceToggle,
   voiceState = 'idle',
+  safeAreaBottomInset = 0,
+  keyboardVisible = false,
 }: ChatInputProps) {
   const INPUT_TEXT_MIN_HEIGHT = 20;
   const INPUT_TEXT_MAX_HEIGHT = 96;
@@ -65,135 +70,158 @@ export function ChatInput({
   const showSendButton = canSend || isLoading;
   const shouldShowActionButton =
     canStop || showSendButton || showVoiceButton || voiceState !== 'idle';
+  const baseBottomPadding =
+    Platform.OS === 'ios'
+      ? keyboardVisible
+        ? spacing.sm
+        : spacing.lg
+      : spacing.md;
+  const extraBottomInset = keyboardVisible ? 0 : safeAreaBottomInset;
 
   return (
-    <View style={styles.container}>
-      {attachments.length > 0 ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.attachmentListContent}
-          style={styles.attachmentList}
-        >
-          {attachments.map((attachment, index) => (
-            <Pressable
-              key={`${attachment.id}-${String(index)}`}
-              onPress={
-                onRemoveAttachment
-                  ? () => onRemoveAttachment(attachment.id)
-                  : undefined
-              }
-              style={({ pressed }) => [
-                styles.attachmentChip,
-                pressed && styles.attachmentChipPressed,
-              ]}
-            >
-              <Ionicons name="attach-outline" size={12} color={colors.textMuted} />
-              <Text style={styles.attachmentChipText} numberOfLines={1}>
-                {attachment.label}
-              </Text>
-              {onRemoveAttachment ? (
-                <Ionicons name="close-outline" size={12} color={colors.textMuted} />
-              ) : null}
-            </Pressable>
-          ))}
-        </ScrollView>
-      ) : null}
+    <View style={styles.shell}>
+      <BlurView
+        intensity={26}
+        tint={Platform.OS === 'ios' ? 'systemUltraThinMaterialDark' : 'dark'}
+        blurMethod="dimezisBlurViewSdk31Plus"
+        style={StyleSheet.absoluteFill}
+      />
+      <View
+        style={[
+          styles.container,
+          {
+            paddingBottom:
+              baseBottomPadding + extraBottomInset,
+          },
+        ]}
+      >
+        {attachments.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.attachmentListContent}
+            style={styles.attachmentList}
+          >
+            {attachments.map((attachment, index) => (
+              <Pressable
+                key={`${attachment.id}-${String(index)}`}
+                onPress={
+                  onRemoveAttachment
+                    ? () => onRemoveAttachment(attachment.id)
+                    : undefined
+                }
+                style={({ pressed }) => [
+                  styles.attachmentChip,
+                  pressed && styles.attachmentChipPressed,
+                ]}
+              >
+                <Ionicons name="attach-outline" size={12} color={colors.textMuted} />
+                <Text style={styles.attachmentChipText} numberOfLines={1}>
+                  {attachment.label}
+                </Text>
+                {onRemoveAttachment ? (
+                  <Ionicons name="close-outline" size={12} color={colors.textMuted} />
+                ) : null}
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
 
-      <View style={styles.row}>
-        <Pressable
-          onPress={onAttachPress}
-          style={({ pressed }) => [styles.plusBtn, pressed && styles.plusBtnPressed]}
-        >
-          <Ionicons name="add" size={20} color={colors.textMuted} />
-        </Pressable>
+        <View style={styles.row}>
+          <Pressable
+            onPress={onAttachPress}
+            style={({ pressed }) => [styles.plusBtn, pressed && styles.plusBtnPressed]}
+          >
+            <Ionicons name="add" size={20} color={colors.textMuted} />
+          </Pressable>
 
-        <View style={styles.inputWrapper}>
-          <TextInput
-            style={[styles.input, { height: inputHeight }]}
-            value={value}
-            onChangeText={onChangeText}
-            onFocus={onFocus}
-            placeholder={placeholder}
-            placeholderTextColor={colors.textMuted}
-            multiline
-            onContentSizeChange={(event) => {
-              const nextHeight = Math.max(
-                INPUT_TEXT_MIN_HEIGHT,
-                Math.min(INPUT_TEXT_MAX_HEIGHT, Math.ceil(event.nativeEvent.contentSize.height))
-              );
-              if (nextHeight !== inputHeight) {
-                setInputHeight(nextHeight);
-              }
-            }}
-            onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
-              const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
-                shiftKey?: boolean;
-              };
-              if (
-                Platform.OS === 'web' &&
-                keyEvent.key === 'Enter' &&
-                !keyEvent.shiftKey
-              ) {
-                e.preventDefault();
-                if (canSend) onSubmit();
-              }
-            }}
-          />
-          {shouldShowActionButton ? (
-            <View style={styles.actionButtons}>
-              {showVoiceButton || voiceState !== 'idle' ? (
-                voiceState === 'transcribing' ? (
-                  <View style={styles.sendBtn}>
-                    <ActivityIndicator size="small" color={colors.textMuted} />
-                  </View>
-                ) : voiceState === 'recording' ? (
-                  <Pressable
-                    onPress={onVoiceToggle}
-                    style={[styles.sendBtn, styles.micBtnRecording]}
-                  >
-                    <Ionicons name="mic" size={14} color={colors.error} />
-                  </Pressable>
-                ) : (
-                  <Pressable
-                    onPress={onVoiceToggle}
-                    style={styles.sendBtn}
-                  >
-                    <Ionicons name="mic-outline" size={14} color={colors.textMuted} />
-                  </Pressable>
-                )
-              ) : null}
-              {canStop ? (
-                <Pressable
-                  onPress={onStop}
-                  style={styles.sendBtn}
-                  disabled={isStopping}
-                >
-                  <View style={styles.stopButtonContent}>
-                    <Ionicons name="square" size={10} color={colors.textPrimary} />
-                    <ActivityIndicator
-                      size="small"
-                      color={colors.textMuted}
-                      style={styles.stopButtonSpinner}
-                    />
-                  </View>
-                </Pressable>
-              ) : null}
-              {showSendButton ? (
-                <Pressable
-                  onPress={canSend ? onSubmit : undefined}
-                  style={styles.sendBtn}
-                  disabled={!canSend}
-                >
-                  {isLoading && !canSend ? (
-                    <ActivityIndicator size="small" color={colors.textMuted} />
+          <View style={styles.inputWrapper}>
+            <TextInput
+              style={[styles.input, { height: inputHeight }]}
+              value={value}
+              onChangeText={onChangeText}
+              onFocus={onFocus}
+              placeholder={placeholder}
+              placeholderTextColor={colors.textMuted}
+              multiline
+              onContentSizeChange={(event) => {
+                const nextHeight = Math.max(
+                  INPUT_TEXT_MIN_HEIGHT,
+                  Math.min(INPUT_TEXT_MAX_HEIGHT, Math.ceil(event.nativeEvent.contentSize.height))
+                );
+                if (nextHeight !== inputHeight) {
+                  setInputHeight(nextHeight);
+                }
+              }}
+              onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
+                const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
+                  shiftKey?: boolean;
+                };
+                if (
+                  Platform.OS === 'web' &&
+                  keyEvent.key === 'Enter' &&
+                  !keyEvent.shiftKey
+                ) {
+                  e.preventDefault();
+                  if (canSend) onSubmit();
+                }
+              }}
+            />
+            {shouldShowActionButton ? (
+              <View style={styles.actionButtons}>
+                {showVoiceButton || voiceState !== 'idle' ? (
+                  voiceState === 'transcribing' ? (
+                    <View style={styles.sendBtn}>
+                      <ActivityIndicator size="small" color={colors.textMuted} />
+                    </View>
+                  ) : voiceState === 'recording' ? (
+                    <Pressable
+                      onPress={onVoiceToggle}
+                      style={[styles.sendBtn, styles.micBtnRecording]}
+                    >
+                      <Ionicons name="mic" size={14} color={colors.error} />
+                    </Pressable>
                   ) : (
-                    <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
-                  )}
-                </Pressable>
-              ) : null}
-            </View>
-          ) : null}
+                    <Pressable
+                      onPress={onVoiceToggle}
+                      style={styles.sendBtn}
+                    >
+                      <Ionicons name="mic-outline" size={14} color={colors.textMuted} />
+                    </Pressable>
+                  )
+                ) : null}
+                {canStop ? (
+                  <Pressable
+                    onPress={onStop}
+                    style={styles.sendBtn}
+                    disabled={isStopping}
+                  >
+                    <View style={styles.stopButtonContent}>
+                      <Ionicons name="square" size={10} color={colors.textPrimary} />
+                      <ActivityIndicator
+                        size="small"
+                        color={colors.textMuted}
+                        style={styles.stopButtonSpinner}
+                      />
+                    </View>
+                  </Pressable>
+                ) : null}
+                {showSendButton ? (
+                  <Pressable
+                    onPress={canSend ? onSubmit : undefined}
+                    style={styles.sendBtn}
+                    disabled={!canSend}
+                  >
+                    {isLoading && !canSend ? (
+                      <ActivityIndicator size="small" color={colors.textMuted} />
+                    ) : (
+                      <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
+                    )}
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
         </View>
       </View>
     </View>
@@ -201,14 +229,16 @@ export function ChatInput({
 }
 
 const styles = StyleSheet.create({
+  shell: {
+    overflow: 'hidden',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.borderLight,
+  },
   container: {
     gap: spacing.xs,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
-    paddingBottom: Platform.OS === 'ios' ? spacing.lg : spacing.md,
-    backgroundColor: colors.bgMain,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
+    backgroundColor: 'rgba(6, 9, 13, 0.42)',
   },
   row: {
     flexDirection: 'row',

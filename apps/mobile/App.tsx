@@ -11,6 +11,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { HostBridgeApiClient } from './src/api/client';
 import type { ApprovalMode, Chat, ReasoningEffort } from './src/api/types';
@@ -421,47 +422,49 @@ export default function App() {
   };
 
   return (
-    <View style={styles.root}>
-      {/* Main content */}
-      <View style={[styles.screen, { width: screenWidth }]}>
-        {renderScreen()}
-      </View>
+    <SafeAreaProvider>
+      <View style={styles.root}>
+        {/* Main content */}
+        <View style={[styles.screen, { width: screenWidth }]}>
+          {renderScreen()}
+        </View>
 
-      {/* Overlay */}
-      <Animated.View
-        pointerEvents={drawerOpen ? 'auto' : 'none'}
-        {...closeSwipeResponder.panHandlers}
-        style={[styles.overlay, { opacity: overlayAnim }]}
-      >
-        <Pressable style={StyleSheet.absoluteFill} onPress={closeDrawer} />
-      </Animated.View>
+        {/* Overlay */}
+        <Animated.View
+          pointerEvents={drawerOpen ? 'auto' : 'none'}
+          {...closeSwipeResponder.panHandlers}
+          style={[styles.overlay, { opacity: overlayAnim }]}
+        >
+          <Pressable style={StyleSheet.absoluteFill} onPress={closeDrawer} />
+        </Animated.View>
 
-      {/* Drawer */}
-      <Animated.View
-        {...closeSwipeResponder.panHandlers}
-        style={[
-          styles.drawer,
-          { transform: [{ translateX: drawerAnim }] },
-        ]}
-      >
-        <DrawerContent
-          api={api}
-          ws={ws}
-          selectedChatId={selectedChatId}
-          selectedDefaultCwd={defaultStartCwd}
-          onSelectDefaultCwd={setDefaultStartCwd}
-          onSelectChat={handleSelectChat}
-          onNewChat={handleNewChat}
-          onNavigate={navigate}
+        {/* Drawer */}
+        <Animated.View
+          {...closeSwipeResponder.panHandlers}
+          style={[
+            styles.drawer,
+            { transform: [{ translateX: drawerAnim }] },
+          ]}
+        >
+          <DrawerContent
+            api={api}
+            ws={ws}
+            selectedChatId={selectedChatId}
+            selectedDefaultCwd={defaultStartCwd}
+            onSelectDefaultCwd={setDefaultStartCwd}
+            onSelectChat={handleSelectChat}
+            onNewChat={handleNewChat}
+            onNavigate={navigate}
+          />
+        </Animated.View>
+
+        <View
+          pointerEvents={drawerOpen ? 'none' : 'auto'}
+          style={styles.edgeSwipeZone}
+          {...openSwipeResponder.panHandlers}
         />
-      </Animated.View>
-
-      <View
-        pointerEvents={drawerOpen ? 'none' : 'auto'}
-        style={styles.edgeSwipeZone}
-        {...openSwipeResponder.panHandlers}
-      />
-    </View>
+      </View>
+    </SafeAreaProvider>
   );
 }
 

@@ -57,7 +57,7 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
         {tone === 'running' ? (
           <ActivityIndicator size="small" color={color} />
         ) : (
-          <Ionicons name={ICON_BY_TONE[tone]} size={14} color={color} />
+          <Ionicons name={ICON_BY_TONE[tone]} size={13} color={color} />
         )}
         <Text style={styles.text} numberOfLines={1}>
           {text}
@@ -69,23 +69,25 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
 
 const styles = StyleSheet.create({
   container: {
-    borderRadius: 12,
+    borderRadius: 10,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 255, 255, 0.22)',
+    borderColor: 'rgba(255, 255, 255, 0.12)',
     backgroundColor: 'rgba(18, 22, 28, 0.16)',
     marginHorizontal: spacing.lg,
-    marginBottom: spacing.xs,
+    marginBottom: spacing.xs / 2,
   },
   content: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 3,
   },
   text: {
     ...typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
     fontWeight: '600',
     color: colors.textPrimary,
     flex: 1,

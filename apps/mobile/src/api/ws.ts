@@ -690,8 +690,8 @@ function toTurnCompletionSnapshot(value: unknown): TurnCompletionSnapshot | null
     return null;
   }
 
-  const threadId = readString(params.threadId) ?? readString(params.thread_id);
   const turn = toRecord(params.turn);
+  const threadId = extractNotificationThreadId(params, turn);
   const turnId =
     readString(turn?.id) ?? readString(params.turnId) ?? readString(params.turn_id);
   if (!threadId) {
@@ -752,18 +752,56 @@ function toCodexEventSnapshot(
     return null;
   }
 
-  const threadId =
-    readString(msg?.thread_id) ??
-    readString(msg?.threadId) ??
-    readString(params?.threadId) ??
-    readString(params?.thread_id) ??
-    readString(params?.conversationId) ??
-    readString(msg?.conversation_id);
+  const threadId = extractNotificationThreadId(params, msg);
 
   return {
     type,
     threadId,
   };
+}
+
+function extractNotificationThreadId(
+  params: Record<string, unknown> | null,
+  msgArg?: Record<string, unknown> | null
+): string | null {
+  if (!params && !msgArg) {
+    return null;
+  }
+
+  const msg = msgArg ?? toRecord(params?.msg);
+  const threadRecord =
+    toRecord(params?.thread) ??
+    toRecord(params?.threadState) ??
+    toRecord(params?.thread_state) ??
+    toRecord(msg?.thread);
+  const sourceRecord = toRecord(params?.source) ?? toRecord(msg?.source);
+  const subagentThreadSpawnRecord = toRecord(
+    toRecord(sourceRecord?.subagent)?.thread_spawn
+  );
+
+  return (
+    readString(msg?.thread_id) ??
+    readString(msg?.threadId) ??
+    readString(msg?.conversation_id) ??
+    readString(msg?.conversationId) ??
+    readString(params?.thread_id) ??
+    readString(params?.threadId) ??
+    readString(params?.conversation_id) ??
+    readString(params?.conversationId) ??
+    readString(threadRecord?.id) ??
+    readString(threadRecord?.thread_id) ??
+    readString(threadRecord?.threadId) ??
+    readString(threadRecord?.conversation_id) ??
+    readString(threadRecord?.conversationId) ??
+    readString(sourceRecord?.thread_id) ??
+    readString(sourceRecord?.threadId) ??
+    readString(sourceRecord?.conversation_id) ??
+    readString(sourceRecord?.conversationId) ??
+    readString(sourceRecord?.parent_thread_id) ??
+    readString(sourceRecord?.parentThreadId) ??
+    readString(subagentThreadSpawnRecord?.parent_thread_id) ??
+    null
+  );
 }
 
 function normalizeCodexEventType(value: string | null): string | null {
