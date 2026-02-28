@@ -97,14 +97,46 @@ export function OnboardingScreen({
     return normalized;
   }, [urlInput]);
 
-  const handleSave = useCallback(() => {
+  const runConnectionCheck = useCallback(async (normalized: string): Promise<boolean> => {
+    setCheckingConnection(true);
+    setConnectionCheck({ kind: 'idle' });
+
+    try {
+      const response = await fetch(toBridgeHealthUrl(normalized), { method: 'GET' });
+      if (response.status !== 200) {
+        throw new Error(`health returned ${response.status}`);
+      }
+
+      setConnectionCheck({
+        kind: 'success',
+        message: `Connected (${response.status})`,
+      });
+      return true;
+    } catch (error) {
+      const message = (error as Error).message || 'request failed';
+      setConnectionCheck({
+        kind: 'error',
+        message: `Could not reach bridge: ${message}`,
+      });
+      return false;
+    } finally {
+      setCheckingConnection(false);
+    }
+  }, []);
+
+  const handleSave = useCallback(async () => {
     const normalized = validateInput();
     if (!normalized) {
       return;
     }
 
+    const ok = await runConnectionCheck(normalized);
+    if (!ok) {
+      return;
+    }
+
     onSave(normalized);
-  }, [onSave, validateInput]);
+  }, [onSave, runConnectionCheck, validateInput]);
 
   const handleConnectionCheck = useCallback(async () => {
     const normalized = validateInput();
@@ -113,29 +145,8 @@ export function OnboardingScreen({
       return;
     }
 
-    setCheckingConnection(true);
-    setConnectionCheck({ kind: 'idle' });
-
-    try {
-      const response = await fetch(toBridgeHealthUrl(normalized), { method: 'GET' });
-      if (!response.ok) {
-        throw new Error(`health returned ${response.status}`);
-      }
-
-      setConnectionCheck({
-        kind: 'success',
-        message: `Connected (${response.status})`,
-      });
-    } catch (error) {
-      const message = (error as Error).message || 'request failed';
-      setConnectionCheck({
-        kind: 'error',
-        message: `Could not reach bridge: ${message}`,
-      });
-    } finally {
-      setCheckingConnection(false);
-    }
-  }, [validateInput]);
+    await runConnectionCheck(normalized);
+  }, [runConnectionCheck, validateInput]);
 
   const applyPreset = useCallback((value: string) => {
     setUrlInput(value);
@@ -267,7 +278,9 @@ export function OnboardingScreen({
                     placeholderTextColor={colors.textMuted}
                     style={styles.input}
                     returnKeyType="done"
-                    onSubmitEditing={handleSave}
+                    onSubmitEditing={() => {
+                      void handleSave();
+                    }}
                   />
                   <Text style={styles.helperText}>
                     Supports `http`, `https`, `ws`, and `wss`. `/rpc` is added automatically.
@@ -320,13 +333,21 @@ export function OnboardingScreen({
                       <Text style={styles.secondaryButtonText}>Test Connection</Text>
                     </Pressable>
                     <Pressable
-                      onPress={handleSave}
+                      onPress={() => {
+                        void handleSave();
+                      }}
+                      disabled={checkingConnection}
                       style={({ pressed }) => [
                         styles.primaryButton,
-                        pressed && styles.primaryButtonPressed,
+                        pressed && !checkingConnection && styles.primaryButtonPressed,
+                        checkingConnection && styles.primaryButtonDisabled,
                       ]}
                     >
-                      <Ionicons name="arrow-forward" size={16} color={colors.black} />
+                      {checkingConnection ? (
+                        <ActivityIndicator size="small" color={colors.black} />
+                      ) : (
+                        <Ionicons name="arrow-forward" size={16} color={colors.black} />
+                      )}
                       <Text style={styles.primaryButtonText}>
                         {mode === 'edit' ? 'Save URL' : 'Continue'}
                       </Text>
@@ -663,6 +684,9 @@ const styles = StyleSheet.create({
   },
   primaryButtonPressed: {
     backgroundColor: colors.accentPressed,
+  },
+  primaryButtonDisabled: {
+    opacity: 0.72,
   },
   primaryButtonText: {
     ...typography.headline,
