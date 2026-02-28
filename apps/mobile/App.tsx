@@ -21,11 +21,10 @@ import { GitScreen } from './src/screens/GitScreen';
 import { MainScreen, type MainScreenHandle } from './src/screens/MainScreen';
 import { PrivacyScreen } from './src/screens/PrivacyScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
-import { TerminalScreen } from './src/screens/TerminalScreen';
 import { TermsScreen } from './src/screens/TermsScreen';
 import { colors } from './src/theme';
 
-type Screen = 'Main' | 'ChatGit' | 'Terminal' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = 'Main' | 'ChatGit' | 'Settings' | 'Privacy' | 'Terms';
 
 const DRAWER_WIDTH = 280;
 const EDGE_SWIPE_WIDTH = 24;
@@ -337,8 +336,6 @@ export default function App() {
 
   const renderScreen = () => {
     switch (currentScreen) {
-      case 'Terminal':
-        return <TerminalScreen api={api} ws={ws} onOpenDrawer={openDrawer} />;
       case 'ChatGit':
         return gitChat ? (
           <GitScreen

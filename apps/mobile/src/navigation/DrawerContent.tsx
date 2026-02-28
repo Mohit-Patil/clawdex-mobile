@@ -19,7 +19,7 @@ import type { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
 import { colors, spacing, typography } from '../theme';
 
-type Screen = 'Main' | 'Terminal' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = 'Main' | 'Settings' | 'Privacy' | 'Terms';
 
 interface DrawerContentProps {
   api: HostBridgeApiClient;
@@ -318,9 +318,6 @@ export function DrawerContent({
               <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
             </Pressable>
           </View>
-
-          {/* Nav items */}
-          <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
 
           {/* Chats section */}
           <View style={styles.sectionHeader}>

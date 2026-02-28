@@ -61,7 +61,7 @@ export function ChatInput({
 
   const canSend = value.trim().length > 0 && voiceState === 'idle';
   const canStop = Boolean(showStopButton && onStop);
-  const showVoiceButton = Boolean(onVoiceToggle) && !canStop && !isLoading;
+  const showVoiceButton = Boolean(onVoiceToggle);
   const showSendButton = canSend || isLoading;
   const shouldShowActionButton =
     canStop || showSendButton || showVoiceButton || voiceState !== 'idle';

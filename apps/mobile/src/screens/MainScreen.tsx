@@ -430,6 +430,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [keyboardVisible, setKeyboardVisible] = useState(false);
     const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
     const [queueDispatching, setQueueDispatching] = useState(false);
+    const [queuePaused, setQueuePaused] = useState(false);
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
     const [activity, setActivity] = useState<ActivityState>({
@@ -1282,6 +1283,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setStoppingTurn(false);
       setQueuedMessages([]);
       setQueueDispatching(false);
+      setQueuePaused(false);
       setActivity({
         tone: 'idle',
         title: 'Ready',
@@ -2628,6 +2630,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setStoppingTurn(false);
         setQueuedMessages([]);
         setQueueDispatching(false);
+        setQueuePaused(false);
         stopRequestedRef.current = false;
         stopSystemMessageLoggedRef.current = false;
 
@@ -2997,6 +3000,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
+      setQueuePaused(false);
+
       if (uploadingAttachment) {
         setError('Please wait for attachments to finish uploading.');
         return;
@@ -3049,11 +3054,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       sendMessageContent,
       sending,
       stoppingTurn,
+      setQueuePaused,
       uploadingAttachment,
     ]);
 
     useEffect(() => {
-      if (!selectedChatId || queuedMessages.length === 0 || queueDispatching) {
+      if (!selectedChatId || queuedMessages.length === 0 || queueDispatching || queuePaused) {
         return;
       }
 
@@ -3082,6 +3088,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         });
         if (sent) {
           setQueuedMessages((prev) => prev.slice(1));
+        } else {
+          setQueuePaused(true);
         }
         setQueueDispatching(false);
       })();
@@ -3091,6 +3099,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingApproval?.id,
       pendingUserInputRequest?.id,
       queueDispatching,
+      queuePaused,
       queuedMessages,
       selectedChat,
       selectedChatId,
@@ -4281,6 +4290,34 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                       ? prev
                       : { tone: 'running', title: 'Working' }
                   );
+                } else {
+                  clearRunWatchdog();
+                  setActiveTurnId(null);
+                  setStoppingTurn(false);
+                  if (!pendingApprovalId && !pendingUserInputRequestId) {
+                    setActiveCommands([]);
+                    setStreamingText(null);
+                    reasoningSummaryRef.current = {};
+                    codexReasoningBufferRef.current = '';
+                    hadCommandRef.current = false;
+                    setActivity(
+                      summary.status === 'error'
+                        ? {
+                            tone: 'error',
+                            title: 'Turn failed',
+                            detail: summary.lastError ?? undefined,
+                          }
+                        : summary.status === 'complete'
+                          ? {
+                              tone: 'complete',
+                              title: 'Turn completed',
+                            }
+                          : {
+                              tone: 'idle',
+                              title: 'Ready',
+                            }
+                    );
+                  }
                 }
               })
               .catch(() => {});
@@ -4398,6 +4435,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
           } else if (!hasPendingApproval && !hasPendingUserInput) {
             clearRunWatchdog();
+            setActiveCommands([]);
+            setStreamingText(null);
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            reasoningSummaryRef.current = {};
+            codexReasoningBufferRef.current = '';
+            hadCommandRef.current = false;
             setActivity((prev) => {
               if (latest.status === 'error') {
                 return {
@@ -4550,12 +4594,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const isLoading = isTurnLoading || uploadingAttachment;
     const isStreaming = sending || creating || Boolean(streamingText);
     const isOpeningChat = Boolean(openingChatId);
-    const isOpeningDifferentChat =
-      Boolean(openingChatId) && selectedChat?.id !== openingChatId;
+    const shouldShowComposer = !isOpeningChat;
     const isTurnLikelyRunning =
       Boolean(activeTurnId) || (selectedChat ? isChatLikelyRunning(selectedChat) : false);
     const queuedMessagesDetail =
-      queuedMessages.length > 0 ? `${String(queuedMessages.length)} queued` : undefined;
+      queuedMessages.length > 0
+        ? queuePaused
+          ? `${String(queuedMessages.length)} queued (paused)`
+          : `${String(queuedMessages.length)} queued`
+        : undefined;
     const activityDetail = queuedMessagesDetail
       ? activity.detail
         ? `${activity.detail} · ${queuedMessagesDetail}`
@@ -4568,9 +4615,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       activity.tone !== 'idle' ||
       activity.title !== 'Ready' ||
       Boolean(activityDetail);
-    const headerTitle = isOpeningDifferentChat
-      ? 'Opening chat'
-      : selectedChat?.title?.trim() || 'New chat';
+    const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
@@ -4586,7 +4631,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onRightActionPress={selectedChat ? handleOpenGit : undefined}
         />
 
-        {selectedChat ? (
+        {selectedChat && !isOpeningChat ? (
           <View style={styles.sessionMetaRow}>
             <Pressable style={styles.workspaceBar} onPress={handleOpenGit}>
               <Ionicons name="folder-open-outline" size={14} color={colors.textMuted} />
@@ -4626,7 +4671,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           enabled={Platform.OS === 'ios'}
         >
-          {selectedChat && !isOpeningDifferentChat ? (
+          {selectedChat && !isOpeningChat ? (
             <ChatView
               chat={selectedChat}
               activePlan={activePlan?.threadId === selectedChat.id ? activePlan : null}
@@ -4654,77 +4699,79 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           )}
 
-          <View
-            style={[
-              styles.composerContainer,
-              !keyboardVisible ? styles.composerContainerResting : null,
-            ]}
-          >
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-            {pendingApproval ? (
-              <ApprovalBanner
-                approval={pendingApproval}
-                onResolve={handleResolveApproval}
+          {shouldShowComposer ? (
+            <View
+              style={[
+                styles.composerContainer,
+                !keyboardVisible ? styles.composerContainerResting : null,
+              ]}
+            >
+              {error ? <Text style={styles.errorText}>{error}</Text> : null}
+              {pendingApproval ? (
+                <ApprovalBanner
+                  approval={pendingApproval}
+                  onResolve={handleResolveApproval}
+                />
+              ) : null}
+              {showActivity ? (
+                <ActivityBar
+                  title={activity.title}
+                  detail={activityDetail}
+                  tone={activity.tone}
+                />
+              ) : null}
+              {showSlashSuggestions ? (
+                <ScrollView
+                  style={[
+                    styles.slashSuggestions,
+                    { maxHeight: slashSuggestionsMaxHeight },
+                  ]}
+                  contentContainerStyle={styles.slashSuggestionsContent}
+                  keyboardShouldPersistTaps="handled"
+                  nestedScrollEnabled
+                >
+                  {slashSuggestions.map((command, index) => {
+                    const suffix = command.argsHint ? ` ${command.argsHint}` : '';
+                    return (
+                      <Pressable
+                        key={`${command.name}-${String(index)}`}
+                        onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
+                        style={({ pressed }) => [
+                          styles.slashSuggestionItem,
+                          index === slashSuggestions.length - 1 &&
+                            styles.slashSuggestionItemLast,
+                          pressed && styles.slashSuggestionItemPressed,
+                        ]}
+                      >
+                        <Text style={styles.slashSuggestionTitle}>{`/${command.name}${suffix}`}</Text>
+                        <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
+                          {command.mobileSupported
+                            ? command.summary
+                            : `${command.summary} · CLI only`}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              ) : null}
+              <ChatInput
+                value={draft}
+                onChangeText={setDraft}
+                onFocus={handleComposerFocus}
+                onSubmit={() => void handleSubmit()}
+                onStop={() => handleStopTurn()}
+                showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
+                isStopping={stoppingTurn}
+                onAttachPress={openAttachmentMenu}
+                attachments={composerAttachments}
+                onRemoveAttachment={removeComposerAttachment}
+                isLoading={isLoading}
+                placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
+                voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
+                onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
               />
-            ) : null}
-            {showActivity ? (
-              <ActivityBar
-                title={activity.title}
-                detail={activityDetail}
-                tone={activity.tone}
-              />
-            ) : null}
-            {showSlashSuggestions ? (
-              <ScrollView
-                style={[
-                  styles.slashSuggestions,
-                  { maxHeight: slashSuggestionsMaxHeight },
-                ]}
-                contentContainerStyle={styles.slashSuggestionsContent}
-                keyboardShouldPersistTaps="handled"
-                nestedScrollEnabled
-              >
-                {slashSuggestions.map((command, index) => {
-                  const suffix = command.argsHint ? ` ${command.argsHint}` : '';
-                  return (
-                    <Pressable
-                      key={`${command.name}-${String(index)}`}
-                      onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
-                      style={({ pressed }) => [
-                        styles.slashSuggestionItem,
-                        index === slashSuggestions.length - 1 &&
-                          styles.slashSuggestionItemLast,
-                        pressed && styles.slashSuggestionItemPressed,
-                      ]}
-                    >
-                      <Text style={styles.slashSuggestionTitle}>{`/${command.name}${suffix}`}</Text>
-                      <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
-                        {command.mobileSupported
-                          ? command.summary
-                          : `${command.summary} · CLI only`}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-            ) : null}
-            <ChatInput
-              value={draft}
-              onChangeText={setDraft}
-              onFocus={handleComposerFocus}
-              onSubmit={() => void handleSubmit()}
-              onStop={() => handleStopTurn()}
-              showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
-              isStopping={stoppingTurn}
-              onAttachPress={openAttachmentMenu}
-              attachments={composerAttachments}
-              onRemoveAttachment={removeComposerAttachment}
-              isLoading={isLoading}
-              placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
-              voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
-              onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
-            />
-          </View>
+            </View>
+          ) : null}
         </KeyboardAvoidingView>
 
         <Modal
