@@ -4617,6 +4617,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
+    const showFloatingActivity =
+      showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
 
     useEffect(() => {
       if (!selectedChat || isOpeningChat || !showActivity) {
@@ -4705,6 +4707,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           )}
 
+          {showFloatingActivity ? (
+            <View
+              pointerEvents="none"
+              style={[styles.activityOverlay, { bottom: composerHeight + spacing.sm }]}
+            >
+              <ActivityBar
+                title={activity.title}
+                detail={activityDetail}
+                tone={activity.tone}
+              />
+            </View>
+          ) : null}
+
           {shouldShowComposer ? (
             <View
               style={[
@@ -4723,13 +4738,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 <ApprovalBanner
                   approval={pendingApproval}
                   onResolve={handleResolveApproval}
-                />
-              ) : null}
-              {showActivity ? (
-                <ActivityBar
-                  title={activity.title}
-                  detail={activityDetail}
-                  tone={activity.tone}
                 />
               ) : null}
               {showSlashSuggestions ? (
@@ -6575,6 +6583,12 @@ const styles = StyleSheet.create({
   },
   composerContainerResting: {
     marginBottom: spacing.xs,
+  },
+  activityOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 3,
   },
   sessionMetaRow: {
     flexDirection: 'row',

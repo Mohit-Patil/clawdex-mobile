@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
 
 import { colors, spacing, typography } from '../theme';
 
@@ -47,7 +47,12 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
   const text = `${title}${suffix}${dots}`;
 
   return (
-    <BlurView intensity={55} tint="dark" style={styles.container}>
+    <BlurView
+      intensity={42}
+      tint={Platform.OS === 'ios' ? 'systemUltraThinMaterialDark' : 'dark'}
+      blurMethod="dimezisBlurViewSdk31Plus"
+      style={styles.container}
+    >
       <View style={styles.content}>
         {tone === 'running' ? (
           <ActivityIndicator size="small" color={color} />
@@ -67,8 +72,8 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(20, 24, 30, 0.35)',
+    borderColor: 'rgba(255, 255, 255, 0.22)',
+    backgroundColor: 'rgba(18, 22, 28, 0.16)',
     marginHorizontal: spacing.lg,
     marginBottom: spacing.xs,
   },
