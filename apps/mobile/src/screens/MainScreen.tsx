@@ -438,6 +438,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       tone: 'idle',
       title: 'Ready',
     });
+    const [composerHeight, setComposerHeight] = useState(spacing.xxl * 4);
     const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
     const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const loadChatRequestRef = useRef(0);
@@ -4608,7 +4609,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       activity.tone !== 'idle' ||
       activity.title !== 'Ready' ||
       Boolean(activityDetail);
-    const chatBottomInset = showActivity ? spacing.xxl * 2 : spacing.xxl;
+    const chatBottomInset = shouldShowComposer
+      ? Math.max(spacing.xxl, composerHeight + spacing.sm)
+      : spacing.xxl;
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
     const defaultStartWorkspaceLabel =
@@ -4708,6 +4711,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 styles.composerContainer,
                 !keyboardVisible ? styles.composerContainerResting : null,
               ]}
+              onLayout={(event) => {
+                const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+                setComposerHeight((previousHeight) =>
+                  previousHeight === nextHeight ? previousHeight : nextHeight
+                );
+              }}
             >
               {error ? <Text style={styles.errorText}>{error}</Text> : null}
               {pendingApproval ? (

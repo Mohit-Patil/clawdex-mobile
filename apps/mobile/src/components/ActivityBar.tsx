@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
@@ -46,25 +47,36 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
   const text = `${title}${suffix}${dots}`;
 
   return (
-    <View style={styles.container}>
-      {tone === 'running' ? (
-        <ActivityIndicator size="small" color={color} />
-      ) : (
-        <Ionicons name={ICON_BY_TONE[tone]} size={14} color={color} />
-      )}
-      <Text style={styles.text} numberOfLines={1}>
-        {text}
-      </Text>
-    </View>
+    <BlurView intensity={55} tint="dark" style={styles.container}>
+      <View style={styles.content}>
+        {tone === 'running' ? (
+          <ActivityIndicator size="small" color={color} />
+        ) : (
+          <Ionicons name={ICON_BY_TONE[tone]} size={14} color={color} />
+        )}
+        <Text style={styles.text} numberOfLines={1}>
+          {text}
+        </Text>
+      </View>
+    </BlurView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: 'rgba(20, 24, 30, 0.35)',
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.xs,
+  },
+  content: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
-    marginHorizontal: spacing.lg,
+    paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs,
   },
   text: {
