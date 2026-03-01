@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Pressable, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { BrandMark } from './BrandMark';
 import { colors, spacing, typography } from '../theme';
 
@@ -22,7 +23,7 @@ export function ChatHeader({
 
   return (
     <View style={styles.headerContainer}>
-      <SafeAreaView>
+      <SafeAreaView edges={['top', 'left', 'right']}>
         <View style={styles.header}>
           <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
             <Ionicons name="menu" size={22} color={colors.textPrimary} />

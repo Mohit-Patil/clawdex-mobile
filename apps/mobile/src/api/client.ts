@@ -32,6 +32,8 @@ import type {
   LocalImageInput,
   UploadAttachmentRequest,
   UploadAttachmentResponse,
+  VoiceTranscribeRequest,
+  VoiceTranscribeResponse,
   ModelOption,
   ReasoningEffort,
   ModelReasoningEffortOption,
@@ -475,6 +477,10 @@ export class HostBridgeApiClient {
 
   uploadAttachment(body: UploadAttachmentRequest): Promise<UploadAttachmentResponse> {
     return this.ws.request<UploadAttachmentResponse>('bridge/attachments/upload', body);
+  }
+
+  transcribeVoice(body: VoiceTranscribeRequest): Promise<VoiceTranscribeResponse> {
+    return this.ws.request<VoiceTranscribeResponse>('bridge/voice/transcribe', body);
   }
 
   async listModels(includeHidden = false): Promise<ModelOption[]> {

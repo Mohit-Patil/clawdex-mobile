@@ -75,3 +75,87 @@ To get strict realtime parity across CLI and mobile, move to a single live event
 2. Make clients attach to the exact same running app-server stream/session boundary.
 
 Without this architectural change, the hybrid model remains the pragmatic and low-risk approach.
+
+## Incident Note: February 28, 2026 Live-Sync Regression
+
+### Symptom
+Mobile chat showed persisted messages, but did not show live activity/reasoning updates (`codex/event/*`, `thread/status/changed`) for CLI-origin turns.
+
+### Root Cause
+Rust bridge rollout discovery scheduler used a modulo condition that could never become true when the discovery interval was `1`.
+
+- Previous behavior: discovery did not run for that interval value.
+- Effect: rollout files were not tracked, so no CLI live-tail notifications were emitted.
+
+### Fix Applied
+Live-sync discovery scheduling was hardened so it is valid for all interval values and always runs on first tick.
+
+Operational result:
+
+1. Rollout files are discovered consistently.
+2. CLI-origin event lines are tailed and converted into bridge notifications.
+3. Mobile receives activity/reasoning status in realtime again.
+
+## Optimization Backlog (Live-Sync Observability + Reliability)
+
+### 1) Add `bridge/liveSync/status` RPC (recommended next)
+
+Goal: make rollout tailing state visible from mobile/Postman without guessing.
+
+Suggested response payload:
+
+1. Sessions root currently in use (`CODEX_HOME` resolved path).
+2. Discovery config (`pollIntervalMs`, `discoveryIntervalTicks`, `maxTrackedFiles`).
+3. Tracked files list:
+   - file path
+   - thread id
+   - originator
+   - include/exclude flag
+   - include/exclude reason
+   - current offset
+   - last seen timestamp
+4. Summary counters:
+   - files discovered
+   - files included
+   - lines parsed
+   - lines dropped (invalid JSON / filtered / duplicate)
+   - notifications emitted by method bucket
+5. Last error (if any) in discovery/poll loop.
+
+Why this helps:
+
+1. Explains "why no live updates" immediately.
+2. Reduces debugging time for CLI vs mobile parity issues.
+3. Enables lightweight health checks and QA verification.
+
+### 2) Add discovery/poll loop metrics
+
+Expose counters for:
+
+1. discovery runs
+2. poll runs
+3. per-file parse errors
+4. event mapping misses
+5. replay buffer writes/drops
+
+These can be returned by the status RPC and optionally logged to stderr in dev mode.
+
+### 3) Add dedup + mapping diagnostics for dropped events
+
+Track bounded recent reasons for dropped lines:
+
+1. duplicate hash
+2. unsupported rollout record type
+3. missing thread id
+4. originator filtered
+
+This will clarify whether events are not emitted due to filtering or malformed source lines.
+
+### 4) Add a short runbook for operators
+
+When live updates are missing, check in this order:
+
+1. `bridge/events/replay` contains recent `codex/event/*` or not.
+2. `bridge/liveSync/status` include/exclude reason for newest rollout file.
+3. newest rollout file `session_meta.originator` and resolved thread id fields.
+4. mobile selected thread id matches emitted thread id.

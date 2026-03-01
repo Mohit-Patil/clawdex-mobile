@@ -4,7 +4,6 @@ import {
   Alert,
   Linking,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -12,6 +11,7 @@ import {
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, radius, spacing, typography } from '../theme';
 

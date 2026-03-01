@@ -57,9 +57,9 @@ npm run mobile
 
 This runs `expo start` in the `apps/mobile` workspace. It loads `apps/mobile/.env` automatically.
 
-Make sure `EXPO_PUBLIC_HOST_BRIDGE_URL` in `apps/mobile/.env` points to your host machine's LAN IP and the bridge port:
+On first app launch, onboarding will ask for your bridge URL. Enter your host machine LAN/Tailscale URL:
 ```
-EXPO_PUBLIC_HOST_BRIDGE_URL=http://<YOUR_LAN_IP>:8787
+http://<YOUR_LAN_IP>:8787
 ```
 
 Find your LAN IP with `ifconfig en0 | grep inet` (macOS) or `ip addr` (Linux). The phone and the host machine must be on the same network.
@@ -116,5 +116,5 @@ Optionally run on a specific platform:
 - On real devices, use LAN host for bridge URL instead of localhost.
 - Endpoint changes must be mirrored in mobile `src/api/types.ts` + client methods.
 - Keep environment handling explicit; avoid relying on implicit cwd assumptions.
-- If Expo Go shows a Worklets JS/native mismatch, align Expo-compatible versions (`react-native-reanimated@4.1.1` with `react-native-worklets@0.5.1`) and reinstall cleanly.
+- If Expo Go shows a Worklets JS/native mismatch, run `npx expo install --fix` in `apps/mobile` and reinstall cleanly.
 - If Expo shows `Failed to create a worklet`, ensure `apps/mobile/babel.config.js` includes `plugins: ['react-native-reanimated/plugin']` and restart with `expo start --clear`.

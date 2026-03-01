@@ -48,11 +48,12 @@ const DYNAMIC_TOOL_CALL_METHOD: &str = "item/tool/call";
 const ACCOUNT_CHATGPT_TOKENS_REFRESH_METHOD: &str = "account/chatgptAuthTokens/refresh";
 const MOBILE_ATTACHMENTS_DIR: &str = ".clawdex-mobile-attachments";
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const DEFAULT_MAX_VOICE_TRANSCRIPTION_BYTES: usize = 100 * 1024 * 1024;
 const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
 const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
 const WS_CLIENT_QUEUE_CAPACITY: usize = 256;
 const ROLLOUT_LIVE_SYNC_POLL_INTERVAL_MS: u64 = 900;
-const ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS: u64 = 6;
+const ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS: u64 = 1;
 const ROLLOUT_LIVE_SYNC_MAX_TRACKED_FILES: usize = 64;
 const ROLLOUT_LIVE_SYNC_MAX_FILE_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 2);
 const ROLLOUT_LIVE_SYNC_INITIAL_TAIL_BYTES: u64 = 64 * 1024;
@@ -71,6 +72,7 @@ struct BridgeConfig {
     allow_outside_root_cwd: bool,
     disable_terminal_exec: bool,
     terminal_allowed_commands: HashSet<String>,
+    show_pairing_qr: bool,
 }
 
 impl BridgeConfig {
@@ -105,6 +107,7 @@ impl BridgeConfig {
         let allow_outside_root_cwd =
             parse_bool_env_with_default("BRIDGE_ALLOW_OUTSIDE_ROOT_CWD", true);
         let disable_terminal_exec = parse_bool_env("BRIDGE_DISABLE_TERMINAL_EXEC");
+        let show_pairing_qr = parse_bool_env_with_default("BRIDGE_SHOW_PAIRING_QR", true);
 
         let terminal_allowed_commands = parse_csv_env(
             "BRIDGE_TERMINAL_ALLOWED_COMMANDS",
@@ -123,6 +126,7 @@ impl BridgeConfig {
             allow_outside_root_cwd,
             disable_terminal_exec,
             terminal_allowed_commands,
+            show_pairing_qr,
         })
     }
 
@@ -1052,9 +1056,9 @@ impl RolloutTrackedFile {
         let mut include_for_live_sync = false;
 
         if let Some((meta_thread_id, meta_originator)) = read_rollout_session_meta(&path).await? {
-            include_for_live_sync = meta_originator == "codex_cli_rs";
+            include_for_live_sync = rollout_originator_allowed(meta_originator.as_deref());
             thread_id = Some(meta_thread_id);
-            originator = Some(meta_originator);
+            originator = meta_originator;
         }
 
         let offset = metadata
@@ -1142,6 +1146,12 @@ impl RolloutTrackedFile {
             }
 
             if let Some((method, params)) = self.to_notification(trimmed) {
+                if let Some(status_payload) =
+                    build_rollout_thread_status_notification(&method, &params)
+                {
+                    hub.broadcast_notification("thread/status/changed", status_payload)
+                        .await;
+                }
                 hub.broadcast_notification(&method, params).await;
             }
         }
@@ -1173,15 +1183,21 @@ impl RolloutTrackedFile {
         let payload = parsed_object.get("payload")?.as_object()?;
 
         if record_type == "session_meta" {
-            self.thread_id = read_string(payload.get("id")).or_else(|| self.thread_id.clone());
+            self.thread_id =
+                extract_rollout_thread_id(payload, true).or_else(|| self.thread_id.clone());
             self.originator =
                 read_string(payload.get("originator")).or_else(|| self.originator.clone());
-            self.include_for_live_sync = self.originator.as_deref() == Some("codex_cli_rs");
+            self.include_for_live_sync =
+                self.thread_id.is_some() && rollout_originator_allowed(self.originator.as_deref());
             return None;
         }
 
         if !self.include_for_live_sync {
             return None;
+        }
+
+        if let Some(payload_thread_id) = extract_rollout_thread_id(payload, false) {
+            self.thread_id = Some(payload_thread_id);
         }
 
         let thread_id = self.thread_id.as_deref()?;
@@ -1216,7 +1232,10 @@ fn spawn_rollout_live_sync(hub: Arc<ClientHub>) {
             ticker.tick().await;
             state.tick = state.tick.wrapping_add(1);
 
-            if state.tick % ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS == 1 {
+            if should_run_rollout_discovery_tick(
+                state.tick,
+                ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS,
+            ) {
                 if let Err(error) =
                     rollout_live_sync_discover_files(&sessions_root, &mut state).await
                 {
@@ -1358,7 +1377,7 @@ fn is_rollout_file_path(path: &Path) -> bool {
 
 async fn read_rollout_session_meta(
     path: &Path,
-) -> Result<Option<(String, String)>, std::io::Error> {
+) -> Result<Option<(String, Option<String>)>, std::io::Error> {
     let file = match fs::File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1389,22 +1408,96 @@ async fn read_rollout_session_meta(
         None => return Ok(None),
     };
 
-    let thread_id = match read_string(payload.get("id")) {
+    let thread_id = match extract_rollout_thread_id(payload, true) {
         Some(id) => id,
         None => return Ok(None),
     };
-    let originator = match read_string(payload.get("originator")) {
-        Some(originator) => originator,
-        None => return Ok(None),
-    };
+    let originator = read_string(payload.get("originator"));
 
     Ok(Some((thread_id, originator)))
+}
+
+fn extract_rollout_thread_id(
+    payload: &serde_json::Map<String, Value>,
+    allow_session_id_fallback: bool,
+) -> Option<String> {
+    let source = payload.get("source").and_then(Value::as_object);
+    let source_subagent = source
+        .and_then(|value| value.get("subagent"))
+        .and_then(Value::as_object);
+    let source_thread_spawn = source_subagent
+        .and_then(|value| value.get("thread_spawn"))
+        .and_then(Value::as_object);
+
+    read_string(payload.get("thread_id"))
+        .or_else(|| read_string(payload.get("threadId")))
+        .or_else(|| read_string(payload.get("conversation_id")))
+        .or_else(|| read_string(payload.get("conversationId")))
+        .or_else(|| source.and_then(|value| read_string(value.get("thread_id"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("threadId"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("conversation_id"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("conversationId"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("parent_thread_id"))))
+        .or_else(|| source.and_then(|value| read_string(value.get("parentThreadId"))))
+        .or_else(|| {
+            source_thread_spawn.and_then(|value| read_string(value.get("parent_thread_id")))
+        })
+        .or_else(|| {
+            if allow_session_id_fallback {
+                read_string(payload.get("id"))
+            } else {
+                None
+            }
+        })
 }
 
 fn hash_rollout_line(line: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     line.hash(&mut hasher);
     hasher.finish()
+}
+
+fn should_run_rollout_discovery_tick(tick: u64, interval_ticks: u64) -> bool {
+    if interval_ticks <= 1 {
+        return true;
+    }
+
+    tick == 1 || tick % interval_ticks == 0
+}
+
+fn rollout_originator_allowed(originator: Option<&str>) -> bool {
+    match originator {
+        Some(value) => {
+            let normalized = value.to_ascii_lowercase();
+            normalized.contains("codex") || normalized.contains("clawdex")
+        }
+        None => true,
+    }
+}
+
+fn build_rollout_thread_status_notification(method: &str, params: &Value) -> Option<Value> {
+    let codex_event_type = method.strip_prefix("codex/event/")?;
+    let status = match codex_event_type {
+        "task_started" | "taskstarted" => "running",
+        "task_complete" | "taskcomplete" => "completed",
+        "task_failed" | "taskfailed" | "turn_failed" | "turnfailed" => "failed",
+        "task_interrupted" | "taskinterrupted" | "turn_aborted" | "turnaborted" => "interrupted",
+        _ => return None,
+    };
+
+    let msg = params
+        .as_object()
+        .and_then(|value| value.get("msg"))
+        .and_then(Value::as_object)?;
+    let thread_id =
+        read_string(msg.get("thread_id")).or_else(|| read_string(msg.get("threadId")))?;
+
+    Some(json!({
+        "threadId": thread_id,
+        "thread_id": thread_id,
+        "status": status,
+        "source": "rollout_live_sync",
+    }))
 }
 
 fn build_rollout_event_msg_notification(
@@ -1781,6 +1874,21 @@ struct AttachmentUploadResponse {
     kind: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceTranscribeRequest {
+    data_base64: String,
+    prompt: Option<String>,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceTranscribeResponse {
+    text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PendingApproval {
@@ -1918,6 +2026,7 @@ async fn main() {
     };
 
     println!("rust-bridge listening on {bind_addr}");
+    maybe_print_pairing_qr(&config);
 
     if let Err(error) = axum::serve(listener, app).await {
         eprintln!("server error: {error}");
@@ -2413,9 +2522,183 @@ async fn handle_bridge_method(
                 "request": user_input_request,
             }))
         }
+        "bridge/voice/transcribe" => {
+            let request: VoiceTranscribeRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|e| BridgeError::invalid_params(&e.to_string()))?;
+            transcribe_voice(request).await
+        }
         _ => Err(BridgeError::method_not_found(&format!(
             "Unknown bridge method: {method}"
         ))),
+    }
+}
+
+async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, BridgeError> {
+    let max_voice_transcription_bytes = resolve_max_voice_transcription_bytes();
+    let estimated_size = estimate_base64_decoded_size(&request.data_base64)?;
+    if estimated_size > max_voice_transcription_bytes {
+        return Err(BridgeError::invalid_params(&format!(
+            "audio payload exceeds max size of {max_voice_transcription_bytes} bytes",
+        )));
+    }
+
+    let audio_bytes = decode_base64_payload(&request.data_base64)?;
+
+    // Minimum ~16KB — roughly 0.5s at 16kHz 16-bit mono.
+    if audio_bytes.len() < 16_000 {
+        return Err(BridgeError::invalid_params(
+            "audio payload too short (minimum ~0.5 seconds required)",
+        ));
+    }
+    if audio_bytes.len() > max_voice_transcription_bytes {
+        return Err(BridgeError::invalid_params(&format!(
+            "audio payload exceeds max size of {max_voice_transcription_bytes} bytes",
+        )));
+    }
+
+    // Resolve auth: env vars first, then ~/.codex/auth.json.
+    let (endpoint, bearer_token, include_model) = resolve_transcription_auth()?;
+    let normalized_mime_type = normalize_transcription_mime_type(request.mime_type.as_deref());
+    let normalized_file_name =
+        normalize_transcription_file_name(request.file_name.as_deref(), &normalized_mime_type);
+
+    let file_part = reqwest::multipart::Part::bytes(audio_bytes)
+        .file_name(normalized_file_name)
+        .mime_str(&normalized_mime_type)
+        .map_err(|e| BridgeError::server(&e.to_string()))?;
+
+    let mut form = reqwest::multipart::Form::new().part("file", file_part);
+
+    if include_model {
+        form = form.text("model", "gpt-4o-transcribe");
+    }
+
+    if let Some(prompt) = request.prompt {
+        let trimmed = prompt.trim().to_string();
+        if !trimmed.is_empty() {
+            form = form.text("prompt", trimmed);
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&endpoint)
+        .bearer_auth(&bearer_token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| BridgeError::server(&e.to_string()))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_string());
+        return Err(BridgeError {
+            code: -32000,
+            message: format!("transcription API returned HTTP {status}"),
+            data: Some(json!({ "status": status, "body": body })),
+        });
+    }
+
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|e| BridgeError::server(&e.to_string()))?;
+
+    let text = body["text"].as_str().unwrap_or("").to_string();
+
+    Ok(serde_json::to_value(VoiceTranscribeResponse { text })
+        .map_err(|e| BridgeError::server(&e.to_string()))?)
+}
+
+fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
+    // Path 1: OPENAI_API_KEY env var → OpenAI direct API.
+    if let Some(api_key) = read_non_empty_env("OPENAI_API_KEY") {
+        return Ok((
+            "https://api.openai.com/v1/audio/transcriptions".to_string(),
+            api_key,
+            true,
+        ));
+    }
+
+    // Path 2: BRIDGE_CHATGPT_ACCESS_TOKEN env var → ChatGPT backend.
+    if let Some(access_token) = read_non_empty_env("BRIDGE_CHATGPT_ACCESS_TOKEN") {
+        return Ok((
+            "https://chatgpt.com/backend-api/transcribe".to_string(),
+            access_token,
+            false,
+        ));
+    }
+
+    // Fall back to ~/.codex/auth.json.
+    let auth_path = resolve_codex_auth_json_path();
+    if let Some(path) = auth_path {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Ok(auth) = serde_json::from_str::<Value>(&contents) {
+                // Check for OPENAI_API_KEY field.
+                if let Some(key) = auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) {
+                    let trimmed = key.trim();
+                    if !trimmed.is_empty() {
+                        return Ok((
+                            "https://api.openai.com/v1/audio/transcriptions".to_string(),
+                            trimmed.to_string(),
+                            true,
+                        ));
+                    }
+                }
+
+                // Check for chatgpt auth mode with access_token.
+                let is_chatgpt_mode = auth
+                    .get("auth_mode")
+                    .and_then(|v| v.as_str())
+                    .map(|m| m == "chatgpt")
+                    .unwrap_or(false);
+
+                if is_chatgpt_mode {
+                    if let Some(token) = auth
+                        .get("tokens")
+                        .and_then(|t| t.get("access_token"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let trimmed = token.trim();
+                        if !trimmed.is_empty() {
+                            return Ok((
+                                "https://chatgpt.com/backend-api/transcribe".to_string(),
+                                trimmed.to_string(),
+                                false,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(BridgeError {
+        code: -32002,
+        message:
+            "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN"
+                .to_string(),
+        data: None,
+    })
+}
+
+fn resolve_codex_auth_json_path() -> Option<PathBuf> {
+    if let Some(codex_home) = read_non_empty_env("CODEX_HOME") {
+        let path = PathBuf::from(codex_home).join("auth.json");
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let home = read_non_empty_env("HOME")?;
+    let path = PathBuf::from(home).join(".codex").join("auth.json");
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
     }
 }
 
@@ -2460,6 +2743,90 @@ fn resolve_bridge_workdir(raw_workdir: PathBuf) -> Result<PathBuf, String> {
     Ok(normalize_path(&canonical))
 }
 
+fn is_unspecified_bind_host(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "0.0.0.0" | "::" | "[::]"
+    )
+}
+
+fn format_host_for_url(host: &str) -> String {
+    let trimmed = host.trim();
+    if trimmed.contains(':') && !trimmed.starts_with('[') && !trimmed.ends_with(']') {
+        return format!("[{}]", trimmed);
+    }
+    trimmed.to_string()
+}
+
+fn build_pairing_payload(config: &BridgeConfig) -> Option<String> {
+    if is_unspecified_bind_host(&config.host) {
+        return None;
+    }
+
+    let bridge_token = config.auth_token.clone()?;
+    let bridge_url = format!(
+        "http://{}:{}",
+        format_host_for_url(&config.host),
+        config.port
+    );
+
+    Some(
+        json!({
+            "type": "clawdex-bridge-pair",
+            "bridgeUrl": bridge_url,
+            "bridgeToken": bridge_token,
+        })
+        .to_string(),
+    )
+}
+
+fn build_token_only_pairing_payload(config: &BridgeConfig) -> Option<String> {
+    let bridge_token = config.auth_token.clone()?;
+
+    Some(
+        json!({
+            "type": "clawdex-bridge-token",
+            "bridgeToken": bridge_token,
+        })
+        .to_string(),
+    )
+}
+
+fn maybe_print_pairing_qr(config: &BridgeConfig) {
+    if !config.show_pairing_qr {
+        return;
+    }
+
+    if let Some(payload) = build_pairing_payload(config) {
+        println!();
+        println!("Bridge pairing QR (scan from mobile onboarding):");
+        if let Err(error) = qr2term::print_qr(payload.as_bytes()) {
+            eprintln!("failed to render pairing QR: {error}");
+            return;
+        }
+        println!("QR contains bridge URL + token for one-tap onboarding.");
+        println!();
+        return;
+    }
+
+    let Some(payload) = build_token_only_pairing_payload(config) else {
+        eprintln!("bridge token QR skipped because BRIDGE_AUTH_TOKEN is not set");
+        return;
+    };
+
+    println!();
+    println!("Bridge token QR fallback (scan from mobile onboarding):");
+    if let Err(error) = qr2term::print_qr(payload.as_bytes()) {
+        eprintln!("failed to render pairing QR: {error}");
+        return;
+    }
+    println!(
+        "Full pairing QR unavailable because BRIDGE_HOST={} is a bind address. Enter URL manually in onboarding.",
+        config.host
+    );
+    println!();
+}
+
 fn parse_bool_env(name: &str) -> bool {
     env::var(name)
         .map(|v| v.trim().eq_ignore_ascii_case("true"))
@@ -2486,6 +2853,13 @@ fn read_non_empty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn resolve_max_voice_transcription_bytes() -> usize {
+    read_non_empty_env("BRIDGE_MAX_VOICE_TRANSCRIPTION_BYTES")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_VOICE_TRANSCRIPTION_BYTES)
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
@@ -2897,6 +3271,62 @@ fn decode_base64_payload(raw: &str) -> Result<Vec<u8>, BridgeError> {
         })
 }
 
+fn normalize_transcription_mime_type(raw_mime_type: Option<&str>) -> String {
+    let Some(raw_mime_type) = raw_mime_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return "audio/wav".to_string();
+    };
+
+    let base_mime = raw_mime_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    match base_mime.as_str() {
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "audio/wav".to_string(),
+        "audio/mp4" => "audio/mp4".to_string(),
+        "audio/m4a" | "audio/x-m4a" => "audio/m4a".to_string(),
+        "audio/aac" => "audio/aac".to_string(),
+        "audio/mpeg" | "audio/mp3" | "audio/mpga" => "audio/mpeg".to_string(),
+        "audio/webm" => "audio/webm".to_string(),
+        "audio/ogg" => "audio/ogg".to_string(),
+        "audio/flac" | "audio/x-flac" => "audio/flac".to_string(),
+        _ => "audio/wav".to_string(),
+    }
+}
+
+fn normalize_transcription_file_name(raw_name: Option<&str>, mime_type: &str) -> String {
+    let mut file_name = raw_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(sanitize_filename)
+        .unwrap_or_else(|| "audio".to_string());
+
+    if !file_name.contains('.') {
+        file_name.push('.');
+        file_name.push_str(infer_transcription_extension_from_mime(mime_type));
+    }
+
+    file_name
+}
+
+fn infer_transcription_extension_from_mime(mime_type: &str) -> &'static str {
+    match mime_type {
+        "audio/wav" => "wav",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/aac" => "aac",
+        "audio/mpeg" => "mp3",
+        "audio/webm" => "webm",
+        "audio/ogg" => "ogg",
+        "audio/flac" => "flac",
+        _ => "wav",
+    }
+}
+
 fn normalize_attachment_kind(kind: Option<&str>, mime_type: Option<&str>) -> &'static str {
     let normalized = kind
         .map(str::trim)
@@ -3088,6 +3518,7 @@ mod tests {
             allow_outside_root_cwd: false,
             disable_terminal_exec: true,
             terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: false,
         });
 
         let hub = Arc::new(ClientHub::new());
@@ -3434,6 +3865,69 @@ mod tests {
     }
 
     #[test]
+    fn extract_rollout_thread_id_prefers_parent_thread_id_from_source() {
+        let payload = json!({
+            "id": "session-123",
+            "source": {
+                "subagent": {
+                    "thread_spawn": {
+                        "parent_thread_id": "thread-parent"
+                    }
+                }
+            }
+        });
+        let payload_object = payload.as_object().expect("payload object");
+
+        assert_eq!(
+            extract_rollout_thread_id(payload_object, true),
+            Some("thread-parent".to_string())
+        );
+    }
+
+    #[test]
+    fn rollout_thread_status_notification_maps_task_lifecycle_events() {
+        let params = json!({
+            "msg": {
+                "thread_id": "thread-1"
+            }
+        });
+
+        let running = build_rollout_thread_status_notification("codex/event/task_started", &params)
+            .expect("running status");
+        assert_eq!(running["threadId"], "thread-1");
+        assert_eq!(running["status"], "running");
+
+        let completed =
+            build_rollout_thread_status_notification("codex/event/task_complete", &params)
+                .expect("complete status");
+        assert_eq!(completed["status"], "completed");
+
+        let failed = build_rollout_thread_status_notification("codex/event/task_failed", &params)
+            .expect("failed status");
+        assert_eq!(failed["status"], "failed");
+
+        let interrupted =
+            build_rollout_thread_status_notification("codex/event/task_interrupted", &params)
+                .expect("interrupted status");
+        assert_eq!(interrupted["status"], "interrupted");
+
+        assert!(build_rollout_thread_status_notification(
+            "codex/event/agent_message_delta",
+            &params
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rollout_originator_filter_allows_codex_and_clawdex_origins() {
+        assert!(rollout_originator_allowed(Some("codex_cli_rs")));
+        assert!(rollout_originator_allowed(Some(
+            "clawdex-mobile-rust-bridge"
+        )));
+        assert!(!rollout_originator_allowed(Some("some_other_originator")));
+    }
+
+    #[test]
     fn rollout_response_item_mapping_builds_exec_command_and_mcp_notifications() {
         let exec_command = build_rollout_response_item_notification(
             json!({
@@ -3508,6 +4002,21 @@ mod tests {
             Some("sunset".to_string())
         );
         assert_eq!(extract_rollout_search_query(&json!({})), None);
+    }
+
+    #[test]
+    fn rollout_discovery_tick_scheduler_handles_one_tick_interval() {
+        assert!(should_run_rollout_discovery_tick(1, 1));
+        assert!(should_run_rollout_discovery_tick(10, 1));
+        assert!(should_run_rollout_discovery_tick(5, 0));
+    }
+
+    #[test]
+    fn rollout_discovery_tick_scheduler_handles_multi_tick_intervals() {
+        assert!(should_run_rollout_discovery_tick(1, 3));
+        assert!(!should_run_rollout_discovery_tick(2, 3));
+        assert!(should_run_rollout_discovery_tick(3, 3));
+        assert!(should_run_rollout_discovery_tick(6, 3));
     }
 
     #[test]
@@ -3694,6 +4203,71 @@ mod tests {
     }
 
     #[test]
+    fn transcription_mime_normalization_accepts_known_values_and_falls_back() {
+        assert_eq!(
+            normalize_transcription_mime_type(Some(" audio/MP4 ")),
+            "audio/mp4".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(Some("audio/webm;codecs=opus")),
+            "audio/webm".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(Some("audio/mpga")),
+            "audio/mpeg".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(Some("application/octet-stream")),
+            "audio/wav".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_mime_type(None),
+            "audio/wav".to_string()
+        );
+    }
+
+    #[test]
+    fn voice_transcribe_request_deserializes_legacy_and_extended_shapes() {
+        let legacy: VoiceTranscribeRequest = serde_json::from_value(json!({
+            "dataBase64": "YQ==",
+            "prompt": "hello"
+        }))
+        .expect("deserialize legacy request shape");
+        assert_eq!(legacy.data_base64, "YQ==");
+        assert_eq!(legacy.prompt.as_deref(), Some("hello"));
+        assert!(legacy.file_name.is_none());
+        assert!(legacy.mime_type.is_none());
+
+        let extended: VoiceTranscribeRequest = serde_json::from_value(json!({
+            "dataBase64": "YQ==",
+            "prompt": "hello",
+            "fileName": "audio.m4a",
+            "mimeType": "audio/mp4"
+        }))
+        .expect("deserialize extended request shape");
+        assert_eq!(extended.data_base64, "YQ==");
+        assert_eq!(extended.prompt.as_deref(), Some("hello"));
+        assert_eq!(extended.file_name.as_deref(), Some("audio.m4a"));
+        assert_eq!(extended.mime_type.as_deref(), Some("audio/mp4"));
+    }
+
+    #[test]
+    fn transcription_file_name_normalization_sanitizes_and_sets_extension() {
+        assert_eq!(
+            normalize_transcription_file_name(Some("../voice note"), "audio/mp4"),
+            "voice_note.m4a".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_file_name(None, "audio/wav"),
+            "audio.wav".to_string()
+        );
+        assert_eq!(
+            normalize_transcription_file_name(Some("meeting"), "audio/webm"),
+            "meeting.webm".to_string()
+        );
+    }
+
+    #[test]
     fn disallowed_control_character_detection_flags_shell_metacharacters() {
         assert!(!contains_disallowed_control_chars("git status"));
         assert!(contains_disallowed_control_chars("echo hi; ls"));
@@ -3733,6 +4307,7 @@ mod tests {
             allow_outside_root_cwd: false,
             disable_terminal_exec: false,
             terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: false,
         };
 
         let mut headers = HeaderMap::new();

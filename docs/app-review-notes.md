@@ -57,10 +57,15 @@ BRIDGE_CORS_ORIGINS=http://localhost:19006,http://localhost:8081
 - In `apps/mobile/.env`, set:
 
 ```env
-EXPO_PUBLIC_HOST_BRIDGE_URL=http://<mac-lan-ip>:8787
 EXPO_PUBLIC_HOST_BRIDGE_TOKEN=<review-token>
 EXPO_PUBLIC_PRIVACY_POLICY_URL=https://<your-policy-url>
 EXPO_PUBLIC_TERMS_OF_SERVICE_URL=https://<your-terms-url>
+```
+
+- In app onboarding, enter:
+
+```text
+http://<mac-lan-ip>:8787
 ```
 
 ## Reviewer Walkthrough
@@ -76,7 +81,7 @@ EXPO_PUBLIC_TERMS_OF_SERVICE_URL=https://<your-terms-url>
 ## Security And Privacy Notes For Review
 
 - Bridge auth token is required by default.
-- WebSocket auth uses Authorization header (query-token fallback is opt-in only).
+- WebSocket auth uses Authorization headers and supports query-token fallback for Android compatibility.
 - Bridge can be run localhost-only; LAN mode is user-configured.
 - Terminal commands are constrained by server-side allowlist and can be fully disabled.
 - Requested command working directory is constrained within configured bridge root.

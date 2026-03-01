@@ -77,3 +77,4 @@ coverage/
 .claude/
 .clawdex-mobile-attachments/
 /app.json
+export-cheat-sheet.local.md

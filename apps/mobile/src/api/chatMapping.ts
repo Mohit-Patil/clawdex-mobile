@@ -82,15 +82,32 @@ function unixSecondsToIso(value: number | undefined): string {
   return new Date(value * 1000).toISOString();
 }
 
+function normalizeLifecycleStatus(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalized.length > 0 ? normalized : null;
+}
+
 function mapRawStatus(status: unknown, turns: RawTurn[] | undefined): ChatStatus {
   const statusRecord = toRecord(status);
-  const statusType = readString(statusRecord?.type) ?? readString(status);
+  const statusType = normalizeLifecycleStatus(
+    readString(statusRecord?.type) ?? readString(status)
+  );
   const hasTurns = Array.isArray(turns) && turns.length > 0;
   const lastTurn = hasTurns ? turns[turns.length - 1] : null;
-  const lastTurnStatus = readString(lastTurn?.status);
-  const isIdleLikeStatus = statusType === 'idle' || statusType === 'notLoaded';
+  const lastTurnStatus = normalizeLifecycleStatus(readString(lastTurn?.status));
+  const isIdleLikeStatus = statusType === 'idle' || statusType === 'notloaded';
 
-  if (lastTurnStatus === 'inProgress') {
+  if (
+    lastTurnStatus === 'inprogress' ||
+    lastTurnStatus === 'running' ||
+    lastTurnStatus === 'active' ||
+    lastTurnStatus === 'queued' ||
+    lastTurnStatus === 'pending'
+  ) {
     // Some thread/read payloads can return stale turn state while the thread
     // itself is already idle/notLoaded. Prefer the thread lifecycle in that case.
     if (isIdleLikeStatus) {
@@ -99,16 +116,39 @@ function mapRawStatus(status: unknown, turns: RawTurn[] | undefined): ChatStatus
     return 'running';
   }
 
-  if (lastTurnStatus === 'failed' || lastTurnStatus === 'interrupted') {
+  if (
+    lastTurnStatus === 'failed' ||
+    lastTurnStatus === 'interrupted' ||
+    lastTurnStatus === 'error' ||
+    lastTurnStatus === 'aborted'
+  ) {
     return 'error';
   }
 
-  if (lastTurnStatus === 'completed') {
+  if (
+    lastTurnStatus === 'completed' ||
+    lastTurnStatus === 'complete' ||
+    lastTurnStatus === 'success' ||
+    lastTurnStatus === 'succeeded'
+  ) {
     return 'complete';
   }
 
-  if (statusType === 'systemError') {
+  if (
+    statusType === 'systemerror' ||
+    statusType === 'error' ||
+    statusType === 'failed'
+  ) {
     return 'error';
+  }
+
+  if (
+    statusType === 'running' ||
+    statusType === 'inprogress' ||
+    statusType === 'queued' ||
+    statusType === 'pending'
+  ) {
+    return 'running';
   }
 
   if (statusType === 'active') {

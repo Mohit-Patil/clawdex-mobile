@@ -6,20 +6,22 @@ import {
   Modal,
   Pressable,
   RefreshControl,
-  SafeAreaView,
   SectionList,
   ScrollView,
+  type StyleProp,
   StyleSheet,
   Text,
+  type ViewStyle,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
 import { colors, spacing, typography } from '../theme';
 
-type Screen = 'Main' | 'Terminal' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = 'Main' | 'Settings' | 'Privacy' | 'Terms';
 
 interface DrawerContentProps {
   api: HostBridgeApiClient;
@@ -319,9 +321,6 @@ export function DrawerContent({
             </Pressable>
           </View>
 
-          {/* Nav items */}
-          <NavItem icon="terminal-outline" label="Terminal" onPress={() => onNavigate('Terminal')} />
-
           {/* Chats section */}
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Chats</Text>
@@ -423,6 +422,7 @@ export function DrawerContent({
             label="Settings"
             onPress={() => onNavigate('Settings')}
             style={styles.settingsItem}
+            pressableStyle={styles.footerNavItem}
           />
         </View>
       </SafeAreaView>
@@ -482,16 +482,22 @@ function NavItem({
   label,
   onPress,
   style,
+  pressableStyle,
 }: {
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
   onPress: () => void;
-  style?: object;
+  style?: StyleProp<ViewStyle>;
+  pressableStyle?: StyleProp<ViewStyle>;
 }) {
   return (
     <View style={style}>
       <Pressable
-        style={({ pressed }) => [styles.navItem, pressed && styles.navItemPressed]}
+        style={({ pressed }) => [
+          styles.navItem,
+          pressableStyle,
+          pressed && styles.navItemPressed,
+        ]}
         onPress={onPress}
       >
         <Ionicons name={icon} size={18} color={colors.textPrimary} />
@@ -890,11 +896,15 @@ const styles = StyleSheet.create({
   settingsItem: {
     marginBottom: 0,
   },
+  footerNavItem: {
+    marginBottom: 0,
+  },
   footer: {
+    marginTop: 'auto',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.borderLight,
     paddingTop: spacing.md,
-    paddingBottom: spacing.md,
+    paddingBottom: 0,
   },
   workspaceModalBackdrop: {
     flex: 1,
