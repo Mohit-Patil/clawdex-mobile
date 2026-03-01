@@ -337,7 +337,7 @@ export class HostBridgeWsClient {
           resolve();
         };
 
-        socket.onclose = (event: unknown) => {
+        socket.onclose = () => {
           this.socket = null;
           this.emitStatus(false);
           this.rejectAllPending(new Error('Bridge websocket closed'));
@@ -348,16 +348,14 @@ export class HostBridgeWsClient {
 
           if (!settled) {
             settled = true;
-            const closeInfo = formatWebSocketCloseEvent(event);
-            reject(new Error(`Bridge websocket closed before open${closeInfo}`));
+            reject(new Error('Bridge websocket closed before open'));
           }
         };
 
-        socket.onerror = (event: unknown) => {
+        socket.onerror = () => {
           if (!settled) {
             settled = true;
-            const errorInfo = formatWebSocketErrorEvent(event);
-            reject(new Error(`Bridge websocket error${errorInfo} (url=${socketUrl})`));
+            reject(new Error('Bridge websocket error'));
           }
         };
 
@@ -684,49 +682,6 @@ function readEventId(record: Record<string, unknown>): number | null {
     return null;
   }
   return eventId;
-}
-
-function formatWebSocketErrorEvent(event: unknown): string {
-  if (!event || typeof event !== 'object') {
-    return '';
-  }
-
-  const record = event as Record<string, unknown>;
-  const nativeEvent =
-    record.nativeEvent && typeof record.nativeEvent === 'object'
-      ? (record.nativeEvent as Record<string, unknown>)
-      : null;
-  const message =
-    readString(record.message) ??
-    readString(nativeEvent?.message) ??
-    readString(record.type);
-  return message ? ` (${message})` : '';
-}
-
-function formatWebSocketCloseEvent(event: unknown): string {
-  if (!event || typeof event !== 'object') {
-    return '';
-  }
-
-  const record = event as Record<string, unknown>;
-  const nativeEvent =
-    record.nativeEvent && typeof record.nativeEvent === 'object'
-      ? (record.nativeEvent as Record<string, unknown>)
-      : null;
-  const code = readNumber(record.code) ?? readNumber(nativeEvent?.code);
-  const reason = readString(record.reason) ?? readString(nativeEvent?.reason);
-
-  if (code === null && !reason) {
-    return '';
-  }
-
-  if (code !== null && reason) {
-    return ` (code=${String(code)}, reason=${reason})`;
-  }
-  if (code !== null) {
-    return ` (code=${String(code)})`;
-  }
-  return ` (reason=${reason})`;
 }
 
 function turnCompletionKey(threadId: string, turnId: string): string {
