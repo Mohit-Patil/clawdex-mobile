@@ -132,13 +132,19 @@ export function OnboardingScreen({
     setConnectionCheck({ kind: 'idle' });
 
     let probeClient: HostBridgeWsClient | null = null;
+    let healthCheckError: string | null = null;
     try {
       const headers: Record<string, string> | undefined = token
         ? { Authorization: `Bearer ${token}` }
         : undefined;
-      const response = await fetch(toBridgeHealthUrl(normalized), { method: 'GET', headers });
-      if (response.status !== 200) {
-        throw new Error(`health returned ${response.status}`);
+      const healthUrl = toBridgeHealthUrl(normalized);
+      try {
+        const response = await fetch(healthUrl, { method: 'GET', headers });
+        if (response.status !== 200) {
+          healthCheckError = `health returned ${response.status}`;
+        }
+      } catch (error) {
+        healthCheckError = (error as Error).message || 'network request failed';
       }
 
       probeClient = new HostBridgeWsClient(normalized, {
@@ -153,14 +159,20 @@ export function OnboardingScreen({
 
       setConnectionCheck({
         kind: 'success',
-        message: 'Connected. URL and token both verified.',
+        message: healthCheckError
+          ? 'Connected. Authenticated RPC verified; /health endpoint did not return 200.'
+          : 'Connected. URL and token both verified.',
       });
       return true;
     } catch (error) {
-      const message = (error as Error).message || 'request failed';
+      const baseMessage = (error as Error).message || 'request failed';
+      const hint =
+        Platform.OS === 'android' && baseMessage.includes('Network request failed')
+          ? ' (If using Android emulator, use http://10.0.2.2:8787 for localhost bridge.)'
+          : '';
       setConnectionCheck({
         kind: 'error',
-        message: `Bridge verification failed: ${message}`,
+        message: `Bridge verification failed: ${baseMessage}${hint}`,
       });
       return false;
     } finally {
