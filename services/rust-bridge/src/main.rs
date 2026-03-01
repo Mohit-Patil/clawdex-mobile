@@ -14,7 +14,7 @@ use std::{
 
 use axum::{
     extract::{
-        ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
+        ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
     http::{HeaderMap, StatusCode},
@@ -2043,7 +2043,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 async fn ws_handler(
-    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<RpcQuery>,
@@ -2072,21 +2072,6 @@ async fn ws_handler(
         )
             .into_response();
     }
-
-    let ws = match ws {
-        Ok(ws) => ws,
-        Err(rejection) => {
-            eprintln!("ws upgrade rejected: {rejection}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "bad_request",
-                    "message": "WebSocket upgrade headers were missing or invalid"
-                })),
-            )
-                .into_response();
-        }
-    };
 
     ws.on_upgrade(move |socket| handle_socket(socket, state))
         .into_response()
