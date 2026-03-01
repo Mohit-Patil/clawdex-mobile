@@ -640,7 +640,7 @@ export class HostBridgeWsClient {
       : this.baseUrl.replace('http://', 'ws://');
     const base = `${wsBase}/rpc`;
 
-    if (!this.authToken || Platform.OS !== 'web' || !this.allowQueryTokenAuth) {
+    if (!this.authToken || !this.allowQueryTokenAuth) {
       return base;
     }
 

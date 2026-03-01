@@ -81,7 +81,7 @@ http://<mac-lan-ip>:8787
 ## Security And Privacy Notes For Review
 
 - Bridge auth token is required by default.
-- WebSocket auth uses Authorization header (query-token fallback is opt-in only).
+- WebSocket auth uses Authorization headers and supports query-token fallback for Android compatibility.
 - Bridge can be run localhost-only; LAN mode is user-configured.
 - Terminal commands are constrained by server-side allowlist and can be fully disabled.
 - Requested command working directory is constrained within configured bridge root.

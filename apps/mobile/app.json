@@ -20,6 +20,7 @@
       "bundleIdentifier": "com.mohitpatil973.clawdexmobile"
     },
     "android": {
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/brand/adaptive-icon.png",
         "backgroundColor": "#000000"

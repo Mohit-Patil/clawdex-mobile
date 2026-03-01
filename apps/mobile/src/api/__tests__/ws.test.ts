@@ -74,18 +74,25 @@ describe('HostBridgeWsClient', () => {
     });
   });
 
-  it('supports web query token auth fallback when enabled', () => {
-    if (Platform.OS !== 'web') {
-      return;
-    }
-
+  it('supports query token auth fallback when enabled', () => {
     const client = new HostBridgeWsClient('http://localhost:8787', {
       authToken: 'token-xyz',
       allowQueryTokenAuth: true,
     });
     client.connect();
 
-    expect(global.WebSocket).toHaveBeenCalledWith('ws://localhost:8787/rpc?token=token-xyz');
+    if (Platform.OS === 'web') {
+      expect(global.WebSocket).toHaveBeenCalledWith('ws://localhost:8787/rpc?token=token-xyz');
+      return;
+    }
+
+    expect(global.WebSocket).toHaveBeenCalledWith(
+      'ws://localhost:8787/rpc?token=token-xyz',
+      undefined,
+      {
+        headers: { Authorization: 'Bearer token-xyz' },
+      }
+    );
   });
 
   it('onEvent emits rpc notifications', () => {

@@ -95,7 +95,7 @@ npm run teardown -- --yes
 | Variable | Purpose |
 |---|---|
 | `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` | token sent by mobile client |
-| `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH` | web query-token behavior |
+| `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH` | query-token behavior for WebSocket auth fallback |
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
 | `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` | in-app Terms link |
@@ -104,7 +104,7 @@ npm run teardown -- --yes
 
 - Keep bridge network-private only (Tailscale/private LAN/VPN + host firewall)
 - Require `BRIDGE_AUTH_TOKEN`
-- Keep `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=false` unless explicitly needed
+- Keep `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true` only on private networks (required for Android WS auth fallback)
 - Do not set `BRIDGE_ALLOW_INSECURE_NO_AUTH=true` outside local debugging
 - Scope `BRIDGE_WORKDIR` to minimal required root
 - Use strict default approvals on mobile
