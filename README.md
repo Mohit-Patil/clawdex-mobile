@@ -109,6 +109,32 @@ Published CLI:
 - `clawdex upgrade` / `clawdex update`
 - `clawdex version`
 
+## Bridge Start Flow
+
+Recommended:
+
+```bash
+npm install -g clawdex-mobile@latest
+clawdex init
+```
+
+Monorepo/manual flow:
+
+```bash
+# from repo root
+npm install
+npm run secure:setup
+npm run secure:bridge
+```
+
+Keep `npm run secure:bridge` running in foreground. It prints pairing QR and bridge logs.
+
+In a second terminal, start the app runtime:
+
+```bash
+npm run mobile
+```
+
 ## Onboarding In App
 
 On first launch (or after reset):
@@ -129,6 +155,38 @@ eas build --platform android --profile preview
 ```
 
 For complete build/submit guidance, see [`docs/eas-builds.md`](docs/eas-builds.md).
+
+## Local Builds (No EAS Cloud)
+
+Run from `apps/mobile`:
+
+```bash
+cd apps/mobile
+```
+
+iOS:
+
+```bash
+# iOS Simulator
+npx expo run:ios
+
+# Connected iPhone
+npx expo run:ios --device
+```
+
+Android:
+
+```bash
+# Android emulator or connected Android device
+npx expo run:android
+```
+
+Optional local EAS build:
+
+```bash
+# Requires local Android SDK / Xcode setup
+eas build --platform android --profile preview --local
+```
 
 ## Documentation Map
 
