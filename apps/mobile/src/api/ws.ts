@@ -311,8 +311,12 @@ export class HostBridgeWsClient {
       await new Promise<void>((resolve, reject) => {
         const WebSocketCtor = globalThis.WebSocket as unknown as ReactNativeWebSocketConstructor;
         const socketUrl = this.socketUrl();
+        const shouldUseHeaderAuth =
+          Boolean(this.authToken) &&
+          Platform.OS !== 'web' &&
+          !(Platform.OS === 'android' && this.allowQueryTokenAuth);
         const socket =
-          this.authToken && Platform.OS !== 'web'
+          shouldUseHeaderAuth
             ? new WebSocketCtor(socketUrl, undefined, {
                 headers: {
                   Authorization: `Bearer ${this.authToken}`,
