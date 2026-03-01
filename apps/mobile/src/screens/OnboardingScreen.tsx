@@ -419,6 +419,7 @@ export function OnboardingScreen({
                       setFormError(null);
                       setConnectionCheck({ kind: 'idle' });
                     }}
+                    keyboardAppearance="dark"
                     autoCapitalize="none"
                     autoCorrect={false}
                     keyboardType="url"
@@ -441,6 +442,7 @@ export function OnboardingScreen({
                         setTokenInput(value);
                         setConnectionCheck({ kind: 'idle' });
                       }}
+                      keyboardAppearance="dark"
                       autoCapitalize="none"
                       autoCorrect={false}
                       keyboardType="default"

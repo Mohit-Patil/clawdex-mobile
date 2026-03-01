@@ -127,6 +127,7 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
             style={styles.input}
             value={command}
             onChangeText={setCommand}
+            keyboardAppearance="dark"
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="send"

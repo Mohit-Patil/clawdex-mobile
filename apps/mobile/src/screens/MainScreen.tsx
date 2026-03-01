@@ -5046,6 +5046,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               <TextInput
                 value={renameDraft}
                 onChangeText={setRenameDraft}
+                keyboardAppearance="dark"
                 placeholder="Chat name"
                 placeholderTextColor={colors.textMuted}
                 style={styles.renameModalInput}
@@ -5099,6 +5100,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               <TextInput
                 value={attachmentPathDraft}
                 onChangeText={setAttachmentPathDraft}
+                keyboardAppearance="dark"
                 placeholder="apps/mobile/src/screens/MainScreen.tsx"
                 placeholderTextColor={colors.textMuted}
                 style={styles.renameModalInput}
@@ -5249,6 +5251,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                         <TextInput
                           value={answer}
                           onChangeText={(value) => setUserInputDraft(question.id, value)}
+                          keyboardAppearance="dark"
                           placeholder={
                             question.isOther
                               ? 'Or enter a custom answer…'

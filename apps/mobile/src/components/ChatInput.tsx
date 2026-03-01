@@ -178,6 +178,7 @@ export function ChatInput({
               style={[styles.input, { height: inputHeight }]}
               value={value}
               onChangeText={onChangeText}
+              keyboardAppearance="dark"
               onLayout={(event) => {
                 const nextWidth = Math.floor(event.nativeEvent.layout.width);
                 setInputWidth((previousWidth) =>

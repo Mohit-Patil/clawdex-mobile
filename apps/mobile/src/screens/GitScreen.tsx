@@ -461,6 +461,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
             style={styles.input}
             value={workspaceDraft}
             onChangeText={setWorkspaceDraft}
+            keyboardAppearance="dark"
             onSubmitEditing={commitWorkspaceIfChanged}
             onBlur={commitWorkspaceIfChanged}
             placeholder="/path/to/project"
@@ -515,6 +516,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
               style={styles.input}
               value={commitMessage}
               onChangeText={setCommitMessage}
+              keyboardAppearance="dark"
               placeholder="Commit message..."
               placeholderTextColor={colors.textMuted}
             />
