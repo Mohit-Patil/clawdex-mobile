@@ -142,6 +142,8 @@ const MAX_ACTIVE_COMMANDS = 16;
 const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
 const CHAT_OPEN_REVEAL_DELAY_MS = 260;
+const LARGE_CHAT_OPEN_REVEAL_DELAY_MS = 2_000;
+const LARGE_CHAT_MESSAGE_COUNT_THRESHOLD = 120;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const UNANSWERED_USER_RUNNING_TTL_MS = 90_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
@@ -2562,12 +2564,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const requestId = loadChatRequestRef.current + 1;
         loadChatRequestRef.current = requestId;
         let loadedSuccessfully = false;
+        let loadedMessageCount = 0;
         try {
           const chat = await api.getChat(chatId);
           if (requestId !== loadChatRequestRef.current) {
             return;
           }
           loadedSuccessfully = true;
+          loadedMessageCount = chat.messages.length;
           setSelectedChatId(chatId);
           setSelectedChat(chat);
           setError(null);
@@ -2627,11 +2631,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (loadedSuccessfully) {
             // Keep spinner visible until initial bottom sync settles for long threads.
             scrollToBottomReliable(false);
+            const revealDelayMs =
+              loadedMessageCount >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD
+                ? LARGE_CHAT_OPEN_REVEAL_DELAY_MS
+                : CHAT_OPEN_REVEAL_DELAY_MS;
             setTimeout(() => {
               if (requestId === loadChatRequestRef.current) {
                 setOpeningChatId(null);
               }
-            }, CHAT_OPEN_REVEAL_DELAY_MS);
+            }, revealDelayMs);
           } else {
             setOpeningChatId(null);
           }
@@ -5512,6 +5520,8 @@ function ChatView({
     () => [styles.messageListContent, { paddingBottom: bottomInset }],
     [bottomInset]
   );
+  const isLargeChat = visibleMessages.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
+  const aggressiveRenderBatchSize = Math.max(visibleMessages.length, 1);
   const keyExtractor = useCallback((msg: ChatTranscriptMessage) => msg.id, []);
   const renderMessageItem = useCallback<ListRenderItem<ChatTranscriptMessage>>(
     ({ item: msg }) => {
@@ -5573,10 +5583,11 @@ function ChatView({
             onAutoScroll(false);
           }
         }}
-        initialNumToRender={16}
-        maxToRenderPerBatch={12}
-        windowSize={11}
-        removeClippedSubviews={Platform.OS === 'android'}
+        initialNumToRender={isLargeChat ? aggressiveRenderBatchSize : 16}
+        maxToRenderPerBatch={isLargeChat ? aggressiveRenderBatchSize : 12}
+        updateCellsBatchingPeriod={isLargeChat ? 0 : undefined}
+        windowSize={isLargeChat ? 21 : 11}
+        removeClippedSubviews={isLargeChat ? false : Platform.OS === 'android'}
         ListHeaderComponent={activePlan ? <PlanCard plan={activePlan} /> : null}
         ListFooterComponent={
           <>

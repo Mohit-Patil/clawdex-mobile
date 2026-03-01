@@ -47,6 +47,7 @@
     },
     "jsEngine": "hermes",
     "plugins": [
+      "./plugins/withAndroidCleartextTraffic",
       "expo-audio"
     ],
     "extra": {
