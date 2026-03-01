@@ -2,7 +2,7 @@
   "expo": {
     "name": "Clawdex Mobile",
     "slug": "clawdex-mobile",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "orientation": "portrait",
     "icon": "./assets/brand/app-icon.png",
     "splash": {
