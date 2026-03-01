@@ -6,13 +6,22 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true"
+      }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true"
+      }
     }
   },
   "submit": {
