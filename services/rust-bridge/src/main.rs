@@ -2049,20 +2049,6 @@ async fn ws_handler(
     Query(query): Query<RpcQuery>,
 ) -> Response {
     if !state.config.is_authorized(&headers, query.token.as_deref()) {
-        let has_auth_header = headers.get("authorization").is_some();
-        let has_query_token = query
-            .token
-            .as_deref()
-            .map(str::trim)
-            .map(|token| !token.is_empty())
-            .unwrap_or(false);
-        eprintln!(
-            "ws auth rejected: has_auth_header={}, has_query_token={}, allow_query_token_auth={}, auth_enabled={}",
-            has_auth_header,
-            has_query_token,
-            state.config.allow_query_token_auth,
-            state.config.auth_enabled
-        );
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({

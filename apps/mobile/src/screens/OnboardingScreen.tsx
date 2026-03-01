@@ -170,12 +170,9 @@ export function OnboardingScreen({
         Platform.OS === 'android' && baseMessage.includes('Network request failed')
           ? ' (If using Android emulator, use http://10.0.2.2:8787 for localhost bridge.)'
           : '';
-      const debugContext = ` [platform=${Platform.OS}; queryTokenAuth=${String(
-        allowQueryTokenAuth
-      )}; tokenPresent=${String(Boolean(token && token.trim().length > 0))}]`;
       setConnectionCheck({
         kind: 'error',
-        message: `Bridge verification failed: ${baseMessage}${hint}${debugContext}`,
+        message: `Bridge verification failed: ${baseMessage}${hint}`,
       });
       return false;
     } finally {
