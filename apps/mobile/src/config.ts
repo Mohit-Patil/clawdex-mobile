@@ -1,5 +1,10 @@
 import { isInsecureRemoteUrl, normalizeBridgeUrlInput } from './bridgeUrl';
 
+const defaultPrivacyPolicyUrl =
+  'https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/privacy-policy.md';
+const defaultTermsOfServiceUrl =
+  'https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/terms-of-service.md';
+
 const legacyHostBridgeUrl = normalizeBridgeUrlInput(
   process.env.EXPO_PUBLIC_HOST_BRIDGE_URL ??
     process.env.EXPO_PUBLIC_MAC_BRIDGE_URL ??
@@ -15,8 +20,10 @@ const allowWsQueryTokenAuth =
 const allowInsecureRemoteBridge =
   process.env.EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE?.trim().toLowerCase() ===
   'true';
-const privacyPolicyUrl = process.env.EXPO_PUBLIC_PRIVACY_POLICY_URL?.trim() || null;
-const termsOfServiceUrl = process.env.EXPO_PUBLIC_TERMS_OF_SERVICE_URL?.trim() || null;
+const privacyPolicyUrl =
+  process.env.EXPO_PUBLIC_PRIVACY_POLICY_URL?.trim() || defaultPrivacyPolicyUrl;
+const termsOfServiceUrl =
+  process.env.EXPO_PUBLIC_TERMS_OF_SERVICE_URL?.trim() || defaultTermsOfServiceUrl;
 const externalStatusFullSyncDebounceMs = parseNonNegativeIntEnv(
   process.env.EXPO_PUBLIC_EXTERNAL_STATUS_FULL_SYNC_DEBOUNCE_MS,
   450

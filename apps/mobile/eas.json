@@ -8,19 +8,25 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true"
+        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true",
+        "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/privacy-policy.md",
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/terms-of-service.md"
       }
     },
     "preview": {
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true"
+        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true",
+        "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/privacy-policy.md",
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/terms-of-service.md"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true"
+        "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true",
+        "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/privacy-policy.md",
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/terms-of-service.md"
       }
     }
   },
