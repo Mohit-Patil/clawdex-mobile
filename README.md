@@ -25,7 +25,7 @@ This project is intended for trusted/private networking (Tailscale or local LAN)
 
 - Android APK: download from the latest GitHub release assets  
   <https://github.com/Mohit-Patil/clawdex-mobile/releases/latest>
-- iOS (TestFlight): share your TestFlight invite/public link with testers (coming soon)
+- iOS (TestFlight): share your TestFlight invite/public link with testers : https://testflight.apple.com/join/4GRsQQKF 
 
 Recommended release-note format for Android:
 
