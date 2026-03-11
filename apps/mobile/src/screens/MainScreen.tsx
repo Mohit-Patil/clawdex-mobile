@@ -1619,10 +1619,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const pickImageFromDevice = useCallback(async () => {
       try {
-        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (!permission.granted) {
-          setError('Photo library permission is required to attach images');
-          return;
+        if (Platform.OS !== 'ios') {
+          const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (!permission.granted) {
+            setError('Photo library permission is required to attach images');
+            return;
+          }
         }
 
         const result = await ImagePicker.launchImageLibraryAsync({

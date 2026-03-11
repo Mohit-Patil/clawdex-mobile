@@ -14,8 +14,6 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "Clawdex uses the camera to scan bridge pairing QR codes.",
-        "NSMicrophoneUsageDescription": "Clawdex uses the microphone for voice-to-text input.",
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.mohitpatil973.clawdexmobile"
@@ -29,9 +27,7 @@
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS",
-        "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "package": "com.mohitpatil973.clawdexmobile"
     },
@@ -49,7 +45,28 @@
     "jsEngine": "hermes",
     "plugins": [
       "./plugins/withAndroidCleartextTraffic",
-      "expo-audio"
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Clawdex uses the camera to scan bridge pairing QR codes."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Clawdex uses your photo library so you can choose an image from your phone and attach it to a chat prompt or workflow sent to your own host bridge.",
+          "cameraPermission": "Clawdex uses the camera to scan bridge pairing QR codes.",
+          "microphonePermission": "Clawdex uses the microphone to record a short voice message that is transcribed into your chat input."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Clawdex uses the microphone to record a short voice message that is transcribed into your chat input.",
+          "enableBackgroundPlayback": false,
+          "enableBackgroundRecording": false
+        }
+      ]
     ],
     "extra": {
       "eas": {
