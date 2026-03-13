@@ -1,8 +1,17 @@
 import { Ionicons } from '@expo/vector-icons';
-import { memo } from 'react';
-import { Image, Linking, Platform, StyleSheet, Text, View } from 'react-native';
+import { memo, type ReactElement } from 'react';
+import {
+  Image,
+  Linking,
+  Platform,
+  StyleSheet,
+  Text,
+  type TextProps,
+  View,
+} from 'react-native';
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
 import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
+import { UITextView } from 'react-native-uitextview';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
@@ -19,18 +28,22 @@ interface TimelineEntry {
 function ChatMessageComponent({ message }: ChatMessageProps) {
   const isUser = message.role === 'user';
 
-  if (isUser) {
-    return (
-      <Animated.View
-        entering={FadeInUp.duration(300)}
-        layout={Layout.springify()}
-        style={[styles.messageWrapper, styles.messageWrapperUser]}
-      >
-        <View style={styles.userBubble}>
-          <Text style={styles.userMessageText}>{message.content}</Text>
-        </View>
-      </Animated.View>
-    );
+  const renderedMessage = isUser ? (
+    <Animated.View
+      entering={FadeInUp.duration(300)}
+      layout={Layout.springify()}
+      style={[styles.messageWrapper, styles.messageWrapperUser]}
+    >
+      <View style={styles.userBubble}>
+        <SelectableMessageText style={styles.userMessageText}>
+          {message.content}
+        </SelectableMessageText>
+      </View>
+    </Animated.View>
+  ) : null;
+
+  if (renderedMessage) {
+    return renderedMessage;
   }
 
   const timelineEntries =
@@ -38,7 +51,7 @@ function ChatMessageComponent({ message }: ChatMessageProps) {
   if (timelineEntries && timelineEntries.length > 0) {
     return (
       <Animated.View
-        entering={FadeInUp.duration(300).delay(50)}
+        entering={FadeInUp.duration(300)}
         layout={Layout.springify()}
         style={[styles.messageWrapper, styles.messageWrapperAssistant]}
       >
@@ -187,33 +200,105 @@ const markdownStyles = StyleSheet.create({
 });
 
 const markdownRules: RenderRules = {
+  text: (node, _children, _parent, styles, inheritedStyles = {}) => (
+    <SelectableMessageText key={node.key} style={[inheritedStyles, styles.text]}>
+      {node.content}
+    </SelectableMessageText>
+  ),
+  textgroup: (node, children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.textgroup}>
+      {children}
+    </SelectableMessageText>
+  ),
+  strong: (node, children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.strong}>
+      {children}
+    </SelectableMessageText>
+  ),
+  em: (node, children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.em}>
+      {children}
+    </SelectableMessageText>
+  ),
+  s: (node, children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.s}>
+      {children}
+    </SelectableMessageText>
+  ),
+  code_inline: (node, _children, _parent, styles, inheritedStyles = {}) => (
+    <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_inline]}>
+      {node.content}
+    </SelectableMessageText>
+  ),
+  code_block: (node, _children, _parent, styles, inheritedStyles = {}) => {
+    const content =
+      typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
+        ? node.content.substring(0, node.content.length - 1)
+        : node.content;
+    return (
+      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_block]}>
+        {content}
+      </SelectableMessageText>
+    );
+  },
+  fence: (node, _children, _parent, styles, inheritedStyles = {}) => {
+    const content =
+      typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
+        ? node.content.substring(0, node.content.length - 1)
+        : node.content;
+    return (
+      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.fence]}>
+        {content}
+      </SelectableMessageText>
+    );
+  },
+  hardbreak: (node, _children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.hardbreak}>
+      {'\n'}
+    </SelectableMessageText>
+  ),
+  softbreak: (node, _children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.softbreak}>
+      {'\n'}
+    </SelectableMessageText>
+  ),
+  inline: (node, children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.inline}>
+      {children}
+    </SelectableMessageText>
+  ),
+  span: (node, children, _parent, styles) => (
+    <SelectableMessageText key={node.key} style={styles.span}>
+      {children}
+    </SelectableMessageText>
+  ),
   link: (node, children, _parent, styles, onLinkPress) => {
     const href = readMarkdownAttr(node.attributes.href);
     if (!href) {
       return (
-        <Text key={node.key} style={styles.link}>
+        <SelectableMessageText key={node.key} style={styles.link}>
           {children}
-        </Text>
+        </SelectableMessageText>
       );
     }
 
     const localFileReference = toLocalFileReferenceLabel(href);
     if (localFileReference) {
       return (
-        <Text key={node.key} style={styles.code_inline}>
+        <SelectableMessageText key={node.key} style={styles.code_inline}>
           {localFileReference}
-        </Text>
+        </SelectableMessageText>
       );
     }
 
     return (
-      <Text
+      <SelectableMessageText
         key={node.key}
         style={styles.link}
         onPress={() => openMarkdownLink(href, onLinkPress)}
       >
         {children}
-      </Text>
+      </SelectableMessageText>
     );
   },
   image: (
@@ -334,6 +419,14 @@ const styles = StyleSheet.create({
 
 function readMarkdownAttr(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function SelectableMessageText({ children, ...props }: TextProps): ReactElement {
+  return (
+    <UITextView selectable uiTextView {...props}>
+      {children}
+    </UITextView>
+  );
 }
 
 function openMarkdownLink(

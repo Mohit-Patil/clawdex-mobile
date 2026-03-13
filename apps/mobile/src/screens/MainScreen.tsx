@@ -5580,7 +5580,9 @@ function ChatView({
         showsVerticalScrollIndicator={false}
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         keyboardShouldPersistTaps="handled"
-        onScrollBeginDrag={Keyboard.dismiss}
+        onScrollBeginDrag={() => {
+          Keyboard.dismiss();
+        }}
         onScroll={handleScroll}
         scrollEventThrottle={16}
         onContentSizeChange={() => {
