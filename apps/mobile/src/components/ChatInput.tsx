@@ -185,23 +185,11 @@ export function ChatInput({
                   previousWidth === nextWidth ? previousWidth : nextWidth
                 );
               }}
-              onChange={(event: NativeSyntheticEvent<unknown>) => {
-                const nativeEvent = event.nativeEvent as {
-                  contentSize?: { height?: number };
-                };
-                const contentHeight = nativeEvent.contentSize?.height;
-                if (typeof contentHeight === 'number' && Number.isFinite(contentHeight)) {
-                  updateInputHeight(contentHeight);
-                }
-              }}
               onFocus={onFocus}
               placeholder={placeholder}
               placeholderTextColor={colors.textMuted}
               multiline
               scrollEnabled={inputScrollEnabled}
-              onContentSizeChange={(event) => {
-                updateInputHeight(event.nativeEvent.contentSize.height);
-              }}
               onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
                 const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
                   shiftKey?: boolean;
