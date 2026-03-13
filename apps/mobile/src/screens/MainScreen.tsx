@@ -59,8 +59,6 @@ import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
 import { ChatMessage } from '../components/ChatMessage';
 import { BrandMark } from '../components/BrandMark';
-import { ToolBlock } from '../components/ToolBlock';
-import { TypingIndicator } from '../components/TypingIndicator';
 import { env } from '../config';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { colors, spacing, typography } from '../theme';
@@ -131,6 +129,12 @@ interface QueuedChatMessage {
   collaborationMode: CollaborationMode;
 }
 
+interface AutoScrollState {
+  shouldStickToBottom: boolean;
+  isUserInteracting: boolean;
+  isMomentumScrolling: boolean;
+}
+
 interface SlashCommandDefinition {
   name: string;
   summary: string;
@@ -141,7 +145,6 @@ interface SlashCommandDefinition {
 }
 
 const MAX_ACTIVE_COMMANDS = 16;
-const MAX_VISIBLE_TOOL_BLOCKS = 3;
 const RUN_WATCHDOG_MS = 60_000;
 const CHAT_OPEN_REVEAL_DELAY_MS = 260;
 const LARGE_CHAT_OPEN_REVEAL_DELAY_MS = 2_000;
@@ -426,7 +429,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [activeCommands, setActiveCommands] = useState<RunEvent[]>([]);
+    const [, setActiveCommands] = useState<RunEvent[]>([]);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
     const [pendingUserInputRequest, setPendingUserInputRequest] =
       useState<PendingUserInputRequest | null>(null);
@@ -434,7 +437,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [userInputError, setUserInputError] = useState<string | null>(null);
     const [resolvingUserInput, setResolvingUserInput] = useState(false);
     const [activePlan, setActivePlan] = useState<ActivePlanState | null>(null);
-    const [streamingText, setStreamingText] = useState<string | null>(null);
+    const [, setStreamingText] = useState<string | null>(null);
     const [renameModalVisible, setRenameModalVisible] = useState(false);
     const [renameDraft, setRenameDraft] = useState('');
     const [renaming, setRenaming] = useState(false);
@@ -472,6 +475,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const safeAreaInsets = useSafeAreaInsets();
     const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
     const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+    const autoScrollStateRef = useRef<AutoScrollState>({
+      shouldStickToBottom: true,
+      isUserInteracting: false,
+      isMomentumScrolling: false,
+    });
     const loadChatRequestRef = useRef(0);
 
     const voiceRecorder = useVoiceRecorder({
@@ -505,6 +513,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         );
       },
       [clearPendingScrollRetries]
+    );
+
+    const scrollToBottomIfPinned = useCallback(
+      (animated = true) => {
+        const autoScrollState = autoScrollStateRef.current;
+        if (
+          autoScrollState.isUserInteracting ||
+          autoScrollState.isMomentumScrolling ||
+          !autoScrollState.shouldStickToBottom
+        ) {
+          return;
+        }
+        scrollToBottomReliable(animated);
+      },
+      [scrollToBottomReliable]
     );
 
     useEffect(() => {
@@ -1042,74 +1065,44 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         if (codexEventType === 'execcommandbegin') {
-          const command = toCommandDisplay(msg?.command);
-          const detail = toTickerSnippet(command, 80);
-          const commandLabel = detail ?? 'Command';
           cacheThreadActivity(threadId, {
             tone: 'running',
-            title: 'Running command',
-            detail: detail ?? undefined,
+            title: 'Working',
           });
-          cacheThreadActiveCommand(threadId, 'command.running', `${commandLabel} | running`);
           return;
         }
 
         if (codexEventType === 'execcommandend') {
           const status = readString(msg?.status);
-          const command = toCommandDisplay(msg?.command);
-          const detail = toTickerSnippet(command, 80);
-          const commandLabel = detail ?? 'Command';
           const failed = status === 'failed' || status === 'error';
           cacheThreadActivity(threadId, {
             tone: failed ? 'error' : 'running',
-            title: failed ? 'Command failed' : 'Working',
-            detail: detail ?? undefined,
+            title: failed ? 'Turn failed' : 'Working',
           });
-          cacheThreadActiveCommand(
-            threadId,
-            'command.completed',
-            `${commandLabel} | ${failed ? 'error' : 'complete'}`
-          );
           return;
         }
 
         if (codexEventType === 'mcpstartupupdate') {
-          const server = readString(msg?.server);
-          const state =
-            readString(msg?.status) ??
-            readString(toRecord(msg?.status)?.type);
-          const detail = [server, state].filter(Boolean).join(' · ');
           cacheThreadActivity(threadId, {
             tone: 'running',
-            title: 'Starting MCP servers',
-            detail: detail || undefined,
+            title: 'Working',
           });
           return;
         }
 
         if (codexEventType === 'mcptoolcallbegin') {
-          const server = readString(msg?.server);
-          const tool = readString(msg?.tool);
-          const detail = [server, tool].filter(Boolean).join(' / ');
-          const toolLabel = detail || 'MCP tool call';
           cacheThreadActivity(threadId, {
             tone: 'running',
-            title: 'Running tool',
-            detail: detail || undefined,
+            title: 'Working',
           });
-          cacheThreadActiveCommand(threadId, 'tool.running', `${toolLabel} | running`);
           return;
         }
 
         if (codexEventType === 'websearchbegin') {
-          const query = toTickerSnippet(readString(msg?.query), 64);
-          const searchLabel = query ? `Web search: ${query}` : 'Web search';
           cacheThreadActivity(threadId, {
             tone: 'running',
-            title: 'Searching web',
-            detail: query ?? undefined,
+            title: 'Working',
           });
-          cacheThreadActiveCommand(threadId, 'web_search.running', `${searchLabel} | running`);
           return;
         }
 
@@ -1948,9 +1941,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ],
           };
         });
-        scrollToBottomReliable(true);
+        scrollToBottomIfPinned(true);
       },
-      [scrollToBottomReliable, selectedChatId]
+      [scrollToBottomIfPinned, selectedChatId]
     );
 
     const appendLocalSystemMessage = useCallback(
@@ -1981,9 +1974,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ],
           };
         });
-        scrollToBottomReliable(true);
+        scrollToBottomIfPinned(true);
       },
-      [scrollToBottomReliable, selectedChatId]
+      [scrollToBottomIfPinned, selectedChatId]
     );
 
     const appendStopSystemMessageIfNeeded = useCallback(() => {
@@ -2566,7 +2559,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
 
     const loadChat = useCallback(
-      async (chatId: string) => {
+      async (
+        chatId: string,
+        options?: { forceScroll?: boolean; preserveRuntimeState?: boolean }
+      ) => {
         const requestId = loadChatRequestRef.current + 1;
         loadChatRequestRef.current = requestId;
         let loadedSuccessfully = false;
@@ -2578,46 +2574,51 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
           loadedSuccessfully = true;
           loadedMessageCount = chat.messages.length;
+          const shouldPreserveRuntimeState = Boolean(
+            options?.preserveRuntimeState && chatId === chatIdRef.current
+          );
           setSelectedChatId(chatId);
           setSelectedChat(chat);
           setError(null);
-          setActiveCommands([]);
-          setPendingApproval(null);
-          setStreamingText(null);
-          setActiveTurnId(null);
-          setStoppingTurn(false);
-          stopSystemMessageLoggedRef.current = false;
-          const shouldRun = isChatLikelyRunning(chat);
-          if (shouldRun) {
-            bumpRunWatchdog();
-            setActivity({
-              tone: 'running',
-              title: 'Working',
-            });
-          } else {
-            clearRunWatchdog();
-            setActivity(
-              chat.status === 'complete'
-                ? {
-                    tone: 'complete',
-                    title: 'Turn completed',
-                  }
-                : chat.status === 'error'
+          if (!shouldPreserveRuntimeState) {
+            setActiveCommands([]);
+            setPendingApproval(null);
+            setStreamingText(null);
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            stopSystemMessageLoggedRef.current = false;
+            const shouldRun = isChatLikelyRunning(chat);
+            if (shouldRun) {
+              bumpRunWatchdog();
+              setActivity({
+                tone: 'running',
+                title: 'Working',
+              });
+            } else {
+              clearRunWatchdog();
+              setActivity(
+                chat.status === 'complete'
                   ? {
-                      tone: 'error',
-                      title: 'Turn failed',
-                      detail: chat.lastError ?? undefined,
+                      tone: 'complete',
+                      title: 'Turn completed',
                     }
-                  : {
-                      tone: 'idle',
-                      title: 'Ready',
-                    }
-            );
+                  : chat.status === 'error'
+                    ? {
+                        tone: 'error',
+                        title: 'Turn failed',
+                        detail: chat.lastError ?? undefined,
+                      }
+                    : {
+                        tone: 'idle',
+                        title: 'Ready',
+                      }
+              );
+            }
+            reasoningSummaryRef.current = {};
+            codexReasoningBufferRef.current = '';
+            hadCommandRef.current = false;
+            applyThreadRuntimeSnapshot(chatId);
           }
-          reasoningSummaryRef.current = {};
-          codexReasoningBufferRef.current = '';
-          hadCommandRef.current = false;
-          applyThreadRuntimeSnapshot(chatId);
           void refreshPendingApprovalsForThread(chatId);
         } catch (err) {
           if (requestId !== loadChatRequestRef.current) {
@@ -2636,7 +2637,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           if (loadedSuccessfully) {
             // Keep spinner visible until initial bottom sync settles for long threads.
-            scrollToBottomReliable(false);
+            if (options?.forceScroll) {
+              scrollToBottomReliable(false);
+            } else {
+              scrollToBottomIfPinned(false);
+            }
             const revealDelayMs =
               loadedMessageCount >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD
                 ? LARGE_CHAT_OPEN_REVEAL_DELAY_MS
@@ -2657,6 +2662,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         bumpRunWatchdog,
         clearRunWatchdog,
         refreshPendingApprovalsForThread,
+        scrollToBottomIfPinned,
         scrollToBottomReliable,
       ]
     );
@@ -2701,7 +2707,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         applyThreadRuntimeSnapshot(id);
         void refreshPendingApprovalsForThread(id);
-        loadChat(id).catch(() => {});
+        loadChat(id, { forceScroll: true }).catch(() => {});
       },
       [
         applyThreadRuntimeSnapshot,
@@ -3203,7 +3209,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 : prev
             );
           } else {
-            loadChat(threadId).catch(() => {});
+            loadChat(threadId, { preserveRuntimeState: true }).catch(() => {});
           }
           return;
         }
@@ -3312,82 +3318,50 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Thinking',
                   }
             );
-            scrollToBottomReliable(true);
+            scrollToBottomIfPinned(true);
             return;
           }
 
           if (codexEventType === 'execcommandbegin') {
-            const command = toCommandDisplay(msg?.command);
-            const detail = toTickerSnippet(command, 80);
-            const commandLabel = detail ?? 'Command';
             setActivity({
               tone: 'running',
-              title: 'Running command',
-              detail: detail ?? undefined,
+              title: 'Working',
             });
-            pushActiveCommand(activeThreadId, 'command.running', `${commandLabel} | running`);
             return;
           }
 
           if (codexEventType === 'execcommandend') {
             const status = readString(msg?.status);
-            const command = toCommandDisplay(msg?.command);
-            const detail = toTickerSnippet(command, 80);
-            const commandLabel = detail ?? 'Command';
             const failed = status === 'failed' || status === 'error';
 
             setActivity({
               tone: failed ? 'error' : 'running',
-              title: failed ? 'Command failed' : 'Working',
-              detail: detail ?? undefined,
+              title: failed ? 'Turn failed' : 'Working',
             });
-            pushActiveCommand(
-              activeThreadId,
-              'command.completed',
-              `${commandLabel} | ${failed ? 'error' : 'complete'}`
-            );
             return;
           }
 
           if (codexEventType === 'mcpstartupupdate') {
-            const server = readString(msg?.server);
-            const state =
-              readString(msg?.status) ??
-              readString(toRecord(msg?.status)?.type);
-            const detail = [server, state].filter(Boolean).join(' · ');
-
             setActivity({
               tone: 'running',
-              title: 'Starting MCP servers',
-              detail: detail || undefined,
+              title: 'Working',
             });
             return;
           }
 
           if (codexEventType === 'mcptoolcallbegin') {
-            const server = readString(msg?.server);
-            const tool = readString(msg?.tool);
-            const detail = [server, tool].filter(Boolean).join(' / ');
-            const toolLabel = detail || 'MCP tool call';
-
             setActivity({
               tone: 'running',
-              title: 'Running tool',
-              detail: detail || undefined,
+              title: 'Working',
             });
-            pushActiveCommand(activeThreadId, 'tool.running', `${toolLabel} | running`);
             return;
           }
 
           if (codexEventType === 'websearchbegin') {
-            const query = toTickerSnippet(readString(msg?.query), 64);
-            const searchLabel = query ? `Web search: ${query}` : 'Web search';
             setActivity({
               tone: 'running',
-              title: 'Searching web',
-              detail: query ?? undefined,
+              title: 'Working',
             });
-            pushActiveCommand(activeThreadId, 'web_search.running', `${searchLabel} | running`);
             return;
           }
 
@@ -3506,7 +3480,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   title: 'Thinking',
                 }
           );
-          scrollToBottomReliable(true);
+          scrollToBottomIfPinned(true);
           return;
         }
 
@@ -3562,45 +3536,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
             });
             if (itemType === 'commandExecution') {
-              const command = readString(item?.command);
-              const commandLabel = toTickerSnippet(command, 80) ?? 'Command';
               cacheThreadActivity(threadId, {
                 tone: 'running',
-                title: 'Running command',
-                detail: command ?? undefined,
+                title: 'Working',
               });
-              cacheThreadActiveCommand(
-                threadId,
-                'command.running',
-                `${commandLabel} | running`
-              );
               return;
             }
 
             if (itemType === 'fileChange') {
               cacheThreadActivity(threadId, {
                 tone: 'running',
-                title: 'Applying file changes',
+                title: 'Working',
               });
-              cacheThreadActiveCommand(
-                threadId,
-                'file_change.running',
-                'Applying file changes | running'
-              );
               return;
             }
 
             if (itemType === 'mcpToolCall') {
-              const server = readString(item?.server);
-              const tool = readString(item?.tool);
-              const detail = [server, tool].filter(Boolean).join(' / ');
-              const toolLabel = detail || 'Tool call';
               cacheThreadActivity(threadId, {
                 tone: 'running',
-                title: 'Running tool',
-                detail,
+                title: 'Working',
               });
-              cacheThreadActiveCommand(threadId, 'tool.running', `${toolLabel} | running`);
               return;
             }
 
@@ -3625,37 +3580,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
 
           if (itemType === 'commandExecution') {
-            const command = readString(item?.command);
-            const commandLabel = toTickerSnippet(command, 80) ?? 'Command';
             setActivity({
               tone: 'running',
-              title: 'Running command',
-              detail: command ?? undefined,
+              title: 'Working',
             });
-            pushActiveCommand(threadId, 'command.running', `${commandLabel} | running`);
             return;
           }
 
           if (itemType === 'fileChange') {
-            pushActiveCommand(threadId, 'file_change.running', 'Applying file changes | running');
             setActivity({
               tone: 'running',
-              title: 'Applying file changes',
+              title: 'Working',
             });
             return;
           }
 
           if (itemType === 'mcpToolCall') {
-            const server = readString(item?.server);
-            const tool = readString(item?.tool);
-            const detail = [server, tool].filter(Boolean).join(' / ');
-            const toolLabel = detail || 'Tool call';
             setActivity({
               tone: 'running',
-              title: 'Running tool',
-              detail,
+              title: 'Working',
             });
-            pushActiveCommand(threadId, 'tool.running', `${toolLabel} | running`);
             return;
           }
 
@@ -3861,18 +3805,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Running command',
+              title: 'Working',
             });
             return;
           }
 
           bumpRunWatchdog();
           setActivity((prev) =>
-            prev.tone === 'running' && prev.title === 'Running command'
+            prev.tone === 'running' && prev.title === 'Working'
               ? prev
               : {
                   tone: 'running',
-                  title: 'Running command',
+                  title: 'Working',
                 }
           );
           return;
@@ -3890,18 +3834,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Running tool',
+              title: 'Working',
             });
             return;
           }
 
           bumpRunWatchdog();
           setActivity((prev) =>
-            prev.tone === 'running' && prev.title === 'Running tool'
+            prev.tone === 'running' && prev.title === 'Working'
               ? prev
               : {
                   tone: 'running',
-                  title: 'Running tool',
+                  title: 'Working',
                 }
           );
           return;
@@ -3919,7 +3863,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Terminal interaction',
+              title: 'Working',
             });
             return;
           }
@@ -3927,7 +3871,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
           setActivity({
             tone: 'running',
-            title: 'Terminal interaction',
+            title: 'Working',
           });
           return;
         }
@@ -3944,7 +3888,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Plan updated',
+              title: 'Working',
             });
             return;
           }
@@ -3970,7 +3914,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
           setActivity({
             tone: 'running',
-            title: 'Plan updated',
+            title: 'Working',
           });
           return;
         }
@@ -3987,7 +3931,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Updating diff',
+              title: 'Working',
             });
             return;
           }
@@ -3995,7 +3939,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
           setActivity({
             tone: 'running',
-            title: 'Updating diff',
+            title: 'Working',
           });
           return;
         }
@@ -4012,76 +3956,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const itemType = readString(item?.type);
           if (threadId !== currentId) {
             if (itemType === 'commandExecution') {
-              const command = toTickerSnippet(readString(item?.command), 80) ?? 'Command';
               const status = readString(item?.status);
               const failed = status === 'failed' || status === 'error';
               cacheThreadActivity(threadId, {
-                tone: failed ? 'error' : 'complete',
-                title: failed ? 'Command failed' : 'Command completed',
-                detail: command ?? undefined,
+                tone: failed ? 'error' : 'running',
+                title: failed ? 'Turn failed' : 'Working',
               });
-              cacheThreadActiveCommand(
-                threadId,
-                'command.completed',
-                `${command} | ${failed ? 'error' : 'complete'}`
-              );
-            } else if (itemType === 'mcpToolCall') {
-              const server = readString(item?.server);
-              const tool = readString(item?.tool);
-              const status = readString(item?.status);
-              const failed = status === 'failed' || status === 'error';
-              const detail = [server, tool].filter(Boolean).join(' / ') || 'Tool call';
-              cacheThreadActiveCommand(
-                threadId,
-                'tool.completed',
-                `${detail} | ${failed ? 'error' : 'complete'}`
-              );
-            } else if (itemType === 'fileChange') {
-              const status = readString(item?.status);
-              const failed = status === 'failed' || status === 'error';
-              cacheThreadActiveCommand(
-                threadId,
-                'file_change.completed',
-                `File changes | ${failed ? 'error' : 'complete'}`
-              );
             }
             return;
           }
 
           if (itemType === 'commandExecution') {
-            const command = toTickerSnippet(readString(item?.command), 80) ?? 'Command';
             const status = readString(item?.status);
             const failed = status === 'failed' || status === 'error';
             hadCommandRef.current = true;
             setActivity({
-              tone: failed ? 'error' : 'complete',
-              title: failed ? 'Command failed' : 'Command completed',
-              detail: command ?? undefined,
+              tone: failed ? 'error' : 'running',
+              title: failed ? 'Turn failed' : 'Working',
             });
-            pushActiveCommand(
-              threadId,
-              'command.completed',
-              `${command} | ${failed ? 'error' : 'complete'}`
-            );
-          } else if (itemType === 'mcpToolCall') {
-            const server = readString(item?.server);
-            const tool = readString(item?.tool);
-            const status = readString(item?.status);
-            const failed = status === 'failed' || status === 'error';
-            const detail = [server, tool].filter(Boolean).join(' / ') || 'Tool call';
-            pushActiveCommand(
-              threadId,
-              'tool.completed',
-              `${detail} | ${failed ? 'error' : 'complete'}`
-            );
-          } else if (itemType === 'fileChange') {
-            const status = readString(item?.status);
-            const failed = status === 'failed' || status === 'error';
-            pushActiveCommand(
-              threadId,
-              'file_change.completed',
-              `File changes | ${failed ? 'error' : 'complete'}`
-            );
           }
           return;
         }
@@ -4420,7 +4312,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   }
             );
             clearRunWatchdog();
-            loadChat(currentId).catch(() => {});
+            loadChat(currentId, { preserveRuntimeState: true }).catch(() => {});
             return;
           }
 
@@ -4453,7 +4345,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       scheduleExternalStatusFullSync,
       registerTurnStarted,
       pushActiveCommand,
-      scrollToBottomReliable,
+      scrollToBottomIfPinned,
       upsertThreadRuntimeSnapshot,
     ]);
 
@@ -4676,27 +4568,109 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const handleSubmit = selectedChat ? sendMessage : createChat;
     const isTurnLoading = sending || creating;
     const isLoading = isTurnLoading || uploadingAttachment;
-    const isStreaming = sending || creating || Boolean(streamingText);
     const isOpeningChat = Boolean(openingChatId);
     const shouldShowComposer = !isOpeningChat;
     const isTurnLikelyRunning =
       Boolean(activeTurnId) || (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+    const hasRunWatchdog = runWatchdogUntilRef.current > Date.now();
+
+    useEffect(() => {
+      if (
+        activity.tone !== 'running' ||
+        isLoading ||
+        isOpeningChat ||
+        pendingApproval ||
+        pendingUserInputRequest ||
+        isTurnLikelyRunning ||
+        hasRunWatchdog
+      ) {
+        return;
+      }
+
+      setActivity((prev) => {
+        if (prev.tone !== 'running') {
+          return prev;
+        }
+
+        if (selectedChat?.status === 'error') {
+          return {
+            tone: 'error',
+            title: 'Turn failed',
+            detail: selectedChat.lastError ?? undefined,
+          };
+        }
+
+        if (selectedChat?.status === 'complete') {
+          return {
+            tone: 'complete',
+            title: 'Turn completed',
+          };
+        }
+
+        return {
+          tone: 'idle',
+          title: 'Ready',
+        };
+      });
+    }, [
+      activity.tone,
+      hasRunWatchdog,
+      isLoading,
+      isOpeningChat,
+      isTurnLikelyRunning,
+      pendingApproval,
+      pendingUserInputRequest,
+      selectedChat,
+    ]);
+
     const queuedMessagesDetail =
       queuedMessages.length > 0
         ? queuePaused
           ? `${String(queuedMessages.length)} queued (paused)`
           : `${String(queuedMessages.length)} queued`
         : undefined;
+    const visibleActivity = (() => {
+      if (isOpeningChat) {
+        return {
+          tone: 'running',
+          title: 'Opening chat',
+        } satisfies ActivityState;
+      }
+
+      if (pendingApproval) {
+        return {
+          tone: 'idle',
+          title: 'Waiting for approval',
+          detail: pendingApproval.command ?? pendingApproval.kind,
+        } satisfies ActivityState;
+      }
+
+      if (pendingUserInputRequest) {
+        return {
+          tone: 'idle',
+          title: 'Waiting for input',
+        } satisfies ActivityState;
+      }
+
+      if (isLoading || isTurnLikelyRunning || activity.tone === 'running') {
+        return {
+          tone: 'running',
+          title: activity.title === 'Thinking' ? 'Thinking' : 'Working',
+        } satisfies ActivityState;
+      }
+
+      return activity;
+    })();
     const activityDetail = queuedMessagesDetail
-      ? activity.detail
-        ? `${activity.detail} · ${queuedMessagesDetail}`
+      ? visibleActivity.detail
+        ? `${visibleActivity.detail} · ${queuedMessagesDetail}`
         : queuedMessagesDetail
-      : activity.detail;
+      : visibleActivity.detail;
     const showActivity =
       isLoading ||
       isOpeningChat ||
       Boolean(queuedMessagesDetail) ||
-      activity.tone !== 'idle' ||
+      visibleActivity.tone !== 'idle' ||
       Boolean(activityDetail);
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
@@ -4713,8 +4687,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       if (!selectedChat || isOpeningChat || !showActivity) {
         return;
       }
-      scrollToBottomReliable(false);
-    }, [isOpeningChat, scrollToBottomReliable, selectedChat, showActivity]);
+      scrollToBottomIfPinned(false);
+    }, [isOpeningChat, scrollToBottomIfPinned, selectedChat, showActivity]);
 
     return (
       <View style={styles.container}>
@@ -4770,15 +4744,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             <ChatView
               chat={selectedChat}
               activePlan={activePlan?.threadId === selectedChat.id ? activePlan : null}
-              activeCommands={activeCommands}
-              streamingText={streamingText}
               bridgeUrl={bridgeUrl}
               bridgeToken={bridgeToken}
               scrollRef={scrollRef}
-              isStreaming={isStreaming}
               inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
               onInlineOptionSelect={handleInlineOptionSelect}
               onAutoScroll={scrollToBottomReliable}
+              onPinnedAutoScroll={scrollToBottomIfPinned}
+              onScrollInteractionStart={clearPendingScrollRetries}
+              autoScrollStateRef={autoScrollStateRef}
               bottomInset={chatBottomInset}
             />
           ) : isOpeningChat ? (
@@ -4807,9 +4781,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               ]}
             >
               <ActivityBar
-                title={activity.title}
+                title={visibleActivity.title}
                 detail={activityDetail}
-                tone={activity.tone}
+                tone={visibleActivity.tone}
               />
             </View>
           ) : null}
@@ -5428,40 +5402,30 @@ function WorkspaceOption({
 function ChatView({
   chat,
   activePlan,
-  activeCommands,
-  streamingText,
   bridgeUrl,
   bridgeToken,
   scrollRef,
-  isStreaming,
   inlineChoicesEnabled,
   onInlineOptionSelect,
   onAutoScroll,
+  onPinnedAutoScroll,
+  onScrollInteractionStart,
+  autoScrollStateRef,
   bottomInset,
 }: {
   chat: Chat;
   activePlan: ActivePlanState | null;
-  activeCommands: RunEvent[];
-  streamingText: string | null;
   bridgeUrl: string;
   bridgeToken: string | null;
   scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
-  isStreaming: boolean;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
   onAutoScroll: (animated?: boolean) => void;
+  onPinnedAutoScroll: (animated?: boolean) => void;
+  onScrollInteractionStart: () => void;
+  autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
   bottomInset: number;
 }) {
-  const { height: windowHeight } = useWindowDimensions();
-  const shouldStickToBottomRef = useRef(true);
-  const visibleToolBlocks = useMemo(
-    () => activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS),
-    [activeCommands]
-  );
-  const toolPanelMaxHeight = Math.floor(windowHeight * 0.5);
-  const liveTimelineText = useMemo(() => toLiveTimelineText(activeCommands), [activeCommands]);
-  const shouldShowToolPanel = visibleToolBlocks.length > 0 && !liveTimelineText;
-
   const visibleMessages = useMemo(() => {
     const filtered = chat.messages.filter((msg) => {
       const text = msg.content || '';
@@ -5485,26 +5449,22 @@ function ChatView({
     () => (inlineChoicesEnabled ? findInlineChoiceSet(visibleMessages) : null),
     [inlineChoicesEnabled, visibleMessages]
   );
-  const streamingPreviewText = useMemo(
-    () => toStreamingPreviewText(streamingText, visibleMessages),
-    [streamingText, visibleMessages]
-  );
   const initialBottomSyncChatIdRef = useRef<string | null>(null);
   const handleScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
       const distanceFromBottom =
         contentSize.height - (contentOffset.y + layoutMeasurement.height);
-      shouldStickToBottomRef.current = distanceFromBottom <= spacing.xl * 2;
+      autoScrollStateRef.current.shouldStickToBottom = distanceFromBottom <= spacing.xl * 2;
     },
-    []
+    [autoScrollStateRef]
   );
 
   useEffect(() => {
     if (initialBottomSyncChatIdRef.current === chat.id) {
       return;
     }
-    if (!activePlan && visibleMessages.length === 0 && !liveTimelineText && !streamingPreviewText) {
+    if (!activePlan && visibleMessages.length === 0) {
       return;
     }
 
@@ -5520,17 +5480,15 @@ function ChatView({
   }, [
     activePlan,
     chat.id,
-    liveTimelineText,
     onAutoScroll,
-    scrollRef,
-    streamingPreviewText,
     visibleMessages.length,
   ]);
 
   useEffect(() => {
-    shouldStickToBottomRef.current = true;
-  }, [chat.id]);
-
+    autoScrollStateRef.current.shouldStickToBottom = true;
+    autoScrollStateRef.current.isUserInteracting = false;
+    autoScrollStateRef.current.isMomentumScrolling = false;
+  }, [autoScrollStateRef, chat.id]);
   const messageListContentStyle = useMemo(
     () => [styles.messageListContent, { paddingBottom: bottomInset }],
     [bottomInset]
@@ -5587,18 +5545,33 @@ function ChatView({
         renderItem={renderMessageItem}
         style={styles.messageList}
         contentContainerStyle={messageListContentStyle}
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         showsVerticalScrollIndicator={false}
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         keyboardShouldPersistTaps="handled"
         onScrollBeginDrag={() => {
+          onScrollInteractionStart();
           Keyboard.dismiss();
+          autoScrollStateRef.current.isUserInteracting = true;
+          autoScrollStateRef.current.isMomentumScrolling = false;
+          autoScrollStateRef.current.shouldStickToBottom = false;
+        }}
+        onScrollEndDrag={() => {
+          if (!autoScrollStateRef.current.isMomentumScrolling) {
+            autoScrollStateRef.current.isUserInteracting = false;
+          }
+        }}
+        onMomentumScrollBegin={() => {
+          autoScrollStateRef.current.isMomentumScrolling = true;
+        }}
+        onMomentumScrollEnd={() => {
+          autoScrollStateRef.current.isUserInteracting = false;
+          autoScrollStateRef.current.isMomentumScrolling = false;
         }}
         onScroll={handleScroll}
         scrollEventThrottle={16}
         onContentSizeChange={() => {
-          if (shouldStickToBottomRef.current) {
-            onAutoScroll(false);
-          }
+          onPinnedAutoScroll(false);
         }}
         initialNumToRender={isLargeChat ? aggressiveRenderBatchSize : 16}
         maxToRenderPerBatch={isLargeChat ? aggressiveRenderBatchSize : 12}
@@ -5606,55 +5579,6 @@ function ChatView({
         windowSize={isLargeChat ? 21 : 11}
         removeClippedSubviews={isLargeChat ? false : Platform.OS === 'android'}
         ListHeaderComponent={activePlan ? <PlanCard plan={activePlan} /> : null}
-        ListFooterComponent={
-          <>
-            {liveTimelineText ? (
-              <View style={styles.chatMessageBlock}>
-                <ChatMessage
-                  message={{
-                    id: `live-timeline-${chat.id}`,
-                    role: 'system',
-                    content: liveTimelineText,
-                    createdAt: new Date().toISOString(),
-                  }}
-                  bridgeUrl={bridgeUrl}
-                  bridgeToken={bridgeToken}
-                />
-              </View>
-            ) : null}
-            {streamingPreviewText ? (
-              <Text style={styles.streamingText} numberOfLines={4}>
-                {streamingPreviewText}
-              </Text>
-            ) : null}
-            {shouldShowToolPanel ? (
-              <View style={[styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
-                <ScrollView
-                  nestedScrollEnabled
-                  showsVerticalScrollIndicator={false}
-                  contentContainerStyle={styles.toolPanelContent}
-                >
-                  {visibleToolBlocks.map((cmd) => {
-                    const tool = toToolBlockState(cmd);
-                    if (!tool) {
-                      return null;
-                    }
-                    return (
-                      <ToolBlock
-                        key={cmd.id}
-                        command={tool.command}
-                        status={tool.status}
-                      />
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            ) : null}
-            {isStreaming && !streamingPreviewText && activeCommands.length === 0 ? (
-              <TypingIndicator />
-            ) : null}
-          </>
-        }
       />
     </View>
   );
@@ -6443,138 +6367,6 @@ function mergeStreamingDelta(previous: string | null, delta: string): string {
   return prev + delta;
 }
 
-function normalizeComparableText(value: string | null | undefined): string {
-  if (!value) {
-    return '';
-  }
-
-  return value.replace(/\s+/g, ' ').trim().toLowerCase();
-}
-
-function toStreamingPreviewText(
-  streamingText: string | null,
-  visibleMessages: ChatTranscriptMessage[]
-): string | null {
-  const preview = streamingText?.trim() ?? '';
-  if (!preview) {
-    return null;
-  }
-
-  const latestAssistantMessage = [...visibleMessages]
-    .reverse()
-    .find((message) => message.role === 'assistant');
-  if (!latestAssistantMessage) {
-    return preview;
-  }
-
-  const assistantText = latestAssistantMessage.content?.trim() ?? '';
-  if (!assistantText) {
-    return preview;
-  }
-
-  const normalizedPreview = normalizeComparableText(preview);
-  const normalizedAssistant = normalizeComparableText(assistantText);
-  if (!normalizedPreview || !normalizedAssistant) {
-    return preview;
-  }
-
-  // Suppress transient preview if it is already represented by the latest
-  // persisted assistant message (common when multiple delta channels overlap).
-  if (
-    normalizedAssistant.includes(normalizedPreview) ||
-    normalizedPreview.includes(normalizedAssistant)
-  ) {
-    return null;
-  }
-
-  return preview;
-}
-
-function toToolBlockState(
-  event: RunEvent
-): { command: string; status: 'running' | 'complete' | 'error' } | null {
-  if (!event.detail) {
-    return null;
-  }
-
-  const parts = event.detail.split('|').map((value) => value.trim());
-  const command = parts[0] || event.detail;
-  const rawStatus = (parts[1] ?? '').toLowerCase();
-
-  const status: 'running' | 'complete' | 'error' =
-    rawStatus === 'running'
-      ? 'running'
-      : rawStatus === 'error' || rawStatus === 'failed'
-        ? 'error'
-        : 'complete';
-
-  return {
-    command,
-    status,
-  };
-}
-
-function toLiveTimelineText(events: RunEvent[]): string | null {
-  if (!Array.isArray(events) || events.length === 0) {
-    return null;
-  }
-
-  const lines = events
-    .slice(-MAX_VISIBLE_TOOL_BLOCKS)
-    .map((event) => toLiveTimelineLine(event))
-    .filter((line): line is string => Boolean(line));
-
-  if (lines.length === 0) {
-    return null;
-  }
-
-  return lines.join('\n');
-}
-
-function toLiveTimelineLine(event: RunEvent): string | null {
-  const detail = (event.detail ?? '').trim();
-  if (!detail) {
-    return null;
-  }
-
-  const [rawLabel, rawState] = detail.split('|').map((value) => value.trim());
-  const label = rawLabel || 'Task';
-  const state = (rawState ?? '').toLowerCase();
-  const isRunning = state === 'running';
-  const isError = state === 'error' || state === 'failed';
-
-  const basePrefix =
-    event.eventType.startsWith('command.')
-      ? isError
-        ? '• Command failed'
-        : isRunning
-          ? '• Running command'
-          : '• Ran'
-      : event.eventType.startsWith('tool.')
-        ? isError
-          ? '• Tool failed'
-          : isRunning
-            ? '• Running tool'
-            : '• Called tool'
-        : event.eventType.startsWith('web_search.')
-          ? isRunning
-            ? '• Searching web'
-            : '• Searched web'
-          : event.eventType.startsWith('file_change.')
-            ? isError
-              ? '• File changes failed'
-              : isRunning
-                ? '• Applying file changes'
-                : '• Applied file changes'
-            : isError
-              ? '• Step failed'
-              : isRunning
-                ? '• Working'
-                : '• Completed';
-
-  return `${basePrefix} \`${label}\``;
-}
-
 function appendRunEventHistory(
   previous: RunEvent[],
   threadId: string,
@@ -6819,19 +6611,6 @@ function extractFirstBoldSnippet(
   }
 
   return toTickerSnippet(match[1], maxLength);
-}
-
-function toCommandDisplay(value: unknown): string | null {
-  if (!Array.isArray(value)) {
-    return null;
-  }
-
-  const parts = value.filter((entry): entry is string => typeof entry === 'string');
-  if (parts.length === 0) {
-    return null;
-  }
-
-  return parts.join(' ');
 }
 
 function toPendingApproval(value: unknown): PendingApproval | null {
@@ -7438,7 +7217,6 @@ const styles = StyleSheet.create({
   },
   messageListContent: {
     flexGrow: 1,
-    justifyContent: 'flex-end',
     padding: spacing.lg,
     paddingTop: spacing.lg,
     paddingBottom: spacing.xl,
@@ -7490,6 +7268,18 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: 2,
     marginLeft: spacing.xs,
+  },
+  livePanelOverlay: {
+    position: 'absolute',
+    left: spacing.lg,
+    right: spacing.lg,
+    zIndex: 2,
+  },
+  livePanelShell: {
+    justifyContent: 'flex-start',
+  },
+  livePanelContent: {
+    gap: spacing.sm,
   },
   toolPanel: {
     borderRadius: 12,

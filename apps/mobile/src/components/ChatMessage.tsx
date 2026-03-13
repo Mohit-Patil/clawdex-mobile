@@ -11,7 +11,6 @@ import {
   View,
 } from 'react-native';
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
-import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
 import { UITextView } from 'react-native-uitextview';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
@@ -47,11 +46,7 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
   );
 
   const renderedMessage = isUser ? (
-    <Animated.View
-      entering={FadeInUp.duration(300)}
-      layout={Layout.springify()}
-      style={[styles.messageWrapper, styles.messageWrapperUser]}
-    >
+    <View style={[styles.messageWrapper, styles.messageWrapperUser]}>
       <View style={[styles.userBubble, userBlocks.length > 1 && styles.userBubbleWithAttachments]}>
         <View style={styles.userBubbleContent}>
           {userBlocks.map((block, index) => {
@@ -87,7 +82,7 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
           })}
         </View>
       </View>
-    </Animated.View>
+    </View>
   ) : null;
 
   if (renderedMessage) {
@@ -98,11 +93,7 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
     message.role === 'system' ? parseTimelineEntries(message.content) : null;
   if (timelineEntries && timelineEntries.length > 0) {
     return (
-      <Animated.View
-        entering={FadeInUp.duration(300)}
-        layout={Layout.springify()}
-        style={[styles.messageWrapper, styles.messageWrapperAssistant]}
-      >
+      <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
         <View style={styles.timelineCardStack}>
           {timelineEntries.map((entry, index) => {
             const visual = toTimelineVisual(entry.title);
@@ -142,20 +133,16 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
             );
           })}
         </View>
-      </Animated.View>
+      </View>
     );
   }
 
   return (
-    <Animated.View
-      entering={FadeInUp.duration(300).delay(50)}
-      layout={Layout.springify()}
-      style={[styles.messageWrapper, styles.messageWrapperAssistant]}
-    >
+    <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
       <Markdown style={markdownStyles} rules={markdownRules}>
         {message.content || '\u258D'}
       </Markdown>
-    </Animated.View>
+    </View>
   );
 }
 

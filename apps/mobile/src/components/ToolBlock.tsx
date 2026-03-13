@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeInUp } from 'react-native-reanimated';
 
 import { colors, radius, spacing } from '../theme';
 
@@ -24,19 +23,17 @@ export function ToolBlock({ command, status }: ToolBlockProps) {
       : colors.statusError;
 
   return (
-    <Animated.View entering={FadeInUp.duration(300)}>
-      <View style={styles.container}>
-        <Ionicons name="terminal-outline" size={14} color={colors.textSecondary} />
-        <Text style={styles.command} numberOfLines={1}>
-          {command}
-        </Text>
-        {status === 'running' ? (
-          <ActivityIndicator size="small" color={statusColor} />
-        ) : statusIcon ? (
-          <Ionicons name={statusIcon} size={14} color={statusColor} />
-        ) : null}
-      </View>
-    </Animated.View>
+    <View style={styles.container}>
+      <Ionicons name="terminal-outline" size={14} color={colors.textSecondary} />
+      <Text style={styles.command} numberOfLines={1}>
+        {command}
+      </Text>
+      {status === 'running' ? (
+        <ActivityIndicator size="small" color={statusColor} />
+      ) : statusIcon ? (
+        <Ionicons name={statusIcon} size={14} color={statusColor} />
+      ) : null}
+    </View>
   );
 }
 
