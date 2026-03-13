@@ -73,6 +73,8 @@ export interface MainScreenHandle {
 interface MainScreenProps {
   api: HostBridgeApiClient;
   ws: HostBridgeWsClient;
+  bridgeUrl: string;
+  bridgeToken?: string | null;
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
   defaultStartCwd?: string | null;
@@ -390,6 +392,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     {
       api,
       ws,
+      bridgeUrl,
+      bridgeToken = null,
       onOpenDrawer,
       onOpenGit,
       defaultStartCwd,
@@ -4768,6 +4772,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               activePlan={activePlan?.threadId === selectedChat.id ? activePlan : null}
               activeCommands={activeCommands}
               streamingText={streamingText}
+              bridgeUrl={bridgeUrl}
+              bridgeToken={bridgeToken}
               scrollRef={scrollRef}
               isStreaming={isStreaming}
               inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
@@ -5424,6 +5430,8 @@ function ChatView({
   activePlan,
   activeCommands,
   streamingText,
+  bridgeUrl,
+  bridgeToken,
   scrollRef,
   isStreaming,
   inlineChoicesEnabled,
@@ -5435,6 +5443,8 @@ function ChatView({
   activePlan: ActivePlanState | null;
   activeCommands: RunEvent[];
   streamingText: string | null;
+  bridgeUrl: string;
+  bridgeToken: string | null;
   scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
   isStreaming: boolean;
   inlineChoicesEnabled: boolean;
@@ -5533,7 +5543,7 @@ function ChatView({
       const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
       return (
         <View style={styles.chatMessageBlock}>
-          <ChatMessage message={msg} />
+          <ChatMessage message={msg} bridgeUrl={bridgeUrl} bridgeToken={bridgeToken} />
           {showInlineChoices ? (
             <View style={styles.inlineChoiceOptions}>
               {inlineChoiceSet.options.map((option, index) => (
@@ -5564,7 +5574,7 @@ function ChatView({
         </View>
       );
     },
-    [inlineChoiceSet, onInlineOptionSelect]
+    [bridgeToken, bridgeUrl, inlineChoiceSet, onInlineOptionSelect]
   );
 
   return (
@@ -5607,6 +5617,8 @@ function ChatView({
                     content: liveTimelineText,
                     createdAt: new Date().toISOString(),
                   }}
+                  bridgeUrl={bridgeUrl}
+                  bridgeToken={bridgeToken}
                 />
               </View>
             ) : null}

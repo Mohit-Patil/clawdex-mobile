@@ -505,6 +505,8 @@ export default function App() {
             ref={mainRef}
             api={activeApi}
             ws={activeWs}
+            bridgeUrl={bridgeUrl}
+            bridgeToken={bridgeToken}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
@@ -559,6 +561,8 @@ export default function App() {
             ref={mainRef}
             api={activeApi}
             ws={activeWs}
+            bridgeUrl={bridgeUrl}
+            bridgeToken={bridgeToken}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}

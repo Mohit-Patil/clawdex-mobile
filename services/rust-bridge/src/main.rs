@@ -13,11 +13,15 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -1959,6 +1963,12 @@ struct RpcQuery {
     token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LocalImageQuery {
+    path: String,
+    token: Option<String>,
+}
+
 #[tokio::main]
 async fn main() {
     let config = match BridgeConfig::from_env() {
@@ -2014,6 +2024,7 @@ async fn main() {
     let app = Router::new()
         .route("/rpc", get(ws_handler))
         .route("/health", get(health_handler))
+        .route("/local-image", get(local_image_handler))
         .with_state(state);
 
     let bind_addr = format!("{}:{}", config.host, config.port);
@@ -2040,6 +2051,120 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
         "at": now_iso(),
         "uptimeSec": state.started_at.elapsed().as_secs(),
     }))
+}
+
+async fn local_image_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<LocalImageQuery>,
+) -> Response {
+    if !state.config.is_authorized(&headers, query.token.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": "unauthorized",
+                "message": "Missing or invalid bridge token"
+            })),
+        )
+            .into_response();
+    }
+
+    let path = match resolve_local_image_path(&query.path) {
+        Ok(path) => path,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_path",
+                    "message": message,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let canonical = match fs::canonicalize(&path).await {
+        Ok(path) => normalize_path(&path),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "not_found",
+                    "message": "Image file not found"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let metadata = match fs::metadata(&canonical).await {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "not_found",
+                    "message": "Image file not found"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !metadata.is_file() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_path",
+                "message": "Image path must reference a file"
+            })),
+        )
+            .into_response();
+    }
+
+    let content_type = match infer_image_content_type_from_path(&canonical) {
+        Some(content_type) => content_type,
+        None => {
+            return (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(json!({
+                    "error": "unsupported_media_type",
+                    "message": "Only image files can be served through /local-image"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let bytes = match fs::read(&canonical).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "read_failed",
+                    "message": format!("Failed to read image file: {error}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, content_type)
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "response_failed",
+                    "message": format!("Failed to build image response: {error}")
+                })),
+            )
+                .into_response()
+        })
 }
 
 async fn ws_handler(
@@ -3453,6 +3578,33 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn resolve_local_image_path(raw_path: &str) -> Result<PathBuf, &'static str> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("Image path is required");
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("Image path must be absolute");
+    }
+
+    Ok(normalize_path(&path))
+}
+
+fn infer_image_content_type_from_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.trim().to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "heic" => Some("image/heic"),
+        "heif" => Some("image/heif"),
+        _ => None,
+    }
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
 
@@ -4283,6 +4435,34 @@ mod tests {
         assert_eq!(
             normalize_path(Path::new("a/b/../c/./d")),
             PathBuf::from("a/c/d")
+        );
+    }
+
+    #[test]
+    fn resolve_local_image_path_requires_absolute_paths() {
+        assert_eq!(
+            resolve_local_image_path("/tmp/../tmp/example.png").unwrap(),
+            PathBuf::from("/tmp/example.png")
+        );
+        assert_eq!(
+            resolve_local_image_path("relative/example.png").unwrap_err(),
+            "Image path must be absolute"
+        );
+    }
+
+    #[test]
+    fn infer_image_content_type_from_path_supports_common_extensions() {
+        assert_eq!(
+            infer_image_content_type_from_path(Path::new("/tmp/example.png")),
+            Some("image/png")
+        );
+        assert_eq!(
+            infer_image_content_type_from_path(Path::new("/tmp/example.JPG")),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            infer_image_content_type_from_path(Path::new("/tmp/example.txt")),
+            None
         );
     }
 

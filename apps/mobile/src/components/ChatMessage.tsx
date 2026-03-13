@@ -1,7 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
-import { memo, type ReactElement } from 'react';
+import { memo, useMemo, useState, type ReactElement } from 'react';
 import {
   Image,
+  type ImageSourcePropType,
   Linking,
   Platform,
   StyleSheet,
@@ -15,9 +16,12 @@ import { UITextView } from 'react-native-uitextview';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
+import { toMarkdownImageSource } from './chatImageSource';
 
 interface ChatMessageProps {
   message: ApiChatMessage;
+  bridgeUrl?: string | null;
+  bridgeToken?: string | null;
 }
 
 interface TimelineEntry {
@@ -25,8 +29,22 @@ interface TimelineEntry {
   details: string[];
 }
 
-function ChatMessageComponent({ message }: ChatMessageProps) {
+type UserMessageBlock =
+  | { kind: 'text'; value: string }
+  | { kind: 'file'; value: string }
+  | { kind: 'image'; source: ImageSourcePropType; accessibilityLabel?: string };
+
+function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }: ChatMessageProps) {
   const isUser = message.role === 'user';
+  const markdownRules = useMemo(
+    () => createMarkdownRules(bridgeUrl, bridgeToken),
+    [bridgeToken, bridgeUrl]
+  );
+  const userBlocks = useMemo(
+    () =>
+      isUser ? parseUserMessageBlocks(message.content, bridgeUrl, bridgeToken) : [],
+    [bridgeToken, bridgeUrl, isUser, message.content]
+  );
 
   const renderedMessage = isUser ? (
     <Animated.View
@@ -34,10 +52,40 @@ function ChatMessageComponent({ message }: ChatMessageProps) {
       layout={Layout.springify()}
       style={[styles.messageWrapper, styles.messageWrapperUser]}
     >
-      <View style={styles.userBubble}>
-        <SelectableMessageText style={styles.userMessageText}>
-          {message.content}
-        </SelectableMessageText>
+      <View style={[styles.userBubble, userBlocks.length > 1 && styles.userBubbleWithAttachments]}>
+        <View style={styles.userBubbleContent}>
+          {userBlocks.map((block, index) => {
+            if (block.kind === 'image') {
+              return (
+                <MarkdownImage
+                  key={`${message.id}-image-${String(index)}`}
+                  source={block.source}
+                  accessibilityLabel={block.accessibilityLabel}
+                />
+              );
+            }
+
+            if (block.kind === 'file') {
+              return (
+                <View key={`${message.id}-file-${String(index)}`} style={styles.userFileChip}>
+                  <Ionicons name="document-text-outline" size={12} color={colors.textMuted} />
+                  <Text style={styles.userFileChipText} numberOfLines={1}>
+                    {block.value}
+                  </Text>
+                </View>
+              );
+            }
+
+            return (
+              <SelectableMessageText
+                key={`${message.id}-text-${String(index)}`}
+                style={styles.userMessageText}
+              >
+                {block.value}
+              </SelectableMessageText>
+            );
+          })}
+        </View>
       </View>
     </Animated.View>
   ) : null;
@@ -126,7 +174,9 @@ function areChatMessagePropsEqual(
     previous.id === next.id &&
     previous.role === next.role &&
     previous.content === next.content &&
-    previous.createdAt === next.createdAt
+    previous.createdAt === next.createdAt &&
+    prevProps.bridgeUrl === nextProps.bridgeUrl &&
+    prevProps.bridgeToken === nextProps.bridgeToken
   );
 }
 
@@ -199,143 +249,133 @@ const markdownStyles = StyleSheet.create({
   },
 });
 
-const markdownRules: RenderRules = {
-  text: (node, _children, _parent, styles, inheritedStyles = {}) => (
-    <SelectableMessageText key={node.key} style={[inheritedStyles, styles.text]}>
-      {node.content}
-    </SelectableMessageText>
-  ),
-  textgroup: (node, children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.textgroup}>
-      {children}
-    </SelectableMessageText>
-  ),
-  strong: (node, children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.strong}>
-      {children}
-    </SelectableMessageText>
-  ),
-  em: (node, children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.em}>
-      {children}
-    </SelectableMessageText>
-  ),
-  s: (node, children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.s}>
-      {children}
-    </SelectableMessageText>
-  ),
-  code_inline: (node, _children, _parent, styles, inheritedStyles = {}) => (
-    <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_inline]}>
-      {node.content}
-    </SelectableMessageText>
-  ),
-  code_block: (node, _children, _parent, styles, inheritedStyles = {}) => {
-    const content =
-      typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
-        ? node.content.substring(0, node.content.length - 1)
-        : node.content;
-    return (
-      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_block]}>
-        {content}
+function createMarkdownRules(
+  bridgeUrl: string | null,
+  bridgeToken: string | null
+): RenderRules {
+  return {
+    text: (node, _children, _parent, styles, inheritedStyles = {}) => (
+      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.text]}>
+        {node.content}
       </SelectableMessageText>
-    );
-  },
-  fence: (node, _children, _parent, styles, inheritedStyles = {}) => {
-    const content =
-      typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
-        ? node.content.substring(0, node.content.length - 1)
-        : node.content;
-    return (
-      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.fence]}>
-        {content}
+    ),
+    textgroup: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.textgroup}>
+        {children}
       </SelectableMessageText>
-    );
-  },
-  hardbreak: (node, _children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.hardbreak}>
-      {'\n'}
-    </SelectableMessageText>
-  ),
-  softbreak: (node, _children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.softbreak}>
-      {'\n'}
-    </SelectableMessageText>
-  ),
-  inline: (node, children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.inline}>
-      {children}
-    </SelectableMessageText>
-  ),
-  span: (node, children, _parent, styles) => (
-    <SelectableMessageText key={node.key} style={styles.span}>
-      {children}
-    </SelectableMessageText>
-  ),
-  link: (node, children, _parent, styles, onLinkPress) => {
-    const href = readMarkdownAttr(node.attributes.href);
-    if (!href) {
+    ),
+    strong: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.strong}>
+        {children}
+      </SelectableMessageText>
+    ),
+    em: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.em}>
+        {children}
+      </SelectableMessageText>
+    ),
+    s: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.s}>
+        {children}
+      </SelectableMessageText>
+    ),
+    code_inline: (node, _children, _parent, styles, inheritedStyles = {}) => (
+      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_inline]}>
+        {node.content}
+      </SelectableMessageText>
+    ),
+    code_block: (node, _children, _parent, styles, inheritedStyles = {}) => {
+      const content =
+        typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
+          ? node.content.substring(0, node.content.length - 1)
+          : node.content;
       return (
-        <SelectableMessageText key={node.key} style={styles.link}>
+        <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_block]}>
+          {content}
+        </SelectableMessageText>
+      );
+    },
+    fence: (node, _children, _parent, styles, inheritedStyles = {}) => {
+      const content =
+        typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
+          ? node.content.substring(0, node.content.length - 1)
+          : node.content;
+      return (
+        <SelectableMessageText key={node.key} style={[inheritedStyles, styles.fence]}>
+          {content}
+        </SelectableMessageText>
+      );
+    },
+    hardbreak: (node, _children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.hardbreak}>
+        {'\n'}
+      </SelectableMessageText>
+    ),
+    softbreak: (node, _children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.softbreak}>
+        {'\n'}
+      </SelectableMessageText>
+    ),
+    inline: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.inline}>
+        {children}
+      </SelectableMessageText>
+    ),
+    span: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.span}>
+        {children}
+      </SelectableMessageText>
+    ),
+    link: (node, children, _parent, styles, onLinkPress) => {
+      const href = readMarkdownAttr(node.attributes.href);
+      if (!href) {
+        return (
+          <SelectableMessageText key={node.key} style={styles.link}>
+            {children}
+          </SelectableMessageText>
+        );
+      }
+
+      const localFileReference = toLocalFileReferenceLabel(href);
+      if (localFileReference) {
+        return (
+          <SelectableMessageText key={node.key} style={styles.code_inline}>
+            {localFileReference}
+          </SelectableMessageText>
+        );
+      }
+
+      return (
+        <SelectableMessageText
+          key={node.key}
+          style={styles.link}
+          onPress={() => openMarkdownLink(href, onLinkPress)}
+        >
           {children}
         </SelectableMessageText>
       );
-    }
+    },
+    image: (node) => {
+      const src = readMarkdownAttr(node.attributes.src);
+      if (!src) {
+        return null;
+      }
+      const source = toMarkdownImageSource(src, bridgeUrl, bridgeToken);
+      if (!source) {
+        return null;
+      }
+      const alt = readMarkdownAttr(node.attributes.alt);
 
-    const localFileReference = toLocalFileReferenceLabel(href);
-    if (localFileReference) {
       return (
-        <SelectableMessageText key={node.key} style={styles.code_inline}>
-          {localFileReference}
-        </SelectableMessageText>
+        <MarkdownImage
+          key={node.key}
+          source={source}
+          accessibilityLabel={alt ?? undefined}
+        />
       );
-    }
-
-    return (
-      <SelectableMessageText
-        key={node.key}
-        style={styles.link}
-        onPress={() => openMarkdownLink(href, onLinkPress)}
-      >
-        {children}
-      </SelectableMessageText>
-    );
-  },
-  image: (
-    node,
-    _children,
-    _parent,
-    _styles,
-    allowedImageHandlers = [],
-    defaultImageHandler = '',
-  ) => {
-    const src = readMarkdownAttr(node.attributes.src);
-    if (!src) {
-      return null;
-    }
-
-    const isAllowed = allowedImageHandlers.some((handler) =>
-      src.toLowerCase().startsWith(handler.toLowerCase())
-    );
-    if (!isAllowed && defaultImageHandler === null) {
-      return null;
-    }
-
-    const uri = isAllowed ? src : `${defaultImageHandler}${src}`;
-    const alt = readMarkdownAttr(node.attributes.alt);
-
-    return (
-      <Image
-        key={node.key}
-        source={{ uri }}
-        style={styles.markdownImage}
-        resizeMode="contain"
-        accessible={Boolean(alt)}
-        accessibilityLabel={alt ?? undefined}
-      />
-    );
-  },
-};
+    },
+  };
+}
 
 const styles = StyleSheet.create({
   messageWrapper: {
@@ -356,19 +396,47 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
   },
+  userBubbleWithAttachments: {
+    minWidth: 196,
+  },
+  userBubbleContent: {
+    gap: spacing.sm,
+  },
   userMessageText: {
     fontFamily: monoFont,
     fontSize: 14,
     color: colors.textPrimary,
     lineHeight: 20,
   },
+  userFileChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: spacing.xs,
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.userBubbleBorder,
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    maxWidth: '100%',
+  },
+  userFileChipText: {
+    fontFamily: monoFont,
+    fontSize: 12,
+    lineHeight: 16,
+    color: colors.textMuted,
+    flexShrink: 1,
+  },
   markdownImage: {
     width: '100%',
-    minHeight: 120,
-    maxHeight: 260,
     borderRadius: radius.sm,
     marginVertical: spacing.sm,
     backgroundColor: colors.bgInput,
+  },
+  markdownImageFallback: {
+    minHeight: 120,
+    maxHeight: 260,
   },
   timelineCardStack: {
     gap: spacing.sm,
@@ -427,6 +495,139 @@ function SelectableMessageText({ children, ...props }: TextProps): ReactElement 
       {children}
     </UITextView>
   );
+}
+
+function MarkdownImage({
+  source,
+  accessibilityLabel,
+}: {
+  source: ImageSourcePropType;
+  accessibilityLabel?: string;
+}): ReactElement {
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+
+  return (
+    <Image
+      source={source}
+      style={[
+        styles.markdownImage,
+        aspectRatio ? { aspectRatio } : styles.markdownImageFallback,
+      ]}
+      resizeMode="contain"
+      accessible={Boolean(accessibilityLabel)}
+      accessibilityLabel={accessibilityLabel}
+      onLoad={(event) => {
+        const width = event.nativeEvent.source?.width;
+        const height = event.nativeEvent.source?.height;
+        if (
+          typeof width !== 'number' ||
+          typeof height !== 'number' ||
+          !Number.isFinite(width) ||
+          !Number.isFinite(height) ||
+          width <= 0 ||
+          height <= 0
+        ) {
+          return;
+        }
+
+        const nextAspectRatio = width / height;
+        setAspectRatio((previousAspectRatio) =>
+          previousAspectRatio === nextAspectRatio ? previousAspectRatio : nextAspectRatio
+        );
+      }}
+    />
+  );
+}
+
+function parseUserMessageBlocks(
+  content: string,
+  bridgeUrl: string | null,
+  bridgeToken: string | null
+): UserMessageBlock[] {
+  const blocks: UserMessageBlock[] = [];
+  const pendingTextLines: string[] = [];
+
+  const flushTextBlock = () => {
+    if (pendingTextLines.length === 0) {
+      return;
+    }
+
+    const value = pendingTextLines.join('\n');
+    pendingTextLines.length = 0;
+    if (!value.trim()) {
+      return;
+    }
+
+    blocks.push({
+      kind: 'text',
+      value,
+    });
+  };
+
+  for (const line of content.split('\n')) {
+    const localImageMatch = line.match(/^\[local image:\s*(.+?)\]$/i);
+    if (localImageMatch) {
+      const source = toMarkdownImageSource(localImageMatch[1], bridgeUrl, bridgeToken);
+      if (source) {
+        flushTextBlock();
+        blocks.push({
+          kind: 'image',
+          source,
+          accessibilityLabel: toPathBasename(localImageMatch[1]),
+        });
+        continue;
+      }
+    }
+
+    const remoteImageMatch = line.match(/^\[image:\s*(.+?)\]$/i);
+    if (remoteImageMatch) {
+      const source = toMarkdownImageSource(remoteImageMatch[1], bridgeUrl, bridgeToken);
+      if (source) {
+        flushTextBlock();
+        blocks.push({
+          kind: 'image',
+          source,
+          accessibilityLabel: toPathBasename(remoteImageMatch[1]),
+        });
+        continue;
+      }
+    }
+
+    const fileMatch = line.match(/^\[file:\s*(.+?)\]$/i);
+    if (fileMatch) {
+      flushTextBlock();
+      blocks.push({
+        kind: 'file',
+        value: toLocalFileReferenceLabel(fileMatch[1]) ?? toPathBasename(fileMatch[1]),
+      });
+      continue;
+    }
+
+    pendingTextLines.push(line);
+  }
+
+  flushTextBlock();
+
+  if (blocks.length === 0) {
+    return [
+      {
+        kind: 'text',
+        value: content,
+      },
+    ];
+  }
+
+  return blocks;
+}
+
+function toPathBasename(path: string): string {
+  const normalizedPath = path.trim().replace(/\\/g, '/');
+  if (!normalizedPath) {
+    return 'image';
+  }
+
+  const basename = normalizedPath.split('/').filter(Boolean).pop();
+  return basename && basename.length > 0 ? basename : normalizedPath;
 }
 
 function openMarkdownLink(
