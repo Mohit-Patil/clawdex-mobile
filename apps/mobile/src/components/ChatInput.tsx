@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 
 import type { VoiceState } from '../hooks/useVoiceRecorder';
+import { VoiceRecordingWaveform } from './VoiceRecordingWaveform';
 import { colors, radius, spacing } from '../theme';
 
 interface ChatInputProps {
@@ -33,6 +34,8 @@ interface ChatInputProps {
   placeholder?: string;
   onVoiceToggle?: () => void;
   voiceState?: VoiceState;
+  voiceRecordingDurationMillis?: number;
+  voiceMetering?: number | null;
   safeAreaBottomInset?: number;
   keyboardVisible?: boolean;
 }
@@ -52,6 +55,8 @@ export function ChatInput({
   placeholder = 'Message Codex...',
   onVoiceToggle,
   voiceState = 'idle',
+  voiceRecordingDurationMillis = 0,
+  voiceMetering = null,
   safeAreaBottomInset = 0,
   keyboardVisible = false,
 }: ChatInputProps) {
@@ -82,6 +87,9 @@ export function ChatInput({
   const showVoiceButton = Boolean(onVoiceToggle);
   const showSendButton = canSend || isLoading;
   const inputScrollEnabled = inputHeight >= INPUT_TEXT_MAX_HEIGHT;
+  const showVoiceRecordingUi = voiceState === 'recording';
+  const showVoiceTranscribingUi = voiceState === 'transcribing';
+  const showVoiceStatusUi = showVoiceRecordingUi || showVoiceTranscribingUi;
   const shouldShowActionButton =
     canStop || showSendButton || showVoiceButton || voiceState !== 'idle';
   const baseBottomPadding =
@@ -149,61 +157,91 @@ export function ChatInput({
             <Ionicons name="add" size={20} color={colors.textMuted} />
           </Pressable>
 
-          <View style={styles.inputWrapper}>
-            <Text
-              pointerEvents="none"
-              accessibilityElementsHidden
-              importantForAccessibility="no-hide-descendants"
-              style={[
-                styles.inputMeasure,
-                {
-                  width: inputWidth,
-                  lineHeight: INPUT_TEXT_LINE_HEIGHT,
-                  paddingVertical: INPUT_TEXT_VERTICAL_PADDING,
-                },
-              ]}
-              onTextLayout={(event: NativeSyntheticEvent<TextLayoutEventData>) => {
-                if (inputWidth <= 0) {
-                  return;
-                }
-                const lineCount = Math.max(1, event.nativeEvent.lines.length);
-                const measuredHeight =
-                  lineCount * INPUT_TEXT_LINE_HEIGHT + INPUT_TEXT_VERTICAL_PADDING * 2;
-                updateInputHeight(measuredHeight);
-              }}
-            >
-              {value.length > 0 ? `${value}\u200b` : ' '}
-            </Text>
-            <TextInput
-              style={[styles.input, { height: inputHeight }]}
-              value={value}
-              onChangeText={onChangeText}
-              keyboardAppearance="dark"
-              onLayout={(event) => {
-                const nextWidth = Math.floor(event.nativeEvent.layout.width);
-                setInputWidth((previousWidth) =>
-                  previousWidth === nextWidth ? previousWidth : nextWidth
-                );
-              }}
-              onFocus={onFocus}
-              placeholder={placeholder}
-              placeholderTextColor={colors.textMuted}
-              multiline
-              scrollEnabled={inputScrollEnabled}
-              onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
-                const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
-                  shiftKey?: boolean;
-                };
-                if (
-                  Platform.OS === 'web' &&
-                  keyEvent.key === 'Enter' &&
-                  !keyEvent.shiftKey
-                ) {
-                  e.preventDefault();
-                  if (canSend) onSubmit();
-                }
-              }}
-            />
+          <View
+            style={[
+              styles.inputWrapper,
+              showVoiceStatusUi && styles.inputWrapperVoiceActive,
+            ]}
+          >
+            {showVoiceStatusUi ? (
+              showVoiceRecordingUi ? (
+                <VoiceRecordingWaveform
+                  durationMillis={voiceRecordingDurationMillis}
+                  metering={voiceMetering}
+                />
+              ) : (
+                <View
+                  accessible
+                  accessibilityLabel="Transcribing recorded audio into text"
+                  style={styles.voiceStatusContent}
+                >
+                  <View style={styles.voiceStatusLabelRow}>
+                    <View style={[styles.voiceStatusDot, styles.voiceStatusDotBusy]} />
+                    <Text style={styles.voiceStatusTitle}>Transcribing audio</Text>
+                  </View>
+                  <Text style={styles.voiceStatusHint}>
+                    Converting your latest recording into text.
+                  </Text>
+                </View>
+              )
+            ) : (
+              <>
+                <Text
+                  pointerEvents="none"
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants"
+                  style={[
+                    styles.inputMeasure,
+                    {
+                      width: inputWidth,
+                      lineHeight: INPUT_TEXT_LINE_HEIGHT,
+                      paddingVertical: INPUT_TEXT_VERTICAL_PADDING,
+                    },
+                  ]}
+                  onTextLayout={(event: NativeSyntheticEvent<TextLayoutEventData>) => {
+                    if (inputWidth <= 0) {
+                      return;
+                    }
+                    const lineCount = Math.max(1, event.nativeEvent.lines.length);
+                    const measuredHeight =
+                      lineCount * INPUT_TEXT_LINE_HEIGHT + INPUT_TEXT_VERTICAL_PADDING * 2;
+                    updateInputHeight(measuredHeight);
+                  }}
+                >
+                  {value.length > 0 ? `${value}\u200b` : ' '}
+                </Text>
+                <TextInput
+                  style={[styles.input, { height: inputHeight }]}
+                  value={value}
+                  onChangeText={onChangeText}
+                  keyboardAppearance="dark"
+                  onLayout={(event) => {
+                    const nextWidth = Math.floor(event.nativeEvent.layout.width);
+                    setInputWidth((previousWidth) =>
+                      previousWidth === nextWidth ? previousWidth : nextWidth
+                    );
+                  }}
+                  onFocus={onFocus}
+                  placeholder={placeholder}
+                  placeholderTextColor={colors.textMuted}
+                  multiline
+                  scrollEnabled={inputScrollEnabled}
+                  onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
+                    const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
+                      shiftKey?: boolean;
+                    };
+                    if (
+                      Platform.OS === 'web' &&
+                      keyEvent.key === 'Enter' &&
+                      !keyEvent.shiftKey
+                    ) {
+                      e.preventDefault();
+                      if (canSend) onSubmit();
+                    }
+                  }}
+                />
+              </>
+            )}
             {shouldShowActionButton ? (
               <View style={styles.actionButtons}>
                 {showVoiceButton || voiceState !== 'idle' ? (
@@ -334,6 +372,10 @@ const styles = StyleSheet.create({
     minHeight: 40,
     maxHeight: 120,
   },
+  inputWrapperVoiceActive: {
+    minHeight: 58,
+    paddingVertical: spacing.sm,
+  },
   input: {
     flex: 1,
     color: colors.textPrimary,
@@ -349,6 +391,36 @@ const styles = StyleSheet.create({
     fontSize: 14,
     left: spacing.md,
     top: spacing.xs,
+  },
+  voiceStatusContent: {
+    flex: 1,
+    gap: 2,
+    justifyContent: 'center',
+    minHeight: 40,
+  },
+  voiceStatusLabelRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  voiceStatusDot: {
+    backgroundColor: colors.error,
+    borderRadius: 4,
+    height: 8,
+    width: 8,
+  },
+  voiceStatusDotBusy: {
+    opacity: 0.82,
+  },
+  voiceStatusTitle: {
+    color: colors.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  voiceStatusHint: {
+    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: 16,
   },
   actionButtons: {
     flexDirection: 'row',

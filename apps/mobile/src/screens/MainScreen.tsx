@@ -4856,6 +4856,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 isLoading={isLoading}
                 placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
                 voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
+                voiceRecordingDurationMillis={
+                  canUseVoiceInput ? voiceRecorder.recordingDurationMillis : 0
+                }
+                voiceMetering={canUseVoiceInput ? voiceRecorder.recordingMetering : null}
                 onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
                 safeAreaBottomInset={safeAreaInsets.bottom}
                 keyboardVisible={keyboardVisible}

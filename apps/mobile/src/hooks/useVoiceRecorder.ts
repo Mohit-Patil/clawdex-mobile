@@ -6,6 +6,7 @@ import {
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
   useAudioRecorder,
+  useAudioRecorderState,
 } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -30,9 +31,10 @@ interface UseVoiceRecorderOptions {
 const MIN_RECORDING_DURATION_MS = 1_000;
 const MAX_RECORDING_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_RECORDING_FILE_MB = MAX_RECORDING_FILE_BYTES / (1024 * 1024);
+const RECORDER_STATE_POLL_INTERVAL_MS = 80;
 
 const RECORDING_OPTIONS: RecordingOptions = {
-  isMeteringEnabled: false,
+  isMeteringEnabled: true,
   extension: '.m4a',
   sampleRate: 16_000,
   numberOfChannels: 1,
@@ -119,6 +121,7 @@ export function useVoiceRecorder({
 }: UseVoiceRecorderOptions) {
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
   const recorder = useAudioRecorder(RECORDING_OPTIONS);
+  const recorderState = useAudioRecorderState(recorder, RECORDER_STATE_POLL_INTERVAL_MS);
   const startTimeRef = useRef<number>(0);
   const recorderRef = useRef<AudioRecorder>(recorder);
   recorderRef.current = recorder;
@@ -256,6 +259,10 @@ export function useVoiceRecorder({
 
   return {
     voiceState,
+    recordingDurationMillis:
+      voiceState === 'recording' ? recorderState.durationMillis : 0,
+    recordingMetering:
+      voiceState === 'recording' ? recorderState.metering ?? null : null,
     startRecording,
     stopRecordingAndTranscribe,
     cancelRecording,
