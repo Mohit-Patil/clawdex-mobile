@@ -526,6 +526,42 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('steerChatTurn() forwards expected turn id and structured input', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({});
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.steerChatTurn('thr_steer', 'turn_steer', {
+      content: 'continue with this direction',
+      mentions: [{ path: '/tmp/src', name: 'src' }],
+      localImages: [{ path: '/tmp/screenshot.png' }],
+    });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'turn/steer',
+      expect.objectContaining({
+        threadId: 'thr_steer',
+        expectedTurnId: 'turn_steer',
+        input: [
+          {
+            type: 'text',
+            text: 'continue with this direction',
+            text_elements: [],
+          },
+          {
+            type: 'mention',
+            path: '/tmp/src',
+            name: 'src',
+          },
+          {
+            type: 'localImage',
+            path: '/tmp/screenshot.png',
+          },
+        ],
+      })
+    );
+  });
+
   it('sendChatMessage() forwards selected approval policy to resume and turn/start', async () => {
     const ws = createWsMock();
     ws.request
@@ -582,7 +618,10 @@ describe('HostBridgeApiClient', () => {
       .mockResolvedValueOnce({});
 
     const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
-    await expect(client.resumeThread('thr_resume')).resolves.toBeUndefined();
+    await expect(client.resumeThread('thr_resume')).resolves.toEqual({
+      model: null,
+      effort: null,
+    });
 
     expect(ws.request).toHaveBeenNthCalledWith(
       1,
@@ -613,7 +652,10 @@ describe('HostBridgeApiClient', () => {
       .mockResolvedValueOnce({});
 
     const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
-    await expect(client.resumeThread('thr_resume_legacy')).resolves.toBeUndefined();
+    await expect(client.resumeThread('thr_resume_legacy')).resolves.toEqual({
+      model: null,
+      effort: null,
+    });
 
     expect(ws.request).toHaveBeenNthCalledWith(
       1,
@@ -657,7 +699,10 @@ describe('HostBridgeApiClient', () => {
     const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await expect(
       client.resumeThread('thr_resume_never', { approvalPolicy: 'never' })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      model: null,
+      effort: null,
+    });
 
     expect(ws.request).toHaveBeenNthCalledWith(
       1,
@@ -905,9 +950,64 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('sendChatMessage() sends structured collaborationMode for default mode using resumed thread settings', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({
+        model: 'gpt-5.3-codex',
+        reasoningEffort: 'medium',
+      }) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_default' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_default',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_default',
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_default',
+                  content: [{ type: 'text', text: 'implement it' }],
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.sendChatMessage('thr_default', {
+      content: 'implement it',
+      collaborationMode: 'default',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        model: 'gpt-5.3-codex',
+        effort: 'medium',
+        collaborationMode: {
+          mode: 'default',
+          settings: {
+            model: 'gpt-5.3-codex',
+            reasoning_effort: 'medium',
+            developer_instructions: null,
+          },
+        },
+      })
+    );
+  });
+
   it('sendChatMessage() resolves default model before plan mode turn when model is unset', async () => {
     const ws = createWsMock();
     ws.request
+      .mockResolvedValueOnce({}) // thread/resume
       .mockResolvedValueOnce({
         data: [
           {
@@ -917,7 +1017,6 @@ describe('HostBridgeApiClient', () => {
           },
         ],
       }) // model/list fallback
-      .mockResolvedValueOnce({}) // thread/resume
       .mockResolvedValueOnce({ turn: { id: 'turn_plan_fallback' } }) // turn/start
       .mockResolvedValueOnce({
         thread: {
@@ -948,7 +1047,7 @@ describe('HostBridgeApiClient', () => {
     });
 
     expect(ws.request).toHaveBeenNthCalledWith(
-      1,
+      2,
       'model/list',
       expect.objectContaining({
         includeHidden: false,

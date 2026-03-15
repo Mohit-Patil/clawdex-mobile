@@ -28,6 +28,7 @@ import type {
   ResolveUserInputRequest,
   ResolveUserInputResponse,
   SendChatMessageRequest,
+  SteerChatTurnRequest,
   MentionInput,
   LocalImageInput,
   UploadAttachmentRequest,
@@ -86,12 +87,17 @@ interface AppServerConfigReadResponse {
 }
 
 interface AppServerCollaborationMode {
-  mode: 'plan';
+  mode: 'plan' | 'default';
   settings: {
     model: string;
     reasoning_effort: ReasoningEffort | null;
     developer_instructions: string | null;
   };
+}
+
+interface AppServerThreadRuntimeSettings {
+  model: string | null;
+  effort: ReasoningEffort | null;
 }
 
 type AppServerThreadSetNameResponse = Record<string, never>;
@@ -315,7 +321,7 @@ export class HostBridgeApiClient {
       model?: string | null;
       approvalPolicy?: ApprovalPolicy | null;
     }
-  ): Promise<void> {
+  ): Promise<AppServerThreadRuntimeSettings> {
     const threadId = id.trim();
     if (!threadId) {
       throw new Error('thread id is required');
@@ -343,8 +349,11 @@ export class HostBridgeApiClient {
     };
 
     try {
-      await this.ws.request('thread/resume', primaryRequest);
-      return;
+      const response = await this.ws.request<Record<string, unknown>>(
+        'thread/resume',
+        primaryRequest
+      );
+      return readThreadRuntimeSettings(response);
     } catch (primaryError) {
       // First fallback: keep raw-event streaming enabled, but relax approval policy.
       const compatibilityRequest = {
@@ -352,8 +361,11 @@ export class HostBridgeApiClient {
         approvalPolicy: fallbackApprovalPolicy,
       };
       try {
-        await this.ws.request('thread/resume', compatibilityRequest);
-        return;
+        const response = await this.ws.request<Record<string, unknown>>(
+          'thread/resume',
+          compatibilityRequest
+        );
+        return readThreadRuntimeSettings(response);
       } catch (compatibilityError) {
         // Final compatibility fallback for older app-server builds that reject
         // experimentalRawEvents/developerInstructions on resume.
@@ -363,8 +375,11 @@ export class HostBridgeApiClient {
         };
         delete (legacyRequest as { experimentalRawEvents?: boolean }).experimentalRawEvents;
         try {
-          await this.ws.request('thread/resume', legacyRequest);
-          return;
+          const response = await this.ws.request<Record<string, unknown>>(
+            'thread/resume',
+            legacyRequest
+          );
+          return readThreadRuntimeSettings(response);
         } catch (legacyError) {
           throw new Error(
             `thread/resume failed: ${(primaryError as Error).message}; compatibility failed: ${(compatibilityError as Error).message}; legacy fallback failed: ${(legacyError as Error).message}`
@@ -395,11 +410,21 @@ export class HostBridgeApiClient {
     const normalizedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy);
     const normalizedMentions = normalizeMentions(body.mentions);
     const normalizedLocalImages = normalizeLocalImages(body.localImages);
-    const requestedPlanMode =
-      typeof body.collaborationMode === 'string' &&
-      body.collaborationMode.trim().toLowerCase() === 'plan';
-    let effectiveModel = normalizedModel;
-    if (requestedPlanMode && !effectiveModel) {
+    const requestedCollaborationMode = normalizeCollaborationMode(body.collaborationMode);
+    let resumedThreadSettings: AppServerThreadRuntimeSettings | null = null;
+
+    try {
+      resumedThreadSettings = await this.resumeThread(id, {
+        model: normalizedModel,
+        cwd: normalizedCwd,
+        approvalPolicy: normalizedApprovalPolicy,
+      });
+    } catch {
+      // Best effort: turn/start still works for recently started chats.
+    }
+
+    let effectiveModel = normalizedModel ?? resumedThreadSettings?.model ?? null;
+    if (requestedCollaborationMode && !effectiveModel) {
       try {
         const models = await this.listModels(false);
         effectiveModel =
@@ -408,21 +433,15 @@ export class HostBridgeApiClient {
         // Best effort: fall back to the current thread settings if model lookup fails.
       }
     }
+    const effectiveEffort =
+      requestedCollaborationMode
+        ? normalizedEffort ?? resumedThreadSettings?.effort ?? null
+        : normalizedEffort;
     const normalizedCollaborationMode = toTurnCollaborationMode(
-      body.collaborationMode,
+      requestedCollaborationMode,
       effectiveModel,
-      normalizedEffort
+      effectiveEffort
     );
-
-    try {
-      await this.resumeThread(id, {
-        model: effectiveModel,
-        cwd: normalizedCwd,
-        approvalPolicy: normalizedApprovalPolicy,
-      });
-    } catch {
-      // Best effort: turn/start still works for recently started chats.
-    }
 
     const turnStart = await this.ws.request<AppServerTurnResponse>('turn/start', {
       threadId: id,
@@ -431,7 +450,7 @@ export class HostBridgeApiClient {
       approvalPolicy: normalizedApprovalPolicy ?? null,
       sandboxPolicy: null,
       model: effectiveModel ?? null,
-      effort: normalizedEffort ?? null,
+      effort: effectiveEffort ?? null,
       serviceTier: normalizedServiceTier ?? null,
       summary: null,
       personality: null,
@@ -445,6 +464,28 @@ export class HostBridgeApiClient {
     }
     options?.onTurnStarted?.(turnId);
     return this.getChatWithUserMessage(id, turnId, content);
+  }
+
+  async steerChatTurn(
+    threadId: string,
+    expectedTurnId: string,
+    body: SteerChatTurnRequest
+  ): Promise<void> {
+    const normalizedThreadId = threadId.trim();
+    const normalizedExpectedTurnId = expectedTurnId.trim();
+    const content = body.content.trim();
+    if (!normalizedThreadId || !normalizedExpectedTurnId || !content) {
+      return;
+    }
+
+    const normalizedMentions = normalizeMentions(body.mentions);
+    const normalizedLocalImages = normalizeLocalImages(body.localImages);
+
+    await this.ws.request<Record<string, never>>('turn/steer', {
+      threadId: normalizedThreadId,
+      expectedTurnId: normalizedExpectedTurnId,
+      input: buildTurnInput(content, normalizedMentions, normalizedLocalImages),
+    });
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
@@ -1034,7 +1075,7 @@ function toTurnCollaborationMode(
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized !== 'plan') {
+  if (normalized !== 'plan' && normalized !== 'default') {
     return null;
   }
 
@@ -1043,12 +1084,37 @@ function toTurnCollaborationMode(
   }
 
   return {
-    mode: 'plan',
+    mode: normalized,
     settings: {
       model,
       reasoning_effort: effort,
       developer_instructions: null,
     },
+  };
+}
+
+function normalizeCollaborationMode(
+  value: CollaborationMode | string | null | undefined
+): CollaborationMode | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'plan' || normalized === 'default') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function readThreadRuntimeSettings(value: unknown): AppServerThreadRuntimeSettings {
+  const record = toRecord(value);
+  return {
+    model: normalizeModel(readString(record?.model)),
+    effort: normalizeEffort(
+      readString(record?.reasoningEffort) ?? readString(record?.reasoning_effort)
+    ),
   };
 }
 

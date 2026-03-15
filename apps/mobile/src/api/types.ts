@@ -57,6 +57,12 @@ export interface SendChatMessageRequest {
   localImages?: LocalImageInput[];
 }
 
+export interface SteerChatTurnRequest {
+  content: string;
+  mentions?: MentionInput[];
+  localImages?: LocalImageInput[];
+}
+
 export interface MentionInput {
   path: string;
   name?: string;

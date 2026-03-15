@@ -138,6 +138,8 @@ interface ComposerAttachmentChip {
 }
 
 interface QueuedChatMessage {
+  id: string;
+  createdAt: string;
   content: string;
   mentions: MentionInput[];
   localImages: LocalImageInput[];
@@ -1202,6 +1204,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (!threadId) {
           setThreadContextUsage(null);
           setActivePlan(null);
+          setSelectedCollaborationMode('default');
           return;
         }
 
@@ -1209,9 +1212,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (!snapshot) {
           setThreadContextUsage(null);
           setActivePlan(null);
+          setSelectedCollaborationMode('default');
           return;
         }
 
+        setSelectedCollaborationMode(resolveSnapshotCollaborationMode(snapshot));
         if (snapshot.activeCommands !== undefined) {
           setActiveCommands(snapshot.activeCommands);
         }
@@ -1647,6 +1652,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       loadChatRequestRef.current += 1;
       setSelectedChat(null);
       setSelectedChatId(null);
+      setSelectedCollaborationMode('default');
       setOpeningChatId(null);
       setDraft('');
       setError(null);
@@ -3516,6 +3522,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setQueuedMessages((prev) => [
           ...prev,
           {
+            id: createQueuedMessageId(),
+            createdAt: new Date().toISOString(),
             content,
             mentions: queuedMentions,
             localImages: queuedLocalImages,
@@ -3584,6 +3592,44 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingPlanImplementationPrompts,
       selectedChatId,
       sendMessageContent,
+    ]);
+
+    const handleSteerQueuedMessage = useCallback(async () => {
+      const threadId = selectedChatId?.trim();
+      const expectedTurnId = activeTurnIdRef.current?.trim() ?? '';
+      const nextQueuedMessage = queuedMessages[0] ?? null;
+      const canSteer =
+        Boolean(threadId) &&
+        Boolean(expectedTurnId) &&
+        Boolean(nextQueuedMessage) &&
+        !pendingApproval?.id &&
+        !pendingUserInputRequest?.id &&
+        Boolean(selectedChat && isChatLikelyRunning(selectedChat));
+
+      if (!threadId || !expectedTurnId || !nextQueuedMessage || !canSteer) {
+        return;
+      }
+
+      try {
+        setError(null);
+        await api.steerChatTurn(threadId, expectedTurnId, {
+          content: nextQueuedMessage.content,
+          mentions: nextQueuedMessage.mentions,
+          localImages: nextQueuedMessage.localImages,
+        });
+        setQueuedMessages((prev) =>
+          prev[0]?.id === nextQueuedMessage.id ? prev.slice(1) : prev
+        );
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    }, [
+      api,
+      pendingApproval?.id,
+      pendingUserInputRequest?.id,
+      queuedMessages,
+      selectedChat,
+      selectedChatId,
     ]);
 
     useEffect(() => {
@@ -5191,12 +5237,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChat,
     ]);
 
-    const queuedMessagesDetail =
-      queuedMessages.length > 0
-        ? queuePaused
-          ? `${String(queuedMessages.length)} queued (paused)`
-          : `${String(queuedMessages.length)} queued`
-        : undefined;
+    const oldestQueuedMessage = queuedMessages[0] ?? null;
+    const remainingQueuedMessagesCount = Math.max(0, queuedMessages.length - 1);
     const visibleActivity = (() => {
       if (isOpeningChat) {
         return {
@@ -5251,15 +5293,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       return activity;
     })();
-    const activityDetail = queuedMessagesDetail
-      ? visibleActivity.detail
-        ? `${visibleActivity.detail} · ${queuedMessagesDetail}`
-        : queuedMessagesDetail
-      : visibleActivity.detail;
+    const activityDetail = visibleActivity.detail;
     const showActivity =
       isLoading ||
       isOpeningChat ||
-      Boolean(queuedMessagesDetail) ||
       visibleActivity.tone !== 'idle' ||
       Boolean(activityDetail);
     const activeContextWindow = threadContextUsage?.modelContextWindow ?? null;
@@ -5319,6 +5356,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChat ? (planPanelCollapsedByThread[selectedChat.id] ?? false) : false;
     const fastModeControlDisabled = isOpeningChat;
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
+    const canSteerQueuedMessage =
+      Boolean(oldestQueuedMessage) &&
+      Boolean(selectedChatId) &&
+      Boolean(activeTurnId) &&
+      !pendingApproval &&
+      !pendingUserInputRequest &&
+      Boolean(selectedChat && isChatLikelyRunning(selectedChat));
+    const queuedMessageSteerDisabledReason = pendingApproval
+      ? 'Waiting for approval before steering.'
+      : pendingUserInputRequest
+        ? 'Waiting for required input before steering.'
+        : null;
+    const showQueuedMessageCard =
+      Boolean(selectedChat) && !isOpeningChat && Boolean(oldestQueuedMessage);
+    const showTopCardsRow = !isOpeningChat && Boolean(selectedThreadPlan);
     const showFloatingActivity =
       showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
     const showPlanImplementationPrompt =
@@ -5466,13 +5518,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           </View>
         ) : null}
 
-        {selectedThreadPlan && !isOpeningChat ? (
-          <View style={styles.planOverlayRow}>
-            <PlanCard
-              plan={selectedThreadPlan}
-              collapsed={planPanelCollapsed}
-              onToggleCollapse={toggleSelectedPlanPanel}
-            />
+        {showTopCardsRow ? (
+          <View style={styles.topCardsRow}>
+            {selectedThreadPlan ? (
+              <PlanCard
+                plan={selectedThreadPlan}
+                collapsed={planPanelCollapsed}
+                onToggleCollapse={toggleSelectedPlanPanel}
+              />
+            ) : null}
           </View>
         ) : null}
 
@@ -5523,6 +5577,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 title={visibleActivity.title}
                 detail={activityDetail}
                 tone={visibleActivity.tone}
+              />
+            </View>
+          ) : null}
+
+          {showQueuedMessageCard && oldestQueuedMessage ? (
+            <View style={styles.queuedMessageDock}>
+              <QueuedMessageCard
+                message={oldestQueuedMessage}
+                remainingCount={remainingQueuedMessagesCount}
+                steerEnabled={canSteerQueuedMessage}
+                steerDisabledReason={queuedMessageSteerDisabledReason}
+                onSteer={() => {
+                  void handleSteerQueuedMessage();
+                }}
               />
             </View>
           ) : null}
@@ -6375,6 +6443,57 @@ function ChatView({
         windowSize={isLargeChat ? 21 : 11}
         removeClippedSubviews={isLargeChat ? false : Platform.OS === 'android'}
       />
+    </View>
+  );
+}
+
+function QueuedMessageCard({
+  message,
+  remainingCount,
+  steerEnabled,
+  steerDisabledReason,
+  onSteer,
+}: {
+  message: QueuedChatMessage;
+  remainingCount: number;
+  steerEnabled: boolean;
+  steerDisabledReason: string | null;
+  onSteer: () => void;
+}) {
+  return (
+    <View style={[styles.planCard, styles.queuedMessageCard]}>
+      <View style={styles.queuedMessageHeader}>
+        <View style={styles.queuedMessageHeaderText}>
+          <Text style={styles.planCardTitle}>Queued message</Text>
+          {remainingCount > 0 ? (
+            <Text style={styles.queuedMessageSummary}>{`+${String(remainingCount)} more queued`}</Text>
+          ) : null}
+        </View>
+        <Pressable
+          onPress={onSteer}
+          disabled={!steerEnabled}
+          style={({ pressed }) => [
+            styles.queuedMessageActionButton,
+            !steerEnabled && styles.queuedMessageActionButtonDisabled,
+            pressed && steerEnabled && styles.queuedMessageActionButtonPressed,
+          ]}
+        >
+          <Text
+            style={[
+              styles.queuedMessageActionLabel,
+              !steerEnabled && styles.queuedMessageActionLabelDisabled,
+            ]}
+          >
+            Steer
+          </Text>
+        </Pressable>
+      </View>
+      <Text numberOfLines={2} style={styles.queuedMessageBody}>
+        {message.content}
+      </Text>
+      {steerDisabledReason ? (
+        <Text style={styles.queuedMessageHint}>{steerDisabledReason}</Text>
+      ) : null}
     </View>
   );
 }
@@ -7244,6 +7363,20 @@ function formatCollaborationModeLabel(mode: CollaborationMode): string {
   return mode === 'plan' ? 'Plan mode' : 'Default mode';
 }
 
+function createQueuedMessageId(): string {
+  return `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function resolveSnapshotCollaborationMode(
+  snapshot: ThreadRuntimeSnapshot | null | undefined
+): CollaborationMode {
+  if (!snapshot) {
+    return 'default';
+  }
+
+  return snapshot.pendingUserInputRequest ? 'plan' : 'default';
+}
+
 function formatReasoningEffort(effort: ReasoningEffort): string {
   if (effort === 'xhigh') {
     return 'X-High';
@@ -7738,6 +7871,13 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xs / 2,
     zIndex: 3,
   },
+  queuedMessageDock: {
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xs / 2,
+    paddingBottom: spacing.xs,
+    zIndex: 3,
+  },
   sessionMetaRow: {
     backgroundColor: colors.bgMain,
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -7750,10 +7890,11 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
   },
-  planOverlayRow: {
+  topCardsRow: {
     backgroundColor: colors.bgMain,
     paddingHorizontal: spacing.lg,
     paddingBottom: spacing.sm,
+    gap: spacing.sm,
     zIndex: 2,
   },
   contextChip: {
@@ -7850,6 +7991,61 @@ const styles = StyleSheet.create({
       height: 4,
     },
     elevation: 4,
+  },
+  queuedMessageCard: {
+    marginBottom: 0,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: 10,
+  },
+  queuedMessageHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    marginBottom: spacing.xs / 2,
+  },
+  queuedMessageHeaderText: {
+    flex: 1,
+    gap: 2,
+  },
+  queuedMessageSummary: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
+  queuedMessageBody: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    lineHeight: 18,
+  },
+  queuedMessageHint: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
+  },
+  queuedMessageActionButton: {
+    flexShrink: 0,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.inlineCodeBg,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+  },
+  queuedMessageActionButtonDisabled: {
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+  },
+  queuedMessageActionButtonPressed: {
+    opacity: 0.88,
+  },
+  queuedMessageActionLabel: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  queuedMessageActionLabelDisabled: {
+    color: colors.textMuted,
   },
   planCardHeader: {
     flexDirection: 'row',
