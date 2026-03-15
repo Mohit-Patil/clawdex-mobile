@@ -26,9 +26,9 @@ export function ChatHeader({
       <SafeAreaView edges={['top', 'left', 'right']}>
         <View style={styles.header}>
           <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
-            <Ionicons name="menu" size={22} color={colors.textPrimary} />
+            <Ionicons name="menu" size={20} color={colors.textPrimary} />
           </Pressable>
-          <BrandMark size={22} />
+          <BrandMark size={18} />
           {onOpenTitleMenu ? (
             <Pressable
               onPress={onOpenTitleMenu}
@@ -38,7 +38,7 @@ export function ChatHeader({
               <Text numberOfLines={1} style={styles.modelName}>
                 {titleDisplay}
               </Text>
-              <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
+              <Ionicons name="chevron-down" size={12} color={colors.textMuted} />
             </Pressable>
           ) : (
             <View style={styles.modelNameRow}>
@@ -50,10 +50,10 @@ export function ChatHeader({
           <View style={{ flex: 1 }} />
           {onRightActionPress ? (
             <Pressable onPress={onRightActionPress} hitSlop={8} style={styles.rightBtn}>
-              <Ionicons name={rightIconName} size={20} color={colors.textMuted} />
+              <Ionicons name={rightIconName} size={18} color={colors.textMuted} />
             </Pressable>
           ) : (
-            <Ionicons name={rightIconName} size={20} color={colors.textMuted} />
+            <Ionicons name={rightIconName} size={18} color={colors.textMuted} />
           )}
         </View>
       </SafeAreaView>
@@ -72,13 +72,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
   },
   menuBtn: {
-    padding: spacing.xs,
+    padding: 2,
   },
   rightBtn: {
-    padding: spacing.xs,
+    padding: 2,
   },
   modelNameRow: {
     flexDirection: 'row',
@@ -91,16 +91,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs,
     borderRadius: 8,
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 2,
+    paddingHorizontal: 2,
+    paddingVertical: 1,
     flexShrink: 1,
   },
   titleButtonPressed: {
     backgroundColor: colors.bgItem,
   },
   modelName: {
-    ...typography.largeTitle,
-    fontSize: 20,
+    ...typography.headline,
+    fontSize: 17,
     color: colors.textPrimary,
     flexShrink: 1,
   },

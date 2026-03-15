@@ -506,7 +506,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     >({});
     const [pendingPlanImplementationPrompts, setPendingPlanImplementationPrompts] =
       useState<Record<string, PendingPlanImplementationPrompt>>({});
-    const [composerHeight, setComposerHeight] = useState(spacing.xxl * 4);
     const safeAreaInsets = useSafeAreaInsets();
     const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
     const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -5337,7 +5336,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       !effortModalVisible &&
       queuedMessages.length === 0;
     const chatBottomInset = shouldShowComposer
-      ? spacing.lg + (showFloatingActivity ? spacing.xxl + spacing.sm : 0)
+      ? spacing.lg
       : Math.max(spacing.xxl, safeAreaInsets.bottom + spacing.lg);
 
     useEffect(() => {
@@ -5519,13 +5518,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           )}
 
           {showFloatingActivity ? (
-            <View
-              pointerEvents="none"
-              style={[
-                styles.activityOverlay,
-                { bottom: composerHeight + spacing.sm },
-              ]}
-            >
+            <View pointerEvents="none" style={styles.activityDock}>
               <ActivityBar
                 title={visibleActivity.title}
                 detail={activityDetail}
@@ -5540,12 +5533,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 styles.composerContainer,
                 !keyboardVisible ? styles.composerContainerResting : null,
               ]}
-              onLayout={(event) => {
-                const nextHeight = Math.ceil(event.nativeEvent.layout.height);
-                setComposerHeight((previousHeight) =>
-                  previousHeight === nextHeight ? previousHeight : nextHeight
-                );
-              }}
             >
               {error ? <Text style={styles.errorText}>{error}</Text> : null}
               {pendingApproval ? (
@@ -7745,10 +7732,10 @@ const styles = StyleSheet.create({
   composerContainerResting: {
     marginBottom: spacing.xs,
   },
-  activityOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
+  activityDock: {
+    backgroundColor: colors.bgMain,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.xs / 2,
     zIndex: 3,
   },
   sessionMetaRow: {
