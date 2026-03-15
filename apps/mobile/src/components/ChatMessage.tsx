@@ -11,7 +11,6 @@ import {
   View,
 } from 'react-native';
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
-import { UITextView } from 'react-native-uitextview';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
@@ -478,9 +477,9 @@ function readMarkdownAttr(value: unknown): string | null {
 
 function SelectableMessageText({ children, ...props }: TextProps): ReactElement {
   return (
-    <UITextView selectable uiTextView {...props}>
+    <Text selectable={props.selectable ?? !props.onPress} {...props}>
       {children}
-    </UITextView>
+    </Text>
   );
 }
 
