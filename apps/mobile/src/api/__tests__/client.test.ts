@@ -339,6 +339,59 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('createChat() forwards service tier in thread/start config', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_fast',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.createChat({ serviceTier: 'fast' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        config: {
+          service_tier: 'fast',
+        },
+      })
+    );
+  });
+
+  it('forkChat() forwards service tier in thread/fork config', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_fork_fast',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.forkChat('thr_parent', { serviceTier: 'fast' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/fork',
+      expect.objectContaining({
+        threadId: 'thr_parent',
+        config: {
+          service_tier: 'fast',
+        },
+      })
+    );
+  });
+
   it('renameChat() retries with threadName when name payload is rejected', async () => {
     const ws = createWsMock();
     ws.request
@@ -421,6 +474,54 @@ describe('HostBridgeApiClient', () => {
       expect.objectContaining({
         model: 'gpt-5.3-codex',
         effort: 'high',
+      })
+    );
+  });
+
+  it('sendChatMessage() forwards service tier to turn/start', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_fast' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_fast',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_fast',
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_fast',
+                  content: [{ type: 'text', text: 'hello' }],
+                },
+                {
+                  type: 'agentMessage',
+                  id: 'a_fast',
+                  text: 'ok',
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.sendChatMessage('thr_fast', {
+      content: 'hello',
+      serviceTier: 'fast',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/resume', expect.any(Object));
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        serviceTier: 'fast',
       })
     );
   });

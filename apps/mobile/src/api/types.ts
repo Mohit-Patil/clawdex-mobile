@@ -38,6 +38,7 @@ export interface CreateChatRequest {
   cwd?: string;
   model?: string;
   effort?: ReasoningEffort;
+  serviceTier?: ServiceTier;
   approvalPolicy?: ApprovalPolicy;
 }
 
@@ -49,6 +50,7 @@ export interface SendChatMessageRequest {
   cwd?: string;
   model?: string;
   effort?: ReasoningEffort;
+  serviceTier?: ServiceTier;
   approvalPolicy?: ApprovalPolicy;
   collaborationMode?: CollaborationMode;
   mentions?: MentionInput[];
@@ -89,6 +91,8 @@ export type ReasoningEffort =
   | 'medium'
   | 'high'
   | 'xhigh';
+
+export type ServiceTier = 'flex' | 'fast';
 
 export type ApprovalPolicy =
   | 'untrusted'

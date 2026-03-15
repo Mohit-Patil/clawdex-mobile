@@ -37,6 +37,7 @@ import type {
   ModelOption,
   ReasoningEffort,
   ModelReasoningEffortOption,
+  ServiceTier,
   TerminalExecRequest,
   TerminalExecResponse,
 } from './types';
@@ -78,6 +79,10 @@ interface AppServerForkResponse {
 
 interface AppServerModelListResponse {
   data?: unknown[];
+}
+
+interface AppServerConfigReadResponse {
+  config?: unknown;
 }
 
 interface AppServerCollaborationMode {
@@ -186,6 +191,7 @@ export class HostBridgeApiClient {
     const requestedCwd = normalizeCwd(body.cwd);
     const requestedModel = normalizeModel(body.model);
     const requestedEffort = normalizeEffort(body.effort);
+    const requestedServiceTier = normalizeServiceTier(body.serviceTier);
     const requestedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy) ?? 'untrusted';
     const started = await this.ws.request<AppServerStartResponse>('thread/start', {
       model: requestedModel ?? null,
@@ -193,7 +199,7 @@ export class HostBridgeApiClient {
       cwd: requestedCwd ?? null,
       approvalPolicy: requestedApprovalPolicy,
       sandbox: 'workspace-write',
-      config: null,
+      config: toThreadConfig(requestedServiceTier),
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       personality: null,
@@ -385,6 +391,7 @@ export class HostBridgeApiClient {
     const normalizedCwd = normalizeCwd(body.cwd);
     const normalizedModel = normalizeModel(body.model);
     const normalizedEffort = normalizeEffort(body.effort);
+    const normalizedServiceTier = normalizeServiceTier(body.serviceTier);
     const normalizedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy);
     const normalizedMentions = normalizeMentions(body.mentions);
     const normalizedLocalImages = normalizeLocalImages(body.localImages);
@@ -425,6 +432,7 @@ export class HostBridgeApiClient {
       sandboxPolicy: null,
       model: effectiveModel ?? null,
       effort: normalizedEffort ?? null,
+      serviceTier: normalizedServiceTier ?? null,
       summary: null,
       personality: null,
       outputSchema: null,
@@ -556,11 +564,13 @@ export class HostBridgeApiClient {
     options?: {
       cwd?: string;
       model?: string;
+      serviceTier?: ServiceTier;
       approvalPolicy?: ApprovalPolicy | null;
     }
   ): Promise<Chat> {
     const requestedApprovalPolicy =
       normalizeApprovalPolicy(options?.approvalPolicy) ?? 'untrusted';
+    const requestedServiceTier = normalizeServiceTier(options?.serviceTier);
     const response = await this.ws.request<AppServerForkResponse>('thread/fork', {
       threadId: id,
       path: null,
@@ -569,7 +579,7 @@ export class HostBridgeApiClient {
       cwd: normalizeCwd(options?.cwd) ?? null,
       approvalPolicy: requestedApprovalPolicy,
       sandbox: 'workspace-write',
-      config: null,
+      config: toThreadConfig(requestedServiceTier),
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       persistExtendedHistory: true,
@@ -580,6 +590,15 @@ export class HostBridgeApiClient {
     }
 
     throw new Error('thread/fork did not return a chat payload');
+  }
+
+  async readServiceTierPreference(): Promise<ServiceTier | null> {
+    const response = await this.ws.request<AppServerConfigReadResponse>('config/read', {
+      includeLayers: false,
+      cwd: null,
+    });
+    const config = toRecord(response.config);
+    return normalizeServiceTier(readString(config?.service_tier));
   }
 
   listApprovals(): Promise<PendingApproval[]> {
@@ -844,6 +863,33 @@ function normalizeEffort(effort: string | null | undefined): ReasoningEffort | n
   }
 
   return null;
+}
+
+function normalizeServiceTier(
+  serviceTier: ServiceTier | string | null | undefined
+): ServiceTier | null {
+  if (typeof serviceTier !== 'string') {
+    return null;
+  }
+
+  const normalized = serviceTier.trim().toLowerCase();
+  if (normalized === 'flex' || normalized === 'fast') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function toThreadConfig(
+  serviceTier: ServiceTier | null
+): Record<string, ServiceTier> | null {
+  if (!serviceTier) {
+    return null;
+  }
+
+  return {
+    service_tier: serviceTier,
+  };
 }
 
 function normalizeApprovalPolicy(

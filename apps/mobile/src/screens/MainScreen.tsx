@@ -49,6 +49,7 @@ import type {
   MentionInput,
   LocalImageInput,
   ReasoningEffort,
+  ServiceTier,
   TurnPlanStep,
   ChatMessage as ChatTranscriptMessage,
 } from '../api/types';
@@ -106,12 +107,26 @@ interface ActivePlanState {
   updatedAt: string;
 }
 
+interface PendingPlanImplementationPrompt {
+  threadId: string;
+  turnId: string;
+}
+
+interface ThreadContextUsage {
+  totalTokens: number | null;
+  lastTokens: number | null;
+  modelContextWindow: number | null;
+  updatedAtMs: number;
+}
+
 interface ThreadRuntimeSnapshot {
   activity?: ActivityState;
   activeCommands?: RunEvent[];
   streamingText?: string | null;
   pendingApproval?: PendingApproval | null;
   pendingUserInputRequest?: PendingUserInputRequest | null;
+  contextUsage?: ThreadContextUsage | null;
+  plan?: ActivePlanState | null;
   activeTurnId?: string | null;
   runWatchdogUntil?: number;
   updatedAtMs: number;
@@ -153,8 +168,15 @@ const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const UNANSWERED_USER_RUNNING_TTL_MS = 90_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
+const CONTEXT_WINDOW_BASELINE_TOKENS = 5_000;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
+const CHAT_PLAN_SNAPSHOTS_FILE = 'chat-plan-snapshots.json';
+const CHAT_PLAN_SNAPSHOTS_VERSION = 1;
+const PLAN_IMPLEMENTATION_TITLE = 'Implement this plan?';
+const PLAN_IMPLEMENTATION_YES = 'Yes, implement this plan';
+const PLAN_IMPLEMENTATION_NO = 'No, stay in Plan mode';
+const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
 const INLINE_OPTION_LINE_PATTERN =
   /^(?:[-*+]\s*)?(?:\d{1,2}\s*[.):-]|\(\d{1,2}\)\s*[.):-]?|\[\d{1,2}\]\s*|[A-Ca-c]\s*[.):-]|\([A-Ca-c]\)\s*[.):-]?|option\s+\d{1,2}\s*[.):-]?)\s*(.+)$/i;
 const INLINE_CHOICE_CUE_PATTERNS = [
@@ -218,6 +240,7 @@ const EXTERNAL_COMPLETE_STATUS_HINTS = new Set([
 interface ChatModelPreference {
   modelId: string | null;
   effort: ReasoningEffort | null;
+  serviceTier: ServiceTier | null;
   updatedAt: string;
 }
 
@@ -459,6 +482,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [loadingModels, setLoadingModels] = useState(false);
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
+    const [selectedServiceTier, setSelectedServiceTier] = useState<ServiceTier | null>(
+      null
+    );
+    const [defaultServiceTier, setDefaultServiceTier] = useState<ServiceTier | null>(null);
     const [selectedCollaborationMode, setSelectedCollaborationMode] =
       useState<CollaborationMode>('default');
     const [keyboardVisible, setKeyboardVisible] = useState(false);
@@ -471,6 +498,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       tone: 'idle',
       title: 'Ready',
     });
+    const [threadContextUsage, setThreadContextUsage] = useState<ThreadContextUsage | null>(
+      null
+    );
+    const [planPanelCollapsedByThread, setPlanPanelCollapsedByThread] = useState<
+      Record<string, boolean>
+    >({});
+    const [pendingPlanImplementationPrompts, setPendingPlanImplementationPrompts] =
+      useState<Record<string, PendingPlanImplementationPrompt>>({});
     const [composerHeight, setComposerHeight] = useState(spacing.xxl * 4);
     const safeAreaInsets = useSafeAreaInsets();
     const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
@@ -551,6 +586,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     // needing to re-subscribe on every change.
     const chatIdRef = useRef<string | null>(null);
     chatIdRef.current = selectedChatId;
+    const selectedChatRef = useRef<Chat | null>(selectedChat);
+    selectedChatRef.current = selectedChat;
+    const planPanelLastTurnByThreadRef = useRef<Record<string, string>>({});
+    const planItemTurnIdByThreadRef = useRef<Record<string, string>>({});
     const activeTurnIdRef = useRef<string | null>(null);
     activeTurnIdRef.current = activeTurnId;
     const stopRequestedRef = useRef(false);
@@ -562,6 +601,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const reasoningSummaryRef = useRef<Record<string, string>>({});
     const codexReasoningBufferRef = useRef('');
     const runWatchdogUntilRef = useRef(0);
+    const runWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [runWatchdogNow, setRunWatchdogNow] = useState(() => Date.now());
     const externalStatusFullSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
       null
     );
@@ -572,6 +613,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const threadReasoningBuffersRef = useRef<Record<string, string>>({});
     const chatModelPreferencesRef = useRef<Record<string, ChatModelPreference>>({});
     const [chatModelPreferencesLoaded, setChatModelPreferencesLoaded] = useState(false);
+    const chatPlanSnapshotsRef = useRef<Record<string, ActivePlanState>>({});
+    const [, setChatPlanSnapshotsLoaded] = useState(false);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
     const preferredDefaultModelId = normalizeModelId(defaultModelId);
     const preferredDefaultEffort = normalizeReasoningEffort(defaultReasoningEffort);
@@ -612,16 +655,109 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       return next;
     }, [pendingLocalImagePaths, pendingMentionPaths]);
 
-    const bumpRunWatchdog = useCallback((durationMs = RUN_WATCHDOG_MS) => {
-      runWatchdogUntilRef.current = Math.max(
-        runWatchdogUntilRef.current,
-        Date.now() + durationMs
-      );
+    const scheduleRunWatchdogExpiry = useCallback((deadlineMs: number) => {
+      const existingTimer = runWatchdogTimerRef.current;
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        runWatchdogTimerRef.current = null;
+      }
+
+      const delayMs = deadlineMs - Date.now();
+      if (delayMs <= 0) {
+        return;
+      }
+
+      runWatchdogTimerRef.current = setTimeout(() => {
+        runWatchdogTimerRef.current = null;
+        setRunWatchdogNow(Date.now());
+      }, delayMs + 16);
     }, []);
+
+    const bumpRunWatchdog = useCallback(
+      (durationMs = RUN_WATCHDOG_MS) => {
+        const deadlineMs = Math.max(runWatchdogUntilRef.current, Date.now() + durationMs);
+        runWatchdogUntilRef.current = deadlineMs;
+        setRunWatchdogNow(Date.now());
+        scheduleRunWatchdogExpiry(deadlineMs);
+      },
+      [scheduleRunWatchdogExpiry]
+    );
 
     const clearRunWatchdog = useCallback(() => {
       runWatchdogUntilRef.current = 0;
+      const existingTimer = runWatchdogTimerRef.current;
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        runWatchdogTimerRef.current = null;
+      }
+      setRunWatchdogNow(Date.now());
     }, []);
+
+    useEffect(() => {
+      return () => {
+        const existingTimer = runWatchdogTimerRef.current;
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          runWatchdogTimerRef.current = null;
+        }
+      };
+    }, []);
+
+    const readThreadContextUsage = useCallback(
+      (value: unknown): ThreadContextUsage | null => {
+        const record = toRecord(value);
+        if (!record) {
+          return null;
+        }
+
+        const turnRecord = toRecord(record.turn);
+        const tokenUsageRecord =
+          toRecord(record.tokenUsage) ??
+          toRecord(record.token_usage) ??
+          toRecord(toRecord(record.info)?.tokenUsage) ??
+          toRecord(toRecord(record.info)?.token_usage);
+        const infoRecord = toRecord(record.info);
+
+        const totalRecord =
+          toRecord(tokenUsageRecord?.total) ??
+          toRecord(infoRecord?.total_token_usage) ??
+          toRecord(infoRecord?.totalTokenUsage);
+        const lastRecord =
+          toRecord(tokenUsageRecord?.last) ??
+          toRecord(infoRecord?.last_token_usage) ??
+          toRecord(infoRecord?.lastTokenUsage);
+
+        const totalTokens =
+          readIntegerLike(totalRecord?.totalTokens) ??
+          readIntegerLike(totalRecord?.total_tokens);
+
+        const lastTokens =
+          readIntegerLike(lastRecord?.totalTokens) ??
+          readIntegerLike(lastRecord?.total_tokens) ??
+          (totalTokens !== null ? 0 : null);
+        const modelContextWindow =
+          readIntegerLike(record.modelContextWindow) ??
+          readIntegerLike(record.model_context_window) ??
+          readIntegerLike(turnRecord?.modelContextWindow) ??
+          readIntegerLike(turnRecord?.model_context_window) ??
+          readIntegerLike(tokenUsageRecord?.modelContextWindow) ??
+          readIntegerLike(tokenUsageRecord?.model_context_window) ??
+          readIntegerLike(infoRecord?.modelContextWindow) ??
+          readIntegerLike(infoRecord?.model_context_window);
+
+        if (totalTokens === null && modelContextWindow === null) {
+          return null;
+        }
+
+        return {
+          totalTokens,
+          lastTokens,
+          modelContextWindow,
+          updatedAtMs: Date.now(),
+        };
+      },
+      []
+    );
 
     const saveChatModelPreferences = useCallback(
       async (nextPreferences: Record<string, ChatModelPreference>) => {
@@ -644,11 +780,63 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       []
     );
 
+    const saveChatPlanSnapshots = useCallback(
+      async (nextSnapshots: Record<string, ActivePlanState>) => {
+        const snapshotsPath = getChatPlanSnapshotsPath();
+        if (!snapshotsPath) {
+          return;
+        }
+
+        const payload = JSON.stringify({
+          version: CHAT_PLAN_SNAPSHOTS_VERSION,
+          entries: nextSnapshots,
+        });
+
+        try {
+          await FileSystem.writeAsStringAsync(snapshotsPath, payload);
+        } catch {
+          // Best effort persistence only.
+        }
+      },
+      []
+    );
+
+    const rememberChatPlanSnapshot = useCallback(
+      (chatId: string, plan: ActivePlanState | null) => {
+        const normalizedChatId = chatId.trim();
+        if (!normalizedChatId) {
+          return;
+        }
+
+        const previous = chatPlanSnapshotsRef.current[normalizedChatId] ?? null;
+        const unchanged =
+          previous?.turnId === plan?.turnId &&
+          previous?.explanation === plan?.explanation &&
+          previous?.deltaText === plan?.deltaText &&
+          previous?.updatedAt === plan?.updatedAt &&
+          JSON.stringify(previous?.steps ?? []) === JSON.stringify(plan?.steps ?? []);
+        if (unchanged) {
+          return;
+        }
+
+        const nextSnapshots = { ...chatPlanSnapshotsRef.current };
+        if (plan) {
+          nextSnapshots[normalizedChatId] = plan;
+        } else {
+          delete nextSnapshots[normalizedChatId];
+        }
+        chatPlanSnapshotsRef.current = nextSnapshots;
+        void saveChatPlanSnapshots(nextSnapshots);
+      },
+      [saveChatPlanSnapshots]
+    );
+
     const rememberChatModelPreference = useCallback(
       (
         chatId: string | null | undefined,
         modelId: string | null | undefined,
-        effort: ReasoningEffort | null | undefined
+        effort: ReasoningEffort | null | undefined,
+        serviceTier: ServiceTier | null | undefined
       ) => {
         const normalizedChatId = typeof chatId === 'string' ? chatId.trim() : '';
         if (!normalizedChatId) {
@@ -657,11 +845,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         const normalizedModelId = normalizeModelId(modelId);
         const normalizedEffort = normalizeReasoningEffort(effort);
+        const normalizedServiceTier = toFastModeServiceTier(
+          normalizeServiceTier(serviceTier)
+        );
         const previous = chatModelPreferencesRef.current[normalizedChatId];
         if (
           previous &&
           previous.modelId === normalizedModelId &&
-          previous.effort === normalizedEffort
+          previous.effort === normalizedEffort &&
+          previous.serviceTier === normalizedServiceTier
         ) {
           return;
         }
@@ -671,6 +863,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           [normalizedChatId]: {
             modelId: normalizedModelId,
             effort: normalizedEffort,
+            serviceTier: normalizedServiceTier,
             updatedAt: new Date().toISOString(),
           },
         };
@@ -678,6 +871,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (chatIdRef.current === normalizedChatId) {
           setSelectedModelId(normalizedModelId);
           setSelectedEffort(normalizedEffort);
+          setSelectedServiceTier(normalizedServiceTier);
         }
         void saveChatModelPreferences(nextPreferences);
       },
@@ -718,6 +912,28 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         cancelled = true;
       };
     }, []);
+
+    useEffect(() => {
+      let cancelled = false;
+
+      const load = async () => {
+        try {
+          const serviceTier = await api.readServiceTierPreference();
+          if (!cancelled) {
+            setDefaultServiceTier(toFastModeServiceTier(serviceTier));
+          }
+        } catch {
+          if (!cancelled) {
+            setDefaultServiceTier(null);
+          }
+        }
+      };
+
+      void load();
+      return () => {
+        cancelled = true;
+      };
+    }, [api]);
 
     const clearExternalStatusFullSync = useCallback(() => {
       const timer = externalStatusFullSyncTimerRef.current;
@@ -895,6 +1111,68 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [upsertThreadRuntimeSnapshot]
     );
 
+    const cacheThreadContextUsage = useCallback(
+      (threadId: string, contextUsage: ThreadContextUsage | null) => {
+        if (!contextUsage) {
+          upsertThreadRuntimeSnapshot(threadId, () => ({
+            contextUsage: null,
+          }));
+          return;
+        }
+
+        const previousContextUsage =
+          threadRuntimeSnapshotsRef.current[threadId]?.contextUsage ?? null;
+        const mergedContextUsage = mergeThreadContextUsage(previousContextUsage, contextUsage);
+
+        upsertThreadRuntimeSnapshot(threadId, (previous) => {
+          return {
+            contextUsage: mergeThreadContextUsage(previous.contextUsage ?? null, mergedContextUsage),
+          };
+        });
+      },
+      [upsertThreadRuntimeSnapshot]
+    );
+
+    const cacheThreadPlan = useCallback(
+      (
+        threadId: string,
+        nextPlan:
+          | ActivePlanState
+          | null
+          | ((previous: ActivePlanState | null) => ActivePlanState | null)
+      ) => {
+        upsertThreadRuntimeSnapshot(threadId, (previous) => ({
+          plan:
+            typeof nextPlan === 'function'
+              ? (
+                  nextPlan as (previous: ActivePlanState | null) => ActivePlanState | null
+                )(previous.plan ?? null)
+              : nextPlan,
+        }));
+        rememberChatPlanSnapshot(
+          threadId,
+          threadRuntimeSnapshotsRef.current[threadId]?.plan ?? null
+        );
+      },
+      [rememberChatPlanSnapshot, upsertThreadRuntimeSnapshot]
+    );
+
+    const clearPendingPlanImplementationPrompt = useCallback((threadId: string) => {
+      if (!threadId) {
+        return;
+      }
+
+      setPendingPlanImplementationPrompts((prev) => {
+        if (!(threadId in prev)) {
+          return prev;
+        }
+
+        const next = { ...prev };
+        delete next[threadId];
+        return next;
+      });
+    }, []);
+
     const clearThreadRuntimeSnapshot = useCallback(
       (threadId: string, preserveApprovals = false) => {
         if (!threadId) {
@@ -923,11 +1201,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const applyThreadRuntimeSnapshot = useCallback(
       (threadId: string) => {
         if (!threadId) {
+          setThreadContextUsage(null);
+          setActivePlan(null);
           return;
         }
 
         const snapshot = threadRuntimeSnapshotsRef.current[threadId];
         if (!snapshot) {
+          setThreadContextUsage(null);
+          setActivePlan(null);
           return;
         }
 
@@ -950,6 +1232,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setUserInputError(null);
           setResolvingUserInput(false);
         }
+        setThreadContextUsage(snapshot.contextUsage ?? null);
+        setActivePlan(snapshot.plan ?? null);
         if (snapshot.activeTurnId !== undefined) {
           setActiveTurnId(snapshot.activeTurnId);
         }
@@ -961,10 +1245,55 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           snapshot.runWatchdogUntil > runWatchdogUntilRef.current
         ) {
           runWatchdogUntilRef.current = snapshot.runWatchdogUntil;
+          setRunWatchdogNow(Date.now());
+          scheduleRunWatchdogExpiry(snapshot.runWatchdogUntil);
         }
       },
-      []
+      [scheduleRunWatchdogExpiry]
     );
+
+    useEffect(() => {
+      let cancelled = false;
+
+      const load = async () => {
+        const snapshotsPath = getChatPlanSnapshotsPath();
+        if (!snapshotsPath) {
+          if (!cancelled) {
+            setChatPlanSnapshotsLoaded(true);
+          }
+          return;
+        }
+
+        try {
+          const raw = await FileSystem.readAsStringAsync(snapshotsPath);
+          if (cancelled) {
+            return;
+          }
+
+          const parsedSnapshots = parseChatPlanSnapshots(raw);
+          chatPlanSnapshotsRef.current = parsedSnapshots;
+          for (const [threadId, plan] of Object.entries(parsedSnapshots)) {
+            upsertThreadRuntimeSnapshot(threadId, () => ({ plan }));
+          }
+          if (chatIdRef.current) {
+            applyThreadRuntimeSnapshot(chatIdRef.current);
+          }
+        } catch {
+          if (!cancelled) {
+            chatPlanSnapshotsRef.current = {};
+          }
+        } finally {
+          if (!cancelled) {
+            setChatPlanSnapshotsLoaded(true);
+          }
+        }
+      };
+
+      void load();
+      return () => {
+        cancelled = true;
+      };
+    }, [applyThreadRuntimeSnapshot, upsertThreadRuntimeSnapshot]);
 
     const refreshPendingApprovalsForThread = useCallback(
       async (threadId: string) => {
@@ -996,6 +1325,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         msg: Record<string, unknown> | null
       ) => {
         if (!threadId) {
+          return;
+        }
+
+        if (codexEventType === 'tokencount') {
+          const contextUsage = readThreadContextUsage(msg);
+          if (contextUsage) {
+            cacheThreadContextUsage(threadId, contextUsage);
+          }
           return;
         }
 
@@ -1156,9 +1493,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [
         cacheThreadActiveCommand,
         cacheThreadActivity,
+        cacheThreadContextUsage,
         cacheThreadStreamingDelta,
         cacheThreadTurnState,
         clearThreadRuntimeSnapshot,
+        readThreadContextUsage,
         upsertThreadRuntimeSnapshot,
       ]
     );
@@ -1189,6 +1528,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       const preference = chatModelPreferencesRef.current[chatId];
       setSelectedModelId(preference?.modelId ?? null);
       setSelectedEffort(preference?.effort ?? null);
+      setSelectedServiceTier(toFastModeServiceTier(preference?.serviceTier ?? null));
     }, [chatModelPreferencesLoaded, selectedChatId]);
 
     useEffect(() => {
@@ -1198,7 +1538,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       setSelectedModelId(preferredDefaultModelId);
       setSelectedEffort(preferredDefaultEffort);
-    }, [preferredDefaultEffort, preferredDefaultModelId, selectedChatId]);
+      setSelectedServiceTier(defaultServiceTier);
+    }, [
+      defaultServiceTier,
+      preferredDefaultEffort,
+      preferredDefaultModelId,
+      selectedChatId,
+    ]);
 
     const serverDefaultModelId = modelOptions.find((model) => model.isDefault)?.id ?? null;
     const activeModelId =
@@ -1217,6 +1563,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const activeModelDefaultEffort = activeModel?.defaultReasoningEffort ?? null;
     const requestedEffort =
       selectedEffort ?? (!selectedChatId ? preferredDefaultEffort : null);
+    const appliedServiceTierForSelectedChat = toFastModeServiceTier(
+      selectedChatId
+        ? normalizeServiceTier(
+            chatModelPreferencesRef.current[selectedChatId]?.serviceTier ?? null
+          )
+        : defaultServiceTier
+    );
+    const activeServiceTier = toFastModeServiceTier(
+      selectedServiceTier ?? (!selectedChatId ? defaultServiceTier : null) ?? null
+    );
+    const fastModeEnabled = activeServiceTier === 'fast';
     const supportsSelectedEffort =
       requestedEffort &&
       (!activeModel ||
@@ -1242,6 +1599,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             : 'Model default';
     const modelReasoningLabel = `${activeModelLabel} · ${activeEffortLabel}`;
     const collaborationModeLabel = formatCollaborationModeLabel(selectedCollaborationMode);
+    const hasPendingServiceTierChange =
+      Boolean(selectedChatId) && appliedServiceTierForSelectedChat !== activeServiceTier;
+    const fastModeLabel = hasPendingServiceTierChange
+      ? `${fastModeEnabled ? 'Fast mode on' : 'Fast mode off'} · next message`
+      : fastModeEnabled
+        ? 'Fast mode on'
+        : 'Fast mode off';
 
     // Auto-transition complete/error → idle after 3s so the bar hides.
     useEffect(() => {
@@ -1287,7 +1651,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setOpeningChatId(null);
       setDraft('');
       setError(null);
+      setSelectedServiceTier(defaultServiceTier);
       setActiveCommands([]);
+      setThreadContextUsage(null);
       setPendingApproval(null);
       setPendingUserInputRequest(null);
       setUserInputDrafts({});
@@ -1320,7 +1686,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       codexReasoningBufferRef.current = '';
       hadCommandRef.current = false;
       clearRunWatchdog();
-    }, [clearExternalStatusFullSync, clearRunWatchdog]);
+    }, [clearExternalStatusFullSync, clearRunWatchdog, defaultServiceTier]);
 
     const startNewChat = useCallback(() => {
       // New chat should land on compose/home so user can pick workspace first.
@@ -1408,10 +1774,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setEffortModalVisible(false);
         setError(null);
         if (selectedChatId) {
-          rememberChatModelPreference(selectedChatId, activeModelId, effort);
+          rememberChatModelPreference(
+            selectedChatId,
+            activeModelId,
+            effort,
+            activeServiceTier
+          );
         }
       },
-      [activeModelId, rememberChatModelPreference, selectedChatId]
+      [activeModelId, activeServiceTier, rememberChatModelPreference, selectedChatId]
     );
 
     const selectModel = useCallback(
@@ -1422,7 +1793,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setModelModalVisible(false);
         setError(null);
         if (selectedChatId) {
-          rememberChatModelPreference(selectedChatId, normalizedModelId, null);
+          rememberChatModelPreference(
+            selectedChatId,
+            normalizedModelId,
+            null,
+            activeServiceTier
+          );
         }
 
         if (normalizedModelId) {
@@ -1433,7 +1809,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
         }
       },
-      [modelOptions, rememberChatModelPreference, selectedChatId]
+      [activeServiceTier, modelOptions, rememberChatModelPreference, selectedChatId]
     );
 
     const loadAttachmentFileCandidates = useCallback(async () => {
@@ -1819,15 +2195,36 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       ]);
     }, [selectedCollaborationMode]);
 
+    const toggleFastMode = useCallback(() => {
+      const nextServiceTier: ServiceTier | null =
+        activeServiceTier === 'fast' ? null : 'fast';
+      const enablingFastMode = nextServiceTier === 'fast';
+      const nextTitle = enablingFastMode ? 'Fast mode enabled' : 'Fast mode disabled';
+      setSelectedServiceTier(nextServiceTier);
+      setError(null);
+      setActivity({
+        tone: 'complete',
+        title: nextTitle,
+        detail: selectedChatId ? 'Applies to the next message' : 'Applies to the next new chat',
+      });
+    }, [activeServiceTier, selectedChatId]);
+
     const openModelReasoningMenu = useCallback(() => {
       const menuTitle = modelReasoningLabel;
+      const fastModeMenuLabel = fastModeEnabled ? 'Disable fast mode' : 'Enable fast mode';
       if (Platform.OS === 'ios') {
         ActionSheetIOS.showActionSheetWithOptions(
           {
             title: menuTitle,
-            message: `Mode: ${formatCollaborationModeLabel(selectedCollaborationMode)}`,
-            options: ['Change model', 'Change reasoning level', 'Change collaboration mode', 'Cancel'],
-            cancelButtonIndex: 3,
+            message: `Mode: ${formatCollaborationModeLabel(selectedCollaborationMode)}\nFast mode: ${fastModeEnabled ? 'On' : 'Off'}`,
+            options: [
+              'Change model',
+              'Change reasoning level',
+              'Change collaboration mode',
+              fastModeMenuLabel,
+              'Cancel',
+            ],
+            cancelButtonIndex: 4,
           },
           (buttonIndex) => {
             if (buttonIndex === 0) {
@@ -1840,6 +2237,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
             if (buttonIndex === 2) {
               openCollaborationModeMenu();
+              return;
+            }
+            if (buttonIndex === 3) {
+              void toggleFastMode();
             }
           }
         );
@@ -1860,16 +2261,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onPress: openCollaborationModeMenu,
         },
         {
+          text: fastModeMenuLabel,
+          onPress: () => {
+            void toggleFastMode();
+          },
+        },
+        {
           text: 'Cancel',
           style: 'cancel',
         },
       ]);
     }, [
       modelReasoningLabel,
+      fastModeEnabled,
       openCollaborationModeMenu,
       openEffortModal,
       openModelModal,
       selectedCollaborationMode,
+      toggleFastMode,
     ]);
 
     const closeRenameModal = useCallback(() => {
@@ -2190,7 +2599,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setSelectedModelId(match.id);
           setSelectedEffort(null);
           if (selectedChatId) {
-            rememberChatModelPreference(selectedChatId, match.id, null);
+            rememberChatModelPreference(
+              selectedChatId,
+              match.id,
+              null,
+              activeServiceTier
+            );
           }
           if ((match.reasoningEffort?.length ?? 0) > 0) {
             setEffortPickerModelId(match.id);
@@ -2261,6 +2675,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 cwd: preferredStartCwd ?? undefined,
                 model: activeModelId ?? undefined,
                 effort: activeEffort ?? undefined,
+                serviceTier: activeServiceTier ?? undefined,
                 approvalPolicy: activeApprovalPolicy,
               });
 
@@ -2285,6 +2700,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 cwd: created.cwd ?? preferredStartCwd ?? undefined,
                 model: activeModelId ?? undefined,
                 effort: activeEffort ?? undefined,
+                serviceTier: activeServiceTier ?? undefined,
                 approvalPolicy: activeApprovalPolicy,
                 collaborationMode: 'plan',
               }, {
@@ -2297,7 +2713,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               rememberChatModelPreference(
                 created.id,
                 activeModelId,
-                selectedEffort ?? activeEffort
+                selectedEffort ?? activeEffort,
+                activeServiceTier
               );
               setSelectedChat(updated);
               setError(null);
@@ -2325,36 +2742,45 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             createdAt: new Date().toISOString(),
           };
 
-          setDraft('');
-          setSelectedChat((prev) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              messages: [...prev.messages, optimisticMessage],
-            };
-          });
-          scrollToBottomReliable(true);
-
-          try {
-            setSending(true);
-            setActiveTurnId(null);
-            setStoppingTurn(false);
-            stopRequestedRef.current = false;
-            setActivePlan(null);
-            setPendingUserInputRequest(null);
-            setUserInputDrafts({});
-            setUserInputError(null);
-            setResolvingUserInput(false);
+            try {
+              setSending(true);
+              setActiveTurnId(null);
+              setStoppingTurn(false);
+              stopRequestedRef.current = false;
+              setActivePlan(null);
+              cacheThreadPlan(selectedChatId, null);
+              setPendingUserInputRequest(null);
+              setUserInputDrafts({});
+              setUserInputError(null);
+              setResolvingUserInput(false);
             setActivity({
               tone: 'running',
               title: 'Sending plan prompt',
             });
             bumpRunWatchdog();
+            setDraft('');
+            setSelectedChat((prev) => {
+              const baseChat =
+                selectedChat?.id === selectedChatId
+                  ? selectedChat
+                  : prev?.id === selectedChatId
+                    ? prev
+                    : prev;
+              if (!baseChat) {
+                return prev;
+              }
+              return {
+                ...baseChat,
+                messages: [...baseChat.messages, optimisticMessage],
+              };
+            });
+            scrollToBottomReliable(true);
             const updated = await api.sendChatMessage(selectedChatId, {
               content: argText,
               cwd: selectedChat?.cwd,
               model: activeModelId ?? undefined,
               effort: activeEffort ?? undefined,
+              serviceTier: activeServiceTier ?? undefined,
               approvalPolicy: activeApprovalPolicy,
               collaborationMode: 'plan',
             }, {
@@ -2363,7 +2789,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             rememberChatModelPreference(
               selectedChatId,
               activeModelId,
-              selectedEffort ?? activeEffort
+              selectedEffort ?? activeEffort,
+              activeServiceTier
             );
             setSelectedChat(updated);
             setError(null);
@@ -2385,6 +2812,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const lines = [
             `Model: ${activeModelLabel}`,
             `Reasoning: ${activeEffortLabel}`,
+            `Fast mode: ${fastModeEnabled ? 'On' : 'Off'}`,
             `Mode: ${formatCollaborationModeLabel(selectedCollaborationMode)}`,
             `Default workspace: ${preferredStartCwd ?? 'Bridge default workspace'}`,
           ];
@@ -2492,13 +2920,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             const forked = await api.forkChat(selectedChatId, {
               cwd: selectedChat?.cwd,
               model: activeModelId ?? undefined,
+              serviceTier: activeServiceTier ?? undefined,
               approvalPolicy: activeApprovalPolicy,
             });
             setSelectedChatId(forked.id);
             rememberChatModelPreference(
               forked.id,
               activeModelId,
-              selectedEffort ?? activeEffort
+              selectedEffort ?? activeEffort,
+              activeServiceTier
             );
             setSelectedChat(forked);
             setError(null);
@@ -2538,10 +2968,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         activeEffortLabel,
         activeModelLabel,
         activeApprovalPolicy,
+        activeServiceTier,
         api,
         appendLocalAssistantMessage,
         bumpRunWatchdog,
         clearRunWatchdog,
+        fastModeEnabled,
         modelOptions,
         onOpenGit,
         openModelModal,
@@ -2784,6 +3216,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           cwd: preferredStartCwd ?? undefined,
           model: activeModelId ?? undefined,
           effort: activeEffort ?? undefined,
+          serviceTier: activeServiceTier ?? undefined,
           approvalPolicy: activeApprovalPolicy,
         });
 
@@ -2813,6 +3246,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             cwd: created.cwd ?? preferredStartCwd ?? undefined,
             model: activeModelId ?? undefined,
             effort: activeEffort ?? undefined,
+            serviceTier: activeServiceTier ?? undefined,
             approvalPolicy: activeApprovalPolicy,
             collaborationMode: selectedCollaborationMode,
           },
@@ -2827,7 +3261,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         rememberChatModelPreference(
           created.id,
           activeModelId,
-          selectedEffort ?? activeEffort
+          selectedEffort ?? activeEffort,
+          activeServiceTier
         );
         setSelectedChat(updated);
         setPendingMentionPaths([]);
@@ -2869,6 +3304,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       activeEffort,
       activeModelId,
       activeApprovalPolicy,
+      activeServiceTier,
       handleSlashCommand,
       pendingMentionPaths,
       pendingLocalImagePaths,
@@ -2891,6 +3327,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           mentions?: MentionInput[];
           localImages?: LocalImageInput[];
           clearComposer?: boolean;
+          preservePlan?: boolean;
         }
       ) => {
         const content = rawContent.trim();
@@ -2899,6 +3336,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         const shouldClearComposer = options?.clearComposer ?? true;
+        const shouldPreservePlan = options?.preservePlan ?? false;
         if (options?.allowSlashCommands && (await handleSlashCommand(content))) {
           if (shouldClearComposer) {
             setDraft('');
@@ -2920,24 +3358,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           createdAt: new Date().toISOString(),
         };
 
-        if (shouldClearComposer) {
-          setDraft('');
-        }
-        setSelectedChat((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            messages: [...prev.messages, optimisticMessage],
-          };
-        });
-        scrollToBottomReliable(true);
-
         try {
           setSending(true);
           setActiveTurnId(null);
           setStoppingTurn(false);
           stopRequestedRef.current = false;
-          setActivePlan(null);
+          if (!shouldPreservePlan) {
+            setActivePlan(null);
+            cacheThreadPlan(selectedChatId, null);
+          }
           setPendingUserInputRequest(null);
           setUserInputDrafts({});
           setUserInputError(null);
@@ -2947,6 +3376,25 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             title: 'Sending message',
           });
           bumpRunWatchdog();
+          if (shouldClearComposer) {
+            setDraft('');
+          }
+          setSelectedChat((prev) => {
+            const baseChat =
+              selectedChat?.id === selectedChatId
+                ? selectedChat
+                : prev?.id === selectedChatId
+                  ? prev
+                  : prev;
+            if (!baseChat) {
+              return prev;
+            }
+            return {
+              ...baseChat,
+              messages: [...baseChat.messages, optimisticMessage],
+            };
+          });
+          scrollToBottomReliable(true);
           const updated = await api.sendChatMessage(
             selectedChatId,
             {
@@ -2956,6 +3404,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               cwd: selectedChat?.cwd,
               model: activeModelId ?? undefined,
               effort: activeEffort ?? undefined,
+              serviceTier: activeServiceTier ?? undefined,
               approvalPolicy: activeApprovalPolicy,
               collaborationMode: resolvedCollaborationMode,
             },
@@ -2970,7 +3419,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           rememberChatModelPreference(
             selectedChatId,
             activeModelId,
-            selectedEffort ?? activeEffort
+            selectedEffort ?? activeEffort,
+            activeServiceTier
           );
           setSelectedChat(updated);
           if (shouldClearComposer) {
@@ -3016,12 +3466,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         activeEffort,
         activeModelId,
         activeApprovalPolicy,
+        activeServiceTier,
         api,
+        cacheThreadPlan,
         handleSlashCommand,
         pendingMentionPaths,
         pendingLocalImagePaths,
         selectedCollaborationMode,
-        selectedChat?.cwd,
+        selectedChat,
         selectedChatId,
         registerTurnStarted,
         handleTurnFailure,
@@ -3094,6 +3546,45 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       stoppingTurn,
       setQueuePaused,
       uploadingAttachment,
+    ]);
+
+    const stayInPlanMode = useCallback(() => {
+      if (!selectedChatId) {
+        return;
+      }
+
+      setSelectedCollaborationMode('plan');
+      clearPendingPlanImplementationPrompt(selectedChatId);
+    }, [clearPendingPlanImplementationPrompt, selectedChatId]);
+
+    const implementPlan = useCallback(async () => {
+      if (!selectedChatId) {
+        return;
+      }
+
+      const prompt = pendingPlanImplementationPrompts[selectedChatId];
+      if (!prompt) {
+        return;
+      }
+
+      clearPendingPlanImplementationPrompt(prompt.threadId);
+      setSelectedCollaborationMode('default');
+      const sent = await sendMessageContent(PLAN_IMPLEMENTATION_CODING_MESSAGE, {
+        collaborationMode: 'default',
+        clearComposer: false,
+        preservePlan: true,
+      });
+      if (!sent) {
+        setPendingPlanImplementationPrompts((prev) => ({
+          ...prev,
+          [prompt.threadId]: prompt,
+        }));
+      }
+    }, [
+      clearPendingPlanImplementationPrompt,
+      pendingPlanImplementationPrompts,
+      selectedChatId,
+      sendMessageContent,
     ]);
 
     useEffect(() => {
@@ -3224,6 +3715,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
           const threadId = extractNotificationThreadId(params, msg);
+
+          if (codexEventType === 'tokencount') {
+            const contextUsage = readThreadContextUsage(msg);
+            if (!threadId || !contextUsage) {
+              return;
+            }
+            cacheThreadContextUsage(threadId, contextUsage);
+            if (threadId === currentId) {
+              setThreadContextUsage((previous) =>
+                mergeThreadContextUsage(previous, contextUsage)
+              );
+            }
+            return;
+          }
 
           if (!currentId) {
             if (threadId) {
@@ -3484,6 +3989,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return;
         }
 
+        if (event.method === 'thread/tokenUsage/updated') {
+          const params = toRecord(event.params);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
+          const contextUsage = readThreadContextUsage(params);
+          if (!threadId || !contextUsage) {
+            return;
+          }
+          cacheThreadContextUsage(threadId, contextUsage);
+          if (threadId === currentId) {
+            setThreadContextUsage((previous) =>
+              mergeThreadContextUsage(previous, contextUsage)
+            );
+          }
+          return;
+        }
+
         if (event.method === 'turn/started') {
           const params = toRecord(event.params);
           const threadId =
@@ -3494,6 +4015,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId) {
             return;
           }
+          const startedContextUsage = readThreadContextUsage(params);
           const turn = toRecord(params?.turn);
           const startedTurnId =
             readString(params?.turnId) ??
@@ -3502,6 +4024,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             readString(turn?.turnId) ??
             null;
           if (threadId !== currentId) {
+            if (startedContextUsage) {
+              cacheThreadContextUsage(threadId, startedContextUsage);
+            }
             cacheThreadTurnState(threadId, {
               activeTurnId: startedTurnId,
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
@@ -3514,6 +4039,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
           if (startedTurnId) {
             registerTurnStarted(threadId, startedTurnId);
+          }
+          if (startedContextUsage) {
+            cacheThreadContextUsage(threadId, startedContextUsage);
+            setThreadContextUsage((previous) =>
+              mergeThreadContextUsage(previous, startedContextUsage)
+            );
           }
           bumpRunWatchdog();
           setActivity({
@@ -3531,6 +4062,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
           const item = toRecord(params?.item);
           const itemType = readString(item?.type);
+          const itemTurnId =
+            readString(params?.turnId) ?? readString(params?.turn_id) ?? null;
+          if (itemType === 'plan' && itemTurnId) {
+            planItemTurnIdByThreadRef.current[threadId] = itemTurnId;
+          }
           if (threadId !== currentId) {
             cacheThreadTurnState(threadId, {
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
@@ -3627,6 +4163,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId) {
             return;
           }
+          const turnId = readString(params?.turnId) ?? 'unknown-turn';
+          planItemTurnIdByThreadRef.current[threadId] = turnId;
           if (threadId !== currentId) {
             cacheThreadTurnState(threadId, {
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
@@ -3635,28 +4173,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: 'running',
               title: 'Planning',
             });
+            const rawDelta = readString(params?.delta) ?? '';
+            cacheThreadPlan(threadId, (previous) =>
+              buildNextPlanStateFromDelta(previous, threadId, turnId, rawDelta)
+            );
             return;
           }
 
           setSelectedCollaborationMode('plan');
           bumpRunWatchdog();
-          const turnId = readString(params?.turnId) ?? 'unknown-turn';
           const rawDelta = readString(params?.delta) ?? '';
-          setActivePlan((prev) => {
-            const sameTurn =
-              prev && prev.threadId === threadId && prev.turnId === turnId;
-            const nextDelta = compactPlanDelta(
-              sameTurn ? `${prev.deltaText}\n${rawDelta}` : rawDelta
-            );
-            return {
-              threadId,
-              turnId,
-              explanation: sameTurn ? prev.explanation : null,
-              steps: sameTurn ? prev.steps : [],
-              deltaText: nextDelta,
-              updatedAt: new Date().toISOString(),
-            };
-          });
+          setActivePlan((prev) =>
+            buildNextPlanStateFromDelta(prev, threadId, turnId, rawDelta)
+          );
+          cacheThreadPlan(threadId, (previous) =>
+            buildNextPlanStateFromDelta(previous, threadId, turnId, rawDelta)
+          );
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Planning'
               ? prev
@@ -3888,8 +4420,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Working',
+              title: 'Planning',
             });
+            const planUpdate = toTurnPlanUpdate(params, threadId);
+            if (planUpdate) {
+              cacheThreadPlan(threadId, (previous) =>
+                buildNextPlanStateFromUpdate(previous, planUpdate)
+              );
+            }
             return;
           }
 
@@ -3897,24 +4435,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
           const planUpdate = toTurnPlanUpdate(params, threadId);
           if (planUpdate) {
-            setActivePlan((prev) => {
-              const sameTurn =
-                prev &&
-                prev.threadId === planUpdate.threadId &&
-                prev.turnId === planUpdate.turnId;
-              return {
-                threadId: planUpdate.threadId,
-                turnId: planUpdate.turnId,
-                explanation: planUpdate.explanation,
-                steps: planUpdate.plan,
-                deltaText: sameTurn ? prev.deltaText : '',
-                updatedAt: new Date().toISOString(),
-              };
-            });
+            setActivePlan((prev) => buildNextPlanStateFromUpdate(prev, planUpdate));
+            cacheThreadPlan(threadId, (previous) =>
+              buildNextPlanStateFromUpdate(previous, planUpdate)
+            );
           }
           setActivity({
             tone: 'running',
-            title: 'Working',
+            title: 'Planning',
           });
           return;
         }
@@ -3997,6 +4525,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             readString(params?.turnId) ??
             readString(params?.turn_id) ??
             null;
+          const planTurnId = planItemTurnIdByThreadRef.current[threadId] ?? null;
+          const promptTurnId = completedTurnId ?? planTurnId;
+          const shouldPromptPlanImplementation =
+            status === 'completed' &&
+            Boolean(planTurnId) &&
+            (!completedTurnId || completedTurnId === planTurnId);
+          delete planItemTurnIdByThreadRef.current[threadId];
           if (currentId !== threadId) {
             delete threadReasoningBuffersRef.current[threadId];
             cacheThreadTurnState(threadId, {
@@ -4019,6 +4554,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                       title: 'Turn completed',
                     },
             }));
+            if (shouldPromptPlanImplementation && promptTurnId) {
+              setPendingPlanImplementationPrompts((prev) => ({
+                ...prev,
+                [threadId]: {
+                  threadId,
+                  turnId: promptTurnId,
+                },
+              }));
+            } else {
+              clearPendingPlanImplementationPrompt(threadId);
+            }
             return;
           }
 
@@ -4059,11 +4605,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 detail: turnErrorMessage ?? status ?? undefined,
               });
             }
+            clearPendingPlanImplementationPrompt(threadId);
           } else {
             setActivity({
               tone: 'complete',
               title: 'Turn completed',
             });
+            if (shouldPromptPlanImplementation && promptTurnId) {
+              setPendingPlanImplementationPrompts((prev) => ({
+                ...prev,
+                [threadId]: {
+                  threadId,
+                  turnId: promptTurnId,
+                },
+              }));
+            } else {
+              clearPendingPlanImplementationPrompt(threadId);
+            }
           }
           loadChat(threadId).catch(() => {});
           return;
@@ -4336,11 +4894,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       cacheCodexRuntimeForThread,
       cacheThreadActiveCommand,
       cacheThreadActivity,
+      cacheThreadContextUsage,
       cacheThreadPendingApproval,
       cacheThreadPendingUserInputRequest,
+      cacheThreadPlan,
       cacheThreadStreamingDelta,
       cacheThreadTurnState,
+      clearPendingPlanImplementationPrompt,
       clearRunWatchdog,
+      readThreadContextUsage,
       refreshPendingApprovalsForThread,
       scheduleExternalStatusFullSync,
       registerTurnStarted,
@@ -4377,13 +4939,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return isUnchanged ? prev : latest;
           });
 
-          const hasAssistantProgress = didAssistantMessageProgress(selectedChat, latest);
-          const hasPendingUserMessage = hasRecentUnansweredUserTurn(latest);
+          const currentSelectedChat = selectedChatRef.current;
+          const hasTerminalStatus =
+            latest.status === 'complete' || latest.status === 'error';
+          const hasAssistantProgress =
+            !hasTerminalStatus &&
+            didAssistantMessageProgress(currentSelectedChat, latest);
+          const hasPendingUserMessage =
+            !hasTerminalStatus && hasRecentUnansweredUserTurn(latest);
           const shouldRunFromChat =
             isChatLikelyRunning(latest) ||
             hasAssistantProgress ||
             hasPendingUserMessage;
-          const shouldRunFromWatchdog = runWatchdogUntilRef.current > Date.now();
+          const shouldRunFromWatchdog =
+            !hasTerminalStatus && runWatchdogUntilRef.current > Date.now();
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
           const shouldRefreshWatchdog = shouldRunFromChat;
           const watchdogDurationMs =
@@ -4572,7 +5141,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const shouldShowComposer = !isOpeningChat;
     const isTurnLikelyRunning =
       Boolean(activeTurnId) || (selectedChat ? isChatLikelyRunning(selectedChat) : false);
-    const hasRunWatchdog = runWatchdogUntilRef.current > Date.now();
+    const hasRunWatchdog = runWatchdogUntilRef.current > runWatchdogNow;
 
     useEffect(() => {
       if (
@@ -4652,10 +5221,32 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         } satisfies ActivityState;
       }
 
+      if (!isLoading && !isTurnLikelyRunning && selectedChat?.status === 'error') {
+        return {
+          tone: 'error',
+          title: 'Turn failed',
+          detail: selectedChat.lastError ?? activity.detail,
+        } satisfies ActivityState;
+      }
+
+      if (!isLoading && !isTurnLikelyRunning && selectedChat?.status === 'complete') {
+        return {
+          tone: 'complete',
+          title: 'Turn completed',
+        } satisfies ActivityState;
+      }
+
       if (isLoading || isTurnLikelyRunning || activity.tone === 'running') {
+        const runningTitle =
+          activity.title === 'Thinking' ||
+          activity.title === 'Planning' ||
+          activity.title === 'Reasoning'
+            ? activity.title
+            : 'Working';
         return {
           tone: 'running',
-          title: activity.title === 'Thinking' ? 'Thinking' : 'Working',
+          title: runningTitle,
+          detail: activity.detail,
         } satisfies ActivityState;
       }
 
@@ -4672,13 +5263,79 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       Boolean(queuedMessagesDetail) ||
       visibleActivity.tone !== 'idle' ||
       Boolean(activityDetail);
+    const activeContextWindow = threadContextUsage?.modelContextWindow ?? null;
+    const contextUsedTokens = threadContextUsage?.lastTokens ?? null;
+    const contextWindowLabel =
+      activeContextWindow !== null ? formatTokenCount(activeContextWindow) : null;
+    const contextUsedLabel =
+      contextUsedTokens !== null ? formatTokenCount(contextUsedTokens) : null;
+    const contextRemainingPercent =
+      activeContextWindow !== null && contextUsedTokens !== null && activeContextWindow > 0
+        ? (() => {
+            if (activeContextWindow <= CONTEXT_WINDOW_BASELINE_TOKENS) {
+              return 0;
+            }
+
+            const effectiveWindow = activeContextWindow - CONTEXT_WINDOW_BASELINE_TOKENS;
+            const used = Math.max(0, contextUsedTokens - CONTEXT_WINDOW_BASELINE_TOKENS);
+            const remaining = Math.max(0, effectiveWindow - used);
+            return Math.max(
+              0,
+              Math.min(100, Math.round((remaining / effectiveWindow) * 100))
+            );
+          })()
+        : null;
+    const contextChipLabel =
+      contextUsedLabel && contextWindowLabel
+        ? `${contextUsedLabel} / ${contextWindowLabel}${
+            contextRemainingPercent !== null ? ` · ${String(contextRemainingPercent)}% left` : ''
+          }`
+        : contextWindowLabel
+          ? `${contextWindowLabel} window`
+          : 'Context --';
+    const contextIndicatorColor =
+      contextRemainingPercent === null
+        ? contextWindowLabel
+          ? colors.borderHighlight
+          : colors.textMuted
+        : contextRemainingPercent <= 10
+          ? colors.error
+          : contextRemainingPercent <= 25
+            ? colors.accent
+            : colors.borderHighlight;
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
-    const workspaceLabel = selectedChat?.cwd?.trim() || 'Workspace not set';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
+    const selectedThreadPlan = selectedChat
+      ? activePlan?.threadId === selectedChat.id
+        ? activePlan
+        : threadRuntimeSnapshotsRef.current[selectedChat.id]?.plan ??
+          chatPlanSnapshotsRef.current[selectedChat.id] ??
+          null
+      : null;
+    const selectedPlanImplementationPrompt = selectedChat
+      ? pendingPlanImplementationPrompts[selectedChat.id] ?? null
+      : null;
+    const planPanelCollapsed =
+      selectedChat ? (planPanelCollapsedByThread[selectedChat.id] ?? false) : false;
+    const fastModeControlDisabled = isOpeningChat;
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
     const showFloatingActivity =
       showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
+    const showPlanImplementationPrompt =
+      Boolean(selectedPlanImplementationPrompt) &&
+      !isOpeningChat &&
+      !sending &&
+      !creating &&
+      !stoppingTurn &&
+      !pendingApproval &&
+      !pendingUserInputRequest &&
+      !renameModalVisible &&
+      !attachmentModalVisible &&
+      !workspaceModalVisible &&
+      !modelModalVisible &&
+      !effortModalVisible &&
+      queuedMessages.length === 0;
     const chatBottomInset = shouldShowComposer
       ? spacing.lg + (showFloatingActivity ? spacing.xxl + spacing.sm : 0)
       : Math.max(spacing.xxl, safeAreaInsets.bottom + spacing.lg);
@@ -4689,6 +5346,41 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       }
       scrollToBottomIfPinned(false);
     }, [isOpeningChat, scrollToBottomIfPinned, selectedChat, showActivity]);
+
+    useEffect(() => {
+      const threadId = selectedChat?.id;
+      const turnId = selectedThreadPlan?.turnId;
+      if (!threadId || !turnId) {
+        return;
+      }
+
+      const previousTurnId = planPanelLastTurnByThreadRef.current[threadId];
+      if (previousTurnId === turnId) {
+        return;
+      }
+
+      planPanelLastTurnByThreadRef.current[threadId] = turnId;
+      setPlanPanelCollapsedByThread((prev) => {
+        if (prev[threadId] === false) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [threadId]: false,
+        };
+      });
+    }, [selectedChat?.id, selectedThreadPlan?.turnId]);
+
+    const toggleSelectedPlanPanel = useCallback(() => {
+      if (!selectedChat?.id || !selectedThreadPlan) {
+        return;
+      }
+
+      setPlanPanelCollapsedByThread((prev) => ({
+        ...prev,
+        [selectedChat.id]: !(prev[selectedChat.id] ?? false),
+      }));
+    }, [selectedChat?.id, selectedThreadPlan]);
 
     return (
       <View style={styles.container}>
@@ -4702,36 +5394,86 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         {selectedChat && !isOpeningChat ? (
           <View style={styles.sessionMetaRow}>
-            <Pressable style={styles.workspaceBar} onPress={handleOpenGit}>
-              <Ionicons name="folder-open-outline" size={14} color={colors.textMuted} />
-              <Text style={styles.workspaceText} numberOfLines={1}>
-                {workspaceLabel}
-              </Text>
-            </Pressable>
-            <Pressable
-              style={({ pressed }) => [
-                styles.modelChip,
-                pressed && styles.modelChipPressed,
-              ]}
-              onPress={openModelReasoningMenu}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.sessionMetaRowContent}
             >
-              <Ionicons name="sparkles-outline" size={13} color={colors.textMuted} />
-              <Text style={styles.modelChipText} numberOfLines={1}>
-                {modelReasoningLabel}
-              </Text>
-            </Pressable>
-            <Pressable
-              style={({ pressed }) => [
-                styles.modeChip,
-                pressed && styles.modelChipPressed,
-              ]}
-              onPress={openCollaborationModeMenu}
-            >
-              <Ionicons name="map-outline" size={13} color={colors.textMuted} />
-              <Text style={styles.modelChipText} numberOfLines={1}>
-                {collaborationModeLabel}
-              </Text>
-            </Pressable>
+              <View style={styles.contextChip}>
+                <View
+                  style={[
+                    styles.contextChipIndicator,
+                    {
+                      backgroundColor: contextIndicatorColor,
+                    },
+                  ]}
+                />
+                <Text style={styles.contextChipText} numberOfLines={1}>
+                  {contextChipLabel}
+                </Text>
+              </View>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modelChip,
+                  pressed && styles.modelChipPressed,
+                ]}
+                onPress={openModelReasoningMenu}
+              >
+                <Ionicons name="sparkles-outline" size={13} color={colors.textMuted} />
+                <Text style={styles.modelChipText} numberOfLines={1}>
+                  {modelReasoningLabel}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modeChip,
+                  pressed && styles.modelChipPressed,
+                ]}
+                onPress={openCollaborationModeMenu}
+              >
+                <Ionicons name="map-outline" size={13} color={colors.textMuted} />
+                <Text style={styles.modelChipText} numberOfLines={1}>
+                  {collaborationModeLabel}
+                </Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.fastChip,
+                  fastModeEnabled && styles.fastChipEnabled,
+                  pressed && styles.modelChipPressed,
+                  fastModeControlDisabled && styles.sessionMetaChipDisabled,
+                ]}
+                onPress={() => {
+                  void toggleFastMode();
+                }}
+                disabled={fastModeControlDisabled}
+              >
+                <Ionicons
+                  name={fastModeEnabled ? 'flash' : 'flash-outline'}
+                  size={13}
+                  color={fastModeEnabled ? colors.textPrimary : colors.textMuted}
+                />
+                <Text
+                  style={[
+                    styles.modelChipText,
+                    fastModeEnabled && styles.fastChipTextEnabled,
+                  ]}
+                  numberOfLines={1}
+                >
+                  Fast
+                </Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        ) : null}
+
+        {selectedThreadPlan && !isOpeningChat ? (
+          <View style={styles.planOverlayRow}>
+            <PlanCard
+              plan={selectedThreadPlan}
+              collapsed={planPanelCollapsed}
+              onToggleCollapse={toggleSelectedPlanPanel}
+            />
           </View>
         ) : null}
 
@@ -4743,7 +5485,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           {selectedChat && !isOpeningChat ? (
             <ChatView
               chat={selectedChat}
-              activePlan={activePlan?.threadId === selectedChat.id ? activePlan : null}
               bridgeUrl={bridgeUrl}
               bridgeToken={bridgeToken}
               scrollRef={scrollRef}
@@ -4765,10 +5506,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               startWorkspaceLabel={defaultStartWorkspaceLabel}
               modelReasoningLabel={modelReasoningLabel}
               collaborationModeLabel={collaborationModeLabel}
+              fastModeEnabled={fastModeEnabled}
+              fastModeLabel={fastModeLabel}
               onSuggestion={(s) => setDraft(s)}
               onOpenWorkspacePicker={openWorkspaceModal}
               onOpenModelReasoningPicker={openModelReasoningMenu}
               onOpenCollaborationModePicker={openCollaborationModeMenu}
+              onToggleFastMode={() => {
+                void toggleFastMode();
+              }}
             />
           )}
 
@@ -5178,6 +5924,45 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         </Modal>
 
         <Modal
+          visible={showPlanImplementationPrompt}
+          transparent
+          animationType="fade"
+          onRequestClose={stayInPlanMode}
+        >
+          <View style={styles.userInputModalBackdrop}>
+            <View style={styles.planPromptModalCard}>
+              <Text style={styles.userInputModalTitle}>{PLAN_IMPLEMENTATION_TITLE}</Text>
+              <View style={styles.planPromptOptionsColumn}>
+                <Pressable
+                  onPress={() => void implementPlan()}
+                  style={({ pressed }) => [
+                    styles.planPromptOptionButton,
+                    pressed && styles.planPromptOptionButtonPressed,
+                  ]}
+                >
+                  <Text style={styles.planPromptOptionTitle}>{PLAN_IMPLEMENTATION_YES}</Text>
+                  <Text style={styles.planPromptOptionDescription}>
+                    Switch to Default and start coding.
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={stayInPlanMode}
+                  style={({ pressed }) => [
+                    styles.planPromptOptionButton,
+                    pressed && styles.planPromptOptionButtonPressed,
+                  ]}
+                >
+                  <Text style={styles.planPromptOptionTitle}>{PLAN_IMPLEMENTATION_NO}</Text>
+                  <Text style={styles.planPromptOptionDescription}>
+                    Continue planning with the model.
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        <Modal
           visible={Boolean(pendingUserInputRequest)}
           transparent
           animationType="fade"
@@ -5287,18 +6072,24 @@ function ComposeView({
   startWorkspaceLabel,
   modelReasoningLabel,
   collaborationModeLabel,
+  fastModeEnabled,
+  fastModeLabel,
   onSuggestion,
   onOpenWorkspacePicker,
   onOpenModelReasoningPicker,
   onOpenCollaborationModePicker,
+  onToggleFastMode,
 }: {
   startWorkspaceLabel: string;
   modelReasoningLabel: string;
   collaborationModeLabel: string;
+  fastModeEnabled: boolean;
+  fastModeLabel: string;
   onSuggestion: (s: string) => void;
   onOpenWorkspacePicker: () => void;
   onOpenModelReasoningPicker: () => void;
   onOpenCollaborationModePicker: () => void;
+  onToggleFastMode: () => void;
 }) {
   return (
     <ScrollView
@@ -5355,6 +6146,23 @@ function ComposeView({
         </Text>
         <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
       </Pressable>
+      <Pressable
+        style={({ pressed }) => [
+          styles.workspaceSelectBtn,
+          pressed && styles.workspaceSelectBtnPressed,
+        ]}
+        onPress={onToggleFastMode}
+      >
+        <Ionicons name="flash-outline" size={16} color={colors.textMuted} />
+        <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
+          {fastModeLabel}
+        </Text>
+        <Ionicons
+          name={fastModeEnabled ? 'checkmark-circle' : 'ellipse-outline'}
+          size={14}
+          color={colors.textMuted}
+        />
+      </Pressable>
       <View style={styles.suggestions}>
         {SUGGESTIONS.map((s, index) => (
           <Pressable
@@ -5405,7 +6213,6 @@ function WorkspaceOption({
 
 function ChatView({
   chat,
-  activePlan,
   bridgeUrl,
   bridgeToken,
   scrollRef,
@@ -5418,7 +6225,6 @@ function ChatView({
   bottomInset,
 }: {
   chat: Chat;
-  activePlan: ActivePlanState | null;
   bridgeUrl: string;
   bridgeToken: string | null;
   scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
@@ -5468,7 +6274,7 @@ function ChatView({
     if (initialBottomSyncChatIdRef.current === chat.id) {
       return;
     }
-    if (!activePlan && visibleMessages.length === 0) {
+    if (visibleMessages.length === 0) {
       return;
     }
 
@@ -5482,7 +6288,6 @@ function ChatView({
       clearTimeout(timeout);
     };
   }, [
-    activePlan,
     chat.id,
     onAutoScroll,
     visibleMessages.length,
@@ -5582,44 +6387,111 @@ function ChatView({
         updateCellsBatchingPeriod={isLargeChat ? 0 : undefined}
         windowSize={isLargeChat ? 21 : 11}
         removeClippedSubviews={isLargeChat ? false : Platform.OS === 'android'}
-        ListHeaderComponent={activePlan ? <PlanCard plan={activePlan} /> : null}
       />
     </View>
   );
 }
 
-function PlanCard({ plan }: { plan: ActivePlanState }) {
+function PlanCard({
+  plan,
+  collapsed,
+  onToggleCollapse,
+}: {
+  plan: ActivePlanState;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+}) {
   const hasSteps = plan.steps.length > 0;
+  const hasStructuredUpdate = hasSteps || Boolean(plan.explanation?.trim());
   const deltaPreview = toTickerSnippet(plan.deltaText, 260);
-  if (!hasSteps && !plan.explanation && !deltaPreview) {
+  if (!hasStructuredUpdate && !deltaPreview) {
     return null;
   }
 
+  const title = hasStructuredUpdate ? 'Updated Plan' : 'Proposed Plan';
+  const activeStep =
+    plan.steps.find((step) => step.status === 'inProgress') ??
+    plan.steps.find((step) => step.status === 'pending') ??
+    plan.steps[plan.steps.length - 1] ??
+    null;
+  const collapsedSummary =
+    activeStep?.step ??
+    plan.explanation?.trim() ??
+    deltaPreview ??
+    '(no steps provided)';
+
   return (
-    <View style={styles.planCard}>
-      <View style={styles.planCardHeader}>
+    <View style={[styles.planCard, styles.planOverlayCard]}>
+      <Pressable
+        style={({ pressed }) => [
+          styles.planCardHeader,
+          styles.planCardHeaderPressable,
+          pressed && styles.modelChipPressed,
+        ]}
+        onPress={onToggleCollapse}
+      >
         <Ionicons name="map-outline" size={14} color={colors.textPrimary} />
-        <Text style={styles.planCardTitle}>Plan</Text>
-      </View>
-
-      {plan.explanation ? (
-        <Text style={styles.planExplanationText}>{plan.explanation}</Text>
-      ) : null}
-
-      {hasSteps ? (
-        <View style={styles.planStepsList}>
-          {plan.steps.map((step, index) => (
-            <View key={`${plan.turnId}-${index}-${step.step}`} style={styles.planStepRow}>
-              <Text style={styles.planStepStatus}>{renderPlanStatusGlyph(step.status)}</Text>
-              <Text style={styles.planStepText}>{step.step}</Text>
-            </View>
-          ))}
+        <View style={styles.planCardHeaderText}>
+          <Text style={styles.planCardTitle}>{title}</Text>
+          {collapsed ? (
+            <Text style={styles.planCardSummary} numberOfLines={1}>
+              {collapsedSummary}
+            </Text>
+          ) : null}
         </View>
-      ) : null}
+        <Ionicons
+          name={collapsed ? 'chevron-down-outline' : 'chevron-up-outline'}
+          size={16}
+          color={colors.textMuted}
+        />
+      </Pressable>
 
-      {!hasSteps && deltaPreview ? (
-        <Text style={styles.planDeltaText}>{deltaPreview}</Text>
-      ) : null}
+      {collapsed ? null : (
+        <>
+          {plan.explanation ? (
+            <Text style={styles.planExplanationText}>{plan.explanation}</Text>
+          ) : null}
+
+          {hasSteps ? (
+            <View style={styles.planStepsList}>
+              {plan.steps.map((step, index) => (
+                <View key={`${plan.turnId}-${index}-${step.step}`} style={styles.planStepRow}>
+                  <Text
+                    style={[
+                      styles.planStepStatus,
+                      step.status === 'completed'
+                        ? styles.planStepStatusCompleted
+                        : step.status === 'inProgress'
+                          ? styles.planStepStatusInProgress
+                          : styles.planStepStatusPending,
+                    ]}
+                  >
+                    {renderPlanStatusGlyph(step.status)}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.planStepText,
+                      step.status === 'completed'
+                        ? styles.planStepTextCompleted
+                        : step.status === 'inProgress'
+                          ? styles.planStepTextInProgress
+                          : styles.planStepTextPending,
+                    ]}
+                  >
+                    {step.step}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ) : hasStructuredUpdate ? (
+            <Text style={styles.planDeltaText}>(no steps provided)</Text>
+          ) : null}
+
+          {!hasStructuredUpdate && deltaPreview ? (
+            <Text style={styles.planDeltaText}>{deltaPreview}</Text>
+          ) : null}
+        </>
+      )}
     </View>
   );
 }
@@ -5649,8 +6521,54 @@ function readNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function readIntegerLike(value: unknown): number | null {
+  const numberValue = readNumber(value);
+  if (numberValue !== null) {
+    return Math.max(0, Math.floor(numberValue));
+  }
+
+  const stringValue = readString(value)?.trim();
+  if (!stringValue) {
+    return null;
+  }
+
+  const parsed = Number(stringValue);
+  return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : null;
+}
+
 function readBoolean(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
+}
+
+function mergeThreadContextUsage(
+  previous: ThreadContextUsage | null,
+  next: ThreadContextUsage | null
+): ThreadContextUsage | null {
+  if (!next) {
+    return previous;
+  }
+
+  return {
+    totalTokens: next.totalTokens ?? previous?.totalTokens ?? null,
+    lastTokens: next.lastTokens ?? previous?.lastTokens ?? null,
+    modelContextWindow: next.modelContextWindow ?? previous?.modelContextWindow ?? null,
+    updatedAtMs: next.updatedAtMs,
+  };
+}
+
+function formatTokenCount(value: number): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) {
+    const millions = value / 1_000_000;
+    return `${millions >= 10 ? millions.toFixed(0) : millions.toFixed(1)}M`;
+  }
+
+  if (abs >= 1_000) {
+    const thousands = value / 1_000;
+    return `${thousands >= 10 ? thousands.toFixed(0) : thousands.toFixed(1)}k`;
+  }
+
+  return String(Math.round(value));
 }
 
 function compactPlanDelta(value: string): string {
@@ -5662,14 +6580,60 @@ function compactPlanDelta(value: string): string {
     .slice(-1200);
 }
 
+function buildNextPlanStateFromDelta(
+  previous: ActivePlanState | null,
+  threadId: string,
+  turnId: string,
+  rawDelta: string
+): ActivePlanState {
+  const sameTurn =
+    previous && previous.threadId === threadId && previous.turnId === turnId;
+  const nextDelta = compactPlanDelta(
+    sameTurn ? `${previous.deltaText}\n${rawDelta}` : rawDelta
+  );
+
+  return {
+    threadId,
+    turnId,
+    explanation: sameTurn ? previous.explanation : null,
+    steps: sameTurn ? previous.steps : [],
+    deltaText: nextDelta,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function buildNextPlanStateFromUpdate(
+  previous: ActivePlanState | null,
+  next: {
+    threadId: string;
+    turnId: string;
+    explanation: string | null;
+    plan: TurnPlanStep[];
+  }
+): ActivePlanState {
+  const sameTurn =
+    previous &&
+    previous.threadId === next.threadId &&
+    previous.turnId === next.turnId;
+
+  return {
+    threadId: next.threadId,
+    turnId: next.turnId,
+    explanation: next.explanation,
+    steps: next.plan,
+    deltaText: sameTurn ? previous.deltaText : '',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function renderPlanStatusGlyph(status: TurnPlanStep['status']): string {
   if (status === 'completed') {
-    return '●';
+    return '✔';
   }
   if (status === 'inProgress') {
-    return '◐';
+    return '□';
   }
-  return '○';
+  return '□';
 }
 
 function toTurnPlanUpdate(
@@ -6130,6 +7094,27 @@ function normalizeReasoningEffort(
   return null;
 }
 
+function normalizeServiceTier(
+  serviceTier: string | null | undefined
+): ServiceTier | null {
+  if (typeof serviceTier !== 'string') {
+    return null;
+  }
+
+  const normalized = serviceTier.trim().toLowerCase();
+  if (normalized === 'flex' || normalized === 'fast') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function toFastModeServiceTier(
+  serviceTier: ServiceTier | null | undefined
+): ServiceTier | null {
+  return serviceTier === 'fast' ? 'fast' : null;
+}
+
 function toApprovalPolicyForMode(mode: ApprovalMode | null | undefined): ApprovalPolicy {
   return mode === 'yolo' ? 'never' : 'untrusted';
 }
@@ -6141,6 +7126,15 @@ function getChatModelPreferencesPath(): string | null {
   }
 
   return `${base}${CHAT_MODEL_PREFERENCES_FILE}`;
+}
+
+function getChatPlanSnapshotsPath(): string | null {
+  const base = FileSystem.documentDirectory;
+  if (typeof base !== 'string' || base.trim().length === 0) {
+    return null;
+  }
+
+  return `${base}${CHAT_PLAN_SNAPSHOTS_FILE}`;
 }
 
 function parseChatModelPreferences(raw: string): Record<string, ChatModelPreference> {
@@ -6175,6 +7169,80 @@ function parseChatModelPreferences(raw: string): Record<string, ChatModelPrefere
       result[normalizedChatId] = {
         modelId: normalizeModelId(readString(entry.modelId)),
         effort: normalizeReasoningEffort(readString(entry.effort)),
+        serviceTier: toFastModeServiceTier(
+          normalizeServiceTier(readString(entry.serviceTier))
+        ),
+        updatedAt: readString(entry.updatedAt) ?? new Date(0).toISOString(),
+      };
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function parseChatPlanSnapshots(raw: string): Record<string, ActivePlanState> {
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const parsedRecord = toRecord(parsed);
+    if (!parsedRecord || parsedRecord.version !== CHAT_PLAN_SNAPSHOTS_VERSION) {
+      return {};
+    }
+
+    const entries = toRecord(parsedRecord.entries);
+    if (!entries) {
+      return {};
+    }
+
+    const result: Record<string, ActivePlanState> = {};
+    for (const [chatId, value] of Object.entries(entries)) {
+      const entry = toRecord(value);
+      if (!entry) {
+        continue;
+      }
+
+      const normalizedChatId = chatId.trim();
+      const threadId = readString(entry.threadId) ?? normalizedChatId;
+      const turnId = readString(entry.turnId);
+      if (!normalizedChatId || !threadId || !turnId) {
+        continue;
+      }
+
+      const rawSteps = Array.isArray(entry.steps) ? entry.steps : [];
+      const steps: TurnPlanStep[] = rawSteps
+        .map((item) => {
+          const itemRecord = toRecord(item);
+          if (!itemRecord) {
+            return null;
+          }
+
+          const step = readString(itemRecord.step);
+          const status = readString(itemRecord.status);
+          if (
+            !step ||
+            (status !== 'pending' && status !== 'inProgress' && status !== 'completed')
+          ) {
+            return null;
+          }
+
+          return {
+            step,
+            status,
+          } satisfies TurnPlanStep;
+        })
+        .filter((item): item is TurnPlanStep => item !== null);
+
+      result[normalizedChatId] = {
+        threadId,
+        turnId,
+        explanation: readString(entry.explanation),
+        steps,
+        deltaText: readString(entry.deltaText) ?? '',
         updatedAt: readString(entry.updatedAt) ?? new Date(0).toISOString(),
       };
     }
@@ -6684,26 +7752,45 @@ const styles = StyleSheet.create({
     zIndex: 3,
   },
   sessionMetaRow: {
+    backgroundColor: colors.bgMain,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.borderLight,
+    paddingVertical: spacing.sm,
+  },
+  sessionMetaRowContent: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.sm,
-    backgroundColor: colors.bgMain,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
   },
-  workspaceBar: {
+  planOverlayRow: {
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+    zIndex: 2,
+  },
+  contextChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    flex: 1,
-    minHeight: 20,
+    gap: spacing.xs,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgItem,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    flexShrink: 0,
   },
-  workspaceText: {
+  contextChipIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    flexShrink: 0,
+  },
+  contextChipText: {
     ...typography.caption,
-    color: colors.textSecondary,
-    flex: 1,
+    color: colors.textPrimary,
+    fontWeight: '600',
   },
   modelChip: {
     flexDirection: 'row',
@@ -6715,7 +7802,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bgItem,
     paddingHorizontal: spacing.sm,
     paddingVertical: 5,
-    maxWidth: '58%',
+    flexShrink: 0,
   },
   modeChip: {
     flexDirection: 'row',
@@ -6727,14 +7814,36 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bgItem,
     paddingHorizontal: spacing.sm,
     paddingVertical: 5,
-    maxWidth: '38%',
+    flexShrink: 0,
+  },
+  fastChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgItem,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    flexShrink: 0,
+  },
+  fastChipEnabled: {
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.inlineCodeBg,
   },
   modelChipPressed: {
     opacity: 0.86,
   },
+  sessionMetaChipDisabled: {
+    opacity: 0.5,
+  },
   modelChipText: {
     ...typography.caption,
     color: colors.textSecondary,
+  },
+  fastChipTextEnabled: {
+    color: colors.textPrimary,
   },
   planCard: {
     borderWidth: StyleSheet.hairlineWidth,
@@ -6744,20 +7853,44 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     marginBottom: spacing.sm,
   },
+  planOverlayCard: {
+    marginBottom: 0,
+    shadowColor: '#000',
+    shadowOpacity: 0.16,
+    shadowRadius: 10,
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    elevation: 4,
+  },
   planCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
     marginBottom: spacing.xs,
   },
+  planCardHeaderPressable: {
+    marginBottom: 0,
+  },
+  planCardHeaderText: {
+    flex: 1,
+    gap: 2,
+  },
   planCardTitle: {
     ...typography.caption,
     color: colors.textPrimary,
     fontWeight: '700',
   },
+  planCardSummary: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
   planExplanationText: {
     ...typography.caption,
     color: colors.textSecondary,
+    fontStyle: 'italic',
+    marginTop: spacing.sm,
     marginBottom: spacing.sm,
   },
   planStepsList: {
@@ -6773,10 +7906,31 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: 1,
   },
+  planStepStatusCompleted: {
+    color: colors.textMuted,
+  },
+  planStepStatusInProgress: {
+    color: colors.accent,
+    fontWeight: '700',
+  },
+  planStepStatusPending: {
+    color: colors.textMuted,
+  },
   planStepText: {
     ...typography.caption,
     color: colors.textPrimary,
     flex: 1,
+  },
+  planStepTextCompleted: {
+    color: colors.textMuted,
+    textDecorationLine: 'line-through',
+  },
+  planStepTextInProgress: {
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  planStepTextPending: {
+    color: colors.textPrimary,
   },
   planDeltaText: {
     ...typography.caption,
@@ -7038,9 +8192,41 @@ const styles = StyleSheet.create({
     gap: spacing.md,
     maxHeight: '80%',
   },
+  planPromptModalCard: {
+    backgroundColor: colors.bgItem,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.borderHighlight,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
   userInputModalTitle: {
     ...typography.headline,
     color: colors.textPrimary,
+  },
+  planPromptOptionsColumn: {
+    gap: spacing.sm,
+  },
+  planPromptOptionButton: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+    borderRadius: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    gap: spacing.xs,
+  },
+  planPromptOptionButtonPressed: {
+    opacity: 0.88,
+  },
+  planPromptOptionTitle: {
+    ...typography.body,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  planPromptOptionDescription: {
+    ...typography.caption,
+    color: colors.textSecondary,
   },
   userInputQuestionsList: {
     maxHeight: 380,

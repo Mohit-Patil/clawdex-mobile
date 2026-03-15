@@ -1510,10 +1510,7 @@ fn build_rollout_event_msg_notification(
     timestamp: Option<&str>,
 ) -> Option<(String, Value)> {
     let raw_type = read_string(payload.get("type"))?;
-    if matches!(
-        raw_type.as_str(),
-        "token_count" | "user_message" | "context_compacted"
-    ) {
+    if matches!(raw_type.as_str(), "user_message" | "context_compacted") {
         return None;
     }
 
@@ -3991,18 +3988,29 @@ mod tests {
     }
 
     #[test]
-    fn rollout_event_msg_mapping_ignores_noise_events() {
-        assert!(build_rollout_event_msg_notification(
+    fn rollout_event_msg_mapping_forwards_token_count_events() {
+        let token_count = build_rollout_event_msg_notification(
             json!({
                 "type": "token_count",
-                "info": {}
+                "info": {
+                    "model_context_window": 200000
+                }
             })
             .as_object()
             .expect("event payload object"),
             "thread-1",
             None,
         )
-        .is_none());
+        .expect("token count notification");
+
+        assert_eq!(token_count.0, "codex/event/token_count");
+        assert_eq!(token_count.1["msg"]["type"], "token_count");
+        assert_eq!(token_count.1["msg"]["thread_id"], "thread-1");
+        assert_eq!(token_count.1["msg"]["info"]["model_context_window"], 200000);
+    }
+
+    #[test]
+    fn rollout_event_msg_mapping_ignores_noise_events() {
         assert!(build_rollout_event_msg_notification(
             json!({
                 "type": "user_message",
