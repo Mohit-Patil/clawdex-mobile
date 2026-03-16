@@ -100,6 +100,38 @@ export type ReasoningEffort =
 
 export type ServiceTier = 'flex' | 'fast';
 
+export type PlanType =
+  | 'free'
+  | 'go'
+  | 'plus'
+  | 'pro'
+  | 'team'
+  | 'business'
+  | 'enterprise'
+  | 'edu'
+  | 'unknown';
+
+export interface AccountCreditsSnapshot {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+export interface AccountRateLimitWindow {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+export interface AccountRateLimitSnapshot {
+  limitId: string | null;
+  limitName: string | null;
+  primary: AccountRateLimitWindow | null;
+  secondary: AccountRateLimitWindow | null;
+  credits: AccountCreditsSnapshot | null;
+  planType: PlanType | null;
+}
+
 export type ApprovalPolicy =
   | 'untrusted'
   | 'on-request'

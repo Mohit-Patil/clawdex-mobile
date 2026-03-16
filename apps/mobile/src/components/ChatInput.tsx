@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   type NativeSyntheticEvent,
@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 
 import type { VoiceState } from '../hooks/useVoiceRecorder';
+import { resolveComposerBottomSpacing } from './chat-input-layout';
 import { VoiceRecordingWaveform } from './VoiceRecordingWaveform';
 import { colors, radius, spacing } from '../theme';
 
@@ -38,6 +39,7 @@ interface ChatInputProps {
   voiceMetering?: number | null;
   safeAreaBottomInset?: number;
   keyboardVisible?: boolean;
+  footer?: ReactNode;
 }
 
 export function ChatInput({
@@ -59,6 +61,7 @@ export function ChatInput({
   voiceMetering = null,
   safeAreaBottomInset = 0,
   keyboardVisible = false,
+  footer = null,
 }: ChatInputProps) {
   const INPUT_TEXT_LINE_HEIGHT = 20;
   const INPUT_TEXT_VERTICAL_PADDING = Platform.OS === 'ios' ? 2 : 0;
@@ -92,13 +95,11 @@ export function ChatInput({
   const showVoiceStatusUi = showVoiceRecordingUi || showVoiceTranscribingUi;
   const shouldShowActionButton =
     canStop || showSendButton || showVoiceButton || voiceState !== 'idle';
-  const baseBottomPadding =
-    Platform.OS === 'ios'
-      ? keyboardVisible
-        ? spacing.sm
-        : spacing.lg
-      : spacing.md;
-  const extraBottomInset = keyboardVisible ? 0 : safeAreaBottomInset;
+  const composerBottomSpacing = resolveComposerBottomSpacing(
+    Platform.OS,
+    safeAreaBottomInset,
+    keyboardVisible
+  );
 
   return (
     <View style={styles.shell}>
@@ -112,8 +113,7 @@ export function ChatInput({
         style={[
           styles.container,
           {
-            paddingBottom:
-              baseBottomPadding + extraBottomInset,
+            paddingBottom: composerBottomSpacing.totalBottomPadding,
           },
         ]}
       >
@@ -298,6 +298,7 @@ export function ChatInput({
             ) : null}
           </View>
         </View>
+        {footer ? <View style={styles.footer}>{footer}</View> : null}
       </View>
     </View>
   );
@@ -312,13 +313,17 @@ const styles = StyleSheet.create({
   container: {
     gap: spacing.xs,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingTop: spacing.sm,
     backgroundColor: 'rgba(6, 9, 13, 0.42)',
   },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
+  },
+  footer: {
+    alignItems: 'flex-start',
+    marginTop: 2,
   },
   attachmentList: {
     maxHeight: 34,

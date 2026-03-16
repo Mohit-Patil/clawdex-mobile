@@ -34,7 +34,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
+import { readAccountRateLimitSnapshot } from '../api/rateLimits';
 import type {
+  AccountRateLimitSnapshot,
   ApprovalMode,
   ApprovalPolicy,
   ApprovalDecision,
@@ -59,7 +61,9 @@ import { ApprovalBanner } from '../components/ApprovalBanner';
 import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
 import { ChatMessage } from '../components/ChatMessage';
+import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
 import { BrandMark } from '../components/BrandMark';
+import { buildComposerUsageLimitBadges } from '../components/usageLimitBadges';
 import { env } from '../config';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { colors, spacing, typography } from '../theme';
@@ -500,6 +504,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       tone: 'idle',
       title: 'Ready',
     });
+    const [accountRateLimits, setAccountRateLimits] = useState<AccountRateLimitSnapshot | null>(
+      null
+    );
+    const accountRateLimitsRef = useRef<AccountRateLimitSnapshot | null>(null);
+    accountRateLimitsRef.current = accountRateLimits;
     const [threadContextUsage, setThreadContextUsage] = useState<ThreadContextUsage | null>(
       null
     );
@@ -927,6 +936,27 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!cancelled) {
             setDefaultServiceTier(null);
           }
+        }
+      };
+
+      void load();
+      return () => {
+        cancelled = true;
+      };
+    }, [api]);
+
+    useEffect(() => {
+      let cancelled = false;
+
+      const load = async () => {
+        try {
+          const snapshot = await api.readAccountRateLimits();
+          if (!cancelled) {
+            accountRateLimitsRef.current = snapshot;
+            setAccountRateLimits(snapshot);
+          }
+        } catch {
+          // Best effort hydration. The footer stays hidden when unavailable.
         }
       };
 
@@ -3726,6 +3756,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       return ws.onEvent((event: RpcNotification) => {
         const currentId = chatIdRef.current;
 
+        if (event.method === 'account/rateLimits/updated') {
+          const params = toRecord(event.params);
+          const snapshot = readAccountRateLimitSnapshot(
+            params?.rateLimits ?? params?.rate_limits ?? event.params
+          );
+          accountRateLimitsRef.current = snapshot;
+          setAccountRateLimits(snapshot);
+          return;
+        }
+
         if (event.method === 'thread/name/updated') {
           const params = toRecord(event.params);
           const threadId = extractNotificationThreadId(params);
@@ -3762,15 +3802,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const threadId = extractNotificationThreadId(params, msg);
 
           if (codexEventType === 'tokencount') {
-            const contextUsage = readThreadContextUsage(msg);
-            if (!threadId || !contextUsage) {
-              return;
+            const rateLimitSnapshot = readAccountRateLimitSnapshot(
+              msg?.rate_limits ?? msg?.rateLimits
+            );
+            if (rateLimitSnapshot && !accountRateLimitsRef.current) {
+              // Token-count events can lag behind account-level rate-limit reads.
+              // Only use them as a bootstrap source when we have no account snapshot yet.
+              accountRateLimitsRef.current = rateLimitSnapshot;
+              setAccountRateLimits(rateLimitSnapshot);
             }
-            cacheThreadContextUsage(threadId, contextUsage);
-            if (threadId === currentId) {
-              setThreadContextUsage((previous) =>
-                mergeThreadContextUsage(previous, contextUsage)
-              );
+
+            const contextUsage = readThreadContextUsage(msg);
+            if (threadId && contextUsage) {
+              cacheThreadContextUsage(threadId, contextUsage);
+              if (threadId === currentId) {
+                setThreadContextUsage((previous) =>
+                  mergeThreadContextUsage(previous, contextUsage)
+                );
+              }
             }
             return;
           }
@@ -5321,6 +5370,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             );
           })()
         : null;
+    const composerUsageLimitBadges = buildComposerUsageLimitBadges(accountRateLimits);
     const contextChipLabel =
       contextUsedLabel && contextWindowLabel
         ? `${contextUsedLabel} / ${contextWindowLabel}${
@@ -5664,6 +5714,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
                 safeAreaBottomInset={safeAreaInsets.bottom}
                 keyboardVisible={keyboardVisible}
+                footer={
+                  composerUsageLimitBadges.length > 0 ? (
+                    <ComposerUsageLimits limits={composerUsageLimitBadges} />
+                  ) : null
+                }
               />
             </View>
           ) : null}
@@ -7863,7 +7918,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bgMain,
   },
   composerContainerResting: {
-    marginBottom: spacing.xs,
+    marginBottom: 0,
   },
   activityDock: {
     backgroundColor: colors.bgMain,

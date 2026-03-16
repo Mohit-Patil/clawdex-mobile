@@ -21,6 +21,128 @@ describe('HostBridgeApiClient', () => {
     expect(result.status).toBe('ok');
   });
 
+  it('readAccountRateLimits() requests account/rateLimits/read and prefers codex bucket', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: 'codex',
+          primary: {
+            usedPercent: 22,
+            windowDurationMins: 300,
+            resetsAt: 1_700_000_000,
+          },
+          secondary: {
+            usedPercent: 61,
+            windowDurationMins: 10_080,
+            resetsAt: 1_700_000_100,
+          },
+          planType: 'plus',
+        },
+      },
+      rateLimits: {
+        limitId: 'legacy',
+        primary: {
+          usedPercent: 99,
+          windowDurationMins: 60,
+          resetsAt: 1_700_000_200,
+        },
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccountRateLimits();
+
+    expect(ws.request).toHaveBeenCalledWith('account/rateLimits/read');
+    expect(result).toMatchObject({
+      limitId: 'codex',
+      planType: 'plus',
+      primary: {
+        usedPercent: 22,
+        windowDurationMins: 300,
+      },
+      secondary: {
+        usedPercent: 61,
+        windowDurationMins: 10080,
+      },
+    });
+  });
+
+  it('readAccountRateLimits() falls back to first populated keyed snapshot with snake_case payloads', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      rate_limits_by_limit_id: {
+        empty: {
+          limit_id: 'empty',
+          primary: null,
+          secondary: null,
+        },
+        shared: {
+          limit_id: 'shared',
+          limit_name: 'Shared',
+          primary: {
+            used_percent: '15',
+            window_duration_mins: '300',
+            resets_at: '1700000000',
+          },
+          secondary: null,
+          plan_type: 'team',
+        },
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccountRateLimits();
+
+    expect(result).toMatchObject({
+      limitId: 'shared',
+      limitName: 'Shared',
+      planType: 'team',
+      primary: {
+        usedPercent: 15,
+        windowDurationMins: 300,
+        resetsAt: 1700000000,
+      },
+      secondary: null,
+    });
+  });
+
+  it('readAccountRateLimits() falls back to top-level rate limits when keyed buckets are unavailable', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: 'codex',
+          primary: null,
+          secondary: null,
+        },
+      },
+      rate_limits: {
+        limit_id: 'legacy',
+        primary: {
+          used_percent: 44,
+          window_duration_mins: 60,
+          resets_at: 1700001234,
+        },
+        secondary: null,
+        plan_type: 'pro',
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccountRateLimits();
+
+    expect(result).toMatchObject({
+      limitId: 'legacy',
+      planType: 'pro',
+      primary: {
+        usedPercent: 44,
+        windowDurationMins: 60,
+        resetsAt: 1700001234,
+      },
+    });
+  });
+
   it('listChats() maps app-server list response', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({

@@ -6,7 +6,9 @@ import {
   type RawThread,
   toRawThread,
 } from './chatMapping';
+import { readAccountRateLimits as readSelectedAccountRateLimits } from './rateLimits';
 import type {
+  AccountRateLimitSnapshot,
   ApprovalPolicy,
   ApprovalDecision,
   CollaborationMode,
@@ -151,6 +153,11 @@ export class HostBridgeApiClient {
 
   health(): Promise<HealthResponse> {
     return this.ws.request<HealthResponse>('bridge/health/read');
+  }
+
+  async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {
+    const response = await this.ws.request<Record<string, unknown>>('account/rateLimits/read');
+    return readSelectedAccountRateLimits(response);
   }
 
   async listChats(): Promise<ChatSummary[]> {
