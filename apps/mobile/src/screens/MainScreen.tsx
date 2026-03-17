@@ -12,9 +12,7 @@ import {
   useState,
 } from 'react';
 import {
-  ActionSheetIOS,
   ActivityIndicator,
-  Alert,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -63,6 +61,7 @@ import { ChatInput } from '../components/ChatInput';
 import { ChatMessage } from '../components/ChatMessage';
 import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
 import { BrandMark } from '../components/BrandMark';
+import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import { buildComposerUsageLimitBadges } from '../components/usageLimitBadges';
 import { env } from '../config';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
@@ -471,6 +470,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [renameDraft, setRenameDraft] = useState('');
     const [renaming, setRenaming] = useState(false);
     const [attachmentModalVisible, setAttachmentModalVisible] = useState(false);
+    const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
     const [attachmentPathDraft, setAttachmentPathDraft] = useState('');
     const [pendingMentionPaths, setPendingMentionPaths] = useState<string[]>([]);
     const [pendingLocalImagePaths, setPendingLocalImagePaths] = useState<string[]>([]);
@@ -483,7 +483,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [workspaceModalVisible, setWorkspaceModalVisible] = useState(false);
     const [workspaceOptions, setWorkspaceOptions] = useState<string[]>([]);
     const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
+    const [chatTitleMenuVisible, setChatTitleMenuVisible] = useState(false);
     const [modelModalVisible, setModelModalVisible] = useState(false);
+    const [modelSettingsMenuVisible, setModelSettingsMenuVisible] = useState(false);
     const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
     const [loadingModels, setLoadingModels] = useState(false);
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
@@ -498,6 +500,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
     const [queueDispatching, setQueueDispatching] = useState(false);
     const [queuePaused, setQueuePaused] = useState(false);
+    const [collaborationModeMenuVisible, setCollaborationModeMenuVisible] = useState(false);
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
     const [activity, setActivity] = useState<ActivityState>({
@@ -1580,7 +1583,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChatId,
     ]);
 
-    const serverDefaultModelId = modelOptions.find((model) => model.isDefault)?.id ?? null;
+    const serverDefaultModel = modelOptions.find((model) => model.isDefault) ?? null;
+    const serverDefaultModelId = serverDefaultModel?.id ?? null;
     const activeModelId =
       selectedModelId ??
       (selectedChatId ? null : preferredDefaultModelId) ??
@@ -1700,6 +1704,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setRenameDraft('');
       setRenaming(false);
       setAttachmentModalVisible(false);
+      setAttachmentMenuVisible(false);
       setAttachmentPathDraft('');
       setPendingMentionPaths([]);
       setPendingLocalImagePaths([]);
@@ -1708,6 +1713,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setUploadingAttachment(false);
       setActiveTurnId(null);
       setStoppingTurn(false);
+      setWorkspaceModalVisible(false);
+      setChatTitleMenuVisible(false);
+      setModelModalVisible(false);
+      setModelSettingsMenuVisible(false);
+      setCollaborationModeMenuVisible(false);
+      setEffortModalVisible(false);
       setQueuedMessages([]);
       setQueueDispatching(false);
       setQueuePaused(false);
@@ -2059,57 +2070,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [uploadMobileAttachment]);
 
     const openAttachmentMenu = useCallback(() => {
-      if (Platform.OS === 'ios') {
-        ActionSheetIOS.showActionSheetWithOptions(
-          {
-            options: [
-              'Attach from workspace path',
-              'Pick file from phone',
-              'Pick image from phone',
-              'Cancel',
-            ],
-            cancelButtonIndex: 3,
-          },
-          (buttonIndex) => {
-            if (buttonIndex === 0) {
-              openAttachmentPathModal();
-              return;
-            }
-            if (buttonIndex === 1) {
-              void pickFileFromDevice();
-              return;
-            }
-            if (buttonIndex === 2) {
-              void pickImageFromDevice();
-            }
-          }
-        );
-        return;
-      }
-
-      Alert.alert('Attach', 'Choose attachment source', [
-        {
-          text: 'Workspace path',
-          onPress: openAttachmentPathModal,
-        },
-        {
-          text: 'File from phone',
-          onPress: () => {
-            void pickFileFromDevice();
-          },
-        },
-        {
-          text: 'Image from phone',
-          onPress: () => {
-            void pickImageFromDevice();
-          },
-        },
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-      ]);
-    }, [openAttachmentPathModal, pickFileFromDevice, pickImageFromDevice]);
+      setAttachmentMenuVisible(true);
+    }, []);
 
     const submitAttachmentPath = useCallback(() => {
       if (!addPendingMentionPath(attachmentPathDraft)) {
@@ -2154,81 +2116,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
-      if (Platform.OS === 'ios') {
-        ActionSheetIOS.showActionSheetWithOptions(
-          {
-            options: ['Rename chat', 'Cancel'],
-            cancelButtonIndex: 1,
-          },
-          (buttonIndex) => {
-            if (buttonIndex === 0) {
-              openRenameModal();
-            }
-          }
-        );
-        return;
-      }
-
-      Alert.alert('Chat options', selectedChat.title || 'Current chat', [
-        {
-          text: 'Rename chat',
-          onPress: openRenameModal,
-        },
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-      ]);
-    }, [openRenameModal, selectedChat]);
+      setChatTitleMenuVisible(true);
+    }, [selectedChat]);
 
     const openCollaborationModeMenu = useCallback(() => {
-      const options = ['Default mode', 'Plan mode', 'Cancel'];
-      const selectedButtonIndex = selectedCollaborationMode === 'plan' ? 1 : 0;
-
-      if (Platform.OS === 'ios') {
-        ActionSheetIOS.showActionSheetWithOptions(
-          {
-            title: 'Collaboration mode',
-            message: `Current: ${formatCollaborationModeLabel(selectedCollaborationMode)}`,
-            options,
-            cancelButtonIndex: 2,
-          },
-          (buttonIndex) => {
-            if (buttonIndex === 0) {
-              setSelectedCollaborationMode('default');
-              setError(null);
-              return;
-            }
-            if (buttonIndex === 1) {
-              setSelectedCollaborationMode('plan');
-              setError(null);
-            }
-          }
-        );
-        return;
-      }
-
-      Alert.alert('Collaboration mode', `Current: ${formatCollaborationModeLabel(selectedCollaborationMode)}`, [
-        {
-          text: `${selectedButtonIndex === 0 ? '✓ ' : ''}Default mode`,
-          onPress: () => {
-            setSelectedCollaborationMode('default');
-            setError(null);
-          },
-        },
-        {
-          text: `${selectedButtonIndex === 1 ? '✓ ' : ''}Plan mode`,
-          onPress: () => {
-            setSelectedCollaborationMode('plan');
-            setError(null);
-          },
-        },
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-      ]);
-    }, [selectedCollaborationMode]);
+      setCollaborationModeMenuVisible(true);
+    }, []);
 
     const toggleFastMode = useCallback(() => {
       const nextServiceTier: ServiceTier | null =
@@ -2245,76 +2138,236 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [activeServiceTier, selectedChatId]);
 
     const openModelReasoningMenu = useCallback(() => {
-      const menuTitle = modelReasoningLabel;
-      const fastModeMenuLabel = fastModeEnabled ? 'Disable fast mode' : 'Enable fast mode';
-      if (Platform.OS === 'ios') {
-        ActionSheetIOS.showActionSheetWithOptions(
-          {
-            title: menuTitle,
-            message: `Mode: ${formatCollaborationModeLabel(selectedCollaborationMode)}\nFast mode: ${fastModeEnabled ? 'On' : 'Off'}`,
-            options: [
-              'Change model',
-              'Change reasoning level',
-              'Change collaboration mode',
-              fastModeMenuLabel,
-              'Cancel',
-            ],
-            cancelButtonIndex: 4,
-          },
-          (buttonIndex) => {
-            if (buttonIndex === 0) {
-              openModelModal();
-              return;
-            }
-            if (buttonIndex === 1) {
-              openEffortModal();
-              return;
-            }
-            if (buttonIndex === 2) {
-              openCollaborationModeMenu();
-              return;
-            }
-            if (buttonIndex === 3) {
-              void toggleFastMode();
-            }
-          }
-        );
-        return;
-      }
+      setModelSettingsMenuVisible(true);
+    }, []);
 
-      Alert.alert('Model settings', menuTitle, [
+    const attachmentMenuOptions = useMemo<SelectionSheetOption[]>(
+      () => [
         {
-          text: 'Change model',
-          onPress: openModelModal,
-        },
-        {
-          text: 'Change reasoning level',
-          onPress: () => openEffortModal(),
-        },
-        {
-          text: `Change collaboration mode (${formatCollaborationModeLabel(selectedCollaborationMode)})`,
-          onPress: openCollaborationModeMenu,
-        },
-        {
-          text: fastModeMenuLabel,
+          key: 'workspace-path',
+          title: 'Attach from workspace path',
+          description: 'Reference a file or folder from the current repo.',
+          icon: 'folder-open-outline',
           onPress: () => {
+            setAttachmentMenuVisible(false);
+            openAttachmentPathModal();
+          },
+        },
+        {
+          key: 'phone-file',
+          title: 'Pick file from phone',
+          description: 'Import a document or asset from local storage.',
+          icon: 'document-outline',
+          onPress: () => {
+            setAttachmentMenuVisible(false);
+            void pickFileFromDevice();
+          },
+        },
+        {
+          key: 'phone-image',
+          title: 'Pick image from phone',
+          description: 'Send an image directly from your photo library.',
+          icon: 'image-outline',
+          onPress: () => {
+            setAttachmentMenuVisible(false);
+            void pickImageFromDevice();
+          },
+        },
+      ],
+      [openAttachmentPathModal, pickFileFromDevice, pickImageFromDevice]
+    );
+
+    const chatTitleMenuOptions = useMemo<SelectionSheetOption[]>(
+      () => [
+        {
+          key: 'rename-chat',
+          title: 'Rename chat',
+          description: 'Update the title shown in the transcript and sidebar.',
+          icon: 'pencil-outline',
+          onPress: () => {
+            setChatTitleMenuVisible(false);
+            openRenameModal();
+          },
+        },
+      ],
+      [openRenameModal]
+    );
+
+    const collaborationModeOptions = useMemo<SelectionSheetOption[]>(
+      () => [
+        {
+          key: 'default',
+          title: 'Default mode',
+          description: 'Answer directly and keep the turn moving.',
+          icon: 'chatbubble-ellipses-outline',
+          selected: selectedCollaborationMode === 'default',
+          onPress: () => {
+            setSelectedCollaborationMode('default');
+            setCollaborationModeMenuVisible(false);
+            setError(null);
+          },
+        },
+        {
+          key: 'plan',
+          title: 'Plan mode',
+          description: 'Pause to ask structured follow-up questions before execution.',
+          icon: 'git-branch-outline',
+          selected: selectedCollaborationMode === 'plan',
+          onPress: () => {
+            setSelectedCollaborationMode('plan');
+            setCollaborationModeMenuVisible(false);
+            setError(null);
+          },
+        },
+      ],
+      [selectedCollaborationMode]
+    );
+
+    const modelSettingsMenuOptions = useMemo<SelectionSheetOption[]>(
+      () => [
+        {
+          key: 'model',
+          title: 'Change model',
+          description: activeModelLabel,
+          icon: 'hardware-chip-outline',
+          onPress: () => {
+            setModelSettingsMenuVisible(false);
+            openModelModal();
+          },
+        },
+        {
+          key: 'reasoning',
+          title: 'Change reasoning level',
+          description: activeEffortLabel,
+          icon: 'pulse-outline',
+          onPress: () => {
+            setModelSettingsMenuVisible(false);
+            openEffortModal();
+          },
+        },
+        {
+          key: 'mode',
+          title: 'Change collaboration mode',
+          description: collaborationModeLabel,
+          icon: 'git-network-outline',
+          onPress: () => {
+            setModelSettingsMenuVisible(false);
+            setCollaborationModeMenuVisible(true);
+          },
+        },
+        {
+          key: 'fast-mode',
+          title: fastModeEnabled ? 'Disable fast mode' : 'Enable fast mode',
+          description:
+            selectedChatId !== null
+              ? 'Applies to the next message in this chat.'
+              : 'Applies to the next new chat.',
+          icon: 'flash-outline',
+          meta: fastModeEnabled ? 'On' : 'Off',
+          onPress: () => {
+            setModelSettingsMenuVisible(false);
             void toggleFastMode();
           },
         },
+      ],
+      [
+        activeEffortLabel,
+        activeModelLabel,
+        collaborationModeLabel,
+        fastModeEnabled,
+        openEffortModal,
+        openModelModal,
+        selectedChatId,
+        toggleFastMode,
+      ]
+    );
+
+    const workspacePickerOptions = useMemo<SelectionSheetOption[]>(
+      () => [
         {
-          text: 'Cancel',
-          style: 'cancel',
+          key: 'bridge-default',
+          title: 'Bridge default workspace',
+          description: 'Use the bridge start directory unless you override it here.',
+          icon: 'server-outline',
+          badge: 'Auto',
+          selected: preferredStartCwd === null,
+          onPress: () => selectDefaultWorkspace(null),
         },
-      ]);
-    }, [
-      modelReasoningLabel,
-      fastModeEnabled,
-      openCollaborationModeMenu,
-      openEffortModal,
-      openModelModal,
-      selectedCollaborationMode,
-      toggleFastMode,
-    ]);
+        ...workspaceOptions.map((cwd) => ({
+          key: cwd,
+          title: toPathBasename(cwd),
+          description: cwd,
+          icon: 'folder-outline' as const,
+          selected: cwd === preferredStartCwd,
+          onPress: () => selectDefaultWorkspace(cwd),
+        })),
+      ],
+      [preferredStartCwd, selectDefaultWorkspace, workspaceOptions]
+    );
+
+    const modelPickerOptions = useMemo<SelectionSheetOption[]>(
+      () => [
+        {
+          key: 'server-default',
+          title: 'Use server default',
+          description: serverDefaultModel
+            ? `Currently ${serverDefaultModel.displayName}.`
+            : 'Follow the bridge default model.',
+          icon: 'sparkles-outline',
+          badge: 'Auto',
+          selected: selectedModelId === null,
+          onPress: () => selectModel(null),
+        },
+        ...modelOptions.map((model) => ({
+          key: model.id,
+          title: model.displayName,
+          description: model.description?.trim() || model.id,
+          icon: 'hardware-chip-outline' as const,
+          badge: model.isDefault ? 'Default' : undefined,
+          meta: model.defaultReasoningEffort
+            ? formatReasoningEffort(model.defaultReasoningEffort)
+            : undefined,
+          selected: model.id === selectedModelId,
+          onPress: () => selectModel(model.id),
+        })),
+      ],
+      [modelOptions, selectModel, selectedModelId, serverDefaultModel]
+    );
+
+    const effortPickerSheetOptions = useMemo<SelectionSheetOption[]>(
+      () => [
+        {
+          key: 'model-default',
+          title: effortPickerDefault
+            ? `Use ${formatReasoningEffort(effortPickerDefault)}`
+            : 'Use model default',
+          description: effortPickerModel
+            ? `Follow ${effortPickerModel.displayName}'s default reasoning.`
+            : 'Follow the active model default.',
+          icon: 'sparkles-outline',
+          badge: 'Auto',
+          selected: selectedEffort === null,
+          onPress: () => selectEffort(null),
+        },
+        ...effortPickerOptions.map((option) => ({
+          key: option.effort,
+          title: formatReasoningEffort(option.effort),
+          description:
+            option.description?.trim() ||
+            'Override the model default for the next response.',
+          icon: 'pulse-outline' as const,
+          selected: option.effort === selectedEffort,
+          onPress: () => selectEffort(option.effort),
+        })),
+      ],
+      [
+        effortPickerDefault,
+        effortPickerModel,
+        effortPickerOptions,
+        selectEffort,
+        selectedEffort,
+      ]
+    );
 
     const closeRenameModal = useCallback(() => {
       if (renaming) {
@@ -5432,7 +5485,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       !pendingApproval &&
       !pendingUserInputRequest &&
       !renameModalVisible &&
+      !attachmentMenuVisible &&
       !attachmentModalVisible &&
+      !chatTitleMenuVisible &&
+      !collaborationModeMenuVisible &&
+      !modelSettingsMenuVisible &&
       !workspaceModalVisible &&
       !modelModalVisible &&
       !effortModalVisible &&
@@ -5724,157 +5781,76 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           ) : null}
         </KeyboardAvoidingView>
 
-        <Modal
+        <SelectionSheet
+          visible={attachmentMenuVisible}
+          eyebrow="Attachments"
+          title="Add context"
+          subtitle="Bring in a workspace path, a file, or an image."
+          options={attachmentMenuOptions}
+          onClose={() => setAttachmentMenuVisible(false)}
+        />
+
+        <SelectionSheet
+          visible={chatTitleMenuVisible}
+          eyebrow="Chat"
+          title={selectedChat?.title?.trim() || 'Chat options'}
+          subtitle="Quick actions for the current thread."
+          options={chatTitleMenuOptions}
+          onClose={() => setChatTitleMenuVisible(false)}
+        />
+
+        <SelectionSheet
+          visible={collaborationModeMenuVisible}
+          eyebrow="Mode"
+          title="Collaboration mode"
+          subtitle="Choose how Codex should steer the next turn."
+          options={collaborationModeOptions}
+          onClose={() => setCollaborationModeMenuVisible(false)}
+        />
+
+        <SelectionSheet
+          visible={modelSettingsMenuVisible}
+          eyebrow="Model"
+          title="Model controls"
+          subtitle={modelReasoningLabel}
+          options={modelSettingsMenuOptions}
+          onClose={() => setModelSettingsMenuVisible(false)}
+        />
+
+        <SelectionSheet
           visible={workspaceModalVisible}
-          transparent
-          animationType="fade"
-          onRequestClose={closeWorkspaceModal}
-        >
-          <View style={styles.workspaceModalBackdrop}>
-            <View style={styles.workspaceModalCard}>
-              <Text style={styles.workspaceModalTitle}>Select start directory</Text>
-              <ScrollView
-                style={styles.workspaceModalList}
-                contentContainerStyle={styles.workspaceModalListContent}
-                showsVerticalScrollIndicator={false}
-              >
-                <WorkspaceOption
-                  label="Bridge default workspace"
-                  selected={preferredStartCwd === null}
-                  onPress={() => selectDefaultWorkspace(null)}
-                />
-                {workspaceOptions.map((cwd) => (
-                  <WorkspaceOption
-                    key={cwd}
-                    label={cwd}
-                    selected={cwd === preferredStartCwd}
-                    onPress={() => selectDefaultWorkspace(cwd)}
-                  />
-                ))}
-              </ScrollView>
-              <View style={styles.workspaceModalActions}>
-                {loadingWorkspaces ? (
-                  <Text style={styles.workspaceModalLoading}>Refreshing…</Text>
-                ) : (
-                  <View />
-                )}
-                <Pressable
-                  onPress={closeWorkspaceModal}
-                  style={({ pressed }) => [
-                    styles.workspaceModalCloseBtn,
-                    pressed && styles.workspaceModalCloseBtnPressed,
-                  ]}
-                >
-                  <Text style={styles.workspaceModalCloseText}>Close</Text>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </Modal>
+          eyebrow="Workspace"
+          title="Start directory"
+          subtitle="Pick which workspace new chats should open in."
+          options={workspacePickerOptions}
+          loading={loadingWorkspaces}
+          loadingLabel="Refreshing workspaces…"
+          onClose={closeWorkspaceModal}
+        />
 
-        <Modal
+        <SelectionSheet
           visible={modelModalVisible}
-          transparent
-          animationType="fade"
-          onRequestClose={closeModelModal}
-        >
-          <View style={styles.workspaceModalBackdrop}>
-            <View style={styles.workspaceModalCard}>
-              <Text style={styles.workspaceModalTitle}>Select model</Text>
-              <ScrollView
-                style={styles.workspaceModalList}
-                contentContainerStyle={styles.workspaceModalListContent}
-                showsVerticalScrollIndicator={false}
-              >
-                <WorkspaceOption
-                  label="Default model"
-                  selected={selectedModelId === null}
-                  onPress={() => selectModel(null)}
-                />
-                {modelOptions.map((model) => (
-                  <WorkspaceOption
-                    key={model.id}
-                    label={`${model.displayName} (${model.id})`}
-                    selected={model.id === selectedModelId}
-                    onPress={() => selectModel(model.id)}
-                  />
-                ))}
-              </ScrollView>
-              <View style={styles.workspaceModalActions}>
-                {loadingModels ? (
-                  <Text style={styles.workspaceModalLoading}>Refreshing…</Text>
-                ) : (
-                  <View />
-                )}
-                <Pressable
-                  onPress={closeModelModal}
-                  style={({ pressed }) => [
-                    styles.workspaceModalCloseBtn,
-                    pressed && styles.workspaceModalCloseBtnPressed,
-                  ]}
-                >
-                  <Text style={styles.workspaceModalCloseText}>Close</Text>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </Modal>
+          eyebrow="Model"
+          title="Select model"
+          subtitle="Choose a model for this chat or fall back to the bridge default."
+          options={modelPickerOptions}
+          loading={loadingModels}
+          loadingLabel="Refreshing available models…"
+          onClose={closeModelModal}
+        />
 
-        <Modal
+        <SelectionSheet
           visible={effortModalVisible}
-          transparent
-          animationType="fade"
-          onRequestClose={closeEffortModal}
-        >
-          <View style={styles.workspaceModalBackdrop}>
-            <View style={styles.workspaceModalCard}>
-              <Text style={styles.workspaceModalTitle}>Select reasoning level</Text>
-              <ScrollView
-                style={styles.workspaceModalList}
-                contentContainerStyle={styles.workspaceModalListContent}
-                showsVerticalScrollIndicator={false}
-              >
-                <WorkspaceOption
-                  label={
-                    effortPickerDefault
-                      ? `Default (${formatReasoningEffort(effortPickerDefault)})`
-                      : 'Model default reasoning'
-                  }
-                  selected={selectedEffort === null}
-                  onPress={() => selectEffort(null)}
-                />
-                {effortPickerOptions.map((option) => (
-                  <WorkspaceOption
-                    key={option.effort}
-                    label={
-                      option.description
-                        ? `${formatReasoningEffort(option.effort)} — ${option.description}`
-                        : formatReasoningEffort(option.effort)
-                    }
-                    selected={option.effort === selectedEffort}
-                    onPress={() => selectEffort(option.effort)}
-                  />
-                ))}
-              </ScrollView>
-              <View style={styles.workspaceModalActions}>
-                <Text style={styles.workspaceModalLoading} numberOfLines={1}>
-                  {effortPickerModel
-                    ? `Model: ${effortPickerModel.displayName}`
-                    : 'Select a model to configure reasoning'}
-                </Text>
-                <Pressable
-                  onPress={closeEffortModal}
-                  style={({ pressed }) => [
-                    styles.workspaceModalCloseBtn,
-                    pressed && styles.workspaceModalCloseBtnPressed,
-                  ]}
-                >
-                  <Text style={styles.workspaceModalCloseText}>Close</Text>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </Modal>
+          eyebrow="Reasoning"
+          title="Reasoning level"
+          subtitle={
+            effortPickerModel
+              ? `Current model: ${effortPickerModel.displayName}`
+              : 'Select how much reasoning depth to use.'
+          }
+          options={effortPickerSheetOptions}
+          onClose={closeEffortModal}
+        />
 
         <Modal
           visible={renameModalVisible}
@@ -6288,34 +6264,6 @@ function ComposeView({
         ))}
       </View>
     </ScrollView>
-  );
-}
-
-function WorkspaceOption({
-  label,
-  selected,
-  onPress,
-}: {
-  label: string;
-  selected: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.workspaceOption,
-        selected && styles.workspaceOptionSelected,
-        pressed && styles.workspaceOptionPressed,
-      ]}
-      onPress={onPress}
-    >
-      <Text style={[styles.workspaceOptionText, selected && styles.workspaceOptionTextSelected]} numberOfLines={2}>
-        {label}
-      </Text>
-      {selected ? (
-        <Ionicons name="checkmark-circle" size={16} color={colors.textPrimary} />
-      ) : null}
-    </Pressable>
   );
 }
 
@@ -8181,82 +8129,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: spacing.lg,
   },
-  workspaceModalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.55)',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
-  },
-  workspaceModalCard: {
-    backgroundColor: colors.bgItem,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.lg,
-    gap: spacing.md,
-    maxHeight: '70%',
-  },
-  workspaceModalTitle: {
-    ...typography.headline,
-    color: colors.textPrimary,
-  },
-  workspaceModalList: {
-    maxHeight: 320,
-  },
-  workspaceModalListContent: {
-    gap: spacing.xs,
-  },
-  workspaceOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  workspaceOptionSelected: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  workspaceOptionPressed: {
-    opacity: 0.88,
-  },
-  workspaceOptionText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    flex: 1,
-  },
-  workspaceOptionTextSelected: {
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  workspaceModalActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
   workspaceModalLoading: {
     ...typography.caption,
     color: colors.textMuted,
-  },
-  workspaceModalCloseBtn: {
-    borderRadius: 10,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
-  },
-  workspaceModalCloseBtnPressed: {
-    opacity: 0.85,
-  },
-  workspaceModalCloseText: {
-    ...typography.body,
-    color: colors.textPrimary,
   },
   slashSuggestions: {
     marginHorizontal: spacing.lg,

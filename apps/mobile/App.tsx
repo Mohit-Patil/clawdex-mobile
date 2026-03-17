@@ -611,8 +611,6 @@ export default function App() {
             api={activeApi}
             ws={activeWs}
             selectedChatId={selectedChatId}
-            selectedDefaultCwd={defaultStartCwd}
-            onSelectDefaultCwd={setDefaultStartCwd}
             onSelectChat={handleSelectChat}
             onNewChat={handleNewChat}
             onNavigate={navigate}

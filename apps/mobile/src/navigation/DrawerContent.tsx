@@ -3,15 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
-  Modal,
   Pressable,
   RefreshControl,
   SectionList,
-  ScrollView,
-  type StyleProp,
   StyleSheet,
   Text,
-  type ViewStyle,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -27,8 +23,6 @@ interface DrawerContentProps {
   api: HostBridgeApiClient;
   ws: HostBridgeWsClient;
   selectedChatId: string | null;
-  selectedDefaultCwd: string | null;
-  onSelectDefaultCwd: (cwd: string | null) => void;
   onSelectChat: (id: string) => void;
   onNewChat: () => void;
   onNavigate: (screen: Screen) => void;
@@ -38,6 +32,7 @@ interface ChatWorkspaceSection {
   key: string;
   title: string;
   subtitle?: string;
+  itemCount: number;
   data: ChatSummary[];
 }
 
@@ -65,8 +60,6 @@ export function DrawerContent({
   api,
   ws,
   selectedChatId,
-  selectedDefaultCwd,
-  onSelectDefaultCwd,
   onSelectChat,
   onNewChat,
   onNavigate,
@@ -74,13 +67,11 @@ export function DrawerContent({
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
   const [runHeartbeatAtByThread, setRunHeartbeatAtByThread] = useState<Record<string, number>>({});
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const hasAppliedInitialCollapseRef = useRef(false);
   const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
-  const workspaceOptions = useMemo(() => listWorkspaces(chats), [chats]);
   const chatSections = useMemo(() => buildWorkspaceSections(chats), [chats]);
   const visibleChatSections = useMemo(
     () =>
@@ -94,8 +85,14 @@ export function DrawerContent({
       ),
     [chatSections, collapsedWorkspaceKeys]
   );
-  const defaultWorkspaceLabel =
-    normalizeCwd(selectedDefaultCwd) ?? 'Bridge default workspace';
+  const runningChatCount = useMemo(() => {
+    const now = Date.now();
+    return chats.reduce((count, chat) => {
+      const runningFromHeartbeat =
+        (runHeartbeatAtByThread[chat.id] ?? 0) > now - RUN_HEARTBEAT_STALE_MS;
+      return count + (chat.status === 'running' || runningFromHeartbeat ? 1 : 0);
+    }, 0);
+  }, [chats, runHeartbeatAtByThread]);
 
   const loadChats = useCallback(async (showRefresh = false) => {
     if (showRefresh) {
@@ -284,52 +281,108 @@ export function DrawerContent({
     <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.mainContent}>
-          <View style={styles.brandRow}>
-            <BrandMark size={20} />
-            <Text style={styles.brandText}>Clawdex</Text>
+          <View style={styles.topDeck}>
+            <View style={styles.heroCard}>
+              <View style={styles.heroHeaderRow}>
+                <View style={styles.brandBadge}>
+                  <BrandMark size={18} />
+                </View>
+                <View style={styles.heroCopy}>
+                  <Text style={styles.heroTitle}>Clawdex</Text>
+                  <Text style={styles.heroSubtitle} numberOfLines={1}>
+                    Threads, terminal, and git in a focused mobile control deck.
+                  </Text>
+                </View>
+                <View
+                  style={[
+                    styles.connectionBadge,
+                    wsConnected
+                      ? styles.connectionBadgeConnected
+                      : styles.connectionBadgeDisconnected,
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.connectionDot,
+                      wsConnected
+                        ? styles.connectionDotConnected
+                        : styles.connectionDotDisconnected,
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.connectionText,
+                      wsConnected
+                        ? styles.connectionTextConnected
+                        : styles.connectionTextDisconnected,
+                    ]}
+                  >
+                    {wsConnected ? 'Live' : 'Offline'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.heroStatsRow}>
+                <View style={styles.heroStat}>
+                  <Text style={styles.heroStatValue}>{formatCompactCount(chats.length)}</Text>
+                  <Text style={styles.heroStatLabel}>Chats</Text>
+                </View>
+                <View style={styles.heroStatsDivider} />
+                <View style={styles.heroStat}>
+                  <Text style={styles.heroStatValue}>
+                    {formatCompactCount(runningChatCount)}
+                  </Text>
+                  <Text style={styles.heroStatLabel}>Running</Text>
+                </View>
+                <View style={styles.heroStatsDivider} />
+                <View style={styles.heroStat}>
+                  <Text style={styles.heroStatValue}>
+                    {formatCompactCount(chatSections.length)}
+                  </Text>
+                  <Text style={styles.heroStatLabel}>Spaces</Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.actionRow}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.primaryActionButton,
+                  pressed && styles.primaryActionButtonPressed,
+                ]}
+                onPress={onNewChat}
+              >
+                <Ionicons name="add" size={18} color={colors.black} />
+                <Text style={styles.primaryActionText}>New chat</Text>
+              </Pressable>
+            </View>
           </View>
 
-          {/* New Chat button */}
-          <View style={styles.header}>
-            <Pressable
-              style={({ pressed }) => [
-                styles.navItem,
-                styles.newChatBtn,
-                pressed && styles.navItemPressed,
-              ]}
-              onPress={onNewChat}
-            >
-              <Ionicons name="add" size={16} color={colors.textPrimary} />
-              <Text style={styles.newChatText}>New chat</Text>
-            </Pressable>
-          </View>
-
-          <View style={styles.workspaceSection}>
-            <Text style={styles.sectionTitle}>Start Directory</Text>
-            <Pressable
-              style={({ pressed }) => [
-                styles.workspacePicker,
-                pressed && styles.workspacePickerPressed,
-              ]}
-              onPress={() => setWorkspacePickerOpen(true)}
-            >
-              <Ionicons name="folder-open-outline" size={16} color={colors.textMuted} />
-              <Text style={styles.workspacePickerText} numberOfLines={1}>
-                {defaultWorkspaceLabel}
-              </Text>
-              <Ionicons name="chevron-down" size={14} color={colors.textMuted} />
-            </Pressable>
-          </View>
-
-          {/* Chats section */}
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Chats</Text>
+            <View style={styles.sectionCountBadge}>
+              <Text style={styles.sectionCountText}>
+                {formatCompactCount(chats.length)}
+              </Text>
+            </View>
           </View>
 
           {loading ? (
-            <ActivityIndicator color={colors.textMuted} style={styles.loader} />
+            <View style={styles.emptyStateCard}>
+              <ActivityIndicator color={colors.textMuted} style={styles.loader} />
+              <Text style={styles.emptyTitle}>Loading chats</Text>
+              <Text style={styles.emptyHint}>Syncing recent threads from your bridge.</Text>
+            </View>
           ) : chatSections.length === 0 ? (
-            <Text style={styles.emptyText}>No chats yet</Text>
+            <View style={styles.emptyStateCard}>
+              <View style={styles.emptyStateIconWrap}>
+                <Ionicons name="sparkles-outline" size={18} color={colors.textPrimary} />
+              </View>
+              <Text style={styles.emptyTitle}>No chats yet</Text>
+              <Text style={styles.emptyHint}>
+                Start a new chat and it will show up here with live activity.
+              </Text>
+            </View>
           ) : (
             <SectionList
               sections={visibleChatSections}
@@ -353,7 +406,9 @@ export function DrawerContent({
                   <Pressable
                     style={({ pressed }) => [
                       styles.workspaceGroupHeader,
-                      collapsed ? styles.workspaceGroupHeaderCollapsed : styles.workspaceGroupHeaderExpanded,
+                      collapsed
+                        ? styles.workspaceGroupHeaderCollapsed
+                        : styles.workspaceGroupHeaderExpanded,
                       pressed && styles.workspaceGroupHeaderPressed,
                     ]}
                     onPress={() => toggleWorkspaceSection(section.key)}
@@ -368,6 +423,11 @@ export function DrawerContent({
                             {section.subtitle}
                           </Text>
                         ) : null}
+                      </View>
+                      <View style={styles.workspaceGroupCountBadge}>
+                        <Text style={styles.workspaceGroupCountText}>
+                          {formatCompactCount(section.itemCount)}
+                        </Text>
                       </View>
                       <View style={styles.workspaceGroupHeaderMeta}>
                         <Ionicons
@@ -390,24 +450,66 @@ export function DrawerContent({
                   <Pressable
                     style={({ pressed }) => [
                       styles.chatItem,
-                      isLast && styles.chatItemLast,
                       isSelected && styles.chatItemSelected,
                       pressed && styles.chatItemPressed,
+                      isLast && styles.chatItemLast,
                     ]}
                     onPress={() => onSelectChat(item.id)}
                   >
-                    <Text style={[styles.chatTitle, isSelected && styles.chatTitleSelected]} numberOfLines={1}>
-                      {item.title || 'Untitled'}
-                    </Text>
-                    <View style={styles.chatMeta}>
-                      {isRunning ? (
-                        <ActivityIndicator
-                          size="small"
-                          color={colors.statusRunning}
-                          style={styles.chatSpinner}
-                        />
-                      ) : null}
-                      <Text style={styles.chatAge}>{relativeTime(item.updatedAt)}</Text>
+                    <View
+                      style={[
+                        styles.chatItemAccent,
+                        isSelected && styles.chatItemAccentSelected,
+                        isRunning && styles.chatItemAccentRunning,
+                        item.status === 'error' && styles.chatItemAccentError,
+                      ]}
+                    />
+                    <View style={styles.chatItemContent}>
+                      <View style={styles.chatItemTopRow}>
+                        <Text
+                          style={[styles.chatTitle, isSelected && styles.chatTitleSelected]}
+                          numberOfLines={1}
+                        >
+                          {item.title || 'Untitled'}
+                        </Text>
+                        <Text
+                          style={[styles.chatAge, isSelected && styles.chatAgeSelected]}
+                        >
+                          {relativeTime(item.updatedAt)}
+                        </Text>
+                      </View>
+                      <View style={styles.chatItemBottomRow}>
+                        <Text
+                          style={[styles.chatPreview, isSelected && styles.chatPreviewSelected]}
+                          numberOfLines={1}
+                        >
+                          {formatChatPreview(item)}
+                        </Text>
+                        {isRunning ? (
+                          <View style={styles.chatMeta}>
+                            <View style={[styles.statusPill, styles.statusPillRunning]}>
+                              <View
+                                style={[styles.statusPillDot, styles.statusPillDotRunning]}
+                              />
+                              <Text
+                                style={[styles.statusPillText, styles.statusPillTextRunning]}
+                              >
+                                Live
+                              </Text>
+                            </View>
+                          </View>
+                        ) : item.status === 'error' ? (
+                          <View style={styles.chatMeta}>
+                            <View style={[styles.statusPill, styles.statusPillError]}>
+                              <Text
+                                style={[styles.statusPillText, styles.statusPillTextError]}
+                              >
+                                Error
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
                   </Pressable>
                 );
@@ -417,121 +519,21 @@ export function DrawerContent({
         </View>
 
         <View style={styles.footer}>
-          <NavItem
-            icon="settings-outline"
-            label="Settings"
+          <Pressable
+            accessibilityLabel="Open settings"
+            style={({ pressed }) => [
+              styles.footerSettingsButton,
+              pressed && styles.footerSettingsButtonPressed,
+            ]}
             onPress={() => onNavigate('Settings')}
-            style={styles.settingsItem}
-            pressableStyle={styles.footerNavItem}
-          />
+          >
+            <Ionicons name="settings-outline" size={16} color={colors.textPrimary} />
+            <Text style={styles.footerSettingsText}>Settings</Text>
+          </Pressable>
         </View>
+
       </SafeAreaView>
-
-      <Modal
-        visible={workspacePickerOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setWorkspacePickerOpen(false)}
-      >
-        <View style={styles.workspaceModalBackdrop}>
-          <View style={styles.workspaceModalCard}>
-            <Text style={styles.workspaceModalTitle}>Start directory for new chats</Text>
-            <ScrollView
-              style={styles.workspaceModalList}
-              contentContainerStyle={styles.workspaceModalListContent}
-              showsVerticalScrollIndicator={false}
-            >
-              <WorkspaceOption
-                label="Bridge default workspace"
-                selected={normalizeCwd(selectedDefaultCwd) === null}
-                onPress={() => {
-                  onSelectDefaultCwd(null);
-                  setWorkspacePickerOpen(false);
-                }}
-              />
-              {workspaceOptions.map((cwd) => (
-                <WorkspaceOption
-                  key={cwd}
-                  label={cwd}
-                  selected={cwd === normalizeCwd(selectedDefaultCwd)}
-                  onPress={() => {
-                    onSelectDefaultCwd(cwd);
-                    setWorkspacePickerOpen(false);
-                  }}
-                />
-              ))}
-            </ScrollView>
-            <Pressable
-              style={({ pressed }) => [
-                styles.workspaceModalCloseBtn,
-                pressed && styles.workspaceModalCloseBtnPressed,
-              ]}
-              onPress={() => setWorkspacePickerOpen(false)}
-            >
-              <Text style={styles.workspaceModalCloseText}>Close</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
     </View>
-  );
-}
-
-function NavItem({
-  icon,
-  label,
-  onPress,
-  style,
-  pressableStyle,
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  label: string;
-  onPress: () => void;
-  style?: StyleProp<ViewStyle>;
-  pressableStyle?: StyleProp<ViewStyle>;
-}) {
-  return (
-    <View style={style}>
-      <Pressable
-        style={({ pressed }) => [
-          styles.navItem,
-          pressableStyle,
-          pressed && styles.navItemPressed,
-        ]}
-        onPress={onPress}
-      >
-        <Ionicons name={icon} size={18} color={colors.textPrimary} />
-        <Text style={styles.navLabel}>{label}</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-function WorkspaceOption({
-  label,
-  selected,
-  onPress,
-}: {
-  label: string;
-  selected: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.workspaceOption,
-        selected && styles.workspaceOptionSelected,
-        pressed && styles.workspaceOptionPressed,
-      ]}
-      onPress={onPress}
-    >
-      <Text style={[styles.workspaceOptionText, selected && styles.workspaceOptionTextSelected]} numberOfLines={2}>
-        {label}
-      </Text>
-      {selected ? (
-        <Ionicons name="checkmark-circle" size={16} color={colors.textPrimary} />
-      ) : null}
-    </Pressable>
   );
 }
 
@@ -559,23 +561,6 @@ function normalizeCwd(value: string | null | undefined): string | null {
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function listWorkspaces(chats: ChatSummary[]): string[] {
-  const sorted = [...chats].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  const seen = new Set<string>();
-  const result: string[] = [];
-
-  for (const chat of sorted) {
-    const cwd = normalizeCwd(chat.cwd);
-    if (!cwd || seen.has(cwd)) {
-      continue;
-    }
-    seen.add(cwd);
-    result.push(cwd);
-  }
-
-  return result;
 }
 
 const DEFAULT_WORKSPACE_KEY = '__bridge_default_workspace__';
@@ -607,7 +592,14 @@ function workspaceSubtitle(cwd: string | null): string | undefined {
     return undefined;
   }
 
-  return cwd;
+  const normalized = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+  const segments = normalized.split('/').filter(Boolean);
+
+  if (segments.length <= 2) {
+    return normalized;
+  }
+
+  return `.../${segments.slice(-2).join('/')}`;
 }
 
 function buildWorkspaceSections(chats: ChatSummary[]): ChatWorkspaceSection[] {
@@ -649,6 +641,7 @@ function buildWorkspaceSections(chats: ChatSummary[]): ChatWorkspaceSection[] {
       key,
       title: workspaceTitle(bucket.cwd),
       subtitle: workspaceSubtitle(bucket.cwd),
+      itemCount: bucket.chats.length,
       data: bucket.chats,
     }));
 }
@@ -662,11 +655,44 @@ function getDefaultCollapsedWorkspaceKeys(sections: ChatWorkspaceSection[]): Set
 }
 
 function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
+  const diff = Math.max(0, Date.now() - new Date(iso).getTime());
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
   const days = Math.floor(diff / 86400000);
-  if (days === 0) return 'today';
-  if (days === 1) return '1d';
-  return `${days}d`;
+  const weeks = Math.floor(days / 7);
+
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m`;
+  if (hours < 24) return `${hours}h`;
+  if (days < 7) return `${days}d`;
+  if (weeks < 5) return `${weeks}w`;
+  return `${Math.floor(days / 30)}mo`;
+}
+
+function formatCompactCount(value: number): string {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1).replace(/\.0$/, '')}k`;
+  }
+
+  return String(value);
+}
+
+function formatChatPreview(chat: ChatSummary): string {
+  const preview = chat.lastMessagePreview.trim();
+  if (preview.length > 0) {
+    return preview;
+  }
+
+  const errorPreview = chat.lastError?.trim();
+  if (errorPreview) {
+    return errorPreview;
+  }
+
+  if (chat.status === 'running') {
+    return 'Run in progress';
+  }
+
+  return 'No messages yet';
 }
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -695,7 +721,7 @@ function extractThreadId(event: RpcNotification): string | null {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bgSidebar,
+    backgroundColor: colors.bgMain,
   },
   safeArea: {
     flex: 1,
@@ -704,175 +730,249 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
   },
-  brandRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
+  topDeck: {
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xs,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
+    gap: spacing.xs + 2,
   },
-  brandText: {
+  heroCard: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.09)',
+    backgroundColor: '#090C10',
+    padding: spacing.sm + 2,
+    gap: spacing.sm,
+  },
+  heroHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.xs + 2,
+  },
+  brandBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#14181D',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  heroCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  heroTitle: {
     ...typography.body,
     color: colors.textPrimary,
-    fontWeight: '600',
+    fontSize: 16,
+    fontWeight: '700',
   },
-  header: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xs,
-    paddingBottom: spacing.md,
+  heroSubtitle: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 11,
+    lineHeight: 14,
   },
-  workspaceSection: {
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.md,
-    gap: spacing.xs,
-  },
-  workspacePicker: {
+  connectionBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    backgroundColor: colors.bgItem,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    borderRadius: 10,
-    paddingHorizontal: spacing.md,
+    gap: 5,
+    borderRadius: 999,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderWidth: 1,
+  },
+  connectionBadgeConnected: {
+    backgroundColor: 'rgba(52, 199, 89, 0.12)',
+    borderColor: 'rgba(52, 199, 89, 0.32)',
+  },
+  connectionBadgeDisconnected: {
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderColor: 'rgba(245, 158, 11, 0.28)',
+  },
+  connectionDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  connectionDotConnected: {
+    backgroundColor: '#34C759',
+  },
+  connectionDotDisconnected: {
+    backgroundColor: '#F59E0B',
+  },
+  connectionText: {
+    ...typography.caption,
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  connectionTextConnected: {
+    color: '#8EE6AD',
+  },
+  connectionTextDisconnected: {
+    color: '#F6C875',
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    borderRadius: 14,
+    backgroundColor: '#050608',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+    overflow: 'hidden',
+  },
+  heroStat: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 2,
     paddingVertical: spacing.sm,
   },
-  workspacePickerPressed: {
-    opacity: 0.85,
-  },
-  workspacePickerText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    flex: 1,
-  },
-  newChatBtn: {
-    marginHorizontal: 0,
-    marginBottom: 0,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
-  },
-  newChatText: {
+  heroStatValue: {
     ...typography.body,
-    fontWeight: '500',
     color: colors.textPrimary,
+    fontSize: 15,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
-  navItem: {
+  heroStatLabel: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 10,
+    lineHeight: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
+  heroStatsDivider: {
+    width: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: spacing.xs + 2,
+  },
+  primaryActionButton: {
+    flex: 1,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: '#F2F4F8',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    marginHorizontal: spacing.md,
-    borderRadius: 10,
-    marginBottom: spacing.xs,
+    justifyContent: 'center',
+    gap: spacing.xs,
   },
-  navItemPressed: {
-    backgroundColor: colors.bgItem,
+  primaryActionButtonPressed: {
+    opacity: 0.9,
   },
-  navLabel: {
+  primaryActionText: {
     ...typography.body,
-    fontWeight: '500',
-    color: colors.textPrimary,
+    color: colors.black,
+    fontWeight: '700',
+    fontSize: 14,
   },
   sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
     paddingBottom: spacing.sm,
   },
   sectionTitle: {
     ...typography.caption,
+    color: colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
+    fontSize: 10,
+    lineHeight: 12,
+    letterSpacing: 0.9,
+    fontWeight: '700',
+  },
+  sectionCountBadge: {
+    minWidth: 24,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: '#101317',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sectionCountText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
   list: {
     flex: 1,
   },
   listContent: {
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.lg,
   },
   loader: {
-    marginTop: spacing.xl,
+    marginBottom: spacing.xs,
   },
-  emptyText: {
-    ...typography.caption,
-    textAlign: 'center',
-    marginTop: spacing.xl,
-  },
-  chatItem: {
-    flexDirection: 'row',
+  emptyStateCard: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: '#0B0D10',
+    padding: spacing.md,
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    marginHorizontal: spacing.md,
-    borderLeftWidth: StyleSheet.hairlineWidth,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
+    gap: spacing.xs + 2,
   },
-  chatItemLast: {
-    borderBottomLeftRadius: 12,
-    borderBottomRightRadius: 12,
-    marginBottom: spacing.sm,
+  emptyStateIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#11151A',
   },
-  chatItemSelected: {
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  chatItemPressed: {
-    opacity: 0.88,
-  },
-  chatTitle: {
+  emptyTitle: {
     ...typography.body,
-    color: colors.textMuted,
-    flex: 1,
-    marginRight: spacing.sm,
-  },
-  chatTitleSelected: {
     color: colors.textPrimary,
+    fontSize: 14,
     fontWeight: '600',
   },
-  chatAge: {
+  emptyHint: {
     ...typography.caption,
-    flexShrink: 0,
-  },
-  chatMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    flexShrink: 0,
-  },
-  chatSpinner: {
-    marginRight: 2,
+    color: colors.textMuted,
+    fontSize: 11,
+    textAlign: 'center',
+    lineHeight: 15,
   },
   workspaceGroupHeader: {
-    marginHorizontal: spacing.md,
-    marginTop: spacing.xs,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs + 3,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: '#15181D',
+    marginHorizontal: spacing.lg,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: spacing.sm,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: '#0C0F13',
   },
   workspaceGroupHeaderExpanded: {
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-    borderBottomLeftRadius: 0,
-    borderBottomRightRadius: 0,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
   },
   workspaceGroupHeaderCollapsed: {
-    borderRadius: 12,
-    marginBottom: spacing.sm,
+    marginTop: spacing.xs,
+    marginBottom: spacing.md,
   },
   workspaceGroupHeaderPressed: {
-    opacity: 0.8,
+    backgroundColor: '#14181D',
   },
   workspaceGroupHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     gap: spacing.sm,
   },
   workspaceGroupTitleBlock: {
@@ -881,99 +981,186 @@ const styles = StyleSheet.create({
   workspaceGroupTitle: {
     ...typography.body,
     color: colors.textPrimary,
+    fontSize: 14,
     fontWeight: '600',
   },
   workspaceGroupSubtitle: {
     ...typography.caption,
     color: colors.textMuted,
-    marginTop: 1,
+    fontSize: 11,
+    lineHeight: 14,
+    marginTop: 2,
+  },
+  workspaceGroupCountBadge: {
+    minWidth: 24,
+    borderRadius: 999,
+    backgroundColor: '#161B20',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  workspaceGroupCountText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
   },
   workspaceGroupHeaderMeta: {
     alignItems: 'center',
     justifyContent: 'center',
     flexShrink: 0,
   },
-  settingsItem: {
-    marginBottom: 0,
+  chatItem: {
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.xs,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+    backgroundColor: '#080A0D',
+    padding: spacing.sm,
+    flexDirection: 'row',
+    gap: spacing.xs + 2,
+    alignItems: 'stretch',
   },
-  footerNavItem: {
-    marginBottom: 0,
+  chatItemLast: {
+    marginBottom: spacing.md,
+  },
+  chatItemSelected: {
+    backgroundColor: '#11151A',
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  chatItemPressed: {
+    backgroundColor: '#0E1216',
+  },
+  chatItemAccent: {
+    width: 4,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  chatItemAccentSelected: {
+    backgroundColor: colors.textPrimary,
+  },
+  chatItemAccentRunning: {
+    backgroundColor: colors.statusRunning,
+  },
+  chatItemAccentError: {
+    backgroundColor: colors.statusError,
+  },
+  chatItemContent: {
+    flex: 1,
+    gap: 4,
+  },
+  chatItemTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+  },
+  chatTitle: {
+    ...typography.body,
+    flex: 1,
+    color: colors.textSecondary,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  chatTitleSelected: {
+    color: colors.textPrimary,
+  },
+  chatAge: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 10,
+    lineHeight: 12,
+    fontVariant: ['tabular-nums'],
+    flexShrink: 0,
+  },
+  chatAgeSelected: {
+    color: colors.textSecondary,
+  },
+  chatItemBottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs + 2,
+  },
+  chatPreview: {
+    ...typography.caption,
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 14,
+    color: 'rgba(232, 236, 244, 0.56)',
+  },
+  chatPreviewSelected: {
+    color: colors.textMuted,
+  },
+  chatMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    flexShrink: 0,
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: 999,
+    paddingHorizontal: spacing.xs + 6,
+    paddingVertical: 3,
+  },
+  statusPillRunning: {
+    backgroundColor: 'rgba(52, 199, 89, 0.12)',
+  },
+  statusPillError: {
+    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+  },
+  statusPillText: {
+    ...typography.caption,
+    fontSize: 10,
+    lineHeight: 12,
+    fontWeight: '700',
+  },
+  statusPillTextRunning: {
+    color: '#8EE6AD',
+  },
+  statusPillTextError: {
+    color: '#FFB4B4',
+  },
+  statusPillDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusPillDotRunning: {
+    backgroundColor: '#34C759',
   },
   footer: {
     marginTop: 'auto',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
-    paddingTop: spacing.md,
-    paddingBottom: 0,
-  },
-  workspaceModalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
     paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.sm,
   },
-  workspaceModalCard: {
-    backgroundColor: colors.bgSidebar,
+  footerSettingsButton: {
+    height: 42,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: colors.border,
-    maxHeight: '70%',
-    padding: spacing.md,
-    gap: spacing.sm,
-  },
-  workspaceModalTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  workspaceModalList: {
-    maxHeight: 340,
-  },
-  workspaceModalListContent: {
-    gap: spacing.xs,
-  },
-  workspaceOption: {
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: '#101317',
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    justifyContent: 'center',
+    gap: spacing.xs,
   },
-  workspaceOptionSelected: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  footerSettingsButtonPressed: {
+    backgroundColor: '#171B20',
   },
-  workspaceOptionPressed: {
-    opacity: 0.88,
-  },
-  workspaceOptionText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    flex: 1,
-  },
-  workspaceOptionTextSelected: {
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  workspaceModalCloseBtn: {
-    alignSelf: 'flex-end',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-    marginTop: spacing.xs,
-  },
-  workspaceModalCloseBtnPressed: {
-    opacity: 0.85,
-  },
-  workspaceModalCloseText: {
+  footerSettingsText: {
     ...typography.caption,
     color: colors.textPrimary,
+    fontSize: 11,
+    lineHeight: 13,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
   },
 });

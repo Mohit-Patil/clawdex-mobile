@@ -3,8 +3,6 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ApprovalMode, ModelOption, ReasoningEffort } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
+import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface SettingsScreenProps {
@@ -223,6 +222,88 @@ export function SettingsScreen({
     [onApprovalModeChange]
   );
 
+  const approvalModeOptions = useMemo<SelectionSheetOption[]>(
+    () => [
+      {
+        key: 'normal',
+        title: 'Normal approvals',
+        description: 'Ask before commands and file-changing actions run.',
+        icon: 'shield-checkmark-outline',
+        selected: normalizedApprovalMode === 'normal',
+        onPress: () => selectApprovalMode('normal'),
+      },
+      {
+        key: 'yolo',
+        title: 'YOLO approvals',
+        description: 'Run commands without prompting for approval.',
+        icon: 'flash-outline',
+        meta: 'Unsafe',
+        selected: normalizedApprovalMode === 'yolo',
+        onPress: () => selectApprovalMode('yolo'),
+      },
+    ],
+    [normalizedApprovalMode, selectApprovalMode]
+  );
+
+  const modelPickerOptions = useMemo<SelectionSheetOption[]>(
+    () => [
+      {
+        key: 'server-default',
+        title: 'Use server default',
+        description: 'Follow the bridge default model for new chats.',
+        icon: 'sparkles-outline',
+        badge: 'Auto',
+        selected: normalizedDefaultModelId === null,
+        onPress: () => selectDefaultModel(null),
+      },
+      ...modelOptions.map((model) => ({
+        key: model.id,
+        title: model.displayName,
+        description: model.description?.trim() || model.id,
+        icon: 'hardware-chip-outline' as const,
+        badge: model.isDefault ? 'Default' : undefined,
+        meta: model.defaultReasoningEffort
+          ? formatReasoningEffort(model.defaultReasoningEffort)
+          : undefined,
+        selected: model.id === normalizedDefaultModelId,
+        onPress: () => selectDefaultModel(model.id),
+      })),
+    ],
+    [modelOptions, normalizedDefaultModelId, selectDefaultModel]
+  );
+
+  const effortPickerOptions = useMemo<SelectionSheetOption[]>(
+    () => [
+      {
+        key: 'model-default',
+        title: 'Use model default',
+        description: selectedDefaultModel
+          ? `Follow ${selectedDefaultModel.displayName}'s default reasoning.`
+          : 'Follow the model default reasoning level.',
+        icon: 'sparkles-outline',
+        badge: 'Auto',
+        selected: normalizedDefaultEffort === null,
+        onPress: () => selectDefaultEffort(null),
+      },
+      ...selectedDefaultModelEfforts.map((option) => ({
+        key: option.effort,
+        title: formatReasoningEffort(option.effort),
+        description:
+          option.description?.trim() ||
+          'Override the default reasoning depth for new chats.',
+        icon: 'pulse-outline' as const,
+        selected: option.effort === normalizedDefaultEffort,
+        onPress: () => selectDefaultEffort(option.effort),
+      })),
+    ],
+    [
+      normalizedDefaultEffort,
+      selectDefaultEffort,
+      selectedDefaultModel,
+      selectedDefaultModelEfforts,
+    ]
+  );
+
   return (
     <View style={styles.container}>
       <LinearGradient
@@ -383,127 +464,38 @@ export function SettingsScreen({
         </ScrollView>
       </SafeAreaView>
 
-      <Modal
+      <SelectionSheet
         visible={approvalModeModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setApprovalModeModalVisible(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Execution approval mode</Text>
-            <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
-              <OptionRow
-                label="Normal — Ask for approvals"
-                selected={normalizedApprovalMode === 'normal'}
-                onPress={() => selectApprovalMode('normal')}
-              />
-              <OptionRow
-                label="YOLO — Do not ask approvals"
-                selected={normalizedApprovalMode === 'yolo'}
-                onPress={() => selectApprovalMode('yolo')}
-              />
-            </ScrollView>
-            <View style={styles.modalActions}>
-              <Pressable
-                onPress={() => setApprovalModeModalVisible(false)}
-                style={({ pressed }) => [
-                  styles.modalCloseBtn,
-                  pressed && styles.workspaceModalCloseBtnPressed,
-                ]}
-              >
-                <Text style={styles.modalCloseText}>Close</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        eyebrow="Approvals"
+        title="Execution approval mode"
+        subtitle="This only affects command and file-change approvals."
+        options={approvalModeOptions}
+        onClose={() => setApprovalModeModalVisible(false)}
+      />
 
-      <Modal
+      <SelectionSheet
         visible={modelModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={closeModelModal}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Default model</Text>
-            {loadingModels ? (
-              <ActivityIndicator color={colors.textPrimary} style={styles.modalLoader} />
-            ) : (
-              <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
-                <OptionRow
-                  label="Server default"
-                  selected={normalizedDefaultModelId === null}
-                  onPress={() => selectDefaultModel(null)}
-                />
-                {modelOptions.map((model) => (
-                  <OptionRow
-                    key={model.id}
-                    label={`${model.displayName} (${model.id})`}
-                    selected={model.id === normalizedDefaultModelId}
-                    onPress={() => selectDefaultModel(model.id)}
-                  />
-                ))}
-              </ScrollView>
-            )}
-            <View style={styles.modalActions}>
-              <Pressable
-                onPress={closeModelModal}
-                style={({ pressed }) => [
-                  styles.modalCloseBtn,
-                  pressed && styles.workspaceModalCloseBtnPressed,
-                ]}
-              >
-                <Text style={styles.modalCloseText}>Close</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        eyebrow="Defaults"
+        title="Default model"
+        subtitle="Pick the model new chats should start with."
+        options={modelPickerOptions}
+        loading={loadingModels}
+        loadingLabel="Refreshing available models…"
+        onClose={closeModelModal}
+      />
 
-      <Modal
+      <SelectionSheet
         visible={effortModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setEffortModalVisible(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Default reasoning</Text>
-            <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
-              <OptionRow
-                label="Model default"
-                selected={normalizedDefaultEffort === null}
-                onPress={() => selectDefaultEffort(null)}
-              />
-              {selectedDefaultModelEfforts.map((option) => (
-                <OptionRow
-                  key={option.effort}
-                  label={
-                    option.description
-                      ? `${formatReasoningEffort(option.effort)} — ${option.description}`
-                      : formatReasoningEffort(option.effort)
-                  }
-                  selected={option.effort === normalizedDefaultEffort}
-                  onPress={() => selectDefaultEffort(option.effort)}
-                />
-              ))}
-            </ScrollView>
-            <View style={styles.modalActions}>
-              <Pressable
-                onPress={() => setEffortModalVisible(false)}
-                style={({ pressed }) => [
-                  styles.modalCloseBtn,
-                  pressed && styles.workspaceModalCloseBtnPressed,
-                ]}
-              >
-                <Text style={styles.modalCloseText}>Close</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        eyebrow="Defaults"
+        title="Default reasoning"
+        subtitle={
+          selectedDefaultModel
+            ? `Current model: ${selectedDefaultModel.displayName}`
+            : 'Choose the default reasoning depth for new chats.'
+        }
+        options={effortPickerOptions}
+        onClose={() => setEffortModalVisible(false)}
+      />
     </View>
   );
 }
@@ -526,30 +518,6 @@ function Row({
         {value}
       </Text>
     </View>
-  );
-}
-
-function OptionRow({
-  label,
-  selected,
-  onPress,
-}: {
-  label: string;
-  selected: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.optionRow,
-        selected && styles.optionRowSelected,
-        pressed && styles.optionRowPressed,
-      ]}
-    >
-      <Text style={[styles.optionRowText, selected && styles.optionRowTextSelected]}>{label}</Text>
-      {selected ? <Ionicons name="checkmark" size={16} color={colors.textPrimary} /> : null}
-    </Pressable>
   );
 }
 
@@ -710,81 +678,6 @@ const styles = StyleSheet.create({
     ...typography.body,
     color: colors.textPrimary,
     fontWeight: '600',
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.55)',
-    justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
-  },
-  modalCard: {
-    backgroundColor: colors.bgItem,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.lg,
-    gap: spacing.md,
-    maxHeight: '74%',
-  },
-  modalTitle: {
-    ...typography.headline,
-    color: colors.textPrimary,
-  },
-  modalLoader: {
-    marginVertical: spacing.lg,
-  },
-  modalList: {
-    maxHeight: 320,
-  },
-  modalListContent: {
-    gap: spacing.xs,
-  },
-  optionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  optionRowSelected: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  optionRowPressed: {
-    opacity: 0.86,
-  },
-  optionRowText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    flex: 1,
-  },
-  optionRowTextSelected: {
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  modalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-  },
-  modalCloseBtn: {
-    borderRadius: 10,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
-  },
-  workspaceModalCloseBtnPressed: {
-    opacity: 0.85,
-  },
-  modalCloseText: {
-    ...typography.body,
-    color: colors.textPrimary,
   },
   errorText: {
     ...typography.caption,
