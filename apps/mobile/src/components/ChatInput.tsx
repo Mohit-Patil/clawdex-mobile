@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
 import { useEffect, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -103,12 +102,6 @@ export function ChatInput({
 
   return (
     <View style={styles.shell}>
-      <BlurView
-        intensity={26}
-        tint={Platform.OS === 'ios' ? 'systemUltraThinMaterialDark' : 'dark'}
-        blurMethod="dimezisBlurViewSdk31Plus"
-        style={StyleSheet.absoluteFill}
-      />
       <View
         style={[
           styles.container,
@@ -307,14 +300,11 @@ export function ChatInput({
 const styles = StyleSheet.create({
   shell: {
     overflow: 'hidden',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
   },
   container: {
     gap: spacing.xs,
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.sm,
-    backgroundColor: 'rgba(6, 9, 13, 0.42)',
   },
   row: {
     flexDirection: 'row',
