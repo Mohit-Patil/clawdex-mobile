@@ -166,9 +166,9 @@ interface SlashCommandDefinition {
 
 const MAX_ACTIVE_COMMANDS = 16;
 const RUN_WATCHDOG_MS = 60_000;
-const CHAT_OPEN_REVEAL_DELAY_MS = 260;
-const LARGE_CHAT_OPEN_REVEAL_DELAY_MS = 2_000;
 const LARGE_CHAT_MESSAGE_COUNT_THRESHOLD = 120;
+const CHAT_INITIAL_VISIBLE_MESSAGE_WINDOW = 80;
+const CHAT_MESSAGE_PAGE_SIZE = 80;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const UNANSWERED_USER_RUNNING_TTL_MS = 90_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
@@ -553,7 +553,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         scrollRetryTimeoutsRef.current = delays.map((delay, index) =>
           setTimeout(() => {
             requestAnimationFrame(() => {
-              scrollRef.current?.scrollToEnd({
+              scrollRef.current?.scrollToOffset({
+                offset: 0,
                 animated: index === 0 ? animated : false,
               });
             });
@@ -3086,14 +3087,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const requestId = loadChatRequestRef.current + 1;
         loadChatRequestRef.current = requestId;
         let loadedSuccessfully = false;
-        let loadedMessageCount = 0;
         try {
           const chat = await api.getChat(chatId);
           if (requestId !== loadChatRequestRef.current) {
             return;
           }
           loadedSuccessfully = true;
-          loadedMessageCount = chat.messages.length;
           const shouldPreserveRuntimeState = Boolean(
             options?.preserveRuntimeState && chatId === chatIdRef.current
           );
@@ -3156,21 +3155,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (loadedSuccessfully) {
-            // Keep spinner visible until initial bottom sync settles for long threads.
             if (options?.forceScroll) {
               scrollToBottomReliable(false);
             } else {
               scrollToBottomIfPinned(false);
             }
-            const revealDelayMs =
-              loadedMessageCount >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD
-                ? LARGE_CHAT_OPEN_REVEAL_DELAY_MS
-                : CHAT_OPEN_REVEAL_DELAY_MS;
-            setTimeout(() => {
-              if (requestId === loadChatRequestRef.current) {
-                setOpeningChatId(null);
-              }
-            }, revealDelayMs);
+            setOpeningChatId((current) => (current === chatId ? null : current));
           } else {
             setOpeningChatId(null);
           }
@@ -3196,7 +3186,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         );
 
         setSelectedChatId(id);
-        setOpeningChatId(id);
+        setOpeningChatId(hasSnapshot ? null : id);
         setSending(false);
         setCreating(false);
         setError(null);
@@ -3219,6 +3209,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (hasSnapshot && optimisticChat) {
           setSelectedChat(optimisticChat);
+        } else {
+          setSelectedChat(null);
         }
         setActivity({
           tone: 'running',
@@ -5650,7 +5642,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               scrollRef={scrollRef}
               inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
               onInlineOptionSelect={handleInlineOptionSelect}
-              onAutoScroll={scrollToBottomReliable}
               onPinnedAutoScroll={scrollToBottomIfPinned}
               onScrollInteractionStart={clearPendingScrollRetries}
               autoScrollStateRef={autoScrollStateRef}
@@ -6276,7 +6267,6 @@ function ChatView({
   scrollRef,
   inlineChoicesEnabled,
   onInlineOptionSelect,
-  onAutoScroll,
   onPinnedAutoScroll,
   onScrollInteractionStart,
   autoScrollStateRef,
@@ -6288,7 +6278,6 @@ function ChatView({
   scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
-  onAutoScroll: (animated?: boolean) => void;
   onPinnedAutoScroll: (animated?: boolean) => void;
   onScrollInteractionStart: () => void;
   autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
@@ -6313,43 +6302,48 @@ function ChatView({
       return !next || next.role !== 'assistant';
     });
   }, [chat.messages]);
-  const inlineChoiceSet = useMemo(
-    () => (inlineChoicesEnabled ? findInlineChoiceSet(visibleMessages) : null),
-    [inlineChoicesEnabled, visibleMessages]
+  const [visibleStartIndex, setVisibleStartIndex] = useState(() =>
+    getInitialVisibleMessageStartIndex(visibleMessages.length)
   );
-  const initialBottomSyncChatIdRef = useRef<string | null>(null);
+  const paginatedMessages = useMemo(
+    () => visibleMessages.slice(visibleStartIndex),
+    [visibleMessages, visibleStartIndex]
+  );
+  const displayMessages = useMemo(
+    () => [...paginatedMessages].reverse(),
+    [paginatedMessages]
+  );
+  const olderMessageCount = visibleStartIndex;
+  const hasOlderMessages = olderMessageCount > 0;
+  const inlineChoiceSet = useMemo(
+    () => (inlineChoicesEnabled ? findInlineChoiceSet(paginatedMessages) : null),
+    [inlineChoicesEnabled, paginatedMessages]
+  );
+  useEffect(() => {
+    setVisibleStartIndex(getInitialVisibleMessageStartIndex(visibleMessages.length));
+  }, [chat.id]);
+
+  useEffect(() => {
+    setVisibleStartIndex((current) => {
+      const maxStartIndex = Math.max(visibleMessages.length - 1, 0);
+      return current > maxStartIndex ? maxStartIndex : current;
+    });
+  }, [visibleMessages.length]);
+
+  const loadOlderMessages = useCallback(() => {
+    setVisibleStartIndex((current) =>
+      Math.max(0, current - CHAT_MESSAGE_PAGE_SIZE)
+    );
+  }, []);
+
   const handleScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-      const distanceFromBottom =
-        contentSize.height - (contentOffset.y + layoutMeasurement.height);
+      const { contentOffset } = event.nativeEvent;
+      const distanceFromBottom = contentOffset.y;
       autoScrollStateRef.current.shouldStickToBottom = distanceFromBottom <= spacing.xl * 2;
     },
     [autoScrollStateRef]
   );
-
-  useEffect(() => {
-    if (initialBottomSyncChatIdRef.current === chat.id) {
-      return;
-    }
-    if (visibleMessages.length === 0) {
-      return;
-    }
-
-    initialBottomSyncChatIdRef.current = chat.id;
-    const scrollToBottom = () => onAutoScroll(false);
-    const frame = requestAnimationFrame(scrollToBottom);
-    const timeout = setTimeout(scrollToBottom, 120);
-
-    return () => {
-      cancelAnimationFrame(frame);
-      clearTimeout(timeout);
-    };
-  }, [
-    chat.id,
-    onAutoScroll,
-    visibleMessages.length,
-  ]);
 
   useEffect(() => {
     autoScrollStateRef.current.shouldStickToBottom = true;
@@ -6361,7 +6355,6 @@ function ChatView({
     [bottomInset]
   );
   const isLargeChat = visibleMessages.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
-  const aggressiveRenderBatchSize = Math.max(visibleMessages.length, 1);
   const keyExtractor = useCallback((msg: ChatTranscriptMessage) => msg.id, []);
   const renderMessageItem = useCallback<ListRenderItem<ChatTranscriptMessage>>(
     ({ item: msg }) => {
@@ -6402,17 +6395,57 @@ function ChatView({
     [bridgeToken, bridgeUrl, inlineChoiceSet, onInlineOptionSelect]
   );
 
+  const paginationHeader = useMemo(() => {
+    if (!hasOlderMessages) {
+      return null;
+    }
+
+    const olderBatchCount = Math.min(CHAT_MESSAGE_PAGE_SIZE, olderMessageCount);
+    return (
+      <View style={styles.messagePaginationWrap}>
+        <Pressable
+          onPress={loadOlderMessages}
+          style={({ pressed }) => [
+            styles.messagePaginationButton,
+            pressed && styles.messagePaginationButtonPressed,
+          ]}>
+          <Ionicons
+            name="chevron-up-circle-outline"
+            size={16}
+            color={colors.textPrimary}
+          />
+          <Text style={styles.messagePaginationButtonText}>
+            {`Load ${String(olderBatchCount)} earlier message${
+              olderBatchCount === 1 ? '' : 's'
+            }`}
+          </Text>
+        </Pressable>
+        <Text style={styles.messagePaginationMeta}>
+          {`Showing ${String(paginatedMessages.length)} of ${String(visibleMessages.length)} messages`}
+        </Text>
+      </View>
+    );
+  }, [
+    hasOlderMessages,
+    loadOlderMessages,
+    olderMessageCount,
+    paginatedMessages.length,
+    visibleMessages.length,
+  ]);
+
   return (
     <View style={styles.messageListShell}>
       <FlatList
         key={chat.id}
         ref={scrollRef}
-        data={visibleMessages}
+        data={displayMessages}
         keyExtractor={keyExtractor}
         renderItem={renderMessageItem}
+        ListFooterComponent={paginationHeader}
         style={styles.messageList}
         contentContainerStyle={messageListContentStyle}
         maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+        inverted
         showsVerticalScrollIndicator={false}
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         keyboardShouldPersistTaps="handled"
@@ -6440,11 +6473,11 @@ function ChatView({
         onContentSizeChange={() => {
           onPinnedAutoScroll(false);
         }}
-        initialNumToRender={isLargeChat ? aggressiveRenderBatchSize : 16}
-        maxToRenderPerBatch={isLargeChat ? aggressiveRenderBatchSize : 12}
-        updateCellsBatchingPeriod={isLargeChat ? 0 : undefined}
-        windowSize={isLargeChat ? 21 : 11}
-        removeClippedSubviews={isLargeChat ? false : Platform.OS === 'android'}
+        initialNumToRender={Math.min(displayMessages.length, 16)}
+        maxToRenderPerBatch={Math.min(displayMessages.length, 12)}
+        updateCellsBatchingPeriod={isLargeChat ? 16 : undefined}
+        windowSize={isLargeChat ? 15 : 11}
+        removeClippedSubviews={Platform.OS === 'android'}
       />
     </View>
   );
@@ -7368,6 +7401,14 @@ function formatCollaborationModeLabel(mode: CollaborationMode): string {
 
 function createQueuedMessageId(): string {
   return `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getInitialVisibleMessageStartIndex(totalMessageCount: number): number {
+  if (totalMessageCount <= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD) {
+    return 0;
+  }
+
+  return Math.max(0, totalMessageCount - CHAT_INITIAL_VISIBLE_MESSAGE_WINDOW);
 }
 
 function resolveSnapshotCollaborationMode(
@@ -8527,6 +8568,34 @@ const styles = StyleSheet.create({
   },
   chatMessageBlock: {
     gap: spacing.sm,
+  },
+  messagePaginationWrap: {
+    alignItems: 'flex-start',
+    gap: spacing.xs,
+  },
+  messagePaginationButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.bgItem,
+    borderRadius: 999,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  messagePaginationButtonPressed: {
+    backgroundColor: colors.bgInput,
+  },
+  messagePaginationButtonText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  messagePaginationMeta: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginLeft: spacing.xs,
   },
   inlineChoiceOptions: {
     marginLeft: spacing.sm,

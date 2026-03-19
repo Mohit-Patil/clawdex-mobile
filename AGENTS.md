@@ -1,120 +1,273 @@
 # AGENTS
 
-## Project Purpose
-- Monorepo for controlling Codex from mobile:
-  - `apps/mobile`: Expo React Native client (Threads, Terminal, Git, Settings).
-  - `services/rust-bridge`: Rust WebSocket JSON-RPC bridge that wraps `codex app-server` plus terminal/git helpers.
-  - `services/mac-bridge`: legacy TypeScript bridge kept for reference.
+## Purpose
 
-## Repo Layout
-- `apps/mobile`: UI and API client code.
-  - API layer: `src/api/*`
-  - Screens: `src/screens/*`
-- `services/rust-bridge`: primary backend bridge service.
-  - WS RPC server + app-server adapter: `src/main.rs`
-- `services/mac-bridge`: backend bridge service.
-  - HTTP/WS server: `src/server.ts`, `src/index.ts`
-  - Service adapters: `src/services/*`
-  - Shared protocol types: `src/types.ts`
-- Root `package.json`: npm workspaces + common scripts.
+This repo is a monorepo for controlling Codex from a phone.
 
-## Setup
-1. Install deps:
-   - `npm install`
-2. Copy env examples:
-   - `cp apps/mobile/.env.example apps/mobile/.env`
-   - `cp services/rust-bridge/.env.example services/rust-bridge/.env`
+- Primary product path:
+  - `apps/mobile`: Expo React Native client
+  - `services/rust-bridge`: current backend bridge (`codex app-server` adapter + terminal/git/attachments/voice helpers)
+  - `bin/clawdex.js` + `scripts/*`: operator CLI and setup/runtime automation
+- Legacy/reference path:
+  - `services/mac-bridge`: older TypeScript bridge with useful tests/reference code, but not the primary runtime
 
-## Open Source License Requirements
-- Follow `docs/open-source-license-requirements.md` for licensing and third-party notice obligations.
-- For any release/distribution changes, ensure the guide remains satisfied before merge.
+The bridge is intended for trusted/private networks only. Do not treat this repo as internet-safe by default.
 
-### Starting the Bridge
+## Read First
 
-The bridge does **not** auto-load `.env` files. All environment variables must be passed inline.
+Use the existing docs as the source of truth instead of duplicating them in code comments or PR notes.
 
-```bash
-BRIDGE_HOST=0.0.0.0 \
-BRIDGE_PORT=8787 \
-BRIDGE_ALLOW_INSECURE_NO_AUTH=true \
-CODEX_CLI_BIN=codex \
-BRIDGE_WORKDIR="$(pwd)" \
-npm run -w @codex/rust-bridge dev
-```
+- Quick start and command map: `README.md`
+- Setup, secure env flow, verification, smoke tests, API summary: `docs/setup-and-operations.md`
+- Troubleshooting and recovery commands: `docs/troubleshooting.md`
+- Realtime/live-sync constraints: `docs/realtime-streaming-limitations.md`
+- Voice transcription architecture: `docs/voice-transcription.md`
+- EAS and native build/release notes: `docs/eas-builds.md`
+- Open-source and notice obligations: `docs/open-source-license-requirements.md`
+- App review template: `docs/app-review-notes.md`
+- App-server/CLI parity tracker: `docs/codex-app-server-cli-gap-tracker.md`
 
-- `BRIDGE_HOST=0.0.0.0` binds to all interfaces so the phone on the same LAN can reach it. Without this it defaults to `127.0.0.1` (localhost only).
-- `BRIDGE_ALLOW_INSECURE_NO_AUTH=true` disables auth for local development. Without it the bridge will throw `BRIDGE_AUTH_TOKEN is required`.
-- `CODEX_CLI_BIN=codex` tells the bridge which Codex binary to use. Make sure `codex` is in your PATH.
-- `BRIDGE_WORKDIR` sets the root directory for git/terminal operations.
+`docs/plans/*` are historical design/implementation plans, not current operating policy.
 
-The shorthand `npm run bridge` only sets `BRIDGE_WORKDIR` — it will fail unless the other vars are already exported in your shell.
+## Repo Map
 
-### Starting Expo
+### Active code
 
-```bash
-npm run mobile
-```
+- `apps/mobile`
+  - `App.tsx`: app shell, drawer navigation, persisted settings
+  - `src/api/*`: bridge client, websocket transport, typed contracts
+  - `src/screens/*`: main UI surfaces
+  - `src/components/*`: chat UI pieces
+  - `ios/*`: active Expo native iOS project
+  - `plugins/withAndroidCleartextTraffic.js`: Android manifest patch for local/insecure bridge access
+- `services/rust-bridge`
+  - `src/main.rs`: main Axum server, JSON-RPC router, app-server bridge, replay/live-sync logic
+  - `src/services/git.rs`: git helpers
+  - `src/services/terminal.rs`: terminal execution helpers
+- `scripts/*`
+  - secure setup/start helpers, Expo bootstrap, service stop/cleanup, version sync
+- `.github/workflows/*`
+  - CI, npm release, and Pages publishing
+- `site/*`
+  - static support/privacy/terms site
 
-This runs `expo start` in the `apps/mobile` workspace. It loads `apps/mobile/.env` automatically.
+### Legacy or easy-to-confuse paths
 
-On first app launch, onboarding will ask for your bridge URL. Enter your host machine LAN/Tailscale URL:
-```
-http://<YOUR_LAN_IP>:8787
-```
+- `services/mac-bridge/*`: legacy TypeScript bridge; useful for reference and tests, not the default runtime
+- `ios/*` at repo root: older native iOS tree (`codexmobilecontrol`), not the active Expo app path
+- `apps/mobile/ios/*`: this is the active iOS native project for the shipped mobile app
+- `apps/telegram-miniapp/*`: currently not a primary maintained source tree; it mostly contains built output/environment leftovers
 
-Find your LAN IP with `ifconfig en0 | grep inet` (macOS) or `ip addr` (Linux). The phone and the host machine must be on the same network.
+### Generated/vendor paths to avoid editing by hand
 
-Optionally run on a specific platform:
+- `node_modules/*`
+- `.expo/*`
+- `apps/mobile/ios/Pods/*`
+- `ios/Pods/*`
+- `ios/build/*`
+- `apps/telegram-miniapp/dist/*`
+
+## Current Architecture
+
+### Mobile app
+
+- The mobile app is a custom shell, not React Navigation based.
+- `apps/mobile/App.tsx` creates exactly one `HostBridgeWsClient` and one `HostBridgeApiClient`, persists app settings, owns the custom drawer, and switches screens via local state.
+- The primary screens are:
+  - `src/screens/MainScreen.tsx`
+  - `src/screens/GitScreen.tsx`
+  - `src/screens/SettingsScreen.tsx`
+  - `src/screens/OnboardingScreen.tsx`
+  - `src/screens/PrivacyScreen.tsx`
+  - `src/screens/TermsScreen.tsx`
+- `src/screens/TerminalScreen.tsx` exists but is not currently routed from `App.tsx`.
+- `src/screens/MainScreen.tsx` is very large and is the main product surface. Treat edits there surgically.
+
+### Bridge/runtime
+
+- The supported backend is `services/rust-bridge`.
+- The bridge exposes:
+  - `GET /health`
+  - `GET /rpc` for WebSocket JSON-RPC
+  - `GET /local-image` for mobile image rendering of local/absolute paths
+- The Rust bridge spawns `codex app-server --listen stdio://` and forwards an allowlist of `thread/*`, `turn/*`, `review/start`, `model/list`, `skills/list`, `app/list`, and related methods.
+- Bridge-native RPC methods include attachments upload, voice transcription, terminal exec, git operations, approvals, user-input resolution, and event replay.
+
+### Realtime model
+
+- Mobile realtime is hybrid:
+  - live WS notifications when the bridge owns the stream
+  - replay buffer recovery via `bridge/events/replay`
+  - snapshot/poll convergence for persisted history
+  - rollout/session tailing in Rust for best-effort CLI-origin live sync
+- If work touches missing live updates, read `docs/realtime-streaming-limitations.md` before changing the bridge or mobile sync loop.
+
+## Primary Workflows
+
+### Preferred operator flow
+
+- Published CLI:
+  - `clawdex init`
+  - `clawdex stop`
+- Monorepo equivalents:
+  - `npm run setup:wizard`
+  - `npm run stop:services`
+
+### Root scripts
+
+From repo root:
+
+- `npm run mobile`
 - `npm run ios`
 - `npm run android`
+- `npm run bridge`
+- `npm run bridge:ts`
+- `npm run secure:setup`
+- `npm run secure:bridge`
+- `npm run secure:bridge:dev`
+- `npm run teardown`
+- `npm run lint`
+- `npm run typecheck`
+- `npm run build`
+- `npm run test`
+- `npm run version:sync`
 
-## Core Commands
-- `npm run lint` (all workspaces)
-- `npm run typecheck` (all workspaces)
-- `npm run build` (all workspaces)
-- `npm run -w @codex/rust-bridge dev` (bridge run mode)
-- `npm run -w apps/mobile start` (Expo dev server)
+### Important operational details
 
-## Architecture Notes
-- Mobile app creates one `HostBridgeApiClient` and one `HostBridgeWsClient` in `App.tsx` and passes them to screen components.
-- Threads, Terminal, and Git screens keep local `useState` and call typed API helpers in `apps/mobile/src/api/client.ts`.
-- Bridge exposes:
-  - WebSocket JSON-RPC (`/rpc`) for thread, turn, approvals, terminal, and git operations.
-  - Optional HTTP `/health` endpoint.
-- App-server events (`turn/*`, `item/*`) are forwarded over WS; approval prompts are surfaced as `bridge/approval.*`.
+- `scripts/start-expo.sh` bootstraps Expo, attempts runtime repair if needed, and sets `REACT_NATIVE_PACKAGER_HOSTNAME` from `.env.secure` or Tailscale/LAN discovery.
+- `scripts/start-bridge-secure.sh` sources `.env.secure` and runs the Rust bridge in dev or release mode.
+- `npm run bridge` is only a shorthand for local development and does not load `.env.secure`.
+- Real-device iOS work should be run from `apps/mobile`, not the repo-root `ios/` tree.
 
-## Coding Conventions
-- Keep changes in `src/` only; do not manually edit build artifacts.
-- Preserve strong typing across bridge contracts (`services/rust-bridge/src/main.rs`, `apps/mobile/src/api/types.ts`).
-- Prefer small service-layer additions over bloating the main RPC router.
-- For mobile, keep API requests in `src/api/client.ts` and UI logic in screen files.
+## Environment and Config
 
-## Security Guardrails
-- Treat bridge as trusted-network only until auth is added:
-  - `bridge/terminal/exec` executes shell commands.
-  - `bridge/git/*` can mutate repository state.
-- Never expose `services/rust-bridge` directly to the public internet in current form.
-- If adding new execution endpoints, enforce authentication/authorization first.
+### Bridge
 
-## Known Risks
-- WebSocket broadcast path has limited resilience for slow/broken clients.
-- Thread/run cache updates can race under concurrent writes.
-- Mobile WS client currently lacks robust reconnect/backoff behavior.
-- npm audit still reports high vulnerabilities from Expo’s transitive toolchain (`minimatch` path) even on latest stable Expo.
+Canonical examples:
+
+- `services/rust-bridge/.env.example`
+- `services/mac-bridge/.env.example`
+
+Important Rust bridge env knobs:
+
+- `BRIDGE_HOST`
+- `BRIDGE_PORT`
+- `BRIDGE_WORKDIR`
+- `BRIDGE_AUTH_TOKEN`
+- `BRIDGE_ALLOW_INSECURE_NO_AUTH`
+- `BRIDGE_ALLOW_QUERY_TOKEN_AUTH`
+- `BRIDGE_ALLOW_OUTSIDE_ROOT_CWD`
+- `BRIDGE_DISABLE_TERMINAL_EXEC`
+- `BRIDGE_TERMINAL_ALLOWED_COMMANDS`
+- `CODEX_CLI_BIN`
+- `CODEX_CLI_TIMEOUT_MS`
+
+### Mobile
+
+Canonical example:
+
+- `apps/mobile/.env.example`
+
+Important mobile env knobs:
+
+- `EXPO_PUBLIC_HOST_BRIDGE_TOKEN`
+- `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH`
+- `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE`
+- `EXPO_PUBLIC_PRIVACY_POLICY_URL`
+- `EXPO_PUBLIC_TERMS_OF_SERVICE_URL`
+
+Current behavior:
+
+- Bridge URL is primarily set in onboarding and persisted in app settings.
+- `EXPO_PUBLIC_HOST_BRIDGE_URL` is legacy/fallback behavior, not the main source of truth.
+
+## Editing Rules For This Repo
+
+- Prefer changing active source files under `apps/mobile/src` and `services/rust-bridge/src`.
+- Keep bridge contract changes mirrored across:
+  - `services/rust-bridge/src/main.rs`
+  - `apps/mobile/src/api/types.ts`
+  - `apps/mobile/src/api/client.ts`
+  - relevant tests and docs
+- If you change secure setup/runtime behavior, check:
+  - `scripts/setup-wizard.sh`
+  - `scripts/setup-secure-dev.sh`
+  - `scripts/start-bridge-secure.sh`
+  - `scripts/start-expo.sh`
+  - `docs/setup-and-operations.md`
+  - `docs/troubleshooting.md`
+- Do not confuse `apps/mobile/ios` with the older repo-root `ios/` directory.
+- Do not edit vendored/generated files unless the change is deliberately maintained through a script or checked-in config.
 
 ## Testing Expectations
-- Current safety net is lint + typecheck + manual smoke tests.
-- Minimum pre-merge checks:
-  - `npm run lint`
-  - `npm run typecheck`
-  - exercise bridge endpoints and WS flow
-  - open mobile app and verify Threads + Terminal + Git screens
-- Add tests for new API behavior when feasible (no test harness is currently configured).
+
+### Automated checks
+
+From repo root:
+
+- `npm run lint`
+- `npm run typecheck`
+- `npm run build`
+- `npm run test`
+
+Workspace-specific:
+
+- `npm run -w apps/mobile lint`
+- `npm run -w apps/mobile typecheck`
+- `npm run -w apps/mobile test`
+- `cargo fmt --check` / `cargo check` / `cargo test` in `services/rust-bridge`
+
+### Existing test coverage
+
+- `apps/mobile` has Jest unit tests for API mapping, websocket logic, notification helpers, and small UI helpers
+- `services/mac-bridge` has the densest unit-test coverage among service layers
+- `services/rust-bridge` relies on `cargo test` plus inline/unit coverage in `main.rs`; there is not a separate large test harness
+
+### Manual smoke tests
+
+Use `docs/setup-and-operations.md` as the canonical smoke-test runbook. Minimum manual validation for meaningful product changes usually includes:
+
+- onboarding / connection
+- creating and running a chat
+- approvals or plan-mode flow when relevant
+- git actions if git-related code changed
+- attachments or voice if those paths changed
+
+## Security Guardrails
+
+- Treat the bridge as private-network only.
+- Never expose the current bridge directly to the public internet.
+- `BRIDGE_ALLOW_INSECURE_NO_AUTH=true` disables auth and is for local debugging only.
+- Bearer auth is preferred; query-token auth exists for mobile compatibility and Android WebSocket fallback.
+- `BRIDGE_ALLOW_OUTSIDE_ROOT_CWD` defaults to permissive behavior unless explicitly disabled. Be careful when changing terminal/git cwd logic.
+- Terminal execution and git mutation are high-risk surfaces. Any new execution endpoint needs explicit auth and scope review first.
 
 ## Common Pitfalls
-- Bridge requires accessible `codex` CLI and `git` binaries in runtime PATH.
-- On real devices, use LAN host for bridge URL instead of localhost.
-- Endpoint changes must be mirrored in mobile `src/api/types.ts` + client methods.
-- Keep environment handling explicit; avoid relying on implicit cwd assumptions.
-- If Expo Go shows a Worklets JS/native mismatch, run `npx expo install --fix` in `apps/mobile` and reinstall cleanly.
-- If Expo shows `Failed to create a worklet`, ensure `apps/mobile/babel.config.js` includes `plugins: ['react-native-reanimated/plugin']` and restart with `expo start --clear`.
+
+- Two iOS trees exist. The active mobile app is under `apps/mobile/ios`, not repo-root `ios/`.
+- Real devices must use LAN/Tailscale bridge URLs, not localhost.
+- `MainScreen.tsx` is very large; broad refactors there are risky.
+- Android cleartext bridge access is intentionally enabled by the Expo config plugin for local/private HTTP development.
+- Worklets/Reanimated issues are usually cache/install problems, not missing config. `babel.config.js` already includes the required plugin.
+- If setup, auth, Expo startup, QR/networking, or interrupt behavior breaks, use `docs/troubleshooting.md` instead of reinventing recovery steps.
+
+## When To Update Docs
+
+Update the relevant docs when changing these areas:
+
+- Setup, env flow, bridge start, or verification:
+  - `docs/setup-and-operations.md`
+- Runtime recovery steps:
+  - `docs/troubleshooting.md`
+- Realtime/live-sync behavior:
+  - `docs/realtime-streaming-limitations.md`
+- Voice recording/transcription behavior:
+  - `docs/voice-transcription.md`
+- EAS/native build or store release flow:
+  - `docs/eas-builds.md`
+- Legal/license obligations:
+  - `docs/open-source-license-requirements.md`
+  - `docs/privacy-policy.md`
+  - `docs/terms-of-service.md`
+
+Keep `AGENTS.md` as the repo-wide orientation layer. Keep detailed procedures in `docs/`.
