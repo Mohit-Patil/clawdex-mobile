@@ -378,7 +378,8 @@ export function SettingsScreen({
           </BlurView>
           <Text style={styles.subtleHintText}>
             This controls command/file-change approvals only. It does not affect
-            request_user_input questions.
+            request_user_input questions. Mobile chats request full Codex sandbox
+            access by default.
           </Text>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge</Text>

@@ -461,6 +461,30 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('createChat() requests danger-full-access sandbox by default', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_sandbox',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.createChat({});
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        sandbox: 'danger-full-access',
+      })
+    );
+  });
+
   it('createChat() forwards service tier in thread/start config', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValueOnce({
@@ -510,6 +534,31 @@ describe('HostBridgeApiClient', () => {
         config: {
           service_tier: 'fast',
         },
+      })
+    );
+  });
+
+  it('forkChat() requests danger-full-access sandbox by default', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_fork_sandbox',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.forkChat('thr_parent');
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/fork',
+      expect.objectContaining({
+        threadId: 'thr_parent',
+        sandbox: 'danger-full-access',
       })
     );
   });
@@ -752,6 +801,7 @@ describe('HostBridgeApiClient', () => {
         threadId: 'thr_resume',
         experimentalRawEvents: true,
         approvalPolicy: 'untrusted',
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -762,6 +812,7 @@ describe('HostBridgeApiClient', () => {
         approvalPolicy: 'on-request',
         developerInstructions: expect.any(String),
         experimentalRawEvents: true,
+        sandbox: 'danger-full-access',
       })
     );
   });
@@ -786,6 +837,7 @@ describe('HostBridgeApiClient', () => {
         threadId: 'thr_resume_legacy',
         experimentalRawEvents: true,
         approvalPolicy: 'untrusted',
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -796,6 +848,7 @@ describe('HostBridgeApiClient', () => {
         approvalPolicy: 'on-request',
         developerInstructions: expect.any(String),
         experimentalRawEvents: true,
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -805,6 +858,7 @@ describe('HostBridgeApiClient', () => {
         threadId: 'thr_resume_legacy',
         approvalPolicy: 'on-request',
         developerInstructions: null,
+        sandbox: 'danger-full-access',
       })
     );
 
@@ -832,6 +886,7 @@ describe('HostBridgeApiClient', () => {
       expect.objectContaining({
         threadId: 'thr_resume_never',
         approvalPolicy: 'never',
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -840,6 +895,7 @@ describe('HostBridgeApiClient', () => {
       expect.objectContaining({
         threadId: 'thr_resume_never',
         approvalPolicy: 'never',
+        sandbox: 'danger-full-access',
       })
     );
   });

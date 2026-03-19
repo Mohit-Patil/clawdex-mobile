@@ -107,6 +107,7 @@ type AppServerThreadSetNameResponse = Record<string, never>;
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
 const MOBILE_DEVELOPER_INSTRUCTIONS =
   'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
+const MOBILE_DEFAULT_SANDBOX = 'danger-full-access';
 
 interface ChatSnapshot {
   rawThread: RawThread;
@@ -211,7 +212,7 @@ export class HostBridgeApiClient {
       modelProvider: null,
       cwd: requestedCwd ?? null,
       approvalPolicy: requestedApprovalPolicy,
-      sandbox: 'workspace-write',
+      sandbox: MOBILE_DEFAULT_SANDBOX,
       config: toThreadConfig(requestedServiceTier),
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
@@ -346,7 +347,7 @@ export class HostBridgeApiClient {
       modelProvider: null,
       cwd: normalizeCwd(options?.cwd) ?? null,
       approvalPolicy: requestedApprovalPolicy,
-      sandbox: 'workspace-write',
+      sandbox: MOBILE_DEFAULT_SANDBOX,
       config: null,
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
@@ -626,7 +627,7 @@ export class HostBridgeApiClient {
       modelProvider: null,
       cwd: normalizeCwd(options?.cwd) ?? null,
       approvalPolicy: requestedApprovalPolicy,
-      sandbox: 'workspace-write',
+      sandbox: MOBILE_DEFAULT_SANDBOX,
       config: toThreadConfig(requestedServiceTier),
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
