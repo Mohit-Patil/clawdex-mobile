@@ -79,6 +79,7 @@ export default function App() {
   const [defaultReasoningEffort, setDefaultReasoningEffort] =
     useState<ReasoningEffort | null>(null);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('normal');
+  const [showToolCalls, setShowToolCalls] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
@@ -99,7 +100,8 @@ export default function App() {
       nextBridgeToken: string | null,
       nextModelId: string | null,
       nextEffort: ReasoningEffort | null,
-      nextApprovalMode: ApprovalMode
+      nextApprovalMode: ApprovalMode,
+      nextShowToolCalls: boolean
     ) => {
       const settingsPath = getAppSettingsPath();
       if (!settingsPath) {
@@ -113,6 +115,7 @@ export default function App() {
         defaultModelId: nextModelId,
         defaultReasoningEffort: nextEffort,
         approvalMode: nextApprovalMode,
+        showToolCalls: nextShowToolCalls,
       });
 
       try {
@@ -131,6 +134,7 @@ export default function App() {
       setDefaultModelId(null);
       setDefaultReasoningEffort(null);
       setApprovalMode('normal');
+      setShowToolCalls(false);
     };
 
     const loadSettings = async () => {
@@ -157,6 +161,7 @@ export default function App() {
         setDefaultModelId(parsed.defaultModelId);
         setDefaultReasoningEffort(parsed.defaultReasoningEffort);
         setApprovalMode(parsed.approvalMode);
+        setShowToolCalls(parsed.showToolCalls);
       } catch {
         if (!cancelled) {
           resetToDefaults();
@@ -327,10 +332,11 @@ export default function App() {
         bridgeToken,
         normalizedModelId,
         normalizedEffort,
-        approvalMode
+        approvalMode,
+        showToolCalls
       );
     },
-    [approvalMode, bridgeToken, bridgeUrl, saveAppSettings]
+    [approvalMode, bridgeToken, bridgeUrl, saveAppSettings, showToolCalls]
   );
 
   const handleApprovalModeChange = useCallback(
@@ -342,10 +348,40 @@ export default function App() {
         bridgeToken,
         defaultModelId,
         defaultReasoningEffort,
-        normalizedMode
+        normalizedMode,
+        showToolCalls
       );
     },
-    [bridgeToken, bridgeUrl, defaultModelId, defaultReasoningEffort, saveAppSettings]
+    [
+      bridgeToken,
+      bridgeUrl,
+      defaultModelId,
+      defaultReasoningEffort,
+      saveAppSettings,
+      showToolCalls,
+    ]
+  );
+
+  const handleShowToolCallsChange = useCallback(
+    (nextValue: boolean) => {
+      setShowToolCalls(nextValue);
+      void saveAppSettings(
+        bridgeUrl,
+        bridgeToken,
+        defaultModelId,
+        defaultReasoningEffort,
+        approvalMode,
+        nextValue
+      );
+    },
+    [
+      approvalMode,
+      bridgeToken,
+      bridgeUrl,
+      defaultModelId,
+      defaultReasoningEffort,
+      saveAppSettings,
+    ]
   );
 
   const handleBridgeUrlSaved = useCallback(
@@ -367,7 +403,8 @@ export default function App() {
         normalizeBridgeToken(nextBridgeToken),
         defaultModelId,
         defaultReasoningEffort,
-        approvalMode
+        approvalMode,
+        showToolCalls
       );
       setCurrentScreen(onboardingMode === 'edit' ? onboardingReturnScreen : 'Main');
       setOnboardingMode('edit');
@@ -381,6 +418,7 @@ export default function App() {
       onboardingMode,
       onboardingReturnScreen,
       saveAppSettings,
+      showToolCalls,
     ]
   );
 
@@ -402,7 +440,14 @@ export default function App() {
     setOnboardingMode('initial');
     setOnboardingReturnScreen('Main');
     setCurrentScreen('Onboarding');
-    void saveAppSettings(null, null, defaultModelId, defaultReasoningEffort, approvalMode);
+    void saveAppSettings(
+      null,
+      null,
+      defaultModelId,
+      defaultReasoningEffort,
+      approvalMode,
+      showToolCalls
+    );
     closeDrawer();
   }, [
     approvalMode,
@@ -410,6 +455,7 @@ export default function App() {
     defaultModelId,
     defaultReasoningEffort,
     saveAppSettings,
+    showToolCalls,
   ]);
 
   const handleCancelOnboarding = useCallback(() => {
@@ -513,6 +559,7 @@ export default function App() {
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
             approvalMode={approvalMode}
+            showToolCalls={showToolCalls}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
@@ -534,6 +581,8 @@ export default function App() {
             onDefaultModelSettingsChange={handleDefaultModelSettingsChange}
             approvalMode={approvalMode}
             onApprovalModeChange={handleApprovalModeChange}
+            showToolCalls={showToolCalls}
+            onShowToolCallsChange={handleShowToolCallsChange}
             onEditBridgeUrl={handleOpenBridgeUrlSettings}
             onResetOnboarding={handleResetOnboarding}
             onOpenDrawer={openDrawer}
@@ -569,6 +618,7 @@ export default function App() {
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
             approvalMode={approvalMode}
+            showToolCalls={showToolCalls}
             onDefaultStartCwdChange={setDefaultStartCwd}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
@@ -642,6 +692,7 @@ function parseAppSettings(raw: string): {
   defaultModelId: string | null;
   defaultReasoningEffort: ReasoningEffort | null;
   approvalMode: ApprovalMode;
+  showToolCalls: boolean;
 } {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return {
@@ -650,6 +701,7 @@ function parseAppSettings(raw: string): {
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
+      showToolCalls: false,
     };
   }
 
@@ -669,6 +721,7 @@ function parseAppSettings(raw: string): {
         defaultModelId: null,
         defaultReasoningEffort: null,
         approvalMode: 'normal',
+        showToolCalls: false,
       };
     }
 
@@ -684,6 +737,9 @@ function parseAppSettings(raw: string): {
       approvalMode: normalizeApprovalMode(
         (parsed as { approvalMode?: unknown }).approvalMode
       ),
+      showToolCalls: normalizeBoolean(
+        (parsed as { showToolCalls?: unknown }).showToolCalls
+      ),
     };
   } catch {
     return {
@@ -692,6 +748,7 @@ function parseAppSettings(raw: string): {
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
+      showToolCalls: false,
     };
   }
 }
@@ -744,6 +801,10 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | null {
 
 function normalizeApprovalMode(value: unknown): ApprovalMode {
   return value === 'yolo' ? 'yolo' : 'normal';
+}
+
+function normalizeBoolean(value: unknown): boolean {
+  return value === true;
 }
 
 const styles = StyleSheet.create({

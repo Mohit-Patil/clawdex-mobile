@@ -59,12 +59,14 @@ import { ApprovalBanner } from '../components/ApprovalBanner';
 import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
 import { ChatMessage } from '../components/ChatMessage';
+import { ToolBlock } from '../components/ToolBlock';
 import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
 import { BrandMark } from '../components/BrandMark';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import { buildComposerUsageLimitBadges } from '../components/usageLimitBadges';
 import { env } from '../config';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { getVisibleTranscriptMessages } from './transcriptMessages';
 import { colors, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
@@ -83,6 +85,7 @@ interface MainScreenProps {
   defaultModelId?: string | null;
   defaultReasoningEffort?: ReasoningEffort | null;
   approvalMode?: ApprovalMode;
+  showToolCalls?: boolean;
   onDefaultStartCwdChange?: (cwd: string | null) => void;
   onChatContextChange?: (chat: Chat | null) => void;
   pendingOpenChatId?: string | null;
@@ -165,6 +168,7 @@ interface SlashCommandDefinition {
 }
 
 const MAX_ACTIVE_COMMANDS = 16;
+const MAX_VISIBLE_TOOL_BLOCKS = 6;
 const RUN_WATCHDOG_MS = 60_000;
 const LARGE_CHAT_MESSAGE_COUNT_THRESHOLD = 120;
 const CHAT_INITIAL_VISIBLE_MESSAGE_WINDOW = 80;
@@ -431,6 +435,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       defaultModelId,
       defaultReasoningEffort,
       approvalMode,
+      showToolCalls = false,
       onDefaultStartCwdChange,
       onChatContextChange,
       pendingOpenChatId,
@@ -457,7 +462,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [, setActiveCommands] = useState<RunEvent[]>([]);
+    const [activeCommands, setActiveCommands] = useState<RunEvent[]>([]);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
     const [pendingUserInputRequest, setPendingUserInputRequest] =
       useState<PendingUserInputRequest | null>(null);
@@ -1474,6 +1479,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         if (codexEventType === 'websearchbegin') {
+          const searchEvent = describeWebSearchToolEvent(msg);
+          if (searchEvent) {
+            cacheThreadActiveCommand(threadId, searchEvent.eventType, searchEvent.detail);
+          }
           cacheThreadActivity(threadId, {
             tone: 'running',
             title: 'Working',
@@ -4002,6 +4011,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (codexEventType === 'websearchbegin') {
+            const searchEvent = describeWebSearchToolEvent(msg);
+            if (searchEvent) {
+              cacheThreadActiveCommand(
+                activeThreadId,
+                searchEvent.eventType,
+                searchEvent.detail
+              );
+              pushActiveCommand(activeThreadId, searchEvent.eventType, searchEvent.detail);
+            }
             setActivity({
               tone: 'running',
               title: 'Working',
@@ -4166,6 +4184,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             if (startedContextUsage) {
               cacheThreadContextUsage(threadId, startedContextUsage);
             }
+            upsertThreadRuntimeSnapshot(threadId, () => ({
+              activeCommands: [],
+              streamingText: null,
+            }));
             cacheThreadTurnState(threadId, {
               activeTurnId: startedTurnId,
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
@@ -4185,6 +4207,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               mergeThreadContextUsage(previous, startedContextUsage)
             );
           }
+          upsertThreadRuntimeSnapshot(threadId, () => ({
+            activeCommands: [],
+            streamingText: null,
+          }));
+          setActiveCommands([]);
+          setStreamingText(null);
           bumpRunWatchdog();
           setActivity({
             tone: 'running',
@@ -4210,6 +4238,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             cacheThreadTurnState(threadId, {
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
             });
+            const startedToolEvent = describeStartedToolEvent(item);
+            if (startedToolEvent) {
+              cacheThreadActiveCommand(
+                threadId,
+                startedToolEvent.eventType,
+                startedToolEvent.detail
+              );
+            }
             if (itemType === 'commandExecution') {
               cacheThreadActivity(threadId, {
                 tone: 'running',
@@ -4253,6 +4289,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           bumpRunWatchdog();
+          const startedToolEvent = describeStartedToolEvent(item);
+          if (startedToolEvent) {
+            cacheThreadActiveCommand(
+              threadId,
+              startedToolEvent.eventType,
+              startedToolEvent.detail
+            );
+            pushActiveCommand(
+              threadId,
+              startedToolEvent.eventType,
+              startedToolEvent.detail
+            );
+          }
 
           if (itemType === 'commandExecution') {
             setActivity({
@@ -4622,6 +4671,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const item = toRecord(params?.item);
           const itemType = readString(item?.type);
           if (threadId !== currentId) {
+            const completedToolEvent = describeCompletedToolEvent(item);
+            if (completedToolEvent) {
+              cacheThreadActiveCommand(
+                threadId,
+                completedToolEvent.eventType,
+                completedToolEvent.detail
+              );
+            }
             if (itemType === 'commandExecution') {
               const status = readString(item?.status);
               const failed = status === 'failed' || status === 'error';
@@ -4631,6 +4688,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               });
             }
             return;
+          }
+
+          const completedToolEvent = describeCompletedToolEvent(item);
+          if (completedToolEvent) {
+            cacheThreadActiveCommand(
+              threadId,
+              completedToolEvent.eventType,
+              completedToolEvent.detail
+            );
+            pushActiveCommand(
+              threadId,
+              completedToolEvent.eventType,
+              completedToolEvent.detail
+            );
           }
 
           if (itemType === 'commandExecution') {
@@ -5468,6 +5539,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const showTopCardsRow = !isOpeningChat && Boolean(selectedThreadPlan);
     const showFloatingActivity =
       showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
+    const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
+    const toolPanelMaxHeight = Math.min(Math.floor(windowHeight * 0.26), 180);
+    const showLiveToolPanel =
+      showToolCalls &&
+      Boolean(selectedChat) &&
+      !isOpeningChat &&
+      visibleToolBlocks.length > 0;
     const showPlanImplementationPrompt =
       Boolean(selectedPlanImplementationPrompt) &&
       !isOpeningChat &&
@@ -5639,6 +5717,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               chat={selectedChat}
               bridgeUrl={bridgeUrl}
               bridgeToken={bridgeToken}
+              showToolCalls={showToolCalls}
               scrollRef={scrollRef}
               inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
               onInlineOptionSelect={handleInlineOptionSelect}
@@ -5668,6 +5747,35 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               }}
             />
           )}
+
+          {showLiveToolPanel ? (
+            <View style={styles.queuedMessageDock}>
+              <View style={[styles.livePanelShell, styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
+                <ScrollView
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={styles.toolPanelContent}
+                >
+                  <View style={styles.livePanelContent}>
+                    {visibleToolBlocks.map((event) => {
+                      const tool = toToolBlockState(event);
+                      if (!tool) {
+                        return null;
+                      }
+                      return (
+                        <ToolBlock
+                          key={event.id}
+                          command={tool.command}
+                          status={tool.status}
+                          icon={tool.icon}
+                        />
+                      );
+                    })}
+                  </View>
+                </ScrollView>
+              </View>
+            </View>
+          ) : null}
 
           {showFloatingActivity ? (
             <View pointerEvents="none" style={styles.activityDock}>
@@ -6264,6 +6372,7 @@ function ChatView({
   chat,
   bridgeUrl,
   bridgeToken,
+  showToolCalls,
   scrollRef,
   inlineChoicesEnabled,
   onInlineOptionSelect,
@@ -6275,6 +6384,7 @@ function ChatView({
   chat: Chat;
   bridgeUrl: string;
   bridgeToken: string | null;
+  showToolCalls: boolean;
   scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
@@ -6283,25 +6393,10 @@ function ChatView({
   autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
   bottomInset: number;
 }) {
-  const visibleMessages = useMemo(() => {
-    const filtered = chat.messages.filter((msg) => {
-      const text = msg.content || '';
-      if (msg.role === 'system') return false;
-      if (text.includes('FINAL_TASK_RESULT_JSON')) return false;
-      if (text.includes('Current working directory is:')) return false;
-      if (text.includes('You are operating in task worktree')) return false;
-      if (msg.role === 'assistant' && !text.trim()) return false;
-      return true;
-    });
-
-    // For each consecutive run of assistant messages, only keep the last
-    // one (the final answer). Earlier ones are intermediate thinking.
-    return filtered.filter((msg, i) => {
-      if (msg.role !== 'assistant') return true;
-      const next = filtered[i + 1];
-      return !next || next.role !== 'assistant';
-    });
-  }, [chat.messages]);
+  const visibleMessages = useMemo(
+    () => getVisibleTranscriptMessages(chat.messages, showToolCalls),
+    [chat.messages, showToolCalls]
+  );
   const [visibleStartIndex, setVisibleStartIndex] = useState(() =>
     getInitialVisibleMessageStartIndex(visibleMessages.length)
   );
@@ -7601,6 +7696,133 @@ function mergeStreamingDelta(previous: string | null, delta: string): string {
   }
 
   return prev + delta;
+}
+
+function describeStartedToolEvent(
+  item: Record<string, unknown> | null
+): { eventType: string; detail: string } | null {
+  const itemType = readString(item?.type);
+  if (itemType === 'commandExecution') {
+    const command = toTickerSnippet(readString(item?.command), 80) ?? 'Command';
+    return {
+      eventType: 'command.running',
+      detail: buildToolEventDetail(command, 'running'),
+    };
+  }
+
+  if (itemType === 'fileChange') {
+    return {
+      eventType: 'file_change.running',
+      detail: buildToolEventDetail('Applying file changes', 'running'),
+    };
+  }
+
+  if (itemType === 'mcpToolCall') {
+    const detail = [readString(item?.server), readString(item?.tool)]
+      .filter(Boolean)
+      .join(' / ') || 'Tool call';
+    return {
+      eventType: 'tool.running',
+      detail: buildToolEventDetail(detail, 'running'),
+    };
+  }
+
+  return null;
+}
+
+function describeCompletedToolEvent(
+  item: Record<string, unknown> | null
+): { eventType: string; detail: string } | null {
+  const itemType = readString(item?.type);
+  const rawStatus = readString(item?.status);
+  const status: 'complete' | 'error' =
+    rawStatus === 'failed' || rawStatus === 'error' ? 'error' : 'complete';
+
+  if (itemType === 'commandExecution') {
+    const command = toTickerSnippet(readString(item?.command), 80) ?? 'Command';
+    return {
+      eventType: 'command.completed',
+      detail: buildToolEventDetail(command, status),
+    };
+  }
+
+  if (itemType === 'fileChange') {
+    return {
+      eventType: 'file_change.completed',
+      detail: buildToolEventDetail('File changes', status),
+    };
+  }
+
+  if (itemType === 'mcpToolCall') {
+    const detail = [readString(item?.server), readString(item?.tool)]
+      .filter(Boolean)
+      .join(' / ') || 'Tool call';
+    return {
+      eventType: 'tool.completed',
+      detail: buildToolEventDetail(detail, status),
+    };
+  }
+
+  return null;
+}
+
+function describeWebSearchToolEvent(
+  msg: Record<string, unknown> | null
+): { eventType: string; detail: string } | null {
+  const query = toTickerSnippet(readString(msg?.query), 80);
+  return {
+    eventType: 'web_search.running',
+    detail: buildToolEventDetail(query ? `Web search: ${query}` : 'Web search', 'running'),
+  };
+}
+
+function buildToolEventDetail(
+  label: string,
+  status: 'running' | 'complete' | 'error'
+): string {
+  return `${label} | ${status}`;
+}
+
+function toToolBlockState(
+  event: RunEvent
+): {
+  command: string;
+  status: 'running' | 'complete' | 'error';
+  icon: keyof typeof Ionicons.glyphMap;
+} | null {
+  const rawDetail = event.detail?.trim();
+  if (!rawDetail) {
+    return null;
+  }
+
+  const separatorIndex = rawDetail.lastIndexOf('|');
+  const command =
+    separatorIndex >= 0 ? rawDetail.slice(0, separatorIndex).trim() : rawDetail;
+  const rawStatus =
+    separatorIndex >= 0
+      ? rawDetail.slice(separatorIndex + 1).trim().toLowerCase()
+      : '';
+
+  const status: 'running' | 'complete' | 'error' =
+    rawStatus === 'running'
+      ? 'running'
+      : rawStatus === 'error' || rawStatus === 'failed'
+        ? 'error'
+        : 'complete';
+
+  const icon: keyof typeof Ionicons.glyphMap = event.eventType.startsWith('web_search')
+    ? 'search-outline'
+    : event.eventType.startsWith('tool')
+      ? 'build-outline'
+      : event.eventType.startsWith('file_change')
+        ? 'document-outline'
+        : 'terminal-outline';
+
+  return {
+    command,
+    status,
+    icon,
+  };
 }
 
 function appendRunEventHistory(

@@ -6,6 +6,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -24,11 +25,13 @@ interface SettingsScreenProps {
   defaultModelId?: string | null;
   defaultReasoningEffort?: ReasoningEffort | null;
   approvalMode?: ApprovalMode;
+  showToolCalls?: boolean;
   onDefaultModelSettingsChange?: (
     modelId: string | null,
     effort: ReasoningEffort | null
   ) => void;
   onApprovalModeChange?: (mode: ApprovalMode) => void;
+  onShowToolCallsChange?: (value: boolean) => void;
   onEditBridgeUrl?: () => void;
   onResetOnboarding?: () => void;
   onOpenDrawer: () => void;
@@ -43,8 +46,10 @@ export function SettingsScreen({
   defaultModelId,
   defaultReasoningEffort,
   approvalMode,
+  showToolCalls = false,
   onDefaultModelSettingsChange,
   onApprovalModeChange,
+  onShowToolCallsChange,
   onEditBridgeUrl,
   onResetOnboarding,
   onOpenDrawer,
@@ -380,6 +385,29 @@ export function SettingsScreen({
             This controls command/file-change approvals only. It does not affect
             request_user_input questions. Mobile chats request full Codex sandbox
             access by default.
+          </Text>
+
+          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Transcript</Text>
+          <BlurView intensity={50} tint="dark" style={styles.card}>
+            <View style={[styles.settingRow, styles.settingRowLast]}>
+              <View style={styles.settingRowLeft}>
+                <Text style={styles.rowLabel}>Show tool calls</Text>
+                <Text style={styles.settingValue} numberOfLines={2}>
+                  Show web searches, MCP/OpenAI docs calls, commands, and file changes.
+                </Text>
+              </View>
+              <Switch
+                value={showToolCalls}
+                onValueChange={(value) => onShowToolCallsChange?.(value)}
+                trackColor={{ false: colors.borderLight, true: colors.accent }}
+                thumbColor={colors.textPrimary}
+                ios_backgroundColor={colors.borderLight}
+              />
+            </View>
+          </BlurView>
+          <Text style={styles.subtleHintText}>
+            Live tool activity stays in a capped panel so the chat list does not
+            start jumping while a turn is running.
           </Text>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge</Text>

@@ -2,6 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { memo, useMemo, useState, type ReactElement } from 'react';
 import {
   Image,
+  Pressable,
   type ImageSourcePropType,
   Linking,
   Platform,
@@ -38,6 +39,9 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
     () => createMarkdownRules(bridgeUrl, bridgeToken),
     [bridgeToken, bridgeUrl]
   );
+  const [expandedTimelineEntries, setExpandedTimelineEntries] = useState<
+    Record<string, boolean>
+  >({});
   const userBlocks = useMemo(
     () =>
       isUser ? parseUserMessageBlocks(message.content, bridgeUrl, bridgeToken) : [],
@@ -96,10 +100,33 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
         <View style={styles.timelineCardStack}>
           {timelineEntries.map((entry, index) => {
             const visual = toTimelineVisual(entry.title);
+            const timelineKey = `${message.id}-timeline-${String(index)}`;
+            const hasDetails = entry.details.length > 0;
+            const expanded = expandedTimelineEntries[timelineKey] === true;
+            const toggleLabel = expanded
+              ? 'Tap to hide output'
+              : entry.details.length <= 1
+                ? 'Tap to show output'
+                : `Tap to show ${String(entry.details.length)} lines`;
             return (
-              <View
+              <Pressable
                 key={`${message.id}-timeline-${String(index)}`}
-                style={[styles.timelineCard, visual.isError && styles.timelineCardError]}
+                disabled={!hasDetails}
+                onPress={() => {
+                  if (!hasDetails) {
+                    return;
+                  }
+                  setExpandedTimelineEntries((previous) => ({
+                    ...previous,
+                    [timelineKey]: !previous[timelineKey],
+                  }));
+                }}
+                style={({ pressed }) => [
+                  styles.timelineCard,
+                  visual.isError && styles.timelineCardError,
+                  hasDetails && styles.timelineCardInteractive,
+                  pressed && hasDetails && styles.timelineCardPressed,
+                ]}
               >
                 <View style={styles.timelineHeader}>
                   <Ionicons
@@ -112,23 +139,34 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
                       styles.timelineTitle,
                       visual.useMonospaceTitle && styles.timelineTitleMono,
                     ]}
+                    numberOfLines={expanded ? 3 : 1}
                   >
                     {entry.title}
                   </Text>
+                  {hasDetails ? (
+                    <Ionicons
+                      name={expanded ? 'chevron-up' : 'chevron-down'}
+                      size={14}
+                      color={colors.textMuted}
+                    />
+                  ) : null}
                 </View>
-                {entry.details.length > 0 ? (
+                {hasDetails ? (
+                  <Text style={styles.timelineToggleText}>{toggleLabel}</Text>
+                ) : null}
+                {expanded && entry.details.length > 0 ? (
                   <View style={styles.timelineDetailWrap}>
                     {entry.details.map((line, lineIndex) => (
-                      <Text
+                      <SelectableMessageText
                         key={`${message.id}-timeline-${String(index)}-line-${String(lineIndex)}`}
                         style={styles.timelineDetailLine}
                       >
                         {line}
-                      </Text>
+                      </SelectableMessageText>
                     ))}
                   </View>
                 ) : null}
-              </View>
+              </Pressable>
             );
           })}
         </View>
@@ -439,6 +477,12 @@ const styles = StyleSheet.create({
     borderColor: colors.statusError,
     backgroundColor: colors.errorBg,
   },
+  timelineCardInteractive: {
+    overflow: 'hidden',
+  },
+  timelineCardPressed: {
+    opacity: 0.82,
+  },
   timelineHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -462,6 +506,11 @@ const styles = StyleSheet.create({
     borderTopColor: colors.borderLight,
     paddingTop: spacing.xs,
     gap: 2,
+  },
+  timelineToggleText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
   },
   timelineDetailLine: {
     fontFamily: monoFont,

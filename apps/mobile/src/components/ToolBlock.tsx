@@ -6,9 +6,14 @@ import { colors, radius, spacing } from '../theme';
 interface ToolBlockProps {
   command: string;
   status: 'running' | 'complete' | 'error';
+  icon?: keyof typeof Ionicons.glyphMap;
 }
 
-export function ToolBlock({ command, status }: ToolBlockProps) {
+export function ToolBlock({
+  command,
+  status,
+  icon = 'terminal-outline',
+}: ToolBlockProps) {
   const statusIcon: keyof typeof Ionicons.glyphMap | null =
     status === 'running'
       ? null
@@ -24,7 +29,7 @@ export function ToolBlock({ command, status }: ToolBlockProps) {
 
   return (
     <View style={styles.container}>
-      <Ionicons name="terminal-outline" size={14} color={colors.textSecondary} />
+      <Ionicons name={icon} size={14} color={colors.textSecondary} />
       <Text style={styles.command} numberOfLines={1}>
         {command}
       </Text>
