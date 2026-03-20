@@ -7,6 +7,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,6 +16,7 @@ import { colors, spacing, typography } from '../theme';
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
 type OptionTone = 'default' | 'accent' | 'danger';
+type SelectionSheetPresentation = 'default' | 'expanded';
 
 export interface SelectionSheetOption {
   key: string;
@@ -46,6 +48,7 @@ interface SelectionSheetProps {
   loading?: boolean;
   loadingLabel?: string;
   emptyLabel?: string;
+  presentation?: SelectionSheetPresentation;
 }
 
 export function SelectionSheet({
@@ -59,8 +62,17 @@ export function SelectionSheet({
   loading = false,
   loadingLabel = 'Loading…',
   emptyLabel = 'No options available.',
+  presentation = 'expanded',
 }: SelectionSheetProps) {
   const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
+  const expanded = presentation === 'expanded';
+  const expandedTopInset = Math.max(insets.top + spacing.xl + 20, 112);
+  const expandedBottomInset = Math.max(insets.bottom + spacing.xl + 28, 118);
+  const expandedCardHeight = Math.min(
+    Math.max(360, Math.round(windowHeight * 0.62)),
+    windowHeight - expandedTopInset - expandedBottomInset
+  );
 
   return (
     <Modal
@@ -75,17 +87,27 @@ export function SelectionSheet({
         <View
           style={[
             styles.sheetOuter,
-            { paddingBottom: Math.max(insets.bottom, spacing.md) },
+            expanded && styles.sheetOuterExpanded,
+            {
+              paddingBottom: expanded ? expandedBottomInset : Math.max(insets.bottom, spacing.md),
+              paddingTop: expanded ? expandedTopInset : undefined,
+            },
           ]}
         >
-          <View style={styles.sheetCard}>
+          <View
+            style={[
+              styles.sheetCard,
+              expanded && styles.sheetCardExpanded,
+              expanded ? { height: expandedCardHeight } : null,
+            ]}
+          >
             <View style={styles.handle} />
 
             <View style={styles.header}>
               {eyebrow ? <Text style={styles.eyebrow}>{eyebrow}</Text> : null}
               <Text style={styles.title}>{title}</Text>
               {subtitle ? (
-                <Text style={styles.subtitle} numberOfLines={2}>
+                <Text style={styles.subtitle} numberOfLines={expanded ? 3 : 2}>
                   {subtitle}
                 </Text>
               ) : null}
@@ -98,8 +120,11 @@ export function SelectionSheet({
               </View>
             ) : options.length > 0 ? (
               <ScrollView
-                style={styles.list}
-                contentContainerStyle={styles.listContent}
+                style={[styles.list, expanded && styles.listExpanded]}
+                contentContainerStyle={[
+                  styles.listContent,
+                  expanded && styles.listContentExpanded,
+                ]}
                 showsVerticalScrollIndicator={false}
               >
                 {options.map((option) => {
@@ -235,6 +260,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingTop: spacing.xl,
   },
+  sheetOuterExpanded: {
+    paddingHorizontal: spacing.md,
+  },
   sheetCard: {
     maxHeight: '82%',
     borderRadius: 24,
@@ -247,6 +275,11 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.lg,
     gap: spacing.md,
     boxShadow: '0 -10px 34px rgba(0, 0, 0, 0.42)',
+  },
+  sheetCardExpanded: {
+    maxHeight: undefined,
+    minHeight: undefined,
+    borderRadius: 28,
   },
   handle: {
     alignSelf: 'center',
@@ -283,8 +316,15 @@ const styles = StyleSheet.create({
   list: {
     maxHeight: 420,
   },
+  listExpanded: {
+    flex: 1,
+    maxHeight: undefined,
+  },
   listContent: {
     gap: spacing.sm,
+  },
+  listContentExpanded: {
+    paddingBottom: spacing.xs,
   },
   loadingState: {
     minHeight: 120,

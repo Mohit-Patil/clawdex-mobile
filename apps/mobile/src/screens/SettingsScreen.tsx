@@ -510,6 +510,7 @@ export function SettingsScreen({
         options={modelPickerOptions}
         loading={loadingModels}
         loadingLabel="Refreshing available models…"
+        presentation="expanded"
         onClose={closeModelModal}
       />
 
@@ -523,6 +524,7 @@ export function SettingsScreen({
             : 'Choose the default reasoning depth for new chats.'
         }
         options={effortPickerOptions}
+        presentation="expanded"
         onClose={() => setEffortModalVisible(false)}
       />
     </View>

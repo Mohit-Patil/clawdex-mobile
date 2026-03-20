@@ -6407,6 +6407,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title="Model controls"
           subtitle={modelReasoningLabel}
           options={modelSettingsMenuOptions}
+          presentation="expanded"
           onClose={() => setModelSettingsMenuVisible(false)}
         />
 
@@ -6429,6 +6430,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           options={modelPickerOptions}
           loading={loadingModels}
           loadingLabel="Refreshing available models…"
+          presentation="expanded"
           onClose={closeModelModal}
         />
 
@@ -6442,6 +6444,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               : 'Select how much reasoning depth to use.'
           }
           options={effortPickerSheetOptions}
+          presentation="expanded"
           onClose={closeEffortModal}
         />
 
