@@ -146,6 +146,13 @@ export interface AccountRateLimitSnapshot {
   planType: PlanType | null;
 }
 
+export interface AccountSnapshot {
+  type: 'apiKey' | 'chatgpt' | null;
+  email: string | null;
+  planType: PlanType | null;
+  requiresOpenaiAuth: boolean;
+}
+
 export type ApprovalPolicy =
   | 'untrusted'
   | 'on-request'

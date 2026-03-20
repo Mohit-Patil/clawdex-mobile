@@ -143,6 +143,59 @@ describe('HostBridgeApiClient', () => {
     });
   });
 
+  it('readAccount() requests account/read and maps ChatGPT account details', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      account: {
+        type: 'chatgpt',
+        email: 'mohit@example.com',
+        planType: 'plus',
+      },
+      requiresOpenaiAuth: true,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccount();
+
+    expect(ws.request).toHaveBeenCalledWith('account/read', { refreshToken: false });
+    expect(result).toEqual({
+      type: 'chatgpt',
+      email: 'mohit@example.com',
+      planType: 'plus',
+      requiresOpenaiAuth: true,
+    });
+  });
+
+  it('readAccount() maps API key auth without ChatGPT fields', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      account: {
+        type: 'apiKey',
+      },
+      requires_openai_auth: false,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccount();
+
+    expect(result).toEqual({
+      type: 'apiKey',
+      email: null,
+      planType: null,
+      requiresOpenaiAuth: false,
+    });
+  });
+
+  it('logoutAccount() requests account/logout', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({});
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.logoutAccount();
+
+    expect(ws.request).toHaveBeenCalledWith('account/logout');
+  });
+
   it('listChats() maps app-server list response', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({

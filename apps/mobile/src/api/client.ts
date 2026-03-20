@@ -6,8 +6,10 @@ import {
   type RawThread,
   toRawThread,
 } from './chatMapping';
+import { readAccountSnapshot } from './account';
 import { readAccountRateLimits as readSelectedAccountRateLimits } from './rateLimits';
 import type {
+  AccountSnapshot,
   AccountRateLimitSnapshot,
   ApprovalPolicy,
   ApprovalDecision,
@@ -90,6 +92,12 @@ interface AppServerModelListResponse {
 
 interface AppServerConfigReadResponse {
   config?: unknown;
+}
+
+interface AppServerAccountReadResponse {
+  account?: unknown;
+  requiresOpenaiAuth?: boolean;
+  requires_openai_auth?: boolean;
 }
 
 interface AppServerCollaborationMode {
@@ -175,6 +183,17 @@ export class HostBridgeApiClient {
   async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {
     const response = await this.ws.request<Record<string, unknown>>('account/rateLimits/read');
     return readSelectedAccountRateLimits(response);
+  }
+
+  async readAccount(): Promise<AccountSnapshot> {
+    const response = await this.ws.request<AppServerAccountReadResponse>('account/read', {
+      refreshToken: false,
+    });
+    return readAccountSnapshot(response);
+  }
+
+  async logoutAccount(): Promise<void> {
+    await this.ws.request('account/logout');
   }
 
   async listChats(options?: ListChatsOptions): Promise<ChatSummary[]> {

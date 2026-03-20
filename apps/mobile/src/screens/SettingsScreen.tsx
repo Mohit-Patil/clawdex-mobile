@@ -3,6 +3,7 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -13,7 +14,13 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
-import type { ApprovalMode, ModelOption, ReasoningEffort } from '../api/types';
+import type {
+  AccountSnapshot,
+  ApprovalMode,
+  ModelOption,
+  PlanType,
+  ReasoningEffort,
+} from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import { colors, radius, spacing, typography } from '../theme';
@@ -65,6 +72,10 @@ export function SettingsScreen({
   const [modelModalVisible, setModelModalVisible] = useState(false);
   const [effortModalVisible, setEffortModalVisible] = useState(false);
   const [approvalModeModalVisible, setApprovalModeModalVisible] = useState(false);
+  const [account, setAccount] = useState<AccountSnapshot | null>(null);
+  const [accountLoading, setAccountLoading] = useState(false);
+  const [accountActionBusy, setAccountActionBusy] = useState(false);
+  const [accountError, setAccountError] = useState<string | null>(null);
 
   const normalizedDefaultModelId = normalizeModelId(defaultModelId);
   const normalizedDefaultEffort = normalizeReasoningEffort(defaultReasoningEffort);
@@ -119,15 +130,51 @@ export function SettingsScreen({
     }
   }, [api]);
 
+  const loadAccount = useCallback(async () => {
+    setAccountLoading(true);
+    try {
+      const snapshot = await api.readAccount();
+      setAccount(snapshot);
+      setAccountError(null);
+    } catch (err) {
+      setAccountError((err as Error).message);
+    } finally {
+      setAccountLoading(false);
+    }
+  }, [api]);
+
   useEffect(() => {
     const t = setTimeout(() => {
       void checkHealth();
       void refreshModelOptions();
+      void loadAccount();
     }, 0);
     return () => clearTimeout(t);
-  }, [checkHealth, refreshModelOptions]);
+  }, [checkHealth, loadAccount, refreshModelOptions]);
 
-  useEffect(() => ws.onStatus(setWsConnected), [ws]);
+  useEffect(
+    () =>
+      ws.onStatus((connected) => {
+        setWsConnected(connected);
+        if (connected) {
+          void loadAccount();
+        }
+      }),
+    [loadAccount, ws]
+  );
+
+  useEffect(
+    () =>
+      ws.onEvent((event) => {
+        if (
+          event.method === 'account/updated' ||
+          event.method === 'account/login/completed'
+        ) {
+          void loadAccount();
+        }
+      }),
+    [loadAccount, ws]
+  );
 
   const openModelModal = useCallback(() => {
     setModelModalVisible(true);
@@ -249,6 +296,23 @@ export function SettingsScreen({
     ],
     [normalizedApprovalMode, selectApprovalMode]
   );
+
+  const handleLogout = useCallback(async () => {
+    if (accountActionBusy) {
+      return;
+    }
+
+    setAccountActionBusy(true);
+    try {
+      await api.logoutAccount();
+      await loadAccount();
+      setAccountError(null);
+    } catch (err) {
+      setAccountError((err as Error).message);
+    } finally {
+      setAccountActionBusy(false);
+    }
+  }, [accountActionBusy, api, loadAccount]);
 
   const modelPickerOptions = useMemo<SelectionSheetOption[]>(
     () => [
@@ -410,6 +474,64 @@ export function SettingsScreen({
             start jumping while a turn is running.
           </Text>
 
+          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Account & Auth</Text>
+          <BlurView intensity={50} tint="dark" style={styles.card}>
+            {accountLoading ? (
+              <View style={styles.accountLoadingState}>
+                <ActivityIndicator color={colors.textPrimary} />
+                <Text style={styles.settingValue}>Loading account details…</Text>
+              </View>
+            ) : (
+              <>
+                <Row
+                  label="Status"
+                  value={formatAccountType(account)}
+                  valueColor={account?.type ? colors.statusComplete : colors.textMuted}
+                />
+                {account?.email ? (
+                  <Row label="Email" value={account.email} />
+                ) : null}
+                {account?.planType ? (
+                  <Row label="Plan" value={formatPlanType(account.planType)} />
+                ) : null}
+                <Row
+                  label="Bridge auth"
+                  value={account?.requiresOpenaiAuth ? 'Required' : 'Optional'}
+                  isLast={!account?.type}
+                />
+
+                {account?.type ? (
+                  <Pressable
+                    onPress={() => {
+                      void handleLogout();
+                    }}
+                    disabled={accountActionBusy}
+                    style={({ pressed }) => [
+                      styles.accountActionBtn,
+                      pressed && !accountActionBusy && styles.accountActionBtnPressed,
+                      accountActionBusy && styles.accountActionBtnDisabled,
+                    ]}
+                  >
+                    <Ionicons
+                      name="log-out-outline"
+                      size={15}
+                      color={colors.textPrimary}
+                    />
+                    <Text style={styles.accountActionBtnText}>
+                      {accountActionBusy ? 'Signing out…' : 'Sign out'}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </>
+            )}
+          </BlurView>
+          {account?.type === null && account?.requiresOpenaiAuth ? (
+            <Text style={styles.subtleHintText}>
+              The bridge expects OpenAI auth, but mobile does not expose a login flow yet.
+            </Text>
+          ) : null}
+          {accountError ? <Text style={styles.errorText}>{accountError}</Text> : null}
+
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge</Text>
           <BlurView intensity={50} tint="dark" style={styles.card}>
             <Text selectable style={styles.valueText}>
@@ -458,11 +580,12 @@ export function SettingsScreen({
             onPress={() => {
               void checkHealth();
               void refreshModelOptions();
+              void loadAccount();
             }}
             style={({ pressed }) => [styles.refreshBtn, pressed && styles.refreshBtnPressed]}
           >
             <Ionicons name="refresh" size={16} color={colors.white} />
-            <Text style={styles.refreshBtnText}>Refresh health</Text>
+            <Text style={styles.refreshBtnText}>Refresh settings</Text>
           </Pressable>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Legal</Text>
@@ -673,6 +796,35 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
     marginHorizontal: spacing.xs,
   },
+  accountLoadingState: {
+    minHeight: 88,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  accountActionBtn: {
+    marginBottom: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.bgMain,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+  },
+  accountActionBtnPressed: {
+    opacity: 0.82,
+  },
+  accountActionBtnDisabled: {
+    opacity: 0.56,
+  },
+  accountActionBtnText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
   refreshBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -757,4 +909,29 @@ function formatReasoningEffort(effort: ReasoningEffort): string {
   }
 
   return effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
+function formatAccountType(account: AccountSnapshot | null): string {
+  if (!account?.type) {
+    return 'Signed out';
+  }
+
+  return account.type === 'chatgpt' ? 'ChatGPT' : 'API key';
+}
+
+function formatPlanType(planType: PlanType): string {
+  if (planType === 'pro') {
+    return 'Pro';
+  }
+  if (planType === 'plus') {
+    return 'Plus';
+  }
+  if (planType === 'go') {
+    return 'Go';
+  }
+  if (planType === 'edu') {
+    return 'Edu';
+  }
+
+  return planType.charAt(0).toUpperCase() + planType.slice(1);
 }
