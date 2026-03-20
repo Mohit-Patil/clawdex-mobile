@@ -260,6 +260,33 @@ describe('HostBridgeWsClient', () => {
     await expect(waitPromise).resolves.toBeUndefined();
   });
 
+  it('waitForTurnCompletion prefers the direct child thread id over parent_thread_id', async () => {
+    const client = new HostBridgeWsClient('http://localhost:8787');
+    client.connect();
+
+    const waitPromise = client.waitForTurnCompletion('thr_child', 'turn_child', 100);
+    latestMockSocket().simulateMessage(
+      JSON.stringify({
+        method: 'codex/event/task_complete',
+        params: {
+          msg: {
+            type: 'task_complete',
+            thread_id: 'thr_child',
+            source: {
+              subagent: {
+                thread_spawn: {
+                  parent_thread_id: 'thr_parent',
+                },
+              },
+            },
+          },
+        },
+      })
+    );
+
+    await expect(waitPromise).resolves.toBeUndefined();
+  });
+
   it('deduplicates notifications by eventId', () => {
     const client = new HostBridgeWsClient('http://localhost:8787');
     const listener = jest.fn();

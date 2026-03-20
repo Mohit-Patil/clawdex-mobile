@@ -3,6 +3,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import {
+  type ComponentProps,
   forwardRef,
   useCallback,
   useEffect,
@@ -66,8 +67,18 @@ import { SelectionSheet, type SelectionSheetOption } from '../components/Selecti
 import { buildComposerUsageLimitBadges } from '../components/usageLimitBadges';
 import { env } from '../config';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import {
+  collectRelatedAgentThreads,
+  describeAgentThreadSource,
+  findMatchingAgentThread,
+} from './agentThreads';
+import {
+  buildAgentThreadDisplayState,
+  type AgentThreadDisplayState,
+} from './agentThreadDisplay';
+import { trimInheritedParentMessages } from './subAgentTranscript';
 import { getVisibleTranscriptMessages } from './transcriptMessages';
-import { colors, spacing, typography } from '../theme';
+import { colors, radius, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
   openChat: (id: string, optimisticChat?: Chat | null) => void;
@@ -271,8 +282,8 @@ const SLASH_COMMANDS: SlashCommandDefinition[] = [
   {
     name: 'agent',
     summary: 'Switch the active sub-agent thread',
-    mobileSupported: false,
-    availabilityNote: 'Available in Codex CLI only right now.',
+    argsHint: '[thread]',
+    mobileSupported: true,
   },
   {
     name: 'apps',
@@ -453,6 +464,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [selectedChat, setSelectedChat] = useState<Chat | null>(
       initialPendingSnapshot
     );
+    const [selectedParentChat, setSelectedParentChat] = useState<Chat | null>(null);
     const [selectedChatId, setSelectedChatId] = useState<string | null>(
       initialPendingSnapshot?.id ?? pendingOpenChatId ?? null
     );
@@ -493,6 +505,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [workspaceOptions, setWorkspaceOptions] = useState<string[]>([]);
     const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
     const [chatTitleMenuVisible, setChatTitleMenuVisible] = useState(false);
+    const [agentThreadMenuVisible, setAgentThreadMenuVisible] = useState(false);
     const [modelModalVisible, setModelModalVisible] = useState(false);
     const [modelSettingsMenuVisible, setModelSettingsMenuVisible] = useState(false);
     const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
@@ -509,6 +522,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
     const [queueDispatching, setQueueDispatching] = useState(false);
     const [queuePaused, setQueuePaused] = useState(false);
+    const [relatedAgentThreads, setRelatedAgentThreads] = useState<ChatSummary[]>([]);
+    const [agentRootThreadId, setAgentRootThreadId] = useState<string | null>(null);
+    const [agentPanelCollapsed, setAgentPanelCollapsed] = useState(false);
+    const [agentRuntimeRevision, setAgentRuntimeRevision] = useState(0);
+    const [loadingAgentThreads, setLoadingAgentThreads] = useState(false);
     const [collaborationModeMenuVisible, setCollaborationModeMenuVisible] = useState(false);
     const [effortModalVisible, setEffortModalVisible] = useState(false);
     const [effortPickerModelId, setEffortPickerModelId] = useState<string | null>(null);
@@ -539,6 +557,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       isMomentumScrolling: false,
     });
     const loadChatRequestRef = useRef(0);
+    const agentThreadsRequestRef = useRef(0);
+    const agentThreadsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const openAgentThreadSelectorRef = useRef<(query?: string | null) => Promise<boolean>>(
+      async () => false
+    );
+    const bumpAgentRuntimeRevision = useCallback(() => {
+      setAgentRuntimeRevision((previous) => previous + 1);
+    }, []);
 
     const voiceRecorder = useVoiceRecorder({
       transcribe: (dataBase64, prompt, options) =>
@@ -596,6 +622,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [clearPendingScrollRetries]);
 
     useEffect(() => {
+      return () => {
+        const timerId = agentThreadsRefreshTimerRef.current;
+        if (timerId) {
+          clearTimeout(timerId);
+          agentThreadsRefreshTimerRef.current = null;
+        }
+      };
+    }, []);
+
+    useEffect(() => {
       const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
       const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
       const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
@@ -612,6 +648,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     chatIdRef.current = selectedChatId;
     const selectedChatRef = useRef<Chat | null>(selectedChat);
     selectedChatRef.current = selectedChat;
+    const parentChatCacheRef = useRef<Record<string, Chat>>({});
+    const agentRootThreadIdRef = useRef<string | null>(agentRootThreadId);
+    agentRootThreadIdRef.current = agentRootThreadId;
     const planPanelLastTurnByThreadRef = useRef<Record<string, string>>({});
     const planItemTurnIdByThreadRef = useRef<Record<string, string>>({});
     const activeTurnIdRef = useRef<string | null>(null);
@@ -662,6 +701,49 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         ),
       [attachmentFileCandidates, attachmentPathDraft, pendingMentionPaths]
     );
+
+    useEffect(() => {
+      if (!selectedChat?.id) {
+        return;
+      }
+
+      parentChatCacheRef.current[selectedChat.id] = selectedChat;
+    }, [selectedChat]);
+
+    useEffect(() => {
+      const parentThreadId = selectedChat?.parentThreadId?.trim();
+      if (!parentThreadId) {
+        setSelectedParentChat(null);
+        return;
+      }
+
+      const cachedParentChat = parentChatCacheRef.current[parentThreadId];
+      if (cachedParentChat) {
+        setSelectedParentChat(cachedParentChat);
+        return;
+      }
+
+      let cancelled = false;
+
+      api
+        .getChat(parentThreadId)
+        .then((parentChat) => {
+          parentChatCacheRef.current[parentThreadId] = parentChat;
+          if (!cancelled) {
+            setSelectedParentChat(parentChat);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setSelectedParentChat(null);
+          }
+        });
+
+      return () => {
+        cancelled = true;
+      };
+    }, [api, selectedChat?.id, selectedChat?.parentThreadId]);
+
     const composerAttachments = useMemo(() => {
       const next: ComposerAttachmentChip[] = [];
       for (const path of pendingMentionPaths) {
@@ -1092,8 +1174,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const cacheThreadActivity = useCallback(
       (threadId: string, nextActivity: ActivityState) => {
         upsertThreadRuntimeSnapshot(threadId, () => ({ activity: nextActivity }));
+        bumpAgentRuntimeRevision();
       },
-      [upsertThreadRuntimeSnapshot]
+      [bumpAgentRuntimeRevision, upsertThreadRuntimeSnapshot]
     );
 
     const cacheThreadStreamingDelta = useCallback(
@@ -1130,8 +1213,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         upsertThreadRuntimeSnapshot(threadId, () => ({
           pendingApproval: approval,
         }));
+        bumpAgentRuntimeRevision();
       },
-      [upsertThreadRuntimeSnapshot]
+      [bumpAgentRuntimeRevision, upsertThreadRuntimeSnapshot]
     );
 
     const cacheThreadPendingUserInputRequest = useCallback(
@@ -1139,8 +1223,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         upsertThreadRuntimeSnapshot(threadId, () => ({
           pendingUserInputRequest: request,
         }));
+        bumpAgentRuntimeRevision();
       },
-      [upsertThreadRuntimeSnapshot]
+      [bumpAgentRuntimeRevision, upsertThreadRuntimeSnapshot]
     );
 
     const cacheThreadTurnState = useCallback(
@@ -1152,8 +1237,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
       ) => {
         upsertThreadRuntimeSnapshot(threadId, () => options);
+        bumpAgentRuntimeRevision();
       },
-      [upsertThreadRuntimeSnapshot]
+      [bumpAgentRuntimeRevision, upsertThreadRuntimeSnapshot]
     );
 
     const cacheThreadContextUsage = useCallback(
@@ -1239,8 +1325,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ? previous.pendingUserInputRequest
             : null,
         }));
+        bumpAgentRuntimeRevision();
       },
-      [upsertThreadRuntimeSnapshot]
+      [bumpAgentRuntimeRevision, upsertThreadRuntimeSnapshot]
     );
 
     const applyThreadRuntimeSnapshot = useCallback(
@@ -1730,6 +1817,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setStoppingTurn(false);
       setWorkspaceModalVisible(false);
       setChatTitleMenuVisible(false);
+      setAgentThreadMenuVisible(false);
       setModelModalVisible(false);
       setModelSettingsMenuVisible(false);
       setCollaborationModeMenuVisible(false);
@@ -1771,12 +1859,113 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       void refreshWorkspaceOptions();
     }, [refreshWorkspaceOptions]);
 
+    const refreshAgentThreads = useCallback(
+      async (
+        focusChatId?: string | null,
+        options?: { showLoading?: boolean }
+      ) => {
+        const activeChatId = focusChatId ?? chatIdRef.current;
+        if (!activeChatId) {
+          setRelatedAgentThreads([]);
+          setAgentRootThreadId(null);
+          return {
+            rootThreadId: null,
+            threads: [],
+          };
+        }
+
+        const requestId = agentThreadsRequestRef.current + 1;
+        agentThreadsRequestRef.current = requestId;
+        if (options?.showLoading) {
+          setLoadingAgentThreads(true);
+        }
+
+        try {
+          const [listedChats, loadedThreadIds] = await Promise.all([
+            api.listChats({ includeSubAgents: true }),
+            api.listLoadedChatIds().catch(() => []),
+          ]);
+          const listedChatIds = new Set(listedChats.map((chat) => chat.id));
+          const missingLoadedIds = loadedThreadIds.filter((threadId) => !listedChatIds.has(threadId));
+          const loadedOnlyChats = await Promise.all(
+            missingLoadedIds.map(async (threadId) => {
+              try {
+                return await api.getChatSummary(threadId);
+              } catch {
+                return null;
+              }
+            })
+          );
+          const chats = [
+            ...listedChats,
+            ...loadedOnlyChats.filter((chat): chat is ChatSummary => chat !== null),
+          ];
+          const focusChat =
+            chats.find((chat) => chat.id === activeChatId) ??
+            (selectedChatRef.current?.id === activeChatId ? selectedChatRef.current : null);
+          const related = collectRelatedAgentThreads(chats, focusChat);
+
+          if (agentThreadsRequestRef.current !== requestId) {
+            return related;
+          }
+
+          setRelatedAgentThreads(related.threads);
+          setAgentRootThreadId(related.rootThreadId);
+          return related;
+        } catch (err) {
+          if (agentThreadsRequestRef.current === requestId && options?.showLoading) {
+            setError((err as Error).message);
+          }
+          return {
+            rootThreadId: null,
+            threads: [],
+          };
+        } finally {
+          if (agentThreadsRequestRef.current === requestId && options?.showLoading) {
+            setLoadingAgentThreads(false);
+          }
+        }
+      },
+      [api]
+    );
+
+    const scheduleAgentThreadsRefresh = useCallback(
+      (focusChatId?: string | null) => {
+        const activeChatId = focusChatId ?? chatIdRef.current;
+        if (!activeChatId) {
+          return;
+        }
+
+        const existingTimer = agentThreadsRefreshTimerRef.current;
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+        }
+
+        agentThreadsRefreshTimerRef.current = setTimeout(() => {
+          agentThreadsRefreshTimerRef.current = null;
+          void refreshAgentThreads(activeChatId);
+        }, 220);
+      },
+      [refreshAgentThreads]
+    );
+
     const closeWorkspaceModal = useCallback(() => {
       if (loadingWorkspaces) {
         return;
       }
       setWorkspaceModalVisible(false);
     }, [loadingWorkspaces]);
+
+    useEffect(() => {
+      if (!selectedChatId) {
+        setRelatedAgentThreads([]);
+        setAgentRootThreadId(null);
+        setAgentThreadMenuVisible(false);
+        return;
+      }
+
+      void refreshAgentThreads(selectedChatId);
+    }, [refreshAgentThreads, selectedChatId]);
 
     const selectDefaultWorkspace = useCallback(
       (cwd: string | null) => {
@@ -2462,6 +2651,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       ]
     );
 
+
     const closeRenameModal = useCallback(() => {
       if (renaming) {
         return;
@@ -2737,6 +2927,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (!commandDef.mobileSupported) {
           setError(commandDef.availabilityNote ?? `/${name} is available in Codex CLI only.`);
+          return true;
+        }
+
+        if (name === 'agent') {
+          await openAgentThreadSelectorRef.current(argText || null);
           return true;
         }
 
@@ -3287,6 +3482,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setUserInputError(null);
         setResolvingUserInput(false);
         setAttachmentModalVisible(false);
+        setAgentThreadMenuVisible(false);
         setAttachmentPathDraft('');
         setPendingMentionPaths([]);
         setPendingLocalImagePaths([]);
@@ -3320,6 +3516,122 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       ]
     );
 
+    const openAgentThreadSelector = useCallback(
+      async (query?: string | null): Promise<boolean> => {
+        const focusChat = selectedChatRef.current;
+        if (!focusChat?.id) {
+          setError('Open a chat before switching agent threads.');
+          return false;
+        }
+
+        const related = await refreshAgentThreads(focusChat.id, { showLoading: true });
+        if (related.threads.length <= 1) {
+          setAgentThreadMenuVisible(false);
+          setError('No spawned agent threads for this chat yet.');
+          return true;
+        }
+
+        const normalizedQuery = query?.trim() ?? '';
+        if (!normalizedQuery) {
+          setError(null);
+          setAgentThreadMenuVisible(true);
+          return true;
+        }
+
+        const match = findMatchingAgentThread(related.threads, normalizedQuery);
+        if (!match) {
+          setError(`No agent thread matched "${normalizedQuery}".`);
+          setAgentThreadMenuVisible(true);
+          return true;
+        }
+
+        setAgentThreadMenuVisible(false);
+        openChatThread(
+          match.id,
+          selectedChatRef.current?.id === match.id ? selectedChatRef.current : null
+        );
+        return true;
+      },
+      [openChatThread, refreshAgentThreads]
+    );
+    openAgentThreadSelectorRef.current = openAgentThreadSelector;
+
+    const agentThreadRows = useMemo(() => {
+      let subAgentOrdinal = 0;
+
+      return relatedAgentThreads.map((chat) => {
+        const isRootThread = Boolean(agentRootThreadId) && chat.id === agentRootThreadId;
+        const ordinal = isRootThread ? null : (subAgentOrdinal += 1);
+        const snapshot = threadRuntimeSnapshotsRef.current[chat.id] ?? null;
+        const runtime = buildAgentThreadDisplayState(
+          chat,
+          snapshot,
+          runWatchdogNow
+        );
+        const fallbackDescription =
+          chat.agentRole?.trim() ||
+          chat.lastMessagePreview.trim() ||
+          describeAgentThreadSource(chat, agentRootThreadId);
+
+        return {
+          chat,
+          isRootThread,
+          ordinal,
+          title: formatAgentThreadOptionTitle(chat, agentRootThreadId, ordinal),
+          description: runtime.detail ?? fallbackDescription,
+          runtime,
+          selected: chat.id === selectedChatId,
+          showInPanel: !isRootThread && runtime.isActive,
+        };
+      });
+    }, [
+      agentRootThreadId,
+      agentRuntimeRevision,
+      relatedAgentThreads,
+      runWatchdogNow,
+      selectedChatId,
+    ]);
+
+    const liveAgentRows = useMemo(
+      () => agentThreadRows.filter((row) => row.showInPanel),
+      [agentThreadRows]
+    );
+    const selectorAgentCount = useMemo(
+      () => agentThreadRows.filter((row) => !row.isRootThread).length,
+      [agentThreadRows]
+    );
+
+    const agentThreadMenuOptions = useMemo<SelectionSheetOption[]>(() => {
+      return agentThreadRows.map((row) => {
+        const { chat, description, isRootThread, runtime } = row;
+        return {
+          key: chat.id,
+          title: row.title,
+          description,
+          badge: isRootThread
+            ? 'Main'
+            : chat.subAgentDepth
+              ? `D${String(chat.subAgentDepth)}`
+              : undefined,
+          badgeBackgroundColor: isRootThread ? undefined : runtime.statusSurfaceColor,
+          badgeTextColor: isRootThread ? undefined : runtime.accentColor,
+          meta: runtime.label,
+          metaColor: runtime.statusColor,
+          icon: isRootThread ? iconForAgentThread(chat, agentRootThreadId) : runtime.icon,
+          iconColor: isRootThread ? undefined : runtime.accentColor,
+          titleColor: isRootThread ? undefined : runtime.accentColor,
+          selected: row.selected,
+          onPress: () => {
+            setAgentThreadMenuVisible(false);
+            if (chat.id === selectedChatRef.current?.id) {
+              return;
+            }
+            openChatThread(chat.id);
+          },
+        } satisfies SelectionSheetOption;
+      });
+    }, [agentRootThreadId, agentThreadRows, openChatThread]);
+
     useImperativeHandle(ref, () => ({
       openChat: (id: string, optimisticChat?: Chat | null) => {
         openChatThread(id, optimisticChat);
@@ -3347,6 +3659,40 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingOpenChatId,
       pendingOpenChatSnapshot,
     ]);
+
+    useEffect(() => {
+      return ws.onEvent((event: RpcNotification) => {
+        if (
+          event.method !== 'thread/started' &&
+          event.method !== 'thread/name/updated' &&
+          event.method !== 'thread/status/changed' &&
+          event.method !== 'turn/completed'
+        ) {
+          return;
+        }
+
+        const currentThreadId = chatIdRef.current;
+        const currentRootThreadId = agentRootThreadIdRef.current;
+        if (!currentThreadId || !currentRootThreadId) {
+          return;
+        }
+
+        const params = toRecord(event.params);
+        const eventThreadId = extractNotificationThreadId(params);
+        const eventParentThreadId = extractNotificationParentThreadId(params);
+        if (
+          eventThreadId &&
+          eventThreadId !== currentThreadId &&
+          eventThreadId !== currentRootThreadId &&
+          eventParentThreadId !== currentThreadId &&
+          eventParentThreadId !== currentRootThreadId
+        ) {
+          return;
+        }
+
+        scheduleAgentThreadsRefresh(currentThreadId);
+      });
+    }, [scheduleAgentThreadsRefresh, ws]);
 
     const createChat = useCallback(async () => {
       const content = draft.trim();
@@ -3799,6 +4145,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChatId,
     ]);
 
+    const handleCancelQueuedMessage = useCallback(
+      (messageId: string) => {
+        const normalizedMessageId = messageId.trim();
+        if (!normalizedMessageId || queueDispatching) {
+          return;
+        }
+
+        setQueuedMessages((prev) =>
+          prev.filter((message) => message.id !== normalizedMessageId)
+        );
+        setQueuePaused(false);
+        setError(null);
+      },
+      [queueDispatching]
+    );
+
     useEffect(() => {
       if (!selectedChatId || queuedMessages.length === 0 || queueDispatching || queuePaused) {
         return;
@@ -3818,6 +4180,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       }
 
       const nextMessage = queuedMessages[0];
+      const dispatchingThreadId = selectedChatId;
+      const dispatchingMessageId = nextMessage.id;
       setQueueDispatching(true);
       void (async () => {
         const sent = await sendMessageContent(nextMessage.content, {
@@ -3827,12 +4191,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           localImages: nextMessage.localImages,
           clearComposer: false,
         });
-        if (sent) {
-          setQueuedMessages((prev) => prev.slice(1));
-        } else {
-          setQueuePaused(true);
+        if (chatIdRef.current === dispatchingThreadId) {
+          if (sent) {
+            setQueuedMessages((prev) =>
+              prev[0]?.id === dispatchingMessageId ? prev.slice(1) : prev
+            );
+          } else {
+            setQueuePaused(true);
+          }
+          setQueueDispatching(false);
         }
-        setQueueDispatching(false);
       })();
     }, [
       activeTurnId,
@@ -5591,6 +5959,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
+    const spawnedAgentCount = selectorAgentCount;
+    const selectedChatIsSubAgent = Boolean(selectedChat?.parentThreadId);
+    const showAgentThreadChip =
+      !isOpeningChat &&
+      Boolean(selectedChat) &&
+      (spawnedAgentCount > 0 || selectedChatIsSubAgent);
+    const agentThreadChipLabel = selectedChatIsSubAgent
+      ? spawnedAgentCount > 1
+        ? `Sub-agent · ${String(spawnedAgentCount)} threads`
+        : 'Sub-agent'
+      : spawnedAgentCount === 1
+        ? '1 agent'
+        : `${String(spawnedAgentCount)} agents`;
+    const showLiveAgentPanel =
+      !isOpeningChat && Boolean(selectedChat) && liveAgentRows.length > 0;
     const selectedThreadPlan = selectedChat
       ? activePlan?.threadId === selectedChat.id
         ? activePlan
@@ -5612,6 +5995,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       !pendingApproval &&
       !pendingUserInputRequest &&
       Boolean(selectedChat && isChatLikelyRunning(selectedChat));
+    const canCancelQueuedMessage =
+      Boolean(oldestQueuedMessage) && !queueDispatching;
     const queuedMessageSteerDisabledReason = pendingApproval
       ? 'Waiting for approval before steering.'
       : pendingUserInputRequest
@@ -5674,6 +6059,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         };
       });
     }, [selectedChat?.id, selectedThreadPlan?.turnId]);
+
+    useEffect(() => {
+      if (!showLiveAgentPanel) {
+        setAgentPanelCollapsed(false);
+      }
+    }, [showLiveAgentPanel]);
+
+    useEffect(() => {
+      setAgentPanelCollapsed(false);
+    }, [selectedChat?.id]);
 
     const toggleSelectedPlanPanel = useCallback(() => {
       if (!selectedChat?.id || !selectedThreadPlan) {
@@ -5740,6 +6135,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   {collaborationModeLabel}
                 </Text>
               </Pressable>
+              {showAgentThreadChip ? (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.modeChip,
+                    pressed && styles.modelChipPressed,
+                  ]}
+                  onPress={() => {
+                    void openAgentThreadSelector();
+                  }}
+                >
+                  <Ionicons name="people-outline" size={13} color={colors.textMuted} />
+                  <Text style={styles.modelChipText} numberOfLines={1}>
+                    {agentThreadChipLabel}
+                  </Text>
+                </Pressable>
+              ) : null}
               <Pressable
                 style={({ pressed }) => [
                   styles.fastChip,
@@ -5783,6 +6194,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           </View>
         ) : null}
 
+        {showLiveAgentPanel ? (
+          <View style={styles.agentPanelWrap}>
+            <AgentThreadsPanel
+              rows={liveAgentRows}
+              collapsed={agentPanelCollapsed}
+              onToggleCollapse={() => {
+                setAgentPanelCollapsed((previous) => !previous);
+              }}
+              onSelectThread={(threadId) => {
+                if (threadId === selectedChatRef.current?.id) {
+                  return;
+                }
+                openChatThread(threadId);
+              }}
+            />
+          </View>
+        ) : null}
+
         <KeyboardAvoidingView
           style={styles.keyboardAvoiding}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -5791,6 +6220,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           {selectedChat && !isOpeningChat ? (
             <ChatView
               chat={selectedChat}
+              parentChat={selectedParentChat}
               bridgeUrl={bridgeUrl}
               bridgeToken={bridgeToken}
               showToolCalls={showToolCalls}
@@ -5840,7 +6270,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 message={oldestQueuedMessage}
                 remainingCount={remainingQueuedMessagesCount}
                 steerEnabled={canSteerQueuedMessage}
+                cancelEnabled={canCancelQueuedMessage}
                 steerDisabledReason={queuedMessageSteerDisabledReason}
+                onCancel={() => {
+                  handleCancelQueuedMessage(oldestQueuedMessage.id);
+                }}
                 onSteer={() => {
                   void handleSteerQueuedMessage();
                 }}
@@ -5944,6 +6378,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           subtitle="Quick actions for the current thread."
           options={chatTitleMenuOptions}
           onClose={() => setChatTitleMenuVisible(false)}
+        />
+
+        <SelectionSheet
+          visible={agentThreadMenuVisible}
+          eyebrow="Agents"
+          title="Agent threads"
+          subtitle="Switch between the main thread and spawned sub-agent threads."
+          options={agentThreadMenuOptions}
+          loading={loadingAgentThreads}
+          loadingLabel="Loading agent threads…"
+          emptyLabel="No spawned agent threads for this chat yet."
+          onClose={() => setAgentThreadMenuVisible(false)}
         />
 
         <SelectionSheet
@@ -6414,10 +6860,137 @@ function ComposeView({
   );
 }
 
+interface AgentThreadPanelRow {
+  chat: ChatSummary;
+  title: string;
+  description: string;
+  runtime: AgentThreadDisplayState;
+  selected: boolean;
+}
+
+function AgentThreadsPanel({
+  rows,
+  collapsed,
+  onToggleCollapse,
+  onSelectThread,
+}: {
+  rows: AgentThreadPanelRow[];
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  onSelectThread: (threadId: string) => void;
+}) {
+  const { height: windowHeight } = useWindowDimensions();
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return (
+    <View style={styles.agentPanelCard}>
+      <Pressable
+        onPress={onToggleCollapse}
+        style={({ pressed }) => [
+          styles.agentPanelHeader,
+          styles.agentPanelHeaderPressable,
+          pressed && styles.agentPanelHeaderPressed,
+        ]}
+      >
+        <View style={styles.agentPanelHeaderCopy}>
+          <Text style={styles.agentPanelEyebrow}>Agents</Text>
+          <Text style={styles.agentPanelSummary}>
+            {rows.length === 1 ? '1 running now' : `${String(rows.length)} running now`}
+          </Text>
+        </View>
+        <Ionicons
+          name={collapsed ? 'chevron-down' : 'chevron-up'}
+          size={16}
+          color={colors.textMuted}
+        />
+      </Pressable>
+
+      {!collapsed ? (
+        <ScrollView
+          style={[
+            styles.agentPanelScroll,
+            { maxHeight: Math.max(180, Math.floor(windowHeight * 0.5)) },
+          ]}
+          contentContainerStyle={styles.agentPanelList}
+          showsVerticalScrollIndicator={false}
+          nestedScrollEnabled
+        >
+          {rows.map((row) => (
+            <Pressable
+              key={row.chat.id}
+              onPress={() => onSelectThread(row.chat.id)}
+              style={({ pressed }) => [
+                styles.agentPanelRow,
+                { borderColor: row.runtime.statusBorderColor },
+                row.selected && styles.agentPanelRowSelected,
+                pressed && styles.agentPanelRowPressed,
+              ]}
+            >
+              <View
+                style={[
+                  styles.agentPanelAccent,
+                  { backgroundColor: row.runtime.accentColor },
+                ]}
+              />
+              <View style={styles.agentPanelCopy}>
+                <View style={styles.agentPanelTitleRow}>
+                  <Text
+                    style={[
+                      styles.agentPanelTitle,
+                      { color: row.runtime.accentColor },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {row.title}
+                  </Text>
+                  {row.selected ? (
+                    <Text style={styles.agentPanelSelectedLabel}>Current</Text>
+                  ) : null}
+                </View>
+                <Text style={styles.agentPanelDescription} numberOfLines={1}>
+                  {row.description}
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.agentPanelStatusBadge,
+                  {
+                    backgroundColor: row.runtime.statusSurfaceColor,
+                    borderColor: row.runtime.statusBorderColor,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name={row.runtime.icon}
+                  size={12}
+                  color={row.runtime.statusColor}
+                />
+                <Text
+                  style={[
+                    styles.agentPanelStatusText,
+                    { color: row.runtime.statusColor },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {row.runtime.label}
+                </Text>
+              </View>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+}
+
 // ── Chat View ──────────────────────────────────────────────────────
 
 function ChatView({
   chat,
+  parentChat,
   bridgeUrl,
   bridgeToken,
   showToolCalls,
@@ -6430,6 +7003,7 @@ function ChatView({
   bottomInset,
 }: {
   chat: Chat;
+  parentChat: Chat | null;
   bridgeUrl: string;
   bridgeToken: string | null;
   showToolCalls: boolean;
@@ -6441,10 +7015,19 @@ function ChatView({
   autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
   bottomInset: number;
 }) {
-  const visibleMessages = useMemo(
-    () => getVisibleTranscriptMessages(chat.messages, showToolCalls),
-    [chat.messages, showToolCalls]
-  );
+  const transcriptView = useMemo(() => {
+    const childVisibleMessages = getVisibleTranscriptMessages(chat.messages, showToolCalls);
+    if (!chat.parentThreadId || !parentChat) {
+      return {
+        messages: childVisibleMessages,
+        hiddenInheritedMessageCount: 0,
+      };
+    }
+
+    const parentVisibleMessages = getVisibleTranscriptMessages(parentChat.messages, showToolCalls);
+    return trimInheritedParentMessages(parentVisibleMessages, childVisibleMessages, chat.id);
+  }, [chat.messages, chat.parentThreadId, parentChat, showToolCalls]);
+  const visibleMessages = transcriptView.messages;
   const [visibleStartIndex, setVisibleStartIndex] = useState(() =>
     getInitialVisibleMessageStartIndex(visibleMessages.length)
   );
@@ -6630,13 +7213,17 @@ function QueuedMessageCard({
   message,
   remainingCount,
   steerEnabled,
+  cancelEnabled,
   steerDisabledReason,
+  onCancel,
   onSteer,
 }: {
   message: QueuedChatMessage;
   remainingCount: number;
   steerEnabled: boolean;
+  cancelEnabled: boolean;
   steerDisabledReason: string | null;
+  onCancel: () => void;
   onSteer: () => void;
 }) {
   return (
@@ -6648,24 +7235,46 @@ function QueuedMessageCard({
             <Text style={styles.queuedMessageSummary}>{`+${String(remainingCount)} more queued`}</Text>
           ) : null}
         </View>
-        <Pressable
-          onPress={onSteer}
-          disabled={!steerEnabled}
-          style={({ pressed }) => [
-            styles.queuedMessageActionButton,
-            !steerEnabled && styles.queuedMessageActionButtonDisabled,
-            pressed && steerEnabled && styles.queuedMessageActionButtonPressed,
-          ]}
-        >
-          <Text
-            style={[
-              styles.queuedMessageActionLabel,
-              !steerEnabled && styles.queuedMessageActionLabelDisabled,
+        <View style={styles.queuedMessageActions}>
+          <Pressable
+            onPress={onCancel}
+            disabled={!cancelEnabled}
+            style={({ pressed }) => [
+              styles.queuedMessageActionButton,
+              styles.queuedMessageActionButtonDestructive,
+              !cancelEnabled && styles.queuedMessageActionButtonDisabled,
+              pressed && cancelEnabled && styles.queuedMessageActionButtonPressed,
             ]}
           >
-            Steer
-          </Text>
-        </Pressable>
+            <Text
+              style={[
+                styles.queuedMessageActionLabel,
+                styles.queuedMessageActionLabelDestructive,
+                !cancelEnabled && styles.queuedMessageActionLabelDisabled,
+              ]}
+            >
+              Cancel
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={onSteer}
+            disabled={!steerEnabled}
+            style={({ pressed }) => [
+              styles.queuedMessageActionButton,
+              !steerEnabled && styles.queuedMessageActionButtonDisabled,
+              pressed && steerEnabled && styles.queuedMessageActionButtonPressed,
+            ]}
+          >
+            <Text
+              style={[
+                styles.queuedMessageActionLabel,
+                !steerEnabled && styles.queuedMessageActionLabelDisabled,
+              ]}
+            >
+              Steer
+            </Text>
+          </Pressable>
+        </View>
       </View>
       <Text numberOfLines={2} style={styles.queuedMessageBody}>
         {message.content}
@@ -7690,6 +8299,43 @@ function dedupeSlashCommandsByName(
   return result;
 }
 
+function formatAgentThreadOptionTitle(
+  chat: ChatSummary,
+  rootThreadId: string | null,
+  ordinal: number | null
+): string {
+  const trimmedTitle = chat.title.trim();
+  if (rootThreadId && chat.id === rootThreadId) {
+    return trimmedTitle || 'Main thread';
+  }
+  const nickname = chat.agentNickname?.trim();
+  if (nickname) {
+    return nickname;
+  }
+  if (ordinal !== null) {
+    return `Sub-agent ${String(ordinal)}`;
+  }
+  return 'Sub-agent';
+}
+
+function iconForAgentThread(
+  chat: ChatSummary,
+  rootThreadId: string | null
+): ComponentProps<typeof Ionicons>['name'] {
+  if (rootThreadId && chat.id === rootThreadId) {
+    return 'chatbubble-ellipses-outline';
+  }
+
+  switch (chat.sourceKind) {
+    case 'subAgentReview':
+      return 'shield-checkmark-outline';
+    case 'subAgentCompact':
+      return 'layers-outline';
+    default:
+      return chat.status === 'running' ? 'sparkles-outline' : 'git-branch-outline';
+  }
+}
+
 function stripMarkdownInline(value: string): string {
   return value
     .replace(/\*\*(.*?)\*\*/g, '$1')
@@ -7889,10 +8535,14 @@ function extractNotificationThreadId(
     toRecord(params?.threadState) ??
     toRecord(params?.thread_state) ??
     toRecord(msg?.thread);
+  const threadSourceRecord = toRecord(threadRecord?.source);
   const turnRecord = toRecord(params?.turn) ?? toRecord(msg?.turn);
   const sourceRecord = toRecord(params?.source) ?? toRecord(msg?.source);
   const subagentThreadSpawnRecord = toRecord(
-    toRecord(sourceRecord?.subagent)?.thread_spawn
+    toRecord(sourceRecord?.subagent ?? sourceRecord?.subAgent)?.thread_spawn
+  );
+  const threadSubagentThreadSpawnRecord = toRecord(
+    toRecord(threadSourceRecord?.subagent ?? threadSourceRecord?.subAgent)?.thread_spawn
   );
 
   return (
@@ -7918,6 +8568,47 @@ function extractNotificationThreadId(
     readString(sourceRecord?.parent_thread_id) ??
     readString(sourceRecord?.parentThreadId) ??
     readString(subagentThreadSpawnRecord?.parent_thread_id) ??
+    readString(subagentThreadSpawnRecord?.parentThreadId) ??
+    readString(threadSourceRecord?.parent_thread_id) ??
+    readString(threadSourceRecord?.parentThreadId) ??
+    readString(threadSubagentThreadSpawnRecord?.parent_thread_id) ??
+    readString(threadSubagentThreadSpawnRecord?.parentThreadId) ??
+    null
+  );
+}
+
+function extractNotificationParentThreadId(
+  params: Record<string, unknown> | null,
+  msgArg?: Record<string, unknown> | null
+): string | null {
+  if (!params && !msgArg) {
+    return null;
+  }
+
+  const msg = msgArg ?? toRecord(params?.msg);
+  const threadRecord =
+    toRecord(params?.thread) ??
+    toRecord(params?.threadState) ??
+    toRecord(params?.thread_state) ??
+    toRecord(msg?.thread);
+  const threadSourceRecord = toRecord(threadRecord?.source);
+  const sourceRecord = toRecord(params?.source) ?? toRecord(msg?.source);
+  const subagentThreadSpawnRecord = toRecord(
+    toRecord(sourceRecord?.subagent ?? sourceRecord?.subAgent)?.thread_spawn
+  );
+  const threadSubagentThreadSpawnRecord = toRecord(
+    toRecord(threadSourceRecord?.subagent ?? threadSourceRecord?.subAgent)?.thread_spawn
+  );
+
+  return (
+    readString(sourceRecord?.parent_thread_id) ??
+    readString(sourceRecord?.parentThreadId) ??
+    readString(subagentThreadSpawnRecord?.parent_thread_id) ??
+    readString(subagentThreadSpawnRecord?.parentThreadId) ??
+    readString(threadSourceRecord?.parent_thread_id) ??
+    readString(threadSourceRecord?.parentThreadId) ??
+    readString(threadSubagentThreadSpawnRecord?.parent_thread_id) ??
+    readString(threadSubagentThreadSpawnRecord?.parentThreadId) ??
     null
   );
 }
@@ -8169,6 +8860,121 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     zIndex: 2,
   },
+  agentPanelWrap: {
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+  },
+  agentPanelCard: {
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: '#0E1116',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    gap: spacing.sm,
+    boxShadow: '0 12px 30px rgba(0, 0, 0, 0.22)',
+  },
+  agentPanelHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  agentPanelHeaderPressable: {
+    borderRadius: radius.md,
+  },
+  agentPanelHeaderPressed: {
+    opacity: 0.84,
+  },
+  agentPanelHeaderCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  agentPanelEyebrow: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  agentPanelSummary: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  agentPanelList: {
+    gap: spacing.sm,
+  },
+  agentPanelScroll: {
+    flexGrow: 0,
+  },
+  agentPanelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: spacing.sm + 2,
+  },
+  agentPanelRowSelected: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  agentPanelRowPressed: {
+    opacity: 0.84,
+  },
+  agentPanelAccent: {
+    width: 4,
+    alignSelf: 'stretch',
+    borderRadius: 999,
+    flexShrink: 0,
+  },
+  agentPanelCopy: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  agentPanelTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  agentPanelTitle: {
+    ...typography.body,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+    flex: 1,
+  },
+  agentPanelSelectedLabel: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  agentPanelDescription: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  agentPanelStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 5,
+    maxWidth: '42%',
+    flexShrink: 0,
+  },
+  agentPanelStatusText: {
+    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '700',
+  },
   contextChip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -8274,6 +9080,11 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 2,
   },
+  queuedMessageActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
   queuedMessageSummary: {
     ...typography.caption,
     color: colors.textSecondary,
@@ -8297,6 +9108,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
     paddingVertical: 5,
   },
+  queuedMessageActionButtonDestructive: {
+    borderColor: colors.error,
+    backgroundColor: colors.errorBg,
+  },
   queuedMessageActionButtonDisabled: {
     borderColor: colors.border,
     backgroundColor: colors.bgMain,
@@ -8308,6 +9123,9 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textPrimary,
     fontWeight: '700',
+  },
+  queuedMessageActionLabelDestructive: {
+    color: colors.error,
   },
   queuedMessageActionLabelDisabled: {
     color: colors.textMuted,

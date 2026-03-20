@@ -6,7 +6,7 @@ export function getVisibleTranscriptMessages(
 ): ChatMessage[] {
   const filtered = messages.filter((msg) => {
     const text = msg.content || '';
-    if (!showToolCalls && msg.role === 'system') {
+    if (!showToolCalls && msg.role === 'system' && msg.systemKind !== 'subAgent') {
       return false;
     }
     if (text.includes('FINAL_TASK_RESULT_JSON')) {

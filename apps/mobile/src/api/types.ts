@@ -2,11 +2,21 @@ export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
 
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
 
+export interface ChatMessageSubAgentMeta {
+  tool?: string;
+  prompt?: string;
+  senderThreadId?: string;
+  receiverThreadIds?: string[];
+  agentStatus?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatMessageRole;
   content: string;
   createdAt: string;
+  systemKind?: 'tool' | 'subAgent';
+  subAgentMeta?: ChatMessageSubAgentMeta;
 }
 
 export interface ChatSummary {
@@ -19,7 +29,11 @@ export interface ChatSummary {
   lastMessagePreview: string;
   cwd?: string;
   modelProvider?: string;
+  agentNickname?: string;
+  agentRole?: string;
   sourceKind?: string;
+  parentThreadId?: string;
+  subAgentDepth?: number;
   lastRunStartedAt?: string;
   lastRunFinishedAt?: string;
   lastRunDurationMs?: number;

@@ -1,6 +1,6 @@
 # Codex App-Server + CLI Gap Tracker
 
-Last updated: February 24, 2026
+Last updated: March 20, 2026
 
 ## Scope
 This tracker compares `clawdex-mobile` against current Codex app-server + CLI capabilities and records what still needs to be added.
@@ -49,8 +49,12 @@ Status: In progress (first implementation pass completed)
 ## Remaining Gaps (Beyond Gap 1)
 
 ### Gap 2: Slash Command Coverage in Mobile
-- Many Codex CLI slash commands are not exposed as first-class actions in mobile UX.
-- Mobile currently has partial command shortcuts and multiple unsupported command branches.
+- Status: In progress
+- Mobile now supports `/agent` thread switching, sub-agent transcript cards, and nested sub-agent rows in the drawer so spawned workers are visible in the main conversation model instead of being hidden behind generic tool-call traces.
+- Mobile still does not expose the full Codex desktop slash-command surface as dedicated UI actions.
+- Agent management remains lightweight:
+  - no dedicated create/configure sub-agent surface beyond `/agent`
+  - no richer per-agent live status/dashboard view
 
 ### Gap 3: Account/Auth UX
 - No dedicated mobile flow for login state, logout, account details, or rate limits.

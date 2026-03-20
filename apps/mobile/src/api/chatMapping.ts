@@ -1,6 +1,7 @@
 import type {
   Chat,
   ChatMessage,
+  ChatMessageSubAgentMeta,
   ChatStatus,
   ChatSummary,
 } from './types';
@@ -43,12 +44,20 @@ export interface RawThread {
   title?: string;
   preview?: string;
   modelProvider?: string;
+  agentNickname?: string;
+  agentRole?: string;
   createdAt?: number;
   updatedAt?: number;
   status?: RawThreadStatus;
   cwd?: string;
   source?: unknown;
   turns?: RawTurn[];
+}
+
+interface ThreadSourceMetadata {
+  kind?: string;
+  parentThreadId?: string;
+  subAgentDepth?: number;
 }
 
 export function toRecord(value: unknown): Record<string, unknown> | null {
@@ -59,6 +68,16 @@ export function toRecord(value: unknown): Record<string, unknown> | null {
 
 export function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => readString(entry)?.trim() ?? '')
+    .filter((entry): entry is string => entry.length > 0);
 }
 
 function readNumber(value: unknown): number | null {
@@ -197,6 +216,14 @@ export function toRawThread(value: unknown): RawThread {
     title: threadName,
     preview: readString(record.preview) ?? undefined,
     modelProvider: readString(record.modelProvider) ?? undefined,
+    agentNickname:
+      readString(record.agentNickname) ??
+      readString(record.agent_nickname) ??
+      undefined,
+    agentRole:
+      readString(record.agentRole) ??
+      readString(record.agent_role) ??
+      undefined,
     createdAt: readNumber(record.createdAt) ?? undefined,
     updatedAt: readNumber(record.updatedAt) ?? undefined,
     status: (record.status as RawThreadStatus) ?? undefined,
@@ -236,6 +263,7 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
   const createdAt = unixSecondsToIso(raw.createdAt);
   const updatedAt = unixSecondsToIso(raw.updatedAt);
   const turns = Array.isArray(raw.turns) ? raw.turns : [];
+  const sourceMetadata = readThreadSourceMetadata(raw.source);
 
   const lastError = extractLastError(turns);
   const displayTitle = raw.name ?? raw.preview;
@@ -250,59 +278,125 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
     lastMessagePreview: toPreview(raw.preview || ''),
     cwd: readString(raw.cwd) ?? undefined,
     modelProvider: readString(raw.modelProvider) ?? undefined,
-    sourceKind: mapSourceKind(raw.source),
+    agentNickname: readString(raw.agentNickname) ?? undefined,
+    agentRole: readString(raw.agentRole) ?? undefined,
+    sourceKind: sourceMetadata.kind,
+    parentThreadId: sourceMetadata.parentThreadId,
+    subAgentDepth: sourceMetadata.subAgentDepth,
     lastError: lastError ?? undefined,
   };
 }
 
-function mapSourceKind(source: unknown): string | undefined {
+function readThreadSourceMetadata(source: unknown): ThreadSourceMetadata {
   if (typeof source === 'string') {
-    return source;
+    return {
+      kind: source,
+    };
   }
 
   const sourceRecord = toRecord(source);
   if (!sourceRecord) {
-    return undefined;
+    return {};
   }
 
   // Legacy shape used by older adapters.
   const legacyKind = readString(sourceRecord.kind);
   if (legacyKind) {
-    return legacyKind;
+    return {
+      kind: legacyKind,
+      parentThreadId:
+        readString(sourceRecord.parentThreadId) ??
+        readString(sourceRecord.parent_thread_id) ??
+        undefined,
+      subAgentDepth:
+        readNumber(sourceRecord.depth) ??
+        readNumber(sourceRecord.agentDepth) ??
+        readNumber(sourceRecord.agent_depth) ??
+        undefined,
+    };
   }
 
   // Current app-server shape: { subAgent: ... } tagged union.
-  if ('subAgent' in sourceRecord) {
-    const subAgent = sourceRecord.subAgent;
+  const subAgentValue =
+    sourceRecord.subAgent ??
+    sourceRecord.subagent;
+
+  if (subAgentValue !== undefined) {
+    const subAgent = subAgentValue;
     if (typeof subAgent === 'string') {
-      if (subAgent === 'review') return 'subAgentReview';
-      if (subAgent === 'compact') return 'subAgentCompact';
-      if (subAgent === 'memory_consolidation') return 'subAgentOther';
-      return 'subAgent';
+      const kind =
+        subAgent === 'review'
+          ? 'subAgentReview'
+          : subAgent === 'compact'
+            ? 'subAgentCompact'
+            : subAgent === 'memory_consolidation'
+              ? 'subAgentOther'
+              : 'subAgent';
+      return {
+        kind,
+      };
     }
 
     const subAgentRecord = toRecord(subAgent);
     if (!subAgentRecord) {
-      return 'subAgent';
+      return {
+        kind: 'subAgent',
+      };
     }
 
-    if (toRecord(subAgentRecord.thread_spawn)) {
-      return 'subAgentThreadSpawn';
+    const threadSpawn = toRecord(subAgentRecord.thread_spawn);
+    if (threadSpawn) {
+      return {
+        kind: 'subAgentThreadSpawn',
+        parentThreadId:
+          readString(threadSpawn.parentThreadId) ??
+          readString(threadSpawn.parent_thread_id) ??
+          undefined,
+        subAgentDepth:
+          readNumber(threadSpawn.depth) ??
+          readNumber(threadSpawn.agentDepth) ??
+          readNumber(threadSpawn.agent_depth) ??
+          undefined,
+      };
     }
 
     if (readString(subAgentRecord.other)) {
-      return 'subAgentOther';
+      return {
+        kind: 'subAgentOther',
+      };
     }
 
-    return 'subAgent';
+    return {
+      kind: 'subAgent',
+      parentThreadId:
+        readString(subAgentRecord.parentThreadId) ??
+        readString(subAgentRecord.parent_thread_id) ??
+        undefined,
+      subAgentDepth:
+        readNumber(subAgentRecord.depth) ??
+        readNumber(subAgentRecord.agentDepth) ??
+        readNumber(subAgentRecord.agent_depth) ??
+        undefined,
+    };
   }
 
   const typeKind = readString(sourceRecord.type);
   if (typeKind && typeKind.startsWith('subAgent')) {
-    return typeKind;
+    return {
+      kind: typeKind,
+      parentThreadId:
+        readString(sourceRecord.parentThreadId) ??
+        readString(sourceRecord.parent_thread_id) ??
+        undefined,
+      subAgentDepth:
+        readNumber(sourceRecord.depth) ??
+        readNumber(sourceRecord.agentDepth) ??
+        readNumber(sourceRecord.agent_depth) ??
+        undefined,
+    };
   }
 
-  return undefined;
+  return {};
 }
 
 export function mapChat(raw: RawThread): Chat {
@@ -406,10 +500,13 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
 
       const toolLikeMessage = toToolLikeMessage(itemRecord);
       if (toolLikeMessage) {
+        const systemKind = itemType === 'collabToolCall' ? 'subAgent' : 'tool';
         messages.push({
           id: readString(itemRecord.id) ?? generateLocalId(),
           role: 'system',
           content: toolLikeMessage,
+          systemKind,
+          subAgentMeta: systemKind === 'subAgent' ? toSubAgentMeta(itemRecord) : undefined,
           createdAt: new Date(baseTs + messages.length * 1000).toISOString(),
         });
       }
@@ -473,6 +570,72 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
     return withNestedDetail(title, detail);
   }
 
+  if (type === 'collabtoolcall') {
+    const tool = normalizeType(readString(item.tool) ?? '');
+    const status = normalizeType(readString(item.status) ?? '');
+    const prompt = normalizeInline(readString(item.prompt), 220);
+    const receiverThreadIds = readReceiverThreadIds(item);
+    const primaryReceiverThreadId = normalizeInline(receiverThreadIds[0], 120);
+    const newThreadId = normalizeInline(
+      readString(item.newThreadId) ??
+        readString(item.new_thread_id) ??
+        primaryReceiverThreadId,
+      120
+    );
+    const senderThreadId = normalizeInline(
+      readString(item.senderThreadId) ?? readString(item.sender_thread_id),
+      120
+    );
+    const agentStatus = normalizeInline(
+      readString(item.agentStatus) ?? readString(item.agent_status),
+      120
+    );
+
+    const title = (() => {
+      if (tool === 'spawnagent') {
+        if (status === 'failed' || status === 'error') {
+          return '• Sub-agent spawn failed';
+        }
+        if (status === 'completed' || status === 'complete' || status === 'succeeded') {
+          return '• Spawned sub-agent';
+        }
+        return '• Spawning sub-agent';
+      }
+
+      if (tool === 'sendinput') {
+        return status === 'failed' || status === 'error'
+          ? '• Sub-agent update failed'
+          : '• Sent follow-up to sub-agent';
+      }
+
+      if (tool === 'wait') {
+        return status === 'failed' || status === 'error'
+          ? '• Waiting on sub-agent failed'
+          : '• Waiting on sub-agent';
+      }
+
+      if (tool === 'closeagent') {
+        return status === 'failed' || status === 'error'
+          ? '• Closing sub-agent failed'
+          : '• Closed sub-agent thread';
+      }
+
+      return status === 'failed' || status === 'error'
+        ? '• Sub-agent action failed'
+        : '• Updated sub-agent thread';
+    })();
+
+    const detailParts = [
+      prompt ? `Prompt: ${prompt}` : null,
+      newThreadId ? `Thread: ${newThreadId}` : null,
+      primaryReceiverThreadId ? `Target: ${primaryReceiverThreadId}` : null,
+      senderThreadId ? `From: ${senderThreadId}` : null,
+      agentStatus ? `Status: ${agentStatus}` : null,
+    ].filter(Boolean);
+
+    return withNestedDetail(title, detailParts.join('\n') || null);
+  }
+
   if (type === 'websearch') {
     const query = normalizeInline(readString(item.query), 180);
     const actionRecord = toRecord(item.action);
@@ -526,6 +689,55 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
   }
 
   return null;
+}
+
+function toSubAgentMeta(item: Record<string, unknown>): ChatMessageSubAgentMeta | undefined {
+  const tool = readString(item.tool) ?? undefined;
+  const prompt = normalizeInline(readString(item.prompt), 4000) ?? undefined;
+  const senderThreadId =
+    normalizeInline(
+      readString(item.senderThreadId) ?? readString(item.sender_thread_id),
+      200
+    ) ?? undefined;
+  const agentStatus =
+    normalizeInline(
+      readString(item.agentStatus) ?? readString(item.agent_status),
+      200
+    ) ?? undefined;
+  const receiverThreadIds = readReceiverThreadIds(item);
+
+  if (!tool && !prompt && !senderThreadId && receiverThreadIds.length === 0 && !agentStatus) {
+    return undefined;
+  }
+
+  return {
+    tool,
+    prompt,
+    senderThreadId,
+    receiverThreadIds,
+    agentStatus,
+  };
+}
+
+function readReceiverThreadIds(item: Record<string, unknown>): string[] {
+  const pluralIds = [
+    ...readStringArray(item.receiverThreadIds),
+    ...readStringArray(item.receiver_thread_ids),
+  ];
+  if (pluralIds.length > 0) {
+    return Array.from(new Set(pluralIds));
+  }
+
+  const singularIds = [
+    readString(item.newThreadId),
+    readString(item.new_thread_id),
+    readString(item.receiverThreadId),
+    readString(item.receiver_thread_id),
+  ]
+    .map((value) => value?.trim() ?? '')
+    .filter((value): value is string => value.length > 0);
+
+  return singularIds;
 }
 
 function normalizeType(value: string): string {

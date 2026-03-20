@@ -94,6 +94,52 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
 
   const timelineEntries =
     message.role === 'system' ? parseTimelineEntries(message.content) : null;
+  if (message.role === 'system' && message.systemKind === 'subAgent') {
+    const subAgentEntries =
+      timelineEntries && timelineEntries.length > 0
+        ? timelineEntries
+        : [{ title: message.content, details: [] }];
+
+    return (
+      <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
+        <View style={styles.subAgentCardStack}>
+          {subAgentEntries.map((entry, index) => {
+            const visual = toSubAgentVisual(entry.title);
+            return (
+              <View
+                key={`${message.id}-subagent-${String(index)}`}
+                style={[
+                  styles.subAgentCard,
+                  visual.isError && styles.subAgentCardError,
+                ]}
+              >
+                <View style={styles.subAgentHeader}>
+                  <Ionicons
+                    name={visual.icon}
+                    size={14}
+                    color={visual.isError ? colors.statusError : '#F5A524'}
+                  />
+                  <Text style={styles.subAgentTitle}>{entry.title}</Text>
+                </View>
+                {entry.details.length > 0 ? (
+                  <View style={styles.subAgentDetailWrap}>
+                    {entry.details.map((line, lineIndex) => (
+                      <SelectableMessageText
+                        key={`${message.id}-subagent-${String(index)}-line-${String(lineIndex)}`}
+                        style={styles.subAgentDetailLine}
+                      >
+                        {line}
+                      </SelectableMessageText>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    );
+  }
   if (timelineEntries && timelineEntries.length > 0) {
     return (
       <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
@@ -199,6 +245,7 @@ function areChatMessagePropsEqual(
     previous.role === next.role &&
     previous.content === next.content &&
     previous.createdAt === next.createdAt &&
+    previous.systemKind === next.systemKind &&
     prevProps.bridgeUrl === nextProps.bridgeUrl &&
     prevProps.bridgeToken === nextProps.bridgeToken
   );
@@ -464,6 +511,43 @@ const styles = StyleSheet.create({
   },
   timelineCardStack: {
     gap: spacing.sm,
+  },
+  subAgentCardStack: {
+    gap: spacing.xs + 2,
+  },
+  subAgentCard: {
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(245, 165, 36, 0.35)',
+    backgroundColor: 'rgba(245, 165, 36, 0.08)',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 1,
+  },
+  subAgentCardError: {
+    borderColor: colors.statusError,
+    backgroundColor: colors.errorBg,
+  },
+  subAgentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  subAgentTitle: {
+    ...typography.body,
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  subAgentDetailWrap: {
+    marginTop: spacing.xs,
+    paddingLeft: spacing.lg + 2,
+    gap: 2,
+  },
+  subAgentDetailLine: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 16,
   },
   timelineCard: {
     borderRadius: radius.md,
@@ -828,6 +912,48 @@ function toTimelineVisual(title: string): {
   return {
     icon: 'document-text-outline',
     useMonospaceTitle: false,
+    isError: false,
+  };
+}
+
+function toSubAgentVisual(title: string): {
+  icon: keyof typeof Ionicons.glyphMap;
+  isError: boolean;
+} {
+  const normalized = title.toLowerCase();
+  const isError =
+    normalized.includes('failed') || normalized.includes('error') || normalized.includes('aborted');
+
+  if (isError) {
+    return {
+      icon: 'alert-circle-outline',
+      isError: true,
+    };
+  }
+
+  if (normalized.includes('waiting')) {
+    return {
+      icon: 'pause-circle-outline',
+      isError: false,
+    };
+  }
+
+  if (normalized.includes('closed')) {
+    return {
+      icon: 'checkmark-circle-outline',
+      isError: false,
+    };
+  }
+
+  if (normalized.includes('spawn')) {
+    return {
+      icon: 'sparkles-outline',
+      isError: false,
+    };
+  }
+
+  return {
+    icon: 'git-branch-outline',
     isError: false,
   };
 }

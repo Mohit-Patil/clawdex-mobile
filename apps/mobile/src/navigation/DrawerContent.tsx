@@ -15,6 +15,12 @@ import type { HostBridgeApiClient } from '../api/client';
 import type { ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
+import { filterDrawerChats } from './drawerChats';
+import { describeAgentThreadSource } from '../screens/agentThreads';
+import {
+  buildChatWorkspaceSections,
+  type ChatWorkspaceSection,
+} from './chatThreadTree';
 import { colors, spacing, typography } from '../theme';
 
 type Screen = 'Main' | 'Settings' | 'Privacy' | 'Terms';
@@ -26,14 +32,6 @@ interface DrawerContentProps {
   onSelectChat: (id: string) => void;
   onNewChat: () => void;
   onNavigate: (screen: Screen) => void;
-}
-
-interface ChatWorkspaceSection {
-  key: string;
-  title: string;
-  subtitle?: string;
-  itemCount: number;
-  data: ChatSummary[];
 }
 
 const RUN_HEARTBEAT_STALE_MS = 20_000;
@@ -72,7 +70,7 @@ export function DrawerContent({
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const hasAppliedInitialCollapseRef = useRef(false);
   const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
-  const chatSections = useMemo(() => buildWorkspaceSections(chats), [chats]);
+  const chatSections = useMemo(() => buildChatWorkspaceSections(chats), [chats]);
   const visibleChatSections = useMemo(
     () =>
       chatSections.map((section) =>
@@ -100,8 +98,26 @@ export function DrawerContent({
     }
 
     try {
-      const data = await api.listChats();
-      const dedupedChats = dedupeChatsById(data);
+      const listedChats = await api.listChats();
+      const listedChatIds = new Set(listedChats.map((chat) => chat.id));
+      let loadedChats: ChatSummary[] = [];
+
+      try {
+        const loadedIds = await api.listLoadedChatIds();
+        const missingIds = loadedIds.filter((threadId) => !listedChatIds.has(threadId));
+        if (missingIds.length > 0) {
+          const loadedResults = await Promise.allSettled(
+            missingIds.map((threadId) => api.getChatSummary(threadId))
+          );
+          loadedChats = loadedResults.flatMap((result) =>
+            result.status === 'fulfilled' ? [result.value] : []
+          );
+        }
+      } catch {
+        // Keep the drawer usable if loaded-thread hydration fails.
+      }
+
+      const dedupedChats = dedupeChatsById(filterDrawerChats([...listedChats, ...loadedChats]));
       setChats(sortChats(dedupedChats));
       const activeChatIds = new Set(dedupedChats.map((chat) => chat.id));
       setRunHeartbeatAtByThread((prev) => {
@@ -386,7 +402,7 @@ export function DrawerContent({
           ) : (
             <SectionList
               sections={visibleChatSections}
-              keyExtractor={(item) => item.id}
+              keyExtractor={(item) => item.chat.id}
               style={styles.list}
               contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
@@ -441,49 +457,73 @@ export function DrawerContent({
                 );
               }}
               renderItem={({ item, index, section }) => {
-                const isSelected = item.id === selectedChatId;
+                const chat = item.chat;
+                const isSelected = chat.id === selectedChatId;
                 const isLast = index === section.data.length - 1;
                 const isRunningFromHeartbeat =
-                  (runHeartbeatAtByThread[item.id] ?? 0) > Date.now() - RUN_HEARTBEAT_STALE_MS;
-                const isRunning = item.status === 'running' || isRunningFromHeartbeat;
+                  (runHeartbeatAtByThread[chat.id] ?? 0) > Date.now() - RUN_HEARTBEAT_STALE_MS;
+                const isRunning = chat.status === 'running' || isRunningFromHeartbeat;
+                const isSubAgent = item.indentLevel > 0 || Boolean(chat.parentThreadId);
+                const previewText = isSubAgent
+                  ? `${describeAgentThreadSource(chat, item.rootThreadId)} • ${formatChatPreview(chat)}`
+                  : formatChatPreview(chat);
                 return (
                   <Pressable
                     style={({ pressed }) => [
                       styles.chatItem,
+                      isSubAgent && styles.chatItemSubAgent,
+                      isSubAgent && { marginLeft: Math.min(item.indentLevel, 4) * 18 },
                       isSelected && styles.chatItemSelected,
                       pressed && styles.chatItemPressed,
                       isLast && styles.chatItemLast,
                     ]}
-                    onPress={() => onSelectChat(item.id)}
+                    onPress={() => onSelectChat(chat.id)}
                   >
                     <View
                       style={[
                         styles.chatItemAccent,
+                        isSubAgent && styles.chatItemAccentSubAgent,
                         isSelected && styles.chatItemAccentSelected,
                         isRunning && styles.chatItemAccentRunning,
-                        item.status === 'error' && styles.chatItemAccentError,
+                        chat.status === 'error' && styles.chatItemAccentError,
                       ]}
                     />
                     <View style={styles.chatItemContent}>
                       <View style={styles.chatItemTopRow}>
+                        {isSubAgent ? (
+                          <Ionicons
+                            name="git-branch-outline"
+                            size={12}
+                            color="#F5A524"
+                            style={styles.chatSubAgentIcon}
+                          />
+                        ) : null}
                         <Text
-                          style={[styles.chatTitle, isSelected && styles.chatTitleSelected]}
+                          style={[
+                            styles.chatTitle,
+                            isSubAgent && styles.chatTitleSubAgent,
+                            isSelected && styles.chatTitleSelected,
+                          ]}
                           numberOfLines={1}
                         >
-                          {item.title || 'Untitled'}
+                          {chat.title || 'Untitled'}
                         </Text>
                         <Text
                           style={[styles.chatAge, isSelected && styles.chatAgeSelected]}
                         >
-                          {relativeTime(item.updatedAt)}
+                          {relativeTime(chat.updatedAt)}
                         </Text>
                       </View>
                       <View style={styles.chatItemBottomRow}>
                         <Text
-                          style={[styles.chatPreview, isSelected && styles.chatPreviewSelected]}
+                          style={[
+                            styles.chatPreview,
+                            isSubAgent && styles.chatPreviewSubAgent,
+                            isSelected && styles.chatPreviewSelected,
+                          ]}
                           numberOfLines={1}
                         >
-                          {formatChatPreview(item)}
+                          {previewText}
                         </Text>
                         {isRunning ? (
                           <View style={styles.chatMeta}>
@@ -498,7 +538,7 @@ export function DrawerContent({
                               </Text>
                             </View>
                           </View>
-                        ) : item.status === 'error' ? (
+                        ) : chat.status === 'error' ? (
                           <View style={styles.chatMeta}>
                             <View style={[styles.statusPill, styles.statusPillError]}>
                               <Text
@@ -552,98 +592,6 @@ function dedupeChatsById(chats: ChatSummary[]): ChatSummary[] {
   }
 
   return Array.from(byId.values());
-}
-
-function normalizeCwd(value: string | null | undefined): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-const DEFAULT_WORKSPACE_KEY = '__bridge_default_workspace__';
-
-function workspaceKey(cwd: string | null): string {
-  return cwd ?? DEFAULT_WORKSPACE_KEY;
-}
-
-function workspaceTitle(cwd: string | null): string {
-  if (!cwd) {
-    return 'Bridge default workspace';
-  }
-
-  const normalized = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
-  if (!normalized) {
-    return cwd;
-  }
-
-  const lastSlash = normalized.lastIndexOf('/');
-  if (lastSlash === -1) {
-    return normalized;
-  }
-
-  return normalized.slice(lastSlash + 1) || normalized;
-}
-
-function workspaceSubtitle(cwd: string | null): string | undefined {
-  if (!cwd) {
-    return undefined;
-  }
-
-  const normalized = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
-  const segments = normalized.split('/').filter(Boolean);
-
-  if (segments.length <= 2) {
-    return normalized;
-  }
-
-  return `.../${segments.slice(-2).join('/')}`;
-}
-
-function buildWorkspaceSections(chats: ChatSummary[]): ChatWorkspaceSection[] {
-  if (chats.length === 0) {
-    return [];
-  }
-
-  const sorted = sortChats(chats);
-  const byWorkspace = new Map<
-    string,
-    {
-      cwd: string | null;
-      chats: ChatSummary[];
-    }
-  >();
-
-  for (const chat of sorted) {
-    const cwd = normalizeCwd(chat.cwd);
-    const key = workspaceKey(cwd);
-    const bucket = byWorkspace.get(key);
-    if (bucket) {
-      bucket.chats.push(chat);
-      continue;
-    }
-
-    byWorkspace.set(key, {
-      cwd,
-      chats: [chat],
-    });
-  }
-
-  return Array.from(byWorkspace.entries())
-    .sort(([, a], [, b]) => {
-      const aUpdatedAt = a.chats[0]?.updatedAt ?? '';
-      const bUpdatedAt = b.chats[0]?.updatedAt ?? '';
-      return bUpdatedAt.localeCompare(aUpdatedAt);
-    })
-    .map(([key, bucket]) => ({
-      key,
-      title: workspaceTitle(bucket.cwd),
-      subtitle: workspaceSubtitle(bucket.cwd),
-      itemCount: bucket.chats.length,
-      data: bucket.chats,
-    }));
 }
 
 function getDefaultCollapsedWorkspaceKeys(sections: ChatWorkspaceSection[]): Set<string> {
@@ -1025,6 +973,9 @@ const styles = StyleSheet.create({
     gap: spacing.xs + 2,
     alignItems: 'stretch',
   },
+  chatItemSubAgent: {
+    backgroundColor: 'rgba(255, 255, 255, 0.025)',
+  },
   chatItemLast: {
     marginBottom: spacing.md,
   },
@@ -1039,6 +990,9 @@ const styles = StyleSheet.create({
     width: 4,
     borderRadius: 999,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  chatItemAccentSubAgent: {
+    backgroundColor: 'rgba(245, 165, 36, 0.35)',
   },
   chatItemAccentSelected: {
     backgroundColor: colors.textPrimary,
@@ -1058,12 +1012,18 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs + 2,
   },
+  chatSubAgentIcon: {
+    marginRight: -2,
+  },
   chatTitle: {
     ...typography.body,
     flex: 1,
     color: colors.textSecondary,
     fontSize: 14,
     fontWeight: '600',
+  },
+  chatTitleSubAgent: {
+    color: '#F5C06A',
   },
   chatTitleSelected: {
     color: colors.textPrimary,
@@ -1090,6 +1050,9 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 14,
     color: 'rgba(232, 236, 244, 0.56)',
+  },
+  chatPreviewSubAgent: {
+    color: 'rgba(245, 192, 106, 0.9)',
   },
   chatPreviewSelected: {
     color: colors.textMuted,

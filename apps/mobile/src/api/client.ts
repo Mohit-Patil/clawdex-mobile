@@ -60,6 +60,10 @@ interface AppServerListResponse {
   data?: unknown[];
 }
 
+interface AppServerLoadedThreadListResponse {
+  data?: unknown[];
+}
+
 interface AppServerReadResponse {
   thread?: unknown;
 }
@@ -105,6 +109,14 @@ interface AppServerThreadRuntimeSettings {
 type AppServerThreadSetNameResponse = Record<string, never>;
 
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
+const CHAT_LIST_SOURCE_KINDS_WITH_SUBAGENTS = [
+  ...CHAT_LIST_SOURCE_KINDS,
+  'subAgent',
+  'subAgentReview',
+  'subAgentCompact',
+  'subAgentThreadSpawn',
+  'subAgentOther',
+] as const;
 const MOBILE_DEVELOPER_INSTRUCTIONS =
   'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
 const MOBILE_DEFAULT_SANDBOX = 'danger-full-access';
@@ -135,6 +147,10 @@ interface SendChatMessageOptions {
   onTurnStarted?: (turnId: string) => void;
 }
 
+interface ListChatsOptions {
+  includeSubAgents?: boolean;
+}
+
 const ACTIVE_TURN_STATUSES = new Set([
   'inprogress',
   'in_progress',
@@ -161,13 +177,16 @@ export class HostBridgeApiClient {
     return readSelectedAccountRateLimits(response);
   }
 
-  async listChats(): Promise<ChatSummary[]> {
+  async listChats(options?: ListChatsOptions): Promise<ChatSummary[]> {
+    const includeSubAgents = options?.includeSubAgents === true;
     const response = await this.ws.request<AppServerListResponse>('thread/list', {
       cursor: null,
       limit: 200,
       sortKey: null,
       modelProviders: null,
-      sourceKinds: CHAT_LIST_SOURCE_KINDS,
+      sourceKinds: includeSubAgents
+        ? CHAT_LIST_SOURCE_KINDS_WITH_SUBAGENTS
+        : CHAT_LIST_SOURCE_KINDS,
       archived: false,
       cwd: null,
     });
@@ -197,8 +216,19 @@ export class HostBridgeApiClient {
         return mapped;
       })
       .filter((item): item is ChatSummary => item !== null)
-      .filter((item) => !isSubAgentSource(item.sourceKind))
+      .filter((item) => includeSubAgents || !isSubAgentSource(item.sourceKind))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async listLoadedChatIds(): Promise<string[]> {
+    const response = await this.ws.request<AppServerLoadedThreadListResponse>(
+      'thread/loaded/list',
+      undefined
+    );
+    const ids = Array.isArray(response.data) ? response.data : [];
+    return ids
+      .map((value) => readString(value)?.trim() ?? '')
+      .filter((value): value is string => value.length > 0);
   }
 
   async createChat(body: CreateChatRequest): Promise<Chat> {

@@ -224,7 +224,7 @@ describe('HostBridgeApiClient', () => {
           updatedAt: 1700000002,
           status: { type: 'idle' },
           source: {
-            subAgent: {
+            subagent: {
               thread_spawn: {
                 parent_thread_id: 'thr_root',
                 depth: 1,
@@ -249,6 +249,79 @@ describe('HostBridgeApiClient', () => {
     const chats = await client.listChats();
 
     expect(chats.map((chat) => chat.id)).toEqual(['thr_root']);
+  });
+
+  it('listChats() can include sub-agent source kinds when requested', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      data: [
+        {
+          id: 'thr_root',
+          preview: 'root chat',
+          createdAt: 1700000000,
+          updatedAt: 1700000001,
+          status: { type: 'idle' },
+          source: 'appServer',
+          turns: [],
+        },
+        {
+          id: 'thr_sub',
+          preview: 'spawned worker',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: 'thr_root',
+                depth: 1,
+              },
+            },
+          },
+          turns: [],
+        },
+      ],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const chats = await client.listChats({ includeSubAgents: true });
+
+    expect(ws.request).toHaveBeenCalledWith('thread/list', {
+      cursor: null,
+      limit: 200,
+      sortKey: null,
+      modelProviders: null,
+      sourceKinds: [
+        'cli',
+        'vscode',
+        'exec',
+        'appServer',
+        'unknown',
+        'subAgent',
+        'subAgentReview',
+        'subAgentCompact',
+        'subAgentThreadSpawn',
+        'subAgentOther',
+      ],
+      archived: false,
+      cwd: null,
+    });
+    expect(chats.map((chat) => chat.id)).toEqual(['thr_sub', 'thr_root']);
+    expect(chats[0].parentThreadId).toBe('thr_root');
+    expect(chats[0].subAgentDepth).toBe(1);
+  });
+
+  it('listLoadedChatIds() returns loaded in-memory thread ids', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      data: ['thr_root', 'thr_sub', null, ''],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const ids = await client.listLoadedChatIds();
+
+    expect(ws.request).toHaveBeenCalledWith('thread/loaded/list', undefined);
+    expect(ids).toEqual(['thr_root', 'thr_sub']);
   });
 
   it('sendChatMessage() starts a turn without waiting for completion', async () => {

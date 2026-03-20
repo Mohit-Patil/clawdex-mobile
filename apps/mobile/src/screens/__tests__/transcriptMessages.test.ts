@@ -4,13 +4,15 @@ import { getVisibleTranscriptMessages } from '../transcriptMessages';
 function message(
   id: string,
   role: ChatMessage['role'],
-  content: string
+  content: string,
+  extras?: Partial<ChatMessage>
 ): ChatMessage {
   return {
     id,
     role,
     content,
     createdAt: '2026-03-19T00:00:00.000Z',
+    ...extras,
   };
 }
 
@@ -40,6 +42,22 @@ describe('getVisibleTranscriptMessages', () => {
       'u1',
       's1',
       's2',
+      'a1',
+    ]);
+  });
+
+  it('keeps sub-agent system rows visible when tool calls are disabled', () => {
+    const messages = [
+      message('u1', 'user', 'Review this repository'),
+      message('s1', 'system', '• Spawned sub-agent\n  Prompt: Review the mobile app', {
+        systemKind: 'subAgent',
+      }),
+      message('a1', 'assistant', 'Done.'),
+    ];
+
+    expect(getVisibleTranscriptMessages(messages, false).map((entry) => entry.id)).toEqual([
+      'u1',
+      's1',
       'a1',
     ]);
   });

@@ -23,6 +23,12 @@ export interface SelectionSheetOption {
   badge?: string;
   meta?: string;
   icon?: IoniconName;
+  titleColor?: string;
+  descriptionColor?: string;
+  badgeBackgroundColor?: string;
+  badgeTextColor?: string;
+  metaColor?: string;
+  iconColor?: string;
   selected?: boolean;
   disabled?: boolean;
   tone?: OptionTone;
@@ -99,11 +105,19 @@ export function SelectionSheet({
                 {options.map((option) => {
                   const tone = option.tone ?? 'default';
                   const iconColor =
-                    tone === 'danger'
+                    option.iconColor ??
+                    (tone === 'danger'
                       ? '#FF8A8A'
                       : option.selected || tone === 'accent'
                         ? colors.textPrimary
-                        : colors.textMuted;
+                        : colors.textMuted);
+                  const titleColor = option.titleColor ?? colors.textPrimary;
+                  const descriptionColor = option.descriptionColor ?? colors.textMuted;
+                  const metaColor = option.metaColor ?? colors.textMuted;
+                  const badgeBackgroundColor =
+                    option.badgeBackgroundColor ?? styles.badge.backgroundColor;
+                  const badgeTextColor =
+                    option.badgeTextColor ?? styles.badgeText.color;
 
                   return (
                     <Pressable
@@ -136,19 +150,30 @@ export function SelectionSheet({
                               style={[
                                 styles.optionTitle,
                                 option.selected && styles.optionTitleSelected,
+                                { color: titleColor },
                               ]}
                               numberOfLines={2}
                             >
                               {option.title}
                             </Text>
                             {option.badge ? (
-                              <View style={styles.badge}>
-                                <Text style={styles.badgeText}>{option.badge}</Text>
+                              <View
+                                style={[
+                                  styles.badge,
+                                  { backgroundColor: badgeBackgroundColor },
+                                ]}
+                              >
+                                <Text style={[styles.badgeText, { color: badgeTextColor }]}>
+                                  {option.badge}
+                                </Text>
                               </View>
                             ) : null}
                           </View>
                           {option.description ? (
-                            <Text style={styles.optionDescription} numberOfLines={2}>
+                            <Text
+                              style={[styles.optionDescription, { color: descriptionColor }]}
+                              numberOfLines={2}
+                            >
                               {option.description}
                             </Text>
                           ) : null}
@@ -157,7 +182,10 @@ export function SelectionSheet({
 
                       <View style={styles.accessory}>
                         {option.meta ? (
-                          <Text style={styles.meta} numberOfLines={1}>
+                          <Text
+                            style={[styles.meta, { color: metaColor }]}
+                            numberOfLines={1}
+                          >
                             {option.meta}
                           </Text>
                         ) : null}
