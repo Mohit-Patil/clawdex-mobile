@@ -617,7 +617,9 @@ impl AppServerBridge {
 
         if let Err(error) = self.write_json(payload).await {
             self.internal_waiters.lock().await.remove(&internal_id);
-            return Err(format!("failed forwarding internal request to app-server: {error}"));
+            return Err(format!(
+                "failed forwarding internal request to app-server: {error}"
+            ));
         }
 
         match timeout(Duration::from_secs(20), rx).await {
