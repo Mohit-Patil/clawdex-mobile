@@ -955,6 +955,29 @@ function normalizeCwd(cwd: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readTimestampIso(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return new Date((numeric > 1_000_000_000_000 ? numeric : numeric * 1000)).toISOString();
+    }
+
+    const parsedMs = Date.parse(trimmed);
+    return Number.isFinite(parsedMs) ? new Date(parsedMs).toISOString() : null;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return new Date((value > 1_000_000_000_000 ? value : value * 1000)).toISOString();
+  }
+
+  return null;
+}
+
 function readWorkspaceListResponse(value: unknown): WorkspaceListResponse {
   const record = toRecord(value) ?? {};
   const workspacesRaw = Array.isArray(record.workspaces) ? record.workspaces : [];
@@ -981,10 +1004,12 @@ function readWorkspaceListResponse(value: unknown): WorkspaceListResponse {
             : typeof rawChatCount === 'string'
               ? Math.max(0, Number.parseInt(rawChatCount, 10) || 0)
               : 0;
+        const updatedAt = readTimestampIso(workspace.updatedAt);
 
         return {
           path,
           chatCount,
+          ...(updatedAt ? { updatedAt } : {}),
         };
       })
       .filter((entry): entry is WorkspaceListResponse['workspaces'][number] => entry !== null),

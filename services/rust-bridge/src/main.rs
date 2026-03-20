@@ -1907,6 +1907,7 @@ struct WorkspaceListRequest {
 struct WorkspaceSummary {
     path: String,
     chat_count: usize,
+    updated_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2806,7 +2807,16 @@ async fn list_workspace_roots(
 
     let mut workspaces = workspaces_by_path
         .into_iter()
-        .map(|(path, (chat_count, updated_at))| (WorkspaceSummary { path, chat_count }, updated_at))
+        .map(|(path, (chat_count, updated_at))| {
+            (
+                WorkspaceSummary {
+                    path,
+                    chat_count,
+                    updated_at: (updated_at > 0).then_some(updated_at),
+                },
+                updated_at,
+            )
+        })
         .collect::<Vec<_>>();
 
     workspaces.sort_by(|(left, left_updated_at), (right, right_updated_at)| {

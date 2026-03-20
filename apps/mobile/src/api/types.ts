@@ -117,6 +117,7 @@ export interface UploadAttachmentResponse {
 export interface WorkspaceSummary {
   path: string;
   chatCount: number;
+  updatedAt?: string;
 }
 
 export interface WorkspaceListResponse {

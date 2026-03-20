@@ -383,9 +383,9 @@ describe('HostBridgeApiClient', () => {
       bridgeRoot: '/Users/mohit/work',
       allowOutsideRootCwd: true,
       workspaces: [
-        { path: '/Users/mohit/work/app', chatCount: 3 },
-        { path: '/Users/mohit/work/docs', chatCount: '1' },
-        { path: '', chatCount: 99 },
+        { path: '/Users/mohit/work/app', chatCount: 3, updatedAt: 1700000000 },
+        { path: '/Users/mohit/work/docs', chatCount: '1', updatedAt: '1700001000' },
+        { path: '', chatCount: 99, updatedAt: 1700002000 },
       ],
     });
 
@@ -397,8 +397,16 @@ describe('HostBridgeApiClient', () => {
       bridgeRoot: '/Users/mohit/work',
       allowOutsideRootCwd: true,
       workspaces: [
-        { path: '/Users/mohit/work/app', chatCount: 3 },
-        { path: '/Users/mohit/work/docs', chatCount: 1 },
+        {
+          path: '/Users/mohit/work/app',
+          chatCount: 3,
+          updatedAt: new Date(1700000000 * 1000).toISOString(),
+        },
+        {
+          path: '/Users/mohit/work/docs',
+          chatCount: 1,
+          updatedAt: new Date(1700001000 * 1000).toISOString(),
+        },
       ],
     });
   });

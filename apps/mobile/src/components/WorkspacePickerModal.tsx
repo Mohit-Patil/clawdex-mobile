@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -12,10 +13,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import type {
-  FileSystemEntry,
-  WorkspaceSummary,
-} from '../api/types';
+import type { FileSystemEntry, WorkspaceSummary } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
 
 interface WorkspacePickerModalProps {
@@ -26,14 +24,18 @@ interface WorkspacePickerModalProps {
   currentPath?: string | null;
   parentPath?: string | null;
   entries: FileSystemEntry[];
-  draftPath: string;
   loadingRecent?: boolean;
   loadingEntries?: boolean;
   error?: string | null;
-  onDraftPathChange: (value: string) => void;
   onBrowsePath: (path: string | null) => void;
   onSelectPath: (path: string | null) => void;
   onClose: () => void;
+}
+
+interface BreadcrumbItem {
+  key: string;
+  label: string;
+  path: string;
 }
 
 export function WorkspacePickerModal({
@@ -44,23 +46,38 @@ export function WorkspacePickerModal({
   currentPath = null,
   parentPath = null,
   entries,
-  draftPath,
   loadingRecent = false,
   loadingEntries = false,
   error = null,
-  onDraftPathChange,
   onBrowsePath,
   onSelectPath,
   onClose,
 }: WorkspacePickerModalProps) {
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
+  const [searchQuery, setSearchQuery] = useState('');
   const topInset = Math.max(insets.top + spacing.lg, 72);
   const bottomInset = Math.max(insets.bottom + spacing.lg, 72);
   const cardHeight = Math.min(
-    Math.max(520, Math.round(windowHeight * 0.76)),
+    Math.max(560, Math.round(windowHeight * 0.82)),
     windowHeight - topInset - bottomInset
   );
+
+  useEffect(() => {
+    if (!visible) {
+      setSearchQuery('');
+    }
+  }, [visible]);
+
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const filteredRecentWorkspaces = recentWorkspaces.filter((workspace) =>
+    matchesSearch([workspace.path, toPathBasename(workspace.path)], normalizedSearch)
+  );
+  const filteredEntries = entries.filter((entry) =>
+    matchesSearch([entry.name, entry.path], normalizedSearch)
+  );
+  const breadcrumbs = buildPathBreadcrumbs(currentPath ?? bridgeRoot);
+  const footerPath = currentPath ?? bridgeRoot ?? 'Bridge default workspace';
 
   return (
     <Modal
@@ -74,164 +91,239 @@ export function WorkspacePickerModal({
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <View style={[styles.outer, { paddingTop: topInset, paddingBottom: bottomInset }]}>
           <View style={[styles.card, { height: cardHeight }]}>
-            <View style={styles.handle} />
             <View style={styles.header}>
-              <View style={styles.headerCopy}>
-                <Text style={styles.eyebrow}>Workspace</Text>
-                <Text style={styles.title}>Start directory</Text>
-                <Text style={styles.subtitle}>
-                  Choose a known Codex workspace or browse any folder on the bridge host.
-                </Text>
-              </View>
+              <View style={styles.headerSpacer} />
+              <Text style={styles.title}>Choose Directory</Text>
               <Pressable
                 onPress={onClose}
-                style={({ pressed }) => [styles.closeIconButton, pressed && styles.pressed]}
+                style={({ pressed }) => [styles.closeButton, pressed && styles.pressed]}
               >
                 <Ionicons name="close" size={18} color={colors.textSecondary} />
               </Pressable>
             </View>
 
             <View style={styles.body}>
-              <View style={styles.quickPicksSection}>
-                <Text style={styles.sectionTitle}>Quick picks</Text>
+              <View style={styles.connectionRow}>
+                <Text style={styles.connectionText} numberOfLines={1}>
+                  {bridgeRoot ? `Bridge root: ${bridgeRoot}` : 'Browse folders on the bridge host'}
+                </Text>
+                <Pressable
+                  onPress={() => onSelectPath(null)}
+                  style={({ pressed }) => [
+                    styles.defaultButton,
+                    selectedPath === null && styles.defaultButtonSelected,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.defaultButtonText,
+                      selectedPath === null && styles.defaultButtonTextSelected,
+                    ]}
+                  >
+                    {selectedPath === null ? 'Default' : 'Use default'}
+                  </Text>
+                </Pressable>
+              </View>
+
+              <View style={styles.searchField}>
+                <Ionicons name="search" size={16} color={colors.textMuted} />
+                <TextInput
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  keyboardAppearance="dark"
+                  placeholder="Search folders"
+                  placeholderTextColor={colors.textMuted}
+                  style={styles.searchInput}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="search"
+                />
+              </View>
+
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Recent Directories</Text>
+              </View>
+
+              <View style={styles.recentCard}>
+                {loadingRecent ? (
+                  <LoadingRow label="Refreshing recent directories..." compact />
+                ) : filteredRecentWorkspaces.length > 0 ? (
+                  <ScrollView
+                    showsVerticalScrollIndicator={false}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    {filteredRecentWorkspaces.map((workspace, index) => (
+                      <Pressable
+                        key={workspace.path}
+                        onPress={() => onBrowsePath(workspace.path)}
+                        style={({ pressed }) => [
+                          styles.recentRow,
+                          workspace.path === currentPath && styles.recentRowSelected,
+                          index === filteredRecentWorkspaces.length - 1 &&
+                            styles.recentRowLast,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <View style={styles.recentIconWrap}>
+                          <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
+                        </View>
+                        <View style={styles.recentCopy}>
+                          <Text style={styles.recentTitle} numberOfLines={1}>
+                            {toPathBasename(workspace.path)}
+                          </Text>
+                          <Text style={styles.recentPath} numberOfLines={1}>
+                            {workspace.path}
+                          </Text>
+                        </View>
+                        <Text style={styles.recentMeta}>
+                          {formatWorkspaceMeta(workspace)}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <EmptyRow
+                    label={
+                      normalizedSearch
+                        ? 'No recent directories match this search.'
+                        : 'No recent directories yet.'
+                    }
+                    compact
+                  />
+                )}
+              </View>
+
+              <Text style={styles.helperText}>Open a recent folder or browse below.</Text>
+
+              <View style={styles.breadcrumbRow}>
+                <Pressable
+                  onPress={() => parentPath && onBrowsePath(parentPath)}
+                  disabled={!parentPath || loadingEntries}
+                  style={({ pressed }) => [
+                    styles.upButton,
+                    (!parentPath || loadingEntries) && styles.buttonDisabled,
+                    pressed && parentPath && !loadingEntries && styles.pressed,
+                  ]}
+                >
+                  <Ionicons name="return-up-back" size={14} color={colors.textSecondary} />
+                  <Text style={styles.upButtonText}>Up one level</Text>
+                </Pressable>
+
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.quickPicksContent}
+                  contentContainerStyle={styles.breadcrumbScroll}
                 >
-                  <QuickPickChip
-                    title="Bridge default"
-                    meta="Auto"
-                    selected={selectedPath === null}
-                    onPress={() => onSelectPath(null)}
-                  />
-                  {!loadingRecent
-                    ? recentWorkspaces.map((workspace) => (
-                        <QuickPickChip
-                          key={workspace.path}
-                          title={toPathBasename(workspace.path)}
-                          meta={workspace.chatCount === 1 ? '1 chat' : `${workspace.chatCount}`}
-                          selected={workspace.path === selectedPath}
-                          onPress={() => onSelectPath(workspace.path)}
-                        />
-                      ))
-                    : null}
+                  {breadcrumbs.length > 0
+                    ? breadcrumbs.map((item, index) => {
+                        const isLast = index === breadcrumbs.length - 1;
+                        return (
+                          <View key={item.key} style={styles.breadcrumbItem}>
+                            {index > 0 ? <Text style={styles.breadcrumbSlash}>/</Text> : null}
+                            <Pressable
+                              onPress={() => onBrowsePath(item.path)}
+                              style={({ pressed }) => [
+                                styles.breadcrumbChip,
+                                isLast && styles.breadcrumbChipActive,
+                                pressed && styles.pressed,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.breadcrumbText,
+                                  isLast && styles.breadcrumbTextActive,
+                                ]}
+                              >
+                                {item.label}
+                              </Text>
+                            </Pressable>
+                          </View>
+                        );
+                      })
+                    : (
+                      <Text style={styles.breadcrumbEmpty}>Loading path...</Text>
+                    )}
                 </ScrollView>
-                {loadingRecent ? (
-                  <Text style={styles.inlineStatusText}>Refreshing known workspaces…</Text>
-                ) : null}
               </View>
 
-              <View style={styles.browserPanel}>
-                <View style={styles.browserHeader}>
-                  <View style={styles.browserHeaderCopy}>
-                    <Text style={styles.sectionTitle}>Browse folders</Text>
-                    <Text style={styles.pathValue} numberOfLines={2}>
-                      {currentPath ?? bridgeRoot ?? 'Loading…'}
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={() => parentPath && onBrowsePath(parentPath)}
-                    disabled={!parentPath || loadingEntries}
-                    style={({ pressed }) => [
-                      styles.iconButton,
-                      (!parentPath || loadingEntries) && styles.buttonDisabled,
-                      pressed && parentPath && !loadingEntries && styles.pressed,
-                    ]}
-                  >
-                    <Ionicons name="arrow-up-outline" size={18} color={colors.textPrimary} />
-                  </Pressable>
-                </View>
+              {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
-                <View style={styles.manualPathRow}>
-                  <TextInput
-                    value={draftPath}
-                    onChangeText={onDraftPathChange}
-                    keyboardAppearance="dark"
-                    placeholder={bridgeRoot ?? '/path/to/workspace'}
-                    placeholderTextColor={colors.textMuted}
-                    style={styles.manualPathInput}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    returnKeyType="go"
-                    onSubmitEditing={() => onBrowsePath(draftPath)}
+              <View style={styles.browserCard}>
+                {loadingEntries ? (
+                  <LoadingRow label="Loading folders..." />
+                ) : filteredEntries.length > 0 ? (
+                  <ScrollView
+                    style={styles.entryListScroll}
+                    contentContainerStyle={styles.entryListContent}
+                    showsVerticalScrollIndicator={false}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    {filteredEntries.map((entry, index) => (
+                      <Pressable
+                        key={entry.path}
+                        onPress={() => onBrowsePath(entry.path)}
+                        style={({ pressed }) => [
+                          styles.entryRow,
+                          entry.path === selectedPath && styles.entryRowSelected,
+                          index === filteredEntries.length - 1 && styles.entryRowLast,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <View style={styles.entryIconWrap}>
+                          <Ionicons
+                            name={entry.isGitRepo ? 'git-branch-outline' : 'folder-outline'}
+                            size={18}
+                            color={colors.textSecondary}
+                          />
+                        </View>
+                        <View style={styles.entryCopy}>
+                          <Text style={styles.entryName} numberOfLines={1}>
+                            {entry.name}
+                          </Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <EmptyRow
+                    label={
+                      normalizedSearch
+                        ? 'No folders match this search.'
+                        : 'No folders found here.'
+                    }
                   />
+                )}
+              </View>
+
+              <View style={styles.footer}>
+                <Text style={styles.footerPath} numberOfLines={1}>
+                  {footerPath}
+                </Text>
+                <View style={styles.footerActions}>
                   <Pressable
-                    onPress={() => onBrowsePath(draftPath)}
-                    disabled={loadingEntries}
+                    onPress={onClose}
                     style={({ pressed }) => [
-                      styles.secondaryButton,
-                      loadingEntries && styles.buttonDisabled,
-                      pressed && !loadingEntries && styles.pressed,
+                      styles.footerButton,
+                      styles.footerButtonSecondary,
+                      pressed && styles.pressed,
                     ]}
                   >
-                    <Text style={styles.secondaryButtonText}>Open</Text>
+                    <Text style={styles.footerButtonSecondaryText}>Cancel</Text>
                   </Pressable>
-                </View>
-
-                <View style={styles.browserActions}>
                   <Pressable
                     onPress={() => currentPath && onSelectPath(currentPath)}
                     disabled={!currentPath || loadingEntries}
                     style={({ pressed }) => [
-                      styles.primaryButton,
+                      styles.footerButton,
+                      styles.footerButtonPrimary,
                       (!currentPath || loadingEntries) && styles.buttonDisabled,
-                      pressed && currentPath && !loadingEntries && styles.primaryButtonPressed,
+                      pressed && currentPath && !loadingEntries && styles.footerButtonPrimaryPressed,
                     ]}
                   >
-                    <Ionicons name="checkmark-circle-outline" size={16} color={colors.bgMain} />
-                    <Text style={styles.primaryButtonText}>Use this folder</Text>
+                    <Text style={styles.footerButtonPrimaryText}>Select Folder</Text>
                   </Pressable>
-                </View>
-
-                {error ? <Text style={styles.errorText}>{error}</Text> : null}
-
-                <View style={styles.entryListCard}>
-                  {loadingEntries ? (
-                    <LoadingRow label="Loading folders…" />
-                  ) : entries.length > 0 ? (
-                    <ScrollView
-                      style={styles.entryListScroll}
-                      contentContainerStyle={styles.entryListContent}
-                      showsVerticalScrollIndicator={false}
-                      keyboardShouldPersistTaps="handled"
-                    >
-                      {entries.map((entry) => (
-                        <Pressable
-                          key={entry.path}
-                          onPress={() => onBrowsePath(entry.path)}
-                          style={({ pressed }) => [
-                            styles.entryRow,
-                            entry.path === selectedPath && styles.entryRowSelected,
-                            pressed && styles.pressed,
-                          ]}
-                        >
-                          <View style={styles.entryIconWrap}>
-                            <Ionicons
-                              name={entry.isGitRepo ? 'git-branch-outline' : 'folder-outline'}
-                              size={18}
-                              color={colors.textPrimary}
-                            />
-                          </View>
-                          <View style={styles.entryCopy}>
-                            <Text style={styles.entryName} numberOfLines={1}>
-                              {entry.name}
-                            </Text>
-                            <Text style={styles.entryPath} numberOfLines={1}>
-                              {entry.path}
-                            </Text>
-                          </View>
-                          <Ionicons
-                            name="chevron-forward"
-                            size={16}
-                            color={colors.textMuted}
-                          />
-                        </Pressable>
-                      ))}
-                    </ScrollView>
-                  ) : (
-                    <EmptyRow label="No folders found here." />
-                  )}
                 </View>
               </View>
             </View>
@@ -242,53 +334,30 @@ export function WorkspacePickerModal({
   );
 }
 
-function QuickPickChip({
-  title,
-  meta,
-  selected,
-  onPress,
+function LoadingRow({
+  label,
+  compact = false,
 }: {
-  title: string;
-  meta?: string;
-  selected: boolean;
-  onPress: () => void;
+  label: string;
+  compact?: boolean;
 }) {
   return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.quickPickChip,
-        selected && styles.quickPickChipSelected,
-        pressed && styles.pressed,
-      ]}
-    >
-      <Text style={styles.quickPickTitle} numberOfLines={1}>
-        {title}
-      </Text>
-      {meta ? (
-        <Text style={styles.quickPickMeta} numberOfLines={1}>
-          {meta}
-        </Text>
-      ) : null}
-      {selected ? (
-        <Ionicons name="checkmark-circle" size={16} color={colors.textPrimary} />
-      ) : null}
-    </Pressable>
-  );
-}
-
-function LoadingRow({ label }: { label: string }) {
-  return (
-    <View style={styles.statusRow}>
+    <View style={[styles.statusRow, compact && styles.statusRowCompact]}>
       <ActivityIndicator color={colors.textPrimary} />
       <Text style={styles.statusText}>{label}</Text>
     </View>
   );
 }
 
-function EmptyRow({ label }: { label: string }) {
+function EmptyRow({
+  label,
+  compact = false,
+}: {
+  label: string;
+  compact?: boolean;
+}) {
   return (
-    <View style={styles.statusRow}>
+    <View style={[styles.statusRow, compact && styles.statusRowCompact]}>
       <Text style={styles.statusText}>{label}</Text>
     </View>
   );
@@ -302,10 +371,98 @@ function toPathBasename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+function matchesSearch(values: string[], query: string): boolean {
+  if (!query) {
+    return true;
+  }
+
+  return values.some((value) => value.toLowerCase().includes(query));
+}
+
+function buildPathBreadcrumbs(path: string | null): BreadcrumbItem[] {
+  if (!path) {
+    return [];
+  }
+
+  const normalized = path.replace(/\\/g, '/');
+  const driveMatch = normalized.match(/^[A-Za-z]:/);
+  const isAbsolute = normalized.startsWith('/');
+  let remainder = normalized;
+  const items: BreadcrumbItem[] = [];
+
+  if (driveMatch) {
+    const root = driveMatch[0];
+    items.push({ key: root, label: root, path: root });
+    remainder = normalized.slice(root.length).replace(/^\/+/, '');
+  } else if (isAbsolute) {
+    items.push({ key: '/', label: '/', path: '/' });
+    remainder = normalized.slice(1);
+  }
+
+  const parts = remainder.split('/').filter(Boolean);
+  let accumulated = driveMatch ? driveMatch[0] : isAbsolute ? '' : '';
+
+  for (const part of parts) {
+    accumulated = driveMatch
+      ? `${accumulated}/${part}`
+      : isAbsolute
+        ? `${accumulated}/${part}`
+        : accumulated
+          ? `${accumulated}/${part}`
+          : part;
+    items.push({
+      key: accumulated,
+      label: part,
+      path: accumulated,
+    });
+  }
+
+  return items;
+}
+
+function formatWorkspaceMeta(workspace: WorkspaceSummary): string {
+  const relative = formatRelativeTime(workspace.updatedAt);
+  if (relative) {
+    return relative;
+  }
+
+  if (workspace.chatCount === 1) {
+    return '1 chat';
+  }
+
+  return `${String(workspace.chatCount)} chats`;
+}
+
+function formatRelativeTime(iso?: string): string | null {
+  if (!iso) {
+    return null;
+  }
+
+  const timestamp = Date.parse(iso);
+  if (!Number.isFinite(timestamp)) {
+    return null;
+  }
+
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const seconds = Math.floor(diffMs / 1000);
+  const minutes = Math.floor(diffMs / 60000);
+  const hours = Math.floor(diffMs / 3600000);
+  const days = Math.floor(diffMs / 86400000);
+  const weeks = Math.floor(days / 7);
+
+  if (seconds < 10) return 'now';
+  if (seconds < 60) return `${String(seconds)} sec ago`;
+  if (minutes < 60) return `${String(minutes)} min ago`;
+  if (hours < 24) return `${String(hours)} hr ago`;
+  if (days < 7) return `${String(days)} ${days === 1 ? 'day' : 'days'} ago`;
+  if (weeks < 5) return `${String(weeks)} wk ago`;
+  return `${String(Math.floor(days / 30))} mo ago`;
+}
+
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.56)',
+    backgroundColor: 'rgba(0, 0, 0, 0.62)',
   },
   outer: {
     flex: 1,
@@ -313,195 +470,235 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
   },
   card: {
-    borderRadius: 26,
+    borderRadius: 28,
     borderCurve: 'continuous',
-    backgroundColor: '#0F1218',
+    backgroundColor: '#07090C',
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: 'rgba(255, 255, 255, 0.09)',
     overflow: 'hidden',
     boxShadow: '0 24px 44px rgba(0, 0, 0, 0.34)',
   },
-  handle: {
-    alignSelf: 'center',
-    width: 48,
-    height: 5,
-    borderRadius: radius.full,
-    backgroundColor: 'rgba(255,255,255,0.16)',
-    marginTop: spacing.sm,
-  },
   header: {
+    minHeight: 68,
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.md,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderLight,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
   },
-  headerCopy: {
-    flex: 1,
-    gap: spacing.xs,
-  },
-  eyebrow: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    textTransform: 'uppercase',
-    letterSpacing: 1.2,
+  headerSpacer: {
+    width: 36,
   },
   title: {
-    ...typography.largeTitle,
-    fontSize: 22,
+    ...typography.headline,
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
   },
-  subtitle: {
-    ...typography.body,
-    color: colors.textMuted,
-  },
-  closeIconButton: {
-    marginTop: 2,
-    width: 34,
-    height: 34,
+  closeButton: {
+    width: 36,
+    height: 36,
     borderRadius: radius.full,
-    borderWidth: 1,
-    borderColor: colors.borderLight,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1,
+    borderColor: colors.borderLight,
   },
   body: {
     flex: 1,
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.xl,
-    gap: spacing.lg,
-  },
-  quickPicksSection: {
-    gap: spacing.sm,
-  },
-  quickPicksContent: {
-    gap: spacing.sm,
-    paddingRight: spacing.lg,
-  },
-  quickPickChip: {
-    minWidth: 112,
-    maxWidth: 172,
-    minHeight: 54,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    justifyContent: 'center',
-    gap: 2,
-  },
-  quickPickChipSelected: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(255,255,255,0.10)',
-  },
-  quickPickTitle: {
-    ...typography.body,
-    fontWeight: '600',
-  },
-  quickPickMeta: {
-    ...typography.caption,
-    color: colors.textMuted,
-  },
-  inlineStatusText: {
-    ...typography.caption,
-    color: colors.textMuted,
-  },
-  sectionTitle: {
-    ...typography.headline,
-  },
-  browserPanel: {
-    flex: 1,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.lg,
     gap: spacing.md,
   },
-  browserHeader: {
+  connectionRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
     alignItems: 'center',
+    gap: spacing.md,
   },
-  browserHeaderCopy: {
+  connectionText: {
     flex: 1,
-    gap: spacing.xs,
+    ...typography.caption,
+    color: colors.textSecondary,
   },
-  iconButton: {
-    width: 42,
-    height: 42,
-    borderRadius: radius.lg,
+  defaultButton: {
+    minHeight: 32,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.full,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.bgItem,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  pathValue: {
-    ...typography.mono,
-    fontSize: 11,
+  defaultButtonSelected: {
+    borderColor: colors.borderHighlight,
+    backgroundColor: colors.bgInput,
   },
-  browserActions: {
-    flexDirection: 'row',
-    gap: spacing.sm,
+  defaultButtonText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
   },
-  manualPathRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    alignItems: 'center',
+  defaultButtonTextSelected: {
+    color: colors.textPrimary,
   },
-  manualPathInput: {
-    flex: 1,
-    minHeight: 46,
+  searchField: {
+    minHeight: 44,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.borderLight,
     backgroundColor: colors.bgInput,
     paddingHorizontal: spacing.md,
-    ...typography.body,
-  },
-  primaryButton: {
-    minHeight: 46,
-    borderRadius: radius.lg,
-    backgroundColor: colors.textPrimary,
-    alignItems: 'center',
-    justifyContent: 'center',
     flexDirection: 'row',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  searchInput: {
     flex: 1,
-  },
-  primaryButtonPressed: {
-    opacity: 0.82,
-  },
-  primaryButtonText: {
     ...typography.body,
-    color: colors.bgMain,
+    paddingVertical: 0,
+  },
+  breadcrumbRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  upButton: {
+    minHeight: 32,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: colors.bgItem,
+  },
+  upButtonText: {
+    ...typography.caption,
+    color: colors.textSecondary,
     fontWeight: '600',
   },
-  secondaryButton: {
-    minHeight: 46,
+  breadcrumbScroll: {
+    alignItems: 'center',
+    paddingRight: spacing.md,
+    gap: spacing.xs,
+  },
+  breadcrumbItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  breadcrumbSlash: {
+    ...typography.mono,
+    color: colors.textMuted,
+  },
+  breadcrumbChip: {
+    minHeight: 30,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.md,
+    justifyContent: 'center',
+  },
+  breadcrumbChipActive: {
+    backgroundColor: colors.bgInput,
+    borderWidth: 1,
+    borderColor: colors.borderHighlight,
+  },
+  breadcrumbText: {
+    ...typography.mono,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  breadcrumbTextActive: {
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  breadcrumbEmpty: {
+    ...typography.caption,
+    color: colors.textMuted,
+  },
+  sectionHeader: {
+    paddingTop: spacing.xs,
+  },
+  sectionTitle: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  recentCard: {
+    maxHeight: 184,
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.borderLight,
     backgroundColor: colors.bgItem,
+    overflow: 'hidden',
+  },
+  recentRow: {
+    minHeight: 54,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.borderLight,
+  },
+  recentRowSelected: {
+    backgroundColor: colors.bgInput,
+  },
+  recentRowLast: {
+    borderBottomWidth: 0,
+  },
+  recentIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-    flexDirection: 'row',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.md,
+    backgroundColor: colors.bgInput,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
   },
-  secondaryButtonText: {
+  recentCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  recentTitle: {
     ...typography.body,
+    fontSize: 13,
+    lineHeight: 18,
     fontWeight: '600',
   },
-  buttonDisabled: {
-    opacity: 0.42,
+  recentPath: {
+    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textMuted,
   },
-  entryListCard: {
+  recentMeta: {
+    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  helperText: {
+    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.textMuted,
+  },
+  errorText: {
+    ...typography.caption,
+    color: '#FF8A8A',
+  },
+  browserCard: {
     flex: 1,
-    minHeight: 240,
+    minHeight: 228,
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.borderLight,
@@ -512,61 +709,104 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   entryListContent: {
-    paddingBottom: spacing.sm,
+    paddingVertical: spacing.xs,
   },
   entryRow: {
+    minHeight: 54,
+    paddingHorizontal: spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.bgItem,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.borderLight,
   },
   entryRowSelected: {
-    backgroundColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: colors.bgInput,
+  },
+  entryRowLast: {
+    borderBottomWidth: 0,
   },
   entryIconWrap: {
-    width: 34,
-    height: 34,
+    width: 32,
+    height: 32,
     borderRadius: radius.md,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: colors.bgInput,
     borderWidth: 1,
     borderColor: colors.borderLight,
   },
   entryCopy: {
     flex: 1,
-    gap: 2,
   },
   entryName: {
     ...typography.body,
+    fontSize: 13,
+    lineHeight: 18,
     fontWeight: '600',
   },
-  entryPath: {
-    ...typography.caption,
+  footer: {
+    gap: spacing.sm,
+  },
+  footerPath: {
+    ...typography.mono,
+    fontSize: 10,
+    lineHeight: 14,
     color: colors.textMuted,
   },
-  errorText: {
-    ...typography.caption,
-    color: '#FF8A8A',
+  footerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  footerButton: {
+    minHeight: 48,
+    borderRadius: radius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+    flex: 1,
+  },
+  footerButtonSecondary: {
+    backgroundColor: colors.bgMain,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  footerButtonPrimary: {
+    backgroundColor: colors.accent,
+  },
+  footerButtonPrimaryPressed: {
+    backgroundColor: colors.accentPressed,
+  },
+  footerButtonSecondaryText: {
+    ...typography.body,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  footerButtonPrimaryText: {
+    ...typography.body,
+    color: colors.black,
+    fontWeight: '700',
   },
   statusRow: {
     flex: 1,
-    minHeight: 120,
+    minHeight: 132,
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
+  },
+  statusRowCompact: {
+    minHeight: 96,
   },
   statusText: {
     ...typography.body,
     textAlign: 'center',
     color: colors.textMuted,
   },
+  buttonDisabled: {
+    opacity: 0.42,
+  },
   pressed: {
-    opacity: 0.84,
+    opacity: 0.86,
   },
 });

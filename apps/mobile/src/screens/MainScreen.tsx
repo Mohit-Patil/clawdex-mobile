@@ -525,7 +525,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
     const [workspaceBrowseEntries, setWorkspaceBrowseEntries] = useState<FileSystemEntry[]>([]);
     const [loadingWorkspaceBrowse, setLoadingWorkspaceBrowse] = useState(false);
-    const [workspaceBrowseDraft, setWorkspaceBrowseDraft] = useState('');
     const [workspaceBrowseError, setWorkspaceBrowseError] = useState<string | null>(null);
     const [chatTitleMenuVisible, setChatTitleMenuVisible] = useState(false);
     const [agentThreadMenuVisible, setAgentThreadMenuVisible] = useState(false);
@@ -1966,7 +1965,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setWorkspaceBrowsePath(normalizedPath);
           setWorkspaceBrowseParentPath(normalizeWorkspacePath(response.parentPath));
           setWorkspaceBrowseEntries(response.entries);
-          setWorkspaceBrowseDraft(normalizedPath ?? '');
           setWorkspaceBrowseError(null);
         } catch (err) {
           setWorkspaceBrowseError((err as Error).message);
@@ -1981,7 +1979,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       const initialPath =
         preferredStartCwd ?? workspaceBrowsePath ?? workspaceBridgeRoot ?? null;
       setWorkspaceModalVisible(true);
-      setWorkspaceBrowseDraft(initialPath ?? '');
       void refreshWorkspaceRoots();
       void browseWorkspacePath(initialPath);
     }, [
@@ -6813,11 +6810,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           currentPath={workspaceBrowsePath}
           parentPath={workspaceBrowseParentPath}
           entries={workspaceBrowseEntries}
-          draftPath={workspaceBrowseDraft}
           loadingRecent={loadingWorkspaceRoots}
           loadingEntries={loadingWorkspaceBrowse}
           error={workspaceBrowseError}
-          onDraftPathChange={setWorkspaceBrowseDraft}
           onBrowsePath={(path) => void browseWorkspacePath(path)}
           onSelectPath={selectDefaultWorkspace}
           onClose={closeWorkspaceModal}
