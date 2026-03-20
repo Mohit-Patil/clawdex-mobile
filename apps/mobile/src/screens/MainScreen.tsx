@@ -14,6 +14,7 @@ import {
 import {
   ActivityIndicator,
   FlatList,
+  InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -59,7 +60,6 @@ import { ApprovalBanner } from '../components/ApprovalBanner';
 import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
 import { ChatMessage } from '../components/ChatMessage';
-import { ToolBlock } from '../components/ToolBlock';
 import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
 import { BrandMark } from '../components/BrandMark';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
@@ -118,6 +118,8 @@ interface PendingPlanImplementationPrompt {
   turnId: string;
 }
 
+type AttachmentMenuAction = 'workspace-path' | 'phone-file' | 'phone-image' | null;
+
 interface ThreadContextUsage {
   totalTokens: number | null;
   lastTokens: number | null;
@@ -168,7 +170,6 @@ interface SlashCommandDefinition {
 }
 
 const MAX_ACTIVE_COMMANDS = 16;
-const MAX_VISIBLE_TOOL_BLOCKS = 6;
 const RUN_WATCHDOG_MS = 60_000;
 const LARGE_CHAT_MESSAGE_COUNT_THRESHOLD = 120;
 const CHAT_INITIAL_VISIBLE_MESSAGE_WINDOW = 80;
@@ -462,7 +463,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [activeCommands, setActiveCommands] = useState<RunEvent[]>([]);
+    const [, setActiveCommands] = useState<RunEvent[]>([]);
     const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
     const [pendingUserInputRequest, setPendingUserInputRequest] =
       useState<PendingUserInputRequest | null>(null);
@@ -477,11 +478,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [attachmentModalVisible, setAttachmentModalVisible] = useState(false);
     const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
     const [attachmentPathDraft, setAttachmentPathDraft] = useState('');
+    const [pendingAttachmentMenuAction, setPendingAttachmentMenuAction] =
+      useState<AttachmentMenuAction>(null);
     const [pendingMentionPaths, setPendingMentionPaths] = useState<string[]>([]);
     const [pendingLocalImagePaths, setPendingLocalImagePaths] = useState<string[]>([]);
     const [attachmentFileCandidates, setAttachmentFileCandidates] = useState<string[]>([]);
     const [loadingAttachmentFileCandidates, setLoadingAttachmentFileCandidates] =
       useState(false);
+    const [attachmentPickerBusy, setAttachmentPickerBusy] = useState(false);
     const [uploadingAttachment, setUploadingAttachment] = useState(false);
     const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
     const [stoppingTurn, setStoppingTurn] = useState(false);
@@ -517,6 +521,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
     const accountRateLimitsRef = useRef<AccountRateLimitSnapshot | null>(null);
     accountRateLimitsRef.current = accountRateLimits;
+    const attachmentPickerInProgressRef = useRef(false);
     const [threadContextUsage, setThreadContextUsage] = useState<ThreadContextUsage | null>(
       null
     );
@@ -1895,6 +1900,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [api, attachmentWorkspace]);
 
     const openAttachmentPathModal = useCallback(() => {
+      if (attachmentPickerInProgressRef.current) {
+        return;
+      }
       setAttachmentPathDraft('');
       setAttachmentModalVisible(true);
       setError(null);
@@ -2023,8 +2031,28 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [addPendingLocalImagePath, addPendingMentionPath, api, selectedChatId]
     );
 
+    const runAttachmentPicker = useCallback(
+      async (picker: () => Promise<void>) => {
+        if (attachmentPickerInProgressRef.current) {
+          return;
+        }
+
+        attachmentPickerInProgressRef.current = true;
+        setAttachmentPickerBusy(true);
+        try {
+          await picker();
+        } catch (err) {
+          setError((err as Error).message);
+        } finally {
+          attachmentPickerInProgressRef.current = false;
+          setAttachmentPickerBusy(false);
+        }
+      },
+      []
+    );
+
     const pickFileFromDevice = useCallback(async () => {
-      try {
+      await runAttachmentPicker(async () => {
         const result = await DocumentPicker.getDocumentAsync({
           type: '*/*',
           copyToCacheDirectory: true,
@@ -2041,13 +2069,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           mimeType: file.mimeType ?? undefined,
           kind: 'file',
         });
-      } catch (err) {
-        setError((err as Error).message);
-      }
-    }, [uploadMobileAttachment]);
+      });
+    }, [runAttachmentPicker, uploadMobileAttachment]);
 
     const pickImageFromDevice = useCallback(async () => {
-      try {
+      await runAttachmentPicker(async () => {
         if (Platform.OS !== 'ios') {
           const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
           if (!permission.granted) {
@@ -2057,7 +2083,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         const result = await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          mediaTypes: ['images'] as ImagePicker.MediaType[],
           quality: 1,
           base64: true,
           allowsMultipleSelection: false,
@@ -2074,14 +2100,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           kind: 'image',
           dataBase64: image.base64 ?? undefined,
         });
-      } catch (err) {
-        setError((err as Error).message);
-      }
-    }, [uploadMobileAttachment]);
+      });
+    }, [runAttachmentPicker, uploadMobileAttachment]);
 
     const openAttachmentMenu = useCallback(() => {
+      if (attachmentPickerInProgressRef.current || uploadingAttachment) {
+        return;
+      }
       setAttachmentMenuVisible(true);
-    }, []);
+    }, [uploadingAttachment]);
 
     const submitAttachmentPath = useCallback(() => {
       if (!addPendingMentionPath(attachmentPathDraft)) {
@@ -2111,6 +2138,52 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     useEffect(() => {
       setAttachmentFileCandidates([]);
     }, [attachmentWorkspace]);
+
+    useEffect(() => {
+      if (attachmentMenuVisible || pendingAttachmentMenuAction === null) {
+        return;
+      }
+
+      let cancelled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      const interactionHandle = InteractionManager.runAfterInteractions(() => {
+        timeoutId = setTimeout(() => {
+          if (cancelled) {
+            return;
+          }
+          const action = pendingAttachmentMenuAction;
+          setPendingAttachmentMenuAction(null);
+
+          if (action === 'workspace-path') {
+            openAttachmentPathModal();
+            return;
+          }
+
+          if (action === 'phone-file') {
+            void pickFileFromDevice();
+            return;
+          }
+
+          if (action === 'phone-image') {
+            void pickImageFromDevice();
+          }
+        }, 180);
+      });
+
+      return () => {
+        cancelled = true;
+        interactionHandle.cancel();
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
+      };
+    }, [
+      attachmentMenuVisible,
+      openAttachmentPathModal,
+      pendingAttachmentMenuAction,
+      pickFileFromDevice,
+      pickImageFromDevice,
+    ]);
 
     const openRenameModal = useCallback(() => {
       if (!selectedChat) {
@@ -2151,6 +2224,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setModelSettingsMenuVisible(true);
     }, []);
 
+    const attachmentControlsDisabled = attachmentPickerBusy || uploadingAttachment;
+
     const attachmentMenuOptions = useMemo<SelectionSheetOption[]>(
       () => [
         {
@@ -2158,9 +2233,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Attach from workspace path',
           description: 'Reference a file or folder from the current repo.',
           icon: 'folder-open-outline',
+          disabled: attachmentControlsDisabled,
           onPress: () => {
             setAttachmentMenuVisible(false);
-            openAttachmentPathModal();
+            setPendingAttachmentMenuAction('workspace-path');
           },
         },
         {
@@ -2168,9 +2244,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Pick file from phone',
           description: 'Import a document or asset from local storage.',
           icon: 'document-outline',
+          disabled: attachmentControlsDisabled,
           onPress: () => {
             setAttachmentMenuVisible(false);
-            void pickFileFromDevice();
+            setPendingAttachmentMenuAction('phone-file');
           },
         },
         {
@@ -2178,13 +2255,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Pick image from phone',
           description: 'Send an image directly from your photo library.',
           icon: 'image-outline',
+          disabled: attachmentControlsDisabled,
           onPress: () => {
             setAttachmentMenuVisible(false);
-            void pickImageFromDevice();
+            setPendingAttachmentMenuAction('phone-image');
           },
         },
       ],
-      [openAttachmentPathModal, pickFileFromDevice, pickImageFromDevice]
+      [
+        attachmentControlsDisabled,
+        openAttachmentPathModal,
+        pickFileFromDevice,
+        pickImageFromDevice,
+      ]
     );
 
     const chatTitleMenuOptions = useMemo<SelectionSheetOption[]>(
@@ -5539,13 +5622,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const showTopCardsRow = !isOpeningChat && Boolean(selectedThreadPlan);
     const showFloatingActivity =
       showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
-    const visibleToolBlocks = activeCommands.slice(-MAX_VISIBLE_TOOL_BLOCKS);
-    const toolPanelMaxHeight = Math.min(Math.floor(windowHeight * 0.26), 180);
-    const showLiveToolPanel =
-      showToolCalls &&
-      Boolean(selectedChat) &&
-      !isOpeningChat &&
-      visibleToolBlocks.length > 0;
     const showPlanImplementationPrompt =
       Boolean(selectedPlanImplementationPrompt) &&
       !isOpeningChat &&
@@ -5748,35 +5824,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           )}
 
-          {showLiveToolPanel ? (
-            <View style={styles.queuedMessageDock}>
-              <View style={[styles.livePanelShell, styles.toolPanel, { maxHeight: toolPanelMaxHeight }]}>
-                <ScrollView
-                  nestedScrollEnabled
-                  showsVerticalScrollIndicator={false}
-                  contentContainerStyle={styles.toolPanelContent}
-                >
-                  <View style={styles.livePanelContent}>
-                    {visibleToolBlocks.map((event) => {
-                      const tool = toToolBlockState(event);
-                      if (!tool) {
-                        return null;
-                      }
-                      return (
-                        <ToolBlock
-                          key={event.id}
-                          command={tool.command}
-                          status={tool.status}
-                          icon={tool.icon}
-                        />
-                      );
-                    })}
-                  </View>
-                </ScrollView>
-              </View>
-            </View>
-          ) : null}
-
           {showFloatingActivity ? (
             <View pointerEvents="none" style={styles.activityDock}>
               <ActivityBar
@@ -5858,6 +5905,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
                 isStopping={stoppingTurn}
                 onAttachPress={openAttachmentMenu}
+                attachDisabled={attachmentControlsDisabled}
                 attachments={composerAttachments}
                 onRemoveAttachment={removeComposerAttachment}
                 isLoading={isLoading}
@@ -7783,48 +7831,6 @@ function buildToolEventDetail(
   return `${label} | ${status}`;
 }
 
-function toToolBlockState(
-  event: RunEvent
-): {
-  command: string;
-  status: 'running' | 'complete' | 'error';
-  icon: keyof typeof Ionicons.glyphMap;
-} | null {
-  const rawDetail = event.detail?.trim();
-  if (!rawDetail) {
-    return null;
-  }
-
-  const separatorIndex = rawDetail.lastIndexOf('|');
-  const command =
-    separatorIndex >= 0 ? rawDetail.slice(0, separatorIndex).trim() : rawDetail;
-  const rawStatus =
-    separatorIndex >= 0
-      ? rawDetail.slice(separatorIndex + 1).trim().toLowerCase()
-      : '';
-
-  const status: 'running' | 'complete' | 'error' =
-    rawStatus === 'running'
-      ? 'running'
-      : rawStatus === 'error' || rawStatus === 'failed'
-        ? 'error'
-        : 'complete';
-
-  const icon: keyof typeof Ionicons.glyphMap = event.eventType.startsWith('web_search')
-    ? 'search-outline'
-    : event.eventType.startsWith('tool')
-      ? 'build-outline'
-      : event.eventType.startsWith('file_change')
-        ? 'document-outline'
-        : 'terminal-outline';
-
-  return {
-    command,
-    status,
-    icon,
-  };
-}
-
 function appendRunEventHistory(
   previous: RunEvent[],
   threadId: string,
@@ -8249,14 +8255,7 @@ const styles = StyleSheet.create({
   },
   planOverlayCard: {
     marginBottom: 0,
-    shadowColor: '#000',
-    shadowOpacity: 0.16,
-    shadowRadius: 10,
-    shadowOffset: {
-      width: 0,
-      height: 4,
-    },
-    elevation: 4,
+    boxShadow: '0px 4px 10px rgba(0, 0, 0, 0.16)',
   },
   queuedMessageCard: {
     marginBottom: 0,
@@ -8862,25 +8861,6 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: 2,
     marginLeft: spacing.xs,
-  },
-  livePanelOverlay: {
-    position: 'absolute',
-    left: spacing.lg,
-    right: spacing.lg,
-    zIndex: 2,
-  },
-  livePanelShell: {
-    justifyContent: 'flex-start',
-  },
-  livePanelContent: {
-    gap: spacing.sm,
-  },
-  toolPanel: {
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
-  toolPanelContent: {
-    paddingBottom: spacing.sm,
   },
   chatLoadingContainer: {
     flex: 1,

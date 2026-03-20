@@ -1,4 +1,4 @@
-import { Platform, StyleSheet } from 'react-native';
+import { Platform } from 'react-native';
 
 export const colors = {
   // Backgrounds
@@ -68,17 +68,11 @@ export const radius = {
   full: 999,
 };
 
-export const shadow = StyleSheet.create({
-  sm: Platform.select({
-    ios: {
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.3,
-      shadowRadius: 6,
-    },
-    default: { elevation: 3 },
-  }) as object,
-});
+export const shadow = {
+  sm: {
+    boxShadow: '0px 2px 6px rgba(0, 0, 0, 0.3)',
+  },
+} as const;
 
 export const typography = {
   largeTitle: {

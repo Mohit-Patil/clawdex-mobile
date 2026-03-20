@@ -26,6 +26,7 @@ interface ChatInputProps {
   onSubmit: () => void;
   onStop?: () => void;
   onAttachPress: () => void;
+  attachDisabled?: boolean;
   attachments?: Array<{ id: string; label: string }>;
   onRemoveAttachment?: (id: string) => void;
   isLoading: boolean;
@@ -48,6 +49,7 @@ export function ChatInput({
   onSubmit,
   onStop,
   onAttachPress,
+  attachDisabled = false,
   attachments = [],
   onRemoveAttachment,
   isLoading,
@@ -144,8 +146,13 @@ export function ChatInput({
 
         <View style={styles.row}>
           <Pressable
+            disabled={attachDisabled}
             onPress={onAttachPress}
-            style={({ pressed }) => [styles.plusBtn, pressed && styles.plusBtnPressed]}
+            style={({ pressed }) => [
+              styles.plusBtn,
+              attachDisabled && styles.plusBtnDisabled,
+              pressed && !attachDisabled && styles.plusBtnPressed,
+            ]}
           >
             <Ionicons name="add" size={20} color={colors.textMuted} />
           </Pressable>
@@ -353,6 +360,9 @@ const styles = StyleSheet.create({
   },
   plusBtnPressed: {
     backgroundColor: colors.bgItem,
+  },
+  plusBtnDisabled: {
+    opacity: 0.45,
   },
   inputWrapper: {
     flex: 1,
