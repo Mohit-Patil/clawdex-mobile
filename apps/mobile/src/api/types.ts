@@ -104,6 +104,39 @@ export interface UploadAttachmentResponse {
   kind: AttachmentUploadKind;
 }
 
+export interface WorkspaceSummary {
+  path: string;
+  chatCount: number;
+}
+
+export interface WorkspaceListResponse {
+  bridgeRoot: string;
+  allowOutsideRootCwd: boolean;
+  workspaces: WorkspaceSummary[];
+}
+
+export interface FileSystemListRequest {
+  path?: string | null;
+  includeHidden?: boolean;
+  directoriesOnly?: boolean;
+}
+
+export interface FileSystemEntry {
+  name: string;
+  path: string;
+  kind: string;
+  hidden: boolean;
+  selectable: boolean;
+  isGitRepo: boolean;
+}
+
+export interface FileSystemListResponse {
+  bridgeRoot: string;
+  path: string;
+  parentPath: string | null;
+  entries: FileSystemEntry[];
+}
+
 export type ReasoningEffort =
   | 'none'
   | 'minimal'

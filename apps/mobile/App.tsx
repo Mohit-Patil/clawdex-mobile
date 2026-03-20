@@ -110,6 +110,7 @@ export default function App() {
     async (
       nextBridgeUrl: string | null,
       nextBridgeToken: string | null,
+      nextDefaultStartCwd: string | null,
       nextModelId: string | null,
       nextEffort: ReasoningEffort | null,
       nextApprovalMode: ApprovalMode,
@@ -124,6 +125,7 @@ export default function App() {
         version: APP_SETTINGS_VERSION,
         bridgeUrl: nextBridgeUrl,
         bridgeToken: nextBridgeToken,
+        defaultStartCwd: nextDefaultStartCwd,
         defaultModelId: nextModelId,
         defaultReasoningEffort: nextEffort,
         approvalMode: nextApprovalMode,
@@ -143,6 +145,7 @@ export default function App() {
     let cancelled = false;
 
     const resetToDefaults = () => {
+      setDefaultStartCwd(null);
       setDefaultModelId(null);
       setDefaultReasoningEffort(null);
       setApprovalMode('normal');
@@ -170,6 +173,7 @@ export default function App() {
         const resolvedBridgeUrl = parsed.bridgeUrl ?? null;
         setBridgeUrl(resolvedBridgeUrl);
         setBridgeToken(parsed.bridgeToken ?? env.hostBridgeToken);
+        setDefaultStartCwd(parsed.defaultStartCwd);
         setDefaultModelId(parsed.defaultModelId);
         setDefaultReasoningEffort(parsed.defaultReasoningEffort);
         setApprovalMode(parsed.approvalMode);
@@ -348,13 +352,21 @@ export default function App() {
       void saveAppSettings(
         bridgeUrl,
         bridgeToken,
+        defaultStartCwd,
         normalizedModelId,
         normalizedEffort,
         approvalMode,
         showToolCalls
       );
     },
-    [approvalMode, bridgeToken, bridgeUrl, saveAppSettings, showToolCalls]
+    [
+      approvalMode,
+      bridgeToken,
+      bridgeUrl,
+      defaultStartCwd,
+      saveAppSettings,
+      showToolCalls,
+    ]
   );
 
   const handleApprovalModeChange = useCallback(
@@ -364,6 +376,7 @@ export default function App() {
       void saveAppSettings(
         bridgeUrl,
         bridgeToken,
+        defaultStartCwd,
         defaultModelId,
         defaultReasoningEffort,
         normalizedMode,
@@ -373,6 +386,7 @@ export default function App() {
     [
       bridgeToken,
       bridgeUrl,
+      defaultStartCwd,
       defaultModelId,
       defaultReasoningEffort,
       saveAppSettings,
@@ -386,6 +400,7 @@ export default function App() {
       void saveAppSettings(
         bridgeUrl,
         bridgeToken,
+        defaultStartCwd,
         defaultModelId,
         defaultReasoningEffort,
         approvalMode,
@@ -396,9 +411,35 @@ export default function App() {
       approvalMode,
       bridgeToken,
       bridgeUrl,
+      defaultStartCwd,
       defaultModelId,
       defaultReasoningEffort,
       saveAppSettings,
+    ]
+  );
+
+  const handleDefaultStartCwdChange = useCallback(
+    (nextCwd: string | null) => {
+      const normalizedDefaultStartCwd = normalizeDefaultStartCwd(nextCwd);
+      setDefaultStartCwd(normalizedDefaultStartCwd);
+      void saveAppSettings(
+        bridgeUrl,
+        bridgeToken,
+        normalizedDefaultStartCwd,
+        defaultModelId,
+        defaultReasoningEffort,
+        approvalMode,
+        showToolCalls
+      );
+    },
+    [
+      approvalMode,
+      bridgeToken,
+      bridgeUrl,
+      defaultModelId,
+      defaultReasoningEffort,
+      saveAppSettings,
+      showToolCalls,
     ]
   );
 
@@ -419,6 +460,7 @@ export default function App() {
       void saveAppSettings(
         normalized,
         normalizeBridgeToken(nextBridgeToken),
+        defaultStartCwd,
         defaultModelId,
         defaultReasoningEffort,
         approvalMode,
@@ -431,6 +473,7 @@ export default function App() {
     [
       approvalMode,
       closeDrawer,
+      defaultStartCwd,
       defaultModelId,
       defaultReasoningEffort,
       onboardingMode,
@@ -461,6 +504,7 @@ export default function App() {
     void saveAppSettings(
       null,
       null,
+      defaultStartCwd,
       defaultModelId,
       defaultReasoningEffort,
       approvalMode,
@@ -470,6 +514,7 @@ export default function App() {
   }, [
     approvalMode,
     closeDrawer,
+    defaultStartCwd,
     defaultModelId,
     defaultReasoningEffort,
     saveAppSettings,
@@ -578,7 +623,7 @@ export default function App() {
             defaultReasoningEffort={defaultReasoningEffort}
             approvalMode={approvalMode}
             showToolCalls={showToolCalls}
-            onDefaultStartCwdChange={setDefaultStartCwd}
+            onDefaultStartCwdChange={handleDefaultStartCwdChange}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
             pendingOpenChatSnapshot={pendingMainChatSnapshot}
@@ -637,7 +682,7 @@ export default function App() {
             defaultReasoningEffort={defaultReasoningEffort}
             approvalMode={approvalMode}
             showToolCalls={showToolCalls}
-            onDefaultStartCwdChange={setDefaultStartCwd}
+            onDefaultStartCwdChange={handleDefaultStartCwdChange}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
             pendingOpenChatSnapshot={pendingMainChatSnapshot}
@@ -716,6 +761,7 @@ function getAppSettingsPath(): string | null {
 function parseAppSettings(raw: string): {
   bridgeUrl: string | null;
   bridgeToken: string | null;
+  defaultStartCwd: string | null;
   defaultModelId: string | null;
   defaultReasoningEffort: ReasoningEffort | null;
   approvalMode: ApprovalMode;
@@ -725,6 +771,7 @@ function parseAppSettings(raw: string): {
     return {
       bridgeUrl: null,
       bridgeToken: null,
+      defaultStartCwd: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
@@ -745,6 +792,7 @@ function parseAppSettings(raw: string): {
       return {
         bridgeUrl: null,
         bridgeToken: null,
+        defaultStartCwd: null,
         defaultModelId: null,
         defaultReasoningEffort: null,
         approvalMode: 'normal',
@@ -755,6 +803,9 @@ function parseAppSettings(raw: string): {
     return {
       bridgeUrl: normalizeBridgeUrl((parsed as { bridgeUrl?: unknown }).bridgeUrl),
       bridgeToken: normalizeBridgeToken((parsed as { bridgeToken?: unknown }).bridgeToken),
+      defaultStartCwd: normalizeDefaultStartCwd(
+        (parsed as { defaultStartCwd?: unknown }).defaultStartCwd
+      ),
       defaultModelId: normalizeModelId(
         (parsed as { defaultModelId?: unknown }).defaultModelId
       ),
@@ -772,6 +823,7 @@ function parseAppSettings(raw: string): {
     return {
       bridgeUrl: null,
       bridgeToken: null,
+      defaultStartCwd: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
@@ -789,6 +841,15 @@ function normalizeBridgeUrl(value: unknown): string | null {
 }
 
 function normalizeBridgeToken(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeDefaultStartCwd(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
   }

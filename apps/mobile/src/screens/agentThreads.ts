@@ -5,6 +5,12 @@ export interface RelatedAgentThreadsResult {
   threads: ChatSummary[];
 }
 
+export interface LiveAgentPanelThreadLike {
+  id: string;
+  isRootThread: boolean;
+  isActive: boolean;
+}
+
 export function collectRelatedAgentThreads(
   chats: ChatSummary[],
   focusChat: ChatSummary | null
@@ -91,6 +97,19 @@ export function describeAgentThreadSource(
     default:
       return 'Agent thread';
   }
+}
+
+export function collectLiveAgentPanelThreadIds(
+  threads: LiveAgentPanelThreadLike[]
+): string[] {
+  const hasActiveSubAgent = threads.some((thread) => !thread.isRootThread && thread.isActive);
+  if (!hasActiveSubAgent) {
+    return [];
+  }
+
+  return threads
+    .filter((thread) => thread.isRootThread || thread.isActive)
+    .map((thread) => thread.id);
 }
 
 function resolveRootThreadId(

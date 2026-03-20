@@ -377,6 +377,75 @@ describe('HostBridgeApiClient', () => {
     expect(ids).toEqual(['thr_root', 'thr_sub']);
   });
 
+  it('listWorkspaceRoots() requests bridge/workspaces/list and maps workspaces', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      bridgeRoot: '/Users/mohit/work',
+      allowOutsideRootCwd: true,
+      workspaces: [
+        { path: '/Users/mohit/work/app', chatCount: 3 },
+        { path: '/Users/mohit/work/docs', chatCount: '1' },
+        { path: '', chatCount: 99 },
+      ],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.listWorkspaceRoots();
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/workspaces/list', { limit: 200 });
+    expect(result).toEqual({
+      bridgeRoot: '/Users/mohit/work',
+      allowOutsideRootCwd: true,
+      workspaces: [
+        { path: '/Users/mohit/work/app', chatCount: 3 },
+        { path: '/Users/mohit/work/docs', chatCount: 1 },
+      ],
+    });
+  });
+
+  it('listFilesystemEntries() requests bridge/fs/list with directory browsing defaults', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      bridgeRoot: '/Users/mohit/work',
+      path: '/Users/mohit/work',
+      parentPath: '/Users/mohit',
+      entries: [
+        {
+          name: 'apps',
+          path: '/Users/mohit/work/apps',
+          kind: 'directory',
+          hidden: false,
+          selectable: true,
+          isGitRepo: false,
+        },
+      ],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.listFilesystemEntries({ path: '/Users/mohit/work' });
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/fs/list', {
+      path: '/Users/mohit/work',
+      includeHidden: false,
+      directoriesOnly: true,
+    });
+    expect(result).toEqual({
+      bridgeRoot: '/Users/mohit/work',
+      path: '/Users/mohit/work',
+      parentPath: '/Users/mohit',
+      entries: [
+        {
+          name: 'apps',
+          path: '/Users/mohit/work/apps',
+          kind: 'directory',
+          hidden: false,
+          selectable: true,
+          isGitRepo: false,
+        },
+      ],
+    });
+  });
+
   it('sendChatMessage() starts a turn without waiting for completion', async () => {
     const ws = createWsMock();
     ws.request

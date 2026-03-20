@@ -1,5 +1,8 @@
 import type { ChatMessage } from '../../api/types';
-import { getVisibleTranscriptMessages } from '../transcriptMessages';
+import {
+  getVisibleTranscriptMessages,
+  syncVisibleSubAgentStatuses,
+} from '../transcriptMessages';
 
 function message(
   id: string,
@@ -73,5 +76,22 @@ describe('getVisibleTranscriptMessages', () => {
       'u1',
       'a2',
     ]);
+  });
+
+  it('replaces stale sub-agent status lines with the latest thread status', () => {
+    const messages = [
+      message('s1', 'system', '• Spawned sub-agent\n  Thread: child\n  Status: running', {
+        systemKind: 'subAgent',
+        subAgentMeta: {
+          receiverThreadIds: ['child'],
+          agentStatus: 'running',
+        },
+      }),
+    ];
+
+    const synced = syncVisibleSubAgentStatuses(messages, new Map([['child', 'complete']]));
+
+    expect(synced[0]?.content).toContain('Status: complete');
+    expect(synced[0]?.subAgentMeta?.agentStatus).toBe('complete');
   });
 });

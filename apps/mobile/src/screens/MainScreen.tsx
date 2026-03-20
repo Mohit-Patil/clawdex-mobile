@@ -13,6 +13,7 @@ import {
   useState,
 } from 'react';
 import {
+  AppState,
   ActivityIndicator,
   FlatList,
   InteractionManager,
@@ -54,6 +55,8 @@ import type {
   ServiceTier,
   TurnPlanStep,
   ChatMessage as ChatTranscriptMessage,
+  FileSystemEntry,
+  WorkspaceSummary,
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import { ActivityBar, type ActivityTone } from '../components/ActivityBar';
@@ -64,10 +67,12 @@ import { ChatMessage } from '../components/ChatMessage';
 import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
 import { BrandMark } from '../components/BrandMark';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
+import { WorkspacePickerModal } from '../components/WorkspacePickerModal';
 import { buildComposerUsageLimitBadges } from '../components/usageLimitBadges';
 import { env } from '../config';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import {
+  collectLiveAgentPanelThreadIds,
   collectRelatedAgentThreads,
   describeAgentThreadSource,
   findMatchingAgentThread,
@@ -77,7 +82,10 @@ import {
   type AgentThreadDisplayState,
 } from './agentThreadDisplay';
 import { trimInheritedParentMessages } from './subAgentTranscript';
-import { getVisibleTranscriptMessages } from './transcriptMessages';
+import {
+  getVisibleTranscriptMessages,
+  syncVisibleSubAgentStatuses,
+} from './transcriptMessages';
 import { colors, radius, spacing, typography } from '../theme';
 
 export interface MainScreenHandle {
@@ -189,6 +197,7 @@ const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const UNANSWERED_USER_RUNNING_TTL_MS = 90_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
+const AGENT_THREADS_SYNC_INTERVAL_MS = 10_000;
 const CONTEXT_WINDOW_BASELINE_TOKENS = 5_000;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
@@ -502,8 +511,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
     const [stoppingTurn, setStoppingTurn] = useState(false);
     const [workspaceModalVisible, setWorkspaceModalVisible] = useState(false);
-    const [workspaceOptions, setWorkspaceOptions] = useState<string[]>([]);
-    const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
+    const [workspaceRoots, setWorkspaceRoots] = useState<WorkspaceSummary[]>([]);
+    const [workspaceBridgeRoot, setWorkspaceBridgeRoot] = useState<string | null>(null);
+    const [loadingWorkspaceRoots, setLoadingWorkspaceRoots] = useState(false);
+    const [workspaceBrowsePath, setWorkspaceBrowsePath] = useState<string | null>(null);
+    const [workspaceBrowseParentPath, setWorkspaceBrowseParentPath] = useState<string | null>(
+      null
+    );
+    const [workspaceBrowseEntries, setWorkspaceBrowseEntries] = useState<FileSystemEntry[]>([]);
+    const [loadingWorkspaceBrowse, setLoadingWorkspaceBrowse] = useState(false);
+    const [workspaceBrowseDraft, setWorkspaceBrowseDraft] = useState('');
+    const [workspaceBrowseError, setWorkspaceBrowseError] = useState<string | null>(null);
     const [chatTitleMenuVisible, setChatTitleMenuVisible] = useState(false);
     const [agentThreadMenuVisible, setAgentThreadMenuVisible] = useState(false);
     const [modelModalVisible, setModelModalVisible] = useState(false);
@@ -657,6 +675,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     activeTurnIdRef.current = activeTurnId;
     const stopRequestedRef = useRef(false);
     const stopSystemMessageLoggedRef = useRef(false);
+    const appStateRef = useRef(AppState.currentState);
 
     // Track whether a command arrived since the last delta — used to
     // know when a new thinking segment starts so we can replace the old one.
@@ -1842,22 +1861,62 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       resetComposerState();
     }, [resetComposerState]);
 
-    const refreshWorkspaceOptions = useCallback(async () => {
-      setLoadingWorkspaces(true);
+    const refreshWorkspaceRoots = useCallback(async () => {
+      setLoadingWorkspaceRoots(true);
       try {
-        const chats = await api.listChats();
-        setWorkspaceOptions(extractWorkspaceOptions(chats));
-      } catch {
-        // Keep existing options when list refresh fails.
+        const response = await api.listWorkspaceRoots();
+        setWorkspaceBridgeRoot(normalizeWorkspacePath(response.bridgeRoot));
+        setWorkspaceRoots(response.workspaces);
+        setWorkspaceBrowseError(null);
+        return response;
+      } catch (err) {
+        setWorkspaceBrowseError((err as Error).message);
+        return null;
       } finally {
-        setLoadingWorkspaces(false);
+        setLoadingWorkspaceRoots(false);
       }
     }, [api]);
 
+    const browseWorkspacePath = useCallback(
+      async (path: string | null | undefined) => {
+        setLoadingWorkspaceBrowse(true);
+        try {
+          const response = await api.listFilesystemEntries({
+            path: normalizeWorkspacePath(path),
+            directoriesOnly: true,
+          });
+          const normalizedPath = normalizeWorkspacePath(response.path);
+          setWorkspaceBridgeRoot(
+            normalizeWorkspacePath(response.bridgeRoot) ?? workspaceBridgeRoot
+          );
+          setWorkspaceBrowsePath(normalizedPath);
+          setWorkspaceBrowseParentPath(normalizeWorkspacePath(response.parentPath));
+          setWorkspaceBrowseEntries(response.entries);
+          setWorkspaceBrowseDraft(normalizedPath ?? '');
+          setWorkspaceBrowseError(null);
+        } catch (err) {
+          setWorkspaceBrowseError((err as Error).message);
+        } finally {
+          setLoadingWorkspaceBrowse(false);
+        }
+      },
+      [api, workspaceBridgeRoot]
+    );
+
     const openWorkspaceModal = useCallback(() => {
+      const initialPath =
+        preferredStartCwd ?? workspaceBrowsePath ?? workspaceBridgeRoot ?? null;
       setWorkspaceModalVisible(true);
-      void refreshWorkspaceOptions();
-    }, [refreshWorkspaceOptions]);
+      setWorkspaceBrowseDraft(initialPath ?? '');
+      void refreshWorkspaceRoots();
+      void browseWorkspacePath(initialPath);
+    }, [
+      browseWorkspacePath,
+      preferredStartCwd,
+      refreshWorkspaceRoots,
+      workspaceBridgeRoot,
+      workspaceBrowsePath,
+    ]);
 
     const refreshAgentThreads = useCallback(
       async (
@@ -1950,11 +2009,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
 
     const closeWorkspaceModal = useCallback(() => {
-      if (loadingWorkspaces) {
+      if (loadingWorkspaceBrowse || loadingWorkspaceRoots) {
         return;
       }
       setWorkspaceModalVisible(false);
-    }, [loadingWorkspaces]);
+    }, [loadingWorkspaceBrowse, loadingWorkspaceRoots]);
 
     useEffect(() => {
       if (!selectedChatId) {
@@ -1967,9 +2026,63 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       void refreshAgentThreads(selectedChatId);
     }, [refreshAgentThreads, selectedChatId]);
 
+    useEffect(() => {
+      if (!selectedChatId) {
+        return;
+      }
+
+      let stopped = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const scheduleNextRefresh = () => {
+        if (stopped) {
+          return;
+        }
+
+        timer = setTimeout(() => {
+          const activeChatId = chatIdRef.current;
+          if (appStateRef.current === 'active' && activeChatId === selectedChatId) {
+            void refreshAgentThreads(activeChatId);
+          }
+          scheduleNextRefresh();
+        }, AGENT_THREADS_SYNC_INTERVAL_MS);
+      };
+
+      scheduleNextRefresh();
+      return () => {
+        stopped = true;
+        if (timer) {
+          clearTimeout(timer);
+        }
+      };
+    }, [refreshAgentThreads, selectedChatId]);
+
+    useEffect(() => {
+      const subscription = AppState.addEventListener('change', (nextAppState) => {
+        const previousAppState = appStateRef.current;
+        appStateRef.current = nextAppState;
+
+        if (nextAppState !== 'active' || previousAppState === 'active') {
+          return;
+        }
+
+        const activeChatId = chatIdRef.current;
+        if (!activeChatId) {
+          return;
+        }
+
+        void refreshAgentThreads(activeChatId);
+      });
+
+      return () => {
+        subscription.remove();
+      };
+    }, [refreshAgentThreads]);
+
     const selectDefaultWorkspace = useCallback(
       (cwd: string | null) => {
         onDefaultStartCwdChange?.(normalizeWorkspacePath(cwd));
+        setWorkspaceBrowseError(null);
         setWorkspaceModalVisible(false);
       },
       [onDefaultStartCwdChange]
@@ -2562,29 +2675,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         selectedChatId,
         toggleFastMode,
       ]
-    );
-
-    const workspacePickerOptions = useMemo<SelectionSheetOption[]>(
-      () => [
-        {
-          key: 'bridge-default',
-          title: 'Bridge default workspace',
-          description: 'Use the bridge start directory unless you override it here.',
-          icon: 'server-outline',
-          badge: 'Auto',
-          selected: preferredStartCwd === null,
-          onPress: () => selectDefaultWorkspace(null),
-        },
-        ...workspaceOptions.map((cwd) => ({
-          key: cwd,
-          title: toPathBasename(cwd),
-          description: cwd,
-          icon: 'folder-outline' as const,
-          selected: cwd === preferredStartCwd,
-          onPress: () => selectDefaultWorkspace(cwd),
-        })),
-      ],
-      [preferredStartCwd, selectDefaultWorkspace, workspaceOptions]
     );
 
     const modelPickerOptions = useMemo<SelectionSheetOption[]>(
@@ -3581,7 +3671,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           description: runtime.detail ?? fallbackDescription,
           runtime,
           selected: chat.id === selectedChatId,
-          showInPanel: !isRootThread && runtime.isActive,
         };
       });
     }, [
@@ -3593,7 +3682,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     ]);
 
     const liveAgentRows = useMemo(
-      () => agentThreadRows.filter((row) => row.showInPanel),
+      () => {
+        const visibleIds = new Set(
+          collectLiveAgentPanelThreadIds(
+            agentThreadRows.map((row) => ({
+              id: row.chat.id,
+              isRootThread: row.isRootThread,
+              isActive: row.runtime.isActive,
+            }))
+          )
+        );
+        return agentThreadRows.filter((row) => visibleIds.has(row.chat.id));
+      },
+      [agentThreadRows]
+    );
+    const liveRunningAgentCount = useMemo(
+      () => agentThreadRows.filter((row) => !row.isRootThread && row.runtime.isActive).length,
       [agentThreadRows]
     );
     const selectorAgentCount = useMemo(
@@ -5974,6 +6078,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         : `${String(spawnedAgentCount)} agents`;
     const showLiveAgentPanel =
       !isOpeningChat && Boolean(selectedChat) && liveAgentRows.length > 0;
+    const agentThreadStatusById = useMemo(
+      () => new Map(relatedAgentThreads.map((chat) => [chat.id, chat.status] as const)),
+      [relatedAgentThreads]
+    );
     const selectedThreadPlan = selectedChat
       ? activePlan?.threadId === selectedChat.id
         ? activePlan
@@ -6198,6 +6306,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           <View style={styles.agentPanelWrap}>
             <AgentThreadsPanel
               rows={liveAgentRows}
+              runningCount={liveRunningAgentCount}
               collapsed={agentPanelCollapsed}
               onToggleCollapse={() => {
                 setAgentPanelCollapsed((previous) => !previous);
@@ -6224,6 +6333,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               bridgeUrl={bridgeUrl}
               bridgeToken={bridgeToken}
               showToolCalls={showToolCalls}
+              agentThreadStatusById={agentThreadStatusById}
               scrollRef={scrollRef}
               inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
               onInlineOptionSelect={handleInlineOptionSelect}
@@ -6411,14 +6521,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onClose={() => setModelSettingsMenuVisible(false)}
         />
 
-        <SelectionSheet
+        <WorkspacePickerModal
           visible={workspaceModalVisible}
-          eyebrow="Workspace"
-          title="Start directory"
-          subtitle="Pick which workspace new chats should open in."
-          options={workspacePickerOptions}
-          loading={loadingWorkspaces}
-          loadingLabel="Refreshing workspaces…"
+          selectedPath={preferredStartCwd}
+          bridgeRoot={workspaceBridgeRoot}
+          recentWorkspaces={workspaceRoots}
+          currentPath={workspaceBrowsePath}
+          parentPath={workspaceBrowseParentPath}
+          entries={workspaceBrowseEntries}
+          draftPath={workspaceBrowseDraft}
+          loadingRecent={loadingWorkspaceRoots}
+          loadingEntries={loadingWorkspaceBrowse}
+          error={workspaceBrowseError}
+          onDraftPathChange={setWorkspaceBrowseDraft}
+          onBrowsePath={(path) => void browseWorkspacePath(path)}
+          onSelectPath={selectDefaultWorkspace}
           onClose={closeWorkspaceModal}
         />
 
@@ -6873,11 +6990,13 @@ interface AgentThreadPanelRow {
 
 function AgentThreadsPanel({
   rows,
+  runningCount,
   collapsed,
   onToggleCollapse,
   onSelectThread,
 }: {
   rows: AgentThreadPanelRow[];
+  runningCount: number;
   collapsed: boolean;
   onToggleCollapse: () => void;
   onSelectThread: (threadId: string) => void;
@@ -6901,7 +7020,9 @@ function AgentThreadsPanel({
         <View style={styles.agentPanelHeaderCopy}>
           <Text style={styles.agentPanelEyebrow}>Agents</Text>
           <Text style={styles.agentPanelSummary}>
-            {rows.length === 1 ? '1 running now' : `${String(rows.length)} running now`}
+            {runningCount === 1
+              ? '1 running now'
+              : `${String(runningCount)} running now`}
           </Text>
         </View>
         <Ionicons
@@ -6997,6 +7118,7 @@ function ChatView({
   bridgeUrl,
   bridgeToken,
   showToolCalls,
+  agentThreadStatusById,
   scrollRef,
   inlineChoicesEnabled,
   onInlineOptionSelect,
@@ -7010,6 +7132,7 @@ function ChatView({
   bridgeUrl: string;
   bridgeToken: string | null;
   showToolCalls: boolean;
+  agentThreadStatusById: ReadonlyMap<string, Chat['status']>;
   scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
@@ -7030,7 +7153,10 @@ function ChatView({
     const parentVisibleMessages = getVisibleTranscriptMessages(parentChat.messages, showToolCalls);
     return trimInheritedParentMessages(parentVisibleMessages, childVisibleMessages, chat.id);
   }, [chat.messages, chat.parentThreadId, parentChat, showToolCalls]);
-  const visibleMessages = transcriptView.messages;
+  const visibleMessages = useMemo(
+    () => syncVisibleSubAgentStatuses(transcriptView.messages, agentThreadStatusById),
+    [agentThreadStatusById, transcriptView.messages]
+  );
   const [visibleStartIndex, setVisibleStartIndex] = useState(() =>
     getInitialVisibleMessageStartIndex(visibleMessages.length)
   );
@@ -7942,22 +8068,6 @@ function toAttachmentPathSuggestions(
   }
 
   return [...startsWithMatches, ...containsMatches].slice(0, 8);
-}
-
-function extractWorkspaceOptions(chats: ChatSummary[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-
-  for (const chat of chats) {
-    const cwd = normalizeWorkspacePath(chat.cwd);
-    if (!cwd || seen.has(cwd)) {
-      continue;
-    }
-    seen.add(cwd);
-    result.push(cwd);
-  }
-
-  return result;
 }
 
 function normalizeModelId(value: string | null | undefined): string | null {

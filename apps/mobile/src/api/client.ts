@@ -45,6 +45,9 @@ import type {
   ServiceTier,
   TerminalExecRequest,
   TerminalExecResponse,
+  WorkspaceListResponse,
+  FileSystemListRequest,
+  FileSystemListResponse,
 } from './types';
 import type { HostBridgeWsClient } from './ws';
 
@@ -248,6 +251,24 @@ export class HostBridgeApiClient {
     return ids
       .map((value) => readString(value)?.trim() ?? '')
       .filter((value): value is string => value.length > 0);
+  }
+
+  async listWorkspaceRoots(limit = 200): Promise<WorkspaceListResponse> {
+    const response = await this.ws.request<Record<string, unknown>>('bridge/workspaces/list', {
+      limit,
+    });
+    return readWorkspaceListResponse(response);
+  }
+
+  async listFilesystemEntries(
+    request?: FileSystemListRequest
+  ): Promise<FileSystemListResponse> {
+    const response = await this.ws.request<Record<string, unknown>>('bridge/fs/list', {
+      path: normalizeCwd(request?.path) ?? null,
+      includeHidden: request?.includeHidden === true,
+      directoriesOnly: request?.directoriesOnly !== false,
+    });
+    return readFileSystemListResponse(response);
   }
 
   async createChat(body: CreateChatRequest): Promise<Chat> {
@@ -932,6 +953,76 @@ function normalizeCwd(cwd: string | null | undefined): string | null {
   }
   const trimmed = cwd.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function readWorkspaceListResponse(value: unknown): WorkspaceListResponse {
+  const record = toRecord(value) ?? {};
+  const workspacesRaw = Array.isArray(record.workspaces) ? record.workspaces : [];
+
+  return {
+    bridgeRoot: normalizeCwd(readString(record.bridgeRoot)) ?? '',
+    allowOutsideRootCwd: record.allowOutsideRootCwd === true,
+    workspaces: workspacesRaw
+      .map((entry) => {
+        const workspace = toRecord(entry);
+        if (!workspace) {
+          return null;
+        }
+
+        const path = normalizeCwd(readString(workspace.path));
+        if (!path) {
+          return null;
+        }
+
+        const rawChatCount = workspace.chatCount;
+        const chatCount =
+          typeof rawChatCount === 'number'
+            ? Math.max(0, Math.trunc(rawChatCount))
+            : typeof rawChatCount === 'string'
+              ? Math.max(0, Number.parseInt(rawChatCount, 10) || 0)
+              : 0;
+
+        return {
+          path,
+          chatCount,
+        };
+      })
+      .filter((entry): entry is WorkspaceListResponse['workspaces'][number] => entry !== null),
+  };
+}
+
+function readFileSystemListResponse(value: unknown): FileSystemListResponse {
+  const record = toRecord(value) ?? {};
+  const entriesRaw = Array.isArray(record.entries) ? record.entries : [];
+
+  return {
+    bridgeRoot: normalizeCwd(readString(record.bridgeRoot)) ?? '',
+    path: normalizeCwd(readString(record.path)) ?? '',
+    parentPath: normalizeCwd(readString(record.parentPath)) ?? null,
+    entries: entriesRaw
+      .map((entry) => {
+        const item = toRecord(entry);
+        if (!item) {
+          return null;
+        }
+
+        const path = normalizeCwd(readString(item.path));
+        const name = normalizeCwd(readString(item.name));
+        if (!path || !name) {
+          return null;
+        }
+
+        return {
+          name,
+          path,
+          kind: readString(item.kind) ?? 'directory',
+          hidden: item.hidden === true,
+          selectable: item.selectable !== false,
+          isGitRepo: item.isGitRepo === true,
+        };
+      })
+      .filter((entry): entry is FileSystemListResponse['entries'][number] => entry !== null),
+  };
 }
 
 function normalizeModel(model: string | null | undefined): string | null {
