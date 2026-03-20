@@ -2,8 +2,10 @@ import type {
   Chat,
   ChatMessage,
   ChatMessageSubAgentMeta,
+  ChatPlanSnapshot,
   ChatStatus,
   ChatSummary,
+  TurnPlanStep,
 } from './types';
 
 export type RawThreadStatus =
@@ -406,6 +408,7 @@ export function mapChat(raw: RawThread): Chat {
   }
 
   const messages = mapMessages(raw, summary.createdAt);
+  const plans = extractChatPlans(raw);
 
   const lastPreview =
     messages.length > 0
@@ -416,6 +419,67 @@ export function mapChat(raw: RawThread): Chat {
     ...summary,
     lastMessagePreview: lastPreview,
     messages,
+    latestPlan: plans.latestPlan,
+    latestTurnPlan: plans.latestTurnPlan,
+    latestTurnStatus: plans.latestTurnStatus,
+  };
+}
+
+function extractChatPlans(raw: RawThread): {
+  latestPlan: ChatPlanSnapshot | null;
+  latestTurnPlan: ChatPlanSnapshot | null;
+  latestTurnStatus: string | null;
+} {
+  const threadId = raw.id?.trim();
+  const turns = Array.isArray(raw.turns) ? raw.turns : [];
+  const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+  const latestTurnStatus = readString(latestTurn?.status);
+
+  if (!threadId || turns.length === 0) {
+    return {
+      latestPlan: null,
+      latestTurnPlan: null,
+      latestTurnStatus,
+    };
+  }
+
+  let latestPlan: ChatPlanSnapshot | null = null;
+  let latestTurnPlan: ChatPlanSnapshot | null = null;
+
+  for (const turn of turns) {
+    const turnId = readString(turn.id);
+    const items = Array.isArray(turn.items) ? turn.items : [];
+    let latestPlanInTurn: ChatPlanSnapshot | null = null;
+
+    for (const item of items) {
+      const itemRecord = toRecord(item);
+      if (!itemRecord) {
+        continue;
+      }
+
+      const itemType = normalizeType(readString(itemRecord.type) ?? '');
+      if (itemType !== 'plan') {
+        continue;
+      }
+
+      const plan = toPlanSnapshot(itemRecord, threadId, turnId);
+      if (!plan) {
+        continue;
+      }
+
+      latestPlan = plan;
+      latestPlanInTurn = plan;
+    }
+
+    if (turn === latestTurn) {
+      latestTurnPlan = latestPlanInTurn;
+    }
+  }
+
+  return {
+    latestPlan,
+    latestTurnPlan,
+    latestTurnStatus,
   };
 }
 
@@ -518,6 +582,147 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
 
 function generateLocalId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function toPlanSnapshot(
+  item: Record<string, unknown>,
+  threadId: string,
+  fallbackTurnId?: string | null
+): ChatPlanSnapshot | null {
+  const turnId =
+    readString(item.turnId) ??
+    readString(item.turn_id) ??
+    fallbackTurnId ??
+    readString(item.id);
+  if (!turnId) {
+    return null;
+  }
+
+  const rawSteps = Array.isArray(item.plan)
+    ? item.plan
+    : Array.isArray(item.steps)
+      ? item.steps
+      : [];
+  const steps: TurnPlanStep[] = rawSteps
+    .map((entry) => {
+      const entryRecord = toRecord(entry);
+      if (!entryRecord) {
+        return null;
+      }
+
+      const step = readString(entryRecord.step);
+      const status = normalizePlanStepStatus(readString(entryRecord.status));
+      if (!step || !status) {
+        return null;
+      }
+
+      return {
+        step,
+        status,
+      } satisfies TurnPlanStep;
+    })
+    .filter((entry): entry is TurnPlanStep => entry !== null);
+  const explanation = readString(item.explanation);
+
+  if (steps.length === 0 && !explanation?.trim()) {
+    return parsePlanTextSnapshot(readString(item.text), threadId, turnId);
+  }
+
+  return {
+    threadId,
+    turnId,
+    explanation,
+    steps,
+  };
+}
+
+function parsePlanTextSnapshot(
+  text: string | null | undefined,
+  threadId: string,
+  turnId: string
+): ChatPlanSnapshot | null {
+  const trimmed = text?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const hasSummaryHeader = lines.some((line) => /^summary$/i.test(line));
+  const steps: TurnPlanStep[] = [];
+  for (const line of lines) {
+    const match = line.match(/^\d+[.)]\s+(.+)$/);
+    if (!match?.[1]) {
+      continue;
+    }
+
+    steps.push({
+      step: match[1].trim(),
+      status: 'pending',
+    });
+  }
+
+  if (!hasSummaryHeader && steps.length === 0) {
+    return null;
+  }
+
+  let startIndex = 0;
+  if (lines.length > 1 && /plan$/i.test(lines[0])) {
+    startIndex = 1;
+  }
+  if (lines[startIndex] && /^summary$/i.test(lines[startIndex])) {
+    startIndex += 1;
+  }
+
+  const explanationLines: string[] = [];
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\d+[.)]\s+/.test(line)) {
+      break;
+    }
+    if (/^(summary|implementation plan|proposed plan)$/i.test(line)) {
+      continue;
+    }
+    explanationLines.push(line);
+  }
+
+  const explanation =
+    explanationLines.length > 0 ? explanationLines.join(' ').trim() : null;
+
+  if (steps.length === 0 && !explanation) {
+    return null;
+  }
+
+  return {
+    threadId,
+    turnId,
+    explanation,
+    steps,
+  };
+}
+
+function normalizePlanStepStatus(value: string | null | undefined): TurnPlanStep['status'] | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/[^a-z]/g, '');
+  if (normalized === 'pending') {
+    return 'pending';
+  }
+  if (normalized === 'inprogress') {
+    return 'inProgress';
+  }
+  if (normalized === 'completed' || normalized === 'complete') {
+    return 'completed';
+  }
+  return null;
 }
 
 function toToolLikeMessage(item: Record<string, unknown>): string | null {

@@ -98,6 +98,165 @@ describe('chatMapping', () => {
     expect(systemMessages[3].content).toContain('• Applied file changes');
   });
 
+  it('extracts the latest structured persisted plan for workflow rehydration', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_plan',
+        preview: 'plan',
+        createdAt: 1700000000,
+        updatedAt: 1700000005,
+        status: { type: 'idle' },
+        turns: [
+          {
+            id: 'turn_plan',
+            status: 'completed',
+            items: [
+              {
+                type: 'plan',
+                id: 'plan_structured',
+                explanation: 'Tighten the workflow-card state handling.',
+                plan: [
+                  {
+                    step: 'Extract the workflow card state into a helper',
+                    status: 'completed',
+                  },
+                  {
+                    step: 'Render approval inline in the top card',
+                    status: 'inProgress',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.latestPlan).toEqual({
+      threadId: 'thr_plan',
+      turnId: 'turn_plan',
+      explanation: 'Tighten the workflow-card state handling.',
+      steps: [
+        {
+          step: 'Extract the workflow card state into a helper',
+          status: 'completed',
+        },
+        {
+          step: 'Render approval inline in the top card',
+          status: 'inProgress',
+        },
+      ],
+    });
+    expect(chat.latestTurnPlan).toEqual(chat.latestPlan);
+    expect(chat.latestTurnStatus).toBe('completed');
+  });
+
+  it('derives workflow plan state from persisted plan text when structured fields are absent', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_plan_text',
+        preview: 'plan text',
+        createdAt: 1700000000,
+        updatedAt: 1700000005,
+        status: { type: 'idle' },
+        turns: [
+          {
+            id: 'turn_plan_text',
+            status: 'completed',
+            items: [
+              {
+                type: 'plan',
+                id: 'plan_text',
+                text: [
+                  'Workflow Card Cleanup Plan',
+                  'Summary',
+                  'Tighten the workflow-card transitions without broad MainScreen churn.',
+                  '1. Extract the card state resolver',
+                  '2. Rehydrate the card from persisted plan data',
+                ].join('\n'),
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.latestPlan).toEqual({
+      threadId: 'thr_plan_text',
+      turnId: 'turn_plan_text',
+      explanation:
+        'Tighten the workflow-card transitions without broad MainScreen churn.',
+      steps: [
+        {
+          step: 'Extract the card state resolver',
+          status: 'pending',
+        },
+        {
+          step: 'Rehydrate the card from persisted plan data',
+          status: 'pending',
+        },
+      ],
+    });
+    expect(chat.latestTurnPlan).toEqual(chat.latestPlan);
+    expect(chat.latestTurnStatus).toBe('completed');
+  });
+
+  it('keeps the latest structured plan even after later non-plan turns', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_plan_history',
+        preview: 'history',
+        createdAt: 1700000000,
+        updatedAt: 1700000006,
+        status: { type: 'idle' },
+        turns: [
+          {
+            id: 'turn_plan',
+            status: 'completed',
+            items: [
+              {
+                type: 'plan',
+                id: 'plan_history',
+                explanation: 'Review the workflow-card UX before coding.',
+                plan: [
+                  {
+                    step: 'Audit the top-card state transitions',
+                    status: 'completed',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            id: 'turn_execution',
+            status: 'completed',
+            items: [
+              {
+                type: 'agentMessage',
+                id: 'assistant_1',
+                text: 'Implemented the change.',
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.latestPlan).toEqual({
+      threadId: 'thr_plan_history',
+      turnId: 'turn_plan',
+      explanation: 'Review the workflow-card UX before coding.',
+      steps: [
+        {
+          step: 'Audit the top-card state transitions',
+          status: 'completed',
+        },
+      ],
+    });
+    expect(chat.latestTurnPlan).toBeNull();
+    expect(chat.latestTurnStatus).toBe('completed');
+  });
+
   it('maps sub-agent source metadata and collaboration items', () => {
     const chat = mapChat(
       toRawThread({

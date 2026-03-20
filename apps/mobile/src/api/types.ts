@@ -42,8 +42,18 @@ export interface ChatSummary {
   lastError?: string;
 }
 
+export interface ChatPlanSnapshot {
+  threadId: string;
+  turnId: string;
+  explanation: string | null;
+  steps: TurnPlanStep[];
+}
+
 export interface Chat extends ChatSummary {
   messages: ChatMessage[];
+  latestPlan?: ChatPlanSnapshot | null;
+  latestTurnPlan?: ChatPlanSnapshot | null;
+  latestTurnStatus?: string | null;
 }
 
 export interface CreateChatRequest {

@@ -32,6 +32,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import Markdown from 'react-native-markdown-display';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
@@ -81,6 +82,10 @@ import {
   buildAgentThreadDisplayState,
   type AgentThreadDisplayState,
 } from './agentThreadDisplay';
+import {
+  hasStructuredPlanCardContent,
+  resolveWorkflowCardMode,
+} from './planCardState';
 import { trimInheritedParentMessages } from './subAgentTranscript';
 import {
   getVisibleTranscriptMessages,
@@ -671,6 +676,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     agentRootThreadIdRef.current = agentRootThreadId;
     const planPanelLastTurnByThreadRef = useRef<Record<string, string>>({});
     const planItemTurnIdByThreadRef = useRef<Record<string, string>>({});
+    const autoEnabledPlanTurnIdByThreadRef = useRef<Record<string, string>>({});
+    const dismissedPlanImplementationTurnIdByThreadRef = useRef<Record<string, string>>({});
     const activeTurnIdRef = useRef<string | null>(null);
     activeTurnIdRef.current = activeTurnId;
     const stopRequestedRef = useRef(false);
@@ -1501,6 +1508,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         if (codexEventType === 'taskstarted') {
+          delete planItemTurnIdByThreadRef.current[threadId];
+          clearPendingPlanImplementationPrompt(threadId);
           cacheThreadActivity(threadId, {
             tone: 'running',
             title: 'Working',
@@ -1551,6 +1560,53 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           cacheThreadActivity(threadId, {
             tone: 'running',
             title: 'Thinking',
+          });
+          return;
+        }
+
+        if (codexEventType === 'plandelta') {
+          const rawDelta = readString(msg?.delta) ?? '';
+          if (!rawDelta) {
+            return;
+          }
+
+          const turnId = resolveCodexPlanTurnId(
+            msg,
+            planItemTurnIdByThreadRef.current[threadId] ??
+              threadRuntimeSnapshotsRef.current[threadId]?.activeTurnId ??
+              null
+          );
+          planItemTurnIdByThreadRef.current[threadId] = turnId;
+          cacheThreadTurnState(threadId, {
+            runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+          });
+          cacheThreadPlan(threadId, (previous) =>
+            buildNextPlanStateFromDelta(previous, threadId, turnId, rawDelta)
+          );
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Planning',
+          });
+          return;
+        }
+
+        if (codexEventType === 'planupdate') {
+          const turnId = resolveCodexPlanTurnId(
+            msg,
+            planItemTurnIdByThreadRef.current[threadId] ??
+              threadRuntimeSnapshotsRef.current[threadId]?.activeTurnId ??
+              null
+          );
+          const planUpdate = toCodexTurnPlanUpdate(msg, threadId, turnId);
+          planItemTurnIdByThreadRef.current[threadId] = turnId;
+          if (planUpdate) {
+            cacheThreadPlan(threadId, (previous) =>
+              buildNextPlanStateFromUpdate(previous, planUpdate)
+            );
+          }
+          cacheThreadActivity(threadId, {
+            tone: 'running',
+            title: 'Planning',
           });
           return;
         }
@@ -1613,6 +1669,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         if (CODEX_RUN_ABORT_EVENT_TYPES.has(codexEventType)) {
+          delete planItemTurnIdByThreadRef.current[threadId];
+          clearPendingPlanImplementationPrompt(threadId);
           cacheThreadTurnState(threadId, {
             activeTurnId: null,
             runWatchdogUntil: 0,
@@ -1629,6 +1687,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         if (CODEX_RUN_FAILURE_EVENT_TYPES.has(codexEventType)) {
+          delete planItemTurnIdByThreadRef.current[threadId];
+          clearPendingPlanImplementationPrompt(threadId);
           cacheThreadTurnState(threadId, {
             activeTurnId: null,
             runWatchdogUntil: 0,
@@ -1645,6 +1705,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         if (CODEX_RUN_COMPLETION_EVENT_TYPES.has(codexEventType)) {
+          const planTurnId = planItemTurnIdByThreadRef.current[threadId] ?? null;
+          delete planItemTurnIdByThreadRef.current[threadId];
+          if (planTurnId) {
+            setPendingPlanImplementationPrompts((prev) => ({
+              ...prev,
+              [threadId]: {
+                threadId,
+                turnId: planTurnId,
+              },
+            }));
+          } else {
+            clearPendingPlanImplementationPrompt(threadId);
+          }
           clearThreadRuntimeSnapshot(threadId, true);
         }
       },
@@ -1654,6 +1727,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         cacheThreadContextUsage,
         cacheThreadStreamingDelta,
         cacheThreadTurnState,
+        clearPendingPlanImplementationPrompt,
         clearThreadRuntimeSnapshot,
         readThreadContextUsage,
         upsertThreadRuntimeSnapshot,
@@ -3473,6 +3547,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const shouldPreserveRuntimeState = Boolean(
             options?.preserveRuntimeState && chatId === chatIdRef.current
           );
+          if (!shouldPreserveRuntimeState) {
+            delete autoEnabledPlanTurnIdByThreadRef.current[chatId];
+          }
           setSelectedChatId(chatId);
           setSelectedChat(chat);
           setError(null);
@@ -3584,6 +3661,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setQueuePaused(false);
         stopRequestedRef.current = false;
         stopSystemMessageLoggedRef.current = false;
+        delete autoEnabledPlanTurnIdByThreadRef.current[id];
 
         if (hasSnapshot && optimisticChat) {
           setSelectedChat(optimisticChat);
@@ -3950,6 +4028,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           localImages?: LocalImageInput[];
           clearComposer?: boolean;
           preservePlan?: boolean;
+          suppressPlanModeAutoEnable?: boolean;
         }
       ) => {
         const content = rawContent.trim();
@@ -4034,7 +4113,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
             }
           );
-          const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+          const autoEnabledPlan =
+            !options?.suppressPlanModeAutoEnable &&
+            shouldAutoEnablePlanModeFromChat(updated);
           if (autoEnabledPlan) {
             setSelectedCollaborationMode('plan');
           }
@@ -4170,45 +4251,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       stoppingTurn,
       setQueuePaused,
       uploadingAttachment,
-    ]);
-
-    const stayInPlanMode = useCallback(() => {
-      if (!selectedChatId) {
-        return;
-      }
-
-      setSelectedCollaborationMode('plan');
-      clearPendingPlanImplementationPrompt(selectedChatId);
-    }, [clearPendingPlanImplementationPrompt, selectedChatId]);
-
-    const implementPlan = useCallback(async () => {
-      if (!selectedChatId) {
-        return;
-      }
-
-      const prompt = pendingPlanImplementationPrompts[selectedChatId];
-      if (!prompt) {
-        return;
-      }
-
-      clearPendingPlanImplementationPrompt(prompt.threadId);
-      setSelectedCollaborationMode('default');
-      const sent = await sendMessageContent(PLAN_IMPLEMENTATION_CODING_MESSAGE, {
-        collaborationMode: 'default',
-        clearComposer: false,
-        preservePlan: true,
-      });
-      if (!sent) {
-        setPendingPlanImplementationPrompts((prev) => ({
-          ...prev,
-          [prompt.threadId]: prompt,
-        }));
-      }
-    }, [
-      clearPendingPlanImplementationPrompt,
-      pendingPlanImplementationPrompts,
-      selectedChatId,
-      sendMessageContent,
     ]);
 
     const handleSteerQueuedMessage = useCallback(async () => {
@@ -4464,6 +4506,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (codexEventType === 'taskstarted') {
+            delete planItemTurnIdByThreadRef.current[activeThreadId];
+            clearPendingPlanImplementationPrompt(activeThreadId);
             setActivity({
               tone: 'running',
               title: 'Working',
@@ -4527,6 +4571,60 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   }
             );
             scrollToBottomIfPinned(true);
+            return;
+          }
+
+          if (codexEventType === 'plandelta') {
+            const rawDelta = readString(msg?.delta) ?? '';
+            if (!rawDelta) {
+              return;
+            }
+
+            const turnId = resolveCodexPlanTurnId(
+              msg,
+              planItemTurnIdByThreadRef.current[activeThreadId] ??
+                activeTurnIdRef.current ??
+                threadRuntimeSnapshotsRef.current[activeThreadId]?.activeTurnId ??
+                null
+            );
+            planItemTurnIdByThreadRef.current[activeThreadId] = turnId;
+            setSelectedCollaborationMode('plan');
+            bumpRunWatchdog();
+            setActivePlan((prev) =>
+              buildNextPlanStateFromDelta(prev, activeThreadId, turnId, rawDelta)
+            );
+            cacheThreadPlan(activeThreadId, (previous) =>
+              buildNextPlanStateFromDelta(previous, activeThreadId, turnId, rawDelta)
+            );
+            setActivity({
+              tone: 'running',
+              title: 'Planning',
+            });
+            return;
+          }
+
+          if (codexEventType === 'planupdate') {
+            const turnId = resolveCodexPlanTurnId(
+              msg,
+              planItemTurnIdByThreadRef.current[activeThreadId] ??
+                activeTurnIdRef.current ??
+                threadRuntimeSnapshotsRef.current[activeThreadId]?.activeTurnId ??
+                null
+            );
+            const planUpdate = toCodexTurnPlanUpdate(msg, activeThreadId, turnId);
+            planItemTurnIdByThreadRef.current[activeThreadId] = turnId;
+            setSelectedCollaborationMode('plan');
+            bumpRunWatchdog();
+            if (planUpdate) {
+              setActivePlan((prev) => buildNextPlanStateFromUpdate(prev, planUpdate));
+              cacheThreadPlan(activeThreadId, (previous) =>
+                buildNextPlanStateFromUpdate(previous, planUpdate)
+              );
+            }
+            setActivity({
+              tone: 'running',
+              title: 'Planning',
+            });
             return;
           }
 
@@ -4595,6 +4693,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           if (CODEX_RUN_ABORT_EVENT_TYPES.has(codexEventType)) {
             const interruptedByUser = stopRequestedRef.current;
+            delete planItemTurnIdByThreadRef.current[activeThreadId];
+            clearPendingPlanImplementationPrompt(activeThreadId);
             clearRunWatchdog();
             setActiveCommands([]);
             setStreamingText(null);
@@ -4617,6 +4717,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (CODEX_RUN_FAILURE_EVENT_TYPES.has(codexEventType)) {
+            delete planItemTurnIdByThreadRef.current[activeThreadId];
+            clearPendingPlanImplementationPrompt(activeThreadId);
             clearRunWatchdog();
             setActiveCommands([]);
             setStreamingText(null);
@@ -4635,10 +4737,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (CODEX_RUN_COMPLETION_EVENT_TYPES.has(codexEventType)) {
+            const planTurnId = planItemTurnIdByThreadRef.current[activeThreadId] ?? null;
+            delete planItemTurnIdByThreadRef.current[activeThreadId];
             clearRunWatchdog();
             setActiveTurnId(null);
             setStoppingTurn(false);
             stopRequestedRef.current = false;
+            if (planTurnId) {
+              setPendingPlanImplementationPrompts((prev) => ({
+                ...prev,
+                [activeThreadId]: {
+                  threadId: activeThreadId,
+                  turnId: planTurnId,
+                },
+              }));
+            } else {
+              clearPendingPlanImplementationPrompt(activeThreadId);
+            }
             setActivity({
               tone: 'complete',
               title: 'Turn completed',
@@ -4727,6 +4842,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId) {
             return;
           }
+          delete planItemTurnIdByThreadRef.current[threadId];
           const startedContextUsage = readThreadContextUsage(params);
           const turn = toRecord(params?.turn);
           const startedTurnId =
@@ -5660,11 +5776,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       cacheThreadActiveCommand,
       cacheThreadActivity,
       cacheThreadContextUsage,
-      cacheThreadPendingApproval,
-      cacheThreadPendingUserInputRequest,
-      cacheThreadPlan,
-      cacheThreadStreamingDelta,
-      cacheThreadTurnState,
+        cacheThreadPendingApproval,
+        cacheThreadPendingUserInputRequest,
+        cacheThreadPlan,
+        cacheThreadStreamingDelta,
+        cacheThreadTurnState,
       clearPendingPlanImplementationPrompt,
       clearRunWatchdog,
       readThreadContextUsage,
@@ -6082,16 +6198,43 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       () => new Map(relatedAgentThreads.map((chat) => [chat.id, chat.status] as const)),
       [relatedAgentThreads]
     );
-    const selectedThreadPlan = selectedChat
+    const selectedThreadRuntimeSnapshot = selectedChat
+      ? threadRuntimeSnapshotsRef.current[selectedChat.id] ?? null
+      : null;
+    const inMemorySelectedThreadPlan = selectedChat
       ? activePlan?.threadId === selectedChat.id
         ? activePlan
-        : threadRuntimeSnapshotsRef.current[selectedChat.id]?.plan ??
+        : selectedThreadRuntimeSnapshot?.plan ??
           chatPlanSnapshotsRef.current[selectedChat.id] ??
           null
       : null;
-    const selectedPlanImplementationPrompt = selectedChat
-      ? pendingPlanImplementationPrompts[selectedChat.id] ?? null
+    const persistedSelectedThreadPlan = selectedChat
+      ? toPersistedActivePlanState(selectedChat.latestPlan, selectedChat.updatedAt)
       : null;
+    const selectedThreadPlan = selectedChat
+      ? resolveDisplayedThreadPlan(
+          inMemorySelectedThreadPlan,
+          persistedSelectedThreadPlan,
+          selectedThreadRuntimeSnapshot
+        )
+      : null;
+    const dismissedSelectedPlanTurnId = selectedChat
+      ? dismissedPlanImplementationTurnIdByThreadRef.current[selectedChat.id] ?? null
+      : null;
+    const derivedSelectedPlanImplementationPrompt = selectedChat
+      ? resolvePersistedPlanImplementationPrompt(
+          selectedChat,
+          dismissedSelectedPlanTurnId
+        )
+      : null;
+    const selectedPlanImplementationPrompt = selectedChat
+      ? resolveUndismissedPlanImplementationPrompt(
+          pendingPlanImplementationPrompts[selectedChat.id] ?? null,
+          dismissedSelectedPlanTurnId
+        ) ??
+        derivedSelectedPlanImplementationPrompt
+      : null;
+    const showStructuredPlanCard = hasStructuredPlanCardContent(selectedThreadPlan);
     const planPanelCollapsed =
       selectedChat ? (planPanelCollapsedByThread[selectedChat.id] ?? false) : false;
     const fastModeControlDisabled = isOpeningChat;
@@ -6110,11 +6253,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       : pendingUserInputRequest
         ? 'Waiting for required input before steering.'
         : null;
-    const showQueuedMessageCard =
+    const showQueuedMessageDock =
       Boolean(selectedChat) && !isOpeningChat && Boolean(oldestQueuedMessage);
-    const showTopCardsRow = !isOpeningChat && Boolean(selectedThreadPlan);
-    const showFloatingActivity =
-      showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
     const showPlanImplementationPrompt =
       Boolean(selectedPlanImplementationPrompt) &&
       !isOpeningChat &&
@@ -6133,9 +6273,145 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       !modelModalVisible &&
       !effortModalVisible &&
       queuedMessages.length === 0;
+    const workflowCardMode = resolveWorkflowCardMode({
+      collaborationMode: selectedCollaborationMode,
+      hasStructuredPlan: showStructuredPlanCard,
+      hasPlanApprovalPrompt: showPlanImplementationPrompt,
+    });
+    const showTopCardsRow = !isOpeningChat && workflowCardMode !== null;
+    const showFloatingActivity =
+      showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
     const chatBottomInset = shouldShowComposer
       ? spacing.lg
       : Math.max(spacing.xxl, safeAreaInsets.bottom + spacing.lg);
+
+    useEffect(() => {
+      if (!selectedChat || isOpeningChat || !shouldAutoEnablePlanModeFromChat(selectedChat)) {
+        return;
+      }
+
+      const latestPlanTurnId = selectedChat.latestTurnPlan?.turnId?.trim();
+      if (!latestPlanTurnId) {
+        return;
+      }
+
+      if (
+        dismissedPlanImplementationTurnIdByThreadRef.current[selectedChat.id] ===
+        latestPlanTurnId
+      ) {
+        return;
+      }
+
+      if (autoEnabledPlanTurnIdByThreadRef.current[selectedChat.id] === latestPlanTurnId) {
+        return;
+      }
+
+      autoEnabledPlanTurnIdByThreadRef.current[selectedChat.id] = latestPlanTurnId;
+      setSelectedCollaborationMode('plan');
+    }, [
+      isOpeningChat,
+      selectedChat?.id,
+      selectedChat?.latestTurnPlan?.turnId,
+      selectedChat?.latestTurnStatus,
+    ]);
+
+    useEffect(() => {
+      const threadId = selectedChat?.id;
+      if (
+        !threadId ||
+        isOpeningChat ||
+        selectedChat?.latestTurnPlan ||
+        selectedCollaborationMode !== 'plan'
+      ) {
+        return;
+      }
+
+      if (!autoEnabledPlanTurnIdByThreadRef.current[threadId]) {
+        return;
+      }
+
+      setSelectedCollaborationMode('default');
+    }, [
+      isOpeningChat,
+      selectedChat?.id,
+      selectedChat?.latestTurnPlan?.turnId,
+      selectedCollaborationMode,
+    ]);
+
+    useEffect(() => {
+      const threadId = selectedChat?.id;
+      if (!threadId) {
+        return;
+      }
+
+      const pendingPrompt = pendingPlanImplementationPrompts[threadId];
+      if (!pendingPrompt) {
+        return;
+      }
+
+      const latestTurnPlanTurnId = selectedChat?.latestTurnPlan?.turnId ?? null;
+      if (latestTurnPlanTurnId && latestTurnPlanTurnId === pendingPrompt.turnId) {
+        return;
+      }
+
+      clearPendingPlanImplementationPrompt(threadId);
+    }, [
+      clearPendingPlanImplementationPrompt,
+      pendingPlanImplementationPrompts,
+      selectedChat?.id,
+      selectedChat?.latestTurnPlan?.turnId,
+    ]);
+
+    const stayInPlanMode = useCallback(() => {
+      if (!selectedChatId) {
+        return;
+      }
+
+      const prompt = selectedPlanImplementationPrompt;
+      if (prompt) {
+        dismissedPlanImplementationTurnIdByThreadRef.current[prompt.threadId] = prompt.turnId;
+      }
+      setSelectedCollaborationMode('plan');
+      clearPendingPlanImplementationPrompt(selectedChatId);
+    }, [
+      clearPendingPlanImplementationPrompt,
+      selectedChatId,
+      selectedPlanImplementationPrompt,
+    ]);
+
+    const implementPlan = useCallback(async () => {
+      if (!selectedChatId) {
+        return;
+      }
+
+      const prompt = selectedPlanImplementationPrompt;
+      if (!prompt) {
+        return;
+      }
+
+      clearPendingPlanImplementationPrompt(prompt.threadId);
+      setSelectedCollaborationMode('default');
+      const sent = await sendMessageContent(PLAN_IMPLEMENTATION_CODING_MESSAGE, {
+        collaborationMode: 'default',
+        clearComposer: false,
+        preservePlan: true,
+        suppressPlanModeAutoEnable: true,
+      });
+      if (sent) {
+        dismissedPlanImplementationTurnIdByThreadRef.current[prompt.threadId] = prompt.turnId;
+      } else {
+        setPendingPlanImplementationPrompts((prev) => ({
+          ...prev,
+          [prompt.threadId]: prompt,
+        }));
+      }
+    }, [
+      clearPendingPlanImplementationPrompt,
+      pendingPlanImplementationPrompts,
+      selectedChatId,
+      selectedPlanImplementationPrompt,
+      sendMessageContent,
+    ]);
 
     useEffect(() => {
       if (!selectedChat || isOpeningChat || !showActivity) {
@@ -6179,7 +6455,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [selectedChat?.id]);
 
     const toggleSelectedPlanPanel = useCallback(() => {
-      if (!selectedChat?.id || !selectedThreadPlan) {
+      if (!selectedChat?.id || workflowCardMode === null) {
         return;
       }
 
@@ -6187,7 +6463,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         ...prev,
         [selectedChat.id]: !(prev[selectedChat.id] ?? false),
       }));
-    }, [selectedChat?.id, selectedThreadPlan]);
+    }, [selectedChat?.id, workflowCardMode]);
 
     return (
       <View style={styles.container}>
@@ -6292,11 +6568,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         {showTopCardsRow ? (
           <View style={styles.topCardsRow}>
-            {selectedThreadPlan ? (
-              <PlanCard
+            {workflowCardMode ? (
+              <WorkflowCard
+                mode={workflowCardMode}
                 plan={selectedThreadPlan}
                 collapsed={planPanelCollapsed}
+                scrollMaxHeight={Math.max(
+                  176,
+                  Math.min(
+                    Math.floor(windowHeight * (workflowCardMode === 'approval' ? 0.34 : 0.4)),
+                    workflowCardMode === 'approval' ? 280 : 360
+                  )
+                )}
+                actionDisabled={sending || creating || stoppingTurn}
                 onToggleCollapse={toggleSelectedPlanPanel}
+                onImplement={() => void implementPlan()}
+                onStayInPlanMode={stayInPlanMode}
               />
             ) : null}
           </View>
@@ -6374,24 +6661,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             </View>
           ) : null}
 
-          {showQueuedMessageCard && oldestQueuedMessage ? (
-            <View style={styles.queuedMessageDock}>
-              <QueuedMessageCard
-                message={oldestQueuedMessage}
-                remainingCount={remainingQueuedMessagesCount}
-                steerEnabled={canSteerQueuedMessage}
-                cancelEnabled={canCancelQueuedMessage}
-                steerDisabledReason={queuedMessageSteerDisabledReason}
-                onCancel={() => {
-                  handleCancelQueuedMessage(oldestQueuedMessage.id);
-                }}
-                onSteer={() => {
-                  void handleSteerQueuedMessage();
-                }}
-              />
-            </View>
-          ) : null}
-
           {shouldShowComposer ? (
             <View
               style={[
@@ -6404,6 +6673,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 <ApprovalBanner
                   approval={pendingApproval}
                   onResolve={handleResolveApproval}
+                />
+              ) : null}
+              {showQueuedMessageDock && oldestQueuedMessage ? (
+                <QueuedMessageDock
+                  queuedMessage={oldestQueuedMessage}
+                  remainingQueuedMessagesCount={remainingQueuedMessagesCount}
+                  steerEnabled={canSteerQueuedMessage}
+                  cancelEnabled={canCancelQueuedMessage}
+                  steerDisabledReason={queuedMessageSteerDisabledReason}
+                  onCancelQueuedMessage={(messageId) => {
+                    handleCancelQueuedMessage(messageId);
+                  }}
+                  onSteerQueuedMessage={() => {
+                    void handleSteerQueuedMessage();
+                  }}
                 />
               ) : null}
               {showSlashSuggestions ? (
@@ -6716,45 +7000,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   disabled={!attachmentPathDraft.trim() || isLoading}
                 >
                   <Text style={styles.renameModalButtonPrimaryText}>Attach</Text>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        </Modal>
-
-        <Modal
-          visible={showPlanImplementationPrompt}
-          transparent
-          animationType="fade"
-          onRequestClose={stayInPlanMode}
-        >
-          <View style={styles.userInputModalBackdrop}>
-            <View style={styles.planPromptModalCard}>
-              <Text style={styles.userInputModalTitle}>{PLAN_IMPLEMENTATION_TITLE}</Text>
-              <View style={styles.planPromptOptionsColumn}>
-                <Pressable
-                  onPress={() => void implementPlan()}
-                  style={({ pressed }) => [
-                    styles.planPromptOptionButton,
-                    pressed && styles.planPromptOptionButtonPressed,
-                  ]}
-                >
-                  <Text style={styles.planPromptOptionTitle}>{PLAN_IMPLEMENTATION_YES}</Text>
-                  <Text style={styles.planPromptOptionDescription}>
-                    Switch to Default and start coding.
-                  </Text>
-                </Pressable>
-                <Pressable
-                  onPress={stayInPlanMode}
-                  style={({ pressed }) => [
-                    styles.planPromptOptionButton,
-                    pressed && styles.planPromptOptionButtonPressed,
-                  ]}
-                >
-                  <Text style={styles.planPromptOptionTitle}>{PLAN_IMPLEMENTATION_NO}</Text>
-                  <Text style={styles.planPromptOptionDescription}>
-                    Continue planning with the model.
-                  </Text>
                 </Pressable>
               </View>
             </View>
@@ -7338,183 +7583,333 @@ function ChatView({
   );
 }
 
-function QueuedMessageCard({
-  message,
-  remainingCount,
-  steerEnabled,
-  cancelEnabled,
-  steerDisabledReason,
-  onCancel,
-  onSteer,
+function WorkflowCard({
+  mode,
+  plan,
+  collapsed,
+  scrollMaxHeight,
+  actionDisabled,
+  onToggleCollapse,
+  onImplement,
+  onStayInPlanMode,
 }: {
-  message: QueuedChatMessage;
-  remainingCount: number;
-  steerEnabled: boolean;
-  cancelEnabled: boolean;
-  steerDisabledReason: string | null;
-  onCancel: () => void;
-  onSteer: () => void;
+  mode: 'plan' | 'approval' | 'execution';
+  plan: ActivePlanState | null;
+  collapsed: boolean;
+  scrollMaxHeight: number;
+  actionDisabled: boolean;
+  onToggleCollapse: () => void;
+  onImplement: () => void;
+  onStayInPlanMode: () => void;
 }) {
-  return (
-    <View style={[styles.planCard, styles.queuedMessageCard]}>
-      <View style={styles.queuedMessageHeader}>
-        <View style={styles.queuedMessageHeaderText}>
-          <Text style={styles.planCardTitle}>Queued message</Text>
-          {remainingCount > 0 ? (
-            <Text style={styles.queuedMessageSummary}>{`+${String(remainingCount)} more queued`}</Text>
+  const hasStructuredPlan = hasStructuredPlanCardContent(plan);
+  const hasSteps = (plan?.steps.length ?? 0) > 0;
+  const totalStepCount = plan?.steps.length ?? 0;
+  const completedStepCount =
+    plan?.steps.filter((step) => step.status === 'completed').length ?? 0;
+  const inProgressStepCount =
+    plan?.steps.filter((step) => step.status === 'inProgress').length ?? 0;
+  const pendingStepCount =
+    plan?.steps.filter((step) => step.status === 'pending').length ?? 0;
+  const activeStep =
+    plan?.steps.find((step) => step.status === 'inProgress') ??
+    plan?.steps.find((step) => step.status === 'pending') ??
+    (plan ? plan.steps[plan.steps.length - 1] ?? null : null) ??
+    null;
+  const collapsedSummaryRaw =
+    mode === 'approval'
+      ? activeStep?.step ??
+        plan?.explanation?.trim() ??
+        'Start coding now or keep refining the plan.'
+      : mode === 'execution'
+        ? activeStep?.step ??
+          plan?.explanation?.trim() ??
+          '(no execution details yet)'
+        : activeStep?.step ?? plan?.explanation?.trim() ?? '(no steps provided)';
+  const collapsedSummary = stripMarkdownInline(collapsedSummaryRaw)
+    .replace(/\s*#{1,6}\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const isCollapsible = hasStructuredPlan || mode === 'approval';
+  const title =
+    mode === 'approval'
+      ? PLAN_IMPLEMENTATION_TITLE
+      : mode === 'execution'
+        ? 'Execution'
+        : 'Plan';
+  const iconName =
+    mode === 'approval'
+      ? 'rocket-outline'
+      : mode === 'execution'
+        ? 'construct-outline'
+        : 'map-outline';
+  const planProgressSummary =
+    totalStepCount > 0
+      ? [
+          `${String(completedStepCount)}/${String(totalStepCount)} done`,
+          inProgressStepCount > 0 ? `${String(inProgressStepCount)} active` : null,
+          pendingStepCount > 0 ? `${String(pendingStepCount)} pending` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : null;
+
+  if (!hasStructuredPlan && mode !== 'approval') {
+    return null;
+  }
+
+  const stepListContent = hasSteps ? (
+    <View style={styles.planStepsList}>
+      {plan?.steps.map((step, index) => (
+        <View key={`${plan.turnId}-${index}-${step.step}`} style={styles.planStepRow}>
+          <Text
+            style={[
+              styles.planStepStatus,
+              step.status === 'completed'
+                ? styles.planStepStatusCompleted
+                : step.status === 'inProgress'
+                  ? styles.planStepStatusInProgress
+                  : styles.planStepStatusPending,
+            ]}
+          >
+            {renderPlanStatusGlyph(step.status)}
+          </Text>
+          <View style={styles.planStepMarkdownWrap}>
+            <Markdown
+              style={workflowMarkdownStyles}
+            >
+              {step.step}
+            </Markdown>
+          </View>
+        </View>
+      ))}
+    </View>
+  ) : (
+    <Text style={styles.planDeltaText}>(no steps provided)</Text>
+  );
+
+  const planSections = hasStructuredPlan ? (
+    mode === 'execution' ? (
+      <>
+        <View style={styles.workflowSection}>
+          <Text style={styles.workflowSectionEyebrow}>Plan summary</Text>
+          {plan?.explanation ? (
+            <Markdown style={workflowMarkdownStyles}>{plan.explanation}</Markdown>
+          ) : activeStep ? (
+            <Markdown style={workflowMarkdownStyles}>{activeStep.step}</Markdown>
+          ) : null}
+          {planProgressSummary ? (
+            <Text style={styles.workflowMetaText}>{planProgressSummary}</Text>
           ) : null}
         </View>
-        <View style={styles.queuedMessageActions}>
-          <Pressable
-            onPress={onCancel}
-            disabled={!cancelEnabled}
-            style={({ pressed }) => [
-              styles.queuedMessageActionButton,
-              styles.queuedMessageActionButtonDestructive,
-              !cancelEnabled && styles.queuedMessageActionButtonDisabled,
-              pressed && cancelEnabled && styles.queuedMessageActionButtonPressed,
-            ]}
-          >
-            <Text
-              style={[
-                styles.queuedMessageActionLabel,
-                styles.queuedMessageActionLabelDestructive,
-                !cancelEnabled && styles.queuedMessageActionLabelDisabled,
-              ]}
-            >
-              Cancel
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={onSteer}
-            disabled={!steerEnabled}
-            style={({ pressed }) => [
-              styles.queuedMessageActionButton,
-              !steerEnabled && styles.queuedMessageActionButtonDisabled,
-              pressed && steerEnabled && styles.queuedMessageActionButtonPressed,
-            ]}
-          >
-            <Text
-              style={[
-                styles.queuedMessageActionLabel,
-                !steerEnabled && styles.queuedMessageActionLabelDisabled,
-              ]}
-            >
-              Steer
-            </Text>
-          </Pressable>
+        <View style={styles.workflowSection}>
+          <Text style={styles.workflowSectionEyebrow}>Tasks</Text>
+          {stepListContent}
         </View>
+      </>
+    ) : (
+      <>
+        {plan?.explanation ? (
+          <Markdown style={workflowMarkdownStyles}>{plan.explanation}</Markdown>
+        ) : null}
+        {stepListContent}
+      </>
+    )
+  ) : null;
+
+  const header = isCollapsible ? (
+    <Pressable
+      style={({ pressed }) => [
+        styles.planCardHeader,
+        styles.planCardHeaderPressable,
+        pressed && styles.modelChipPressed,
+      ]}
+      onPress={onToggleCollapse}
+    >
+      <Ionicons name={iconName} size={14} color={colors.textPrimary} />
+      <View style={styles.planCardHeaderText}>
+        <Text style={styles.planCardTitle}>{title}</Text>
+        {collapsed ? (
+          <Text style={styles.planCardSummary} numberOfLines={1}>
+            {collapsedSummary}
+          </Text>
+        ) : null}
       </View>
-      <Text numberOfLines={2} style={styles.queuedMessageBody}>
-        {message.content}
-      </Text>
-      {steerDisabledReason ? (
-        <Text style={styles.queuedMessageHint}>{steerDisabledReason}</Text>
-      ) : null}
+      <Ionicons
+        name={collapsed ? 'chevron-down-outline' : 'chevron-up-outline'}
+        size={16}
+        color={colors.textMuted}
+      />
+    </Pressable>
+  ) : (
+    <View style={styles.planCardHeader}>
+      <Ionicons name={iconName} size={14} color={colors.textPrimary} />
+      <View style={styles.planCardHeaderText}>
+        <Text style={styles.planCardTitle}>{title}</Text>
+        <Text style={styles.planCardSummary} numberOfLines={2}>
+          {collapsedSummary}
+        </Text>
+      </View>
+    </View>
+  );
+
+  return (
+    <View style={[styles.planCard, styles.planOverlayCard]}>
+      {header}
+
+      {collapsed && isCollapsible ? null : (
+        <>
+          {planSections ? (
+            <ScrollView
+              nestedScrollEnabled
+              bounces={false}
+              style={[styles.workflowScrollViewport, { maxHeight: scrollMaxHeight }]}
+              contentContainerStyle={styles.workflowScrollContent}
+              showsVerticalScrollIndicator
+            >
+              {planSections}
+            </ScrollView>
+          ) : null}
+
+          {mode === 'approval' ? (
+            <View style={styles.planPromptOptionsColumn}>
+              <Pressable
+                onPress={onImplement}
+                disabled={actionDisabled}
+                style={({ pressed }) => [
+                  styles.planPromptOptionButton,
+                  actionDisabled && styles.planPromptOptionButtonDisabled,
+                  pressed && !actionDisabled && styles.planPromptOptionButtonPressed,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.planPromptOptionTitle,
+                    actionDisabled && styles.planPromptOptionTitleDisabled,
+                  ]}
+                >
+                  {PLAN_IMPLEMENTATION_YES}
+                </Text>
+                <Text
+                  style={[
+                    styles.planPromptOptionDescription,
+                    actionDisabled && styles.planPromptOptionDescriptionDisabled,
+                  ]}
+                >
+                  Switch to Default mode and start coding.
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={onStayInPlanMode}
+                disabled={actionDisabled}
+                style={({ pressed }) => [
+                  styles.planPromptOptionButton,
+                  actionDisabled && styles.planPromptOptionButtonDisabled,
+                  pressed && !actionDisabled && styles.planPromptOptionButtonPressed,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.planPromptOptionTitle,
+                    actionDisabled && styles.planPromptOptionTitleDisabled,
+                  ]}
+                >
+                  {PLAN_IMPLEMENTATION_NO}
+                </Text>
+                <Text
+                  style={[
+                    styles.planPromptOptionDescription,
+                    actionDisabled && styles.planPromptOptionDescriptionDisabled,
+                  ]}
+                >
+                  Stay in Plan mode and keep refining the approach.
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </>
+      )}
     </View>
   );
 }
 
-function PlanCard({
-  plan,
-  collapsed,
-  onToggleCollapse,
+function QueuedMessageDock({
+  queuedMessage,
+  remainingQueuedMessagesCount,
+  steerEnabled,
+  cancelEnabled,
+  steerDisabledReason,
+  onCancelQueuedMessage,
+  onSteerQueuedMessage,
 }: {
-  plan: ActivePlanState;
-  collapsed: boolean;
-  onToggleCollapse: () => void;
+  queuedMessage: QueuedChatMessage;
+  remainingQueuedMessagesCount: number;
+  steerEnabled: boolean;
+  cancelEnabled: boolean;
+  steerDisabledReason: string | null;
+  onCancelQueuedMessage: (messageId: string) => void;
+  onSteerQueuedMessage: () => void;
 }) {
-  const hasSteps = plan.steps.length > 0;
-  const hasStructuredUpdate = hasSteps || Boolean(plan.explanation?.trim());
-  const deltaPreview = toTickerSnippet(plan.deltaText, 260);
-  if (!hasStructuredUpdate && !deltaPreview) {
-    return null;
-  }
-
-  const title = hasStructuredUpdate ? 'Updated Plan' : 'Proposed Plan';
-  const activeStep =
-    plan.steps.find((step) => step.status === 'inProgress') ??
-    plan.steps.find((step) => step.status === 'pending') ??
-    plan.steps[plan.steps.length - 1] ??
-    null;
-  const collapsedSummary =
-    activeStep?.step ??
-    plan.explanation?.trim() ??
-    deltaPreview ??
-    '(no steps provided)';
-
   return (
-    <View style={[styles.planCard, styles.planOverlayCard]}>
-      <Pressable
-        style={({ pressed }) => [
-          styles.planCardHeader,
-          styles.planCardHeaderPressable,
-          pressed && styles.modelChipPressed,
-        ]}
-        onPress={onToggleCollapse}
-      >
-        <Ionicons name="map-outline" size={14} color={colors.textPrimary} />
-        <View style={styles.planCardHeaderText}>
-          <Text style={styles.planCardTitle}>{title}</Text>
-          {collapsed ? (
-            <Text style={styles.planCardSummary} numberOfLines={1}>
-              {collapsedSummary}
-            </Text>
-          ) : null}
+    <View style={styles.queuedMessageDock}>
+      <View style={[styles.planCard, styles.planOverlayCard, styles.queuedMessageCard]}>
+        <View style={styles.queuedMessageHeader}>
+          <View style={styles.queuedMessageHeaderText}>
+            <Text style={styles.planCardTitle}>Queued message</Text>
+            {remainingQueuedMessagesCount > 0 ? (
+              <Text style={styles.queuedMessageSummary}>
+                {`+${String(remainingQueuedMessagesCount)} more queued`}
+              </Text>
+            ) : null}
+          </View>
+          <View style={styles.queuedMessageActions}>
+            <Pressable
+              onPress={() => onCancelQueuedMessage(queuedMessage.id)}
+              disabled={!cancelEnabled}
+              style={({ pressed }) => [
+                styles.queuedMessageActionButton,
+                styles.queuedMessageActionButtonDestructive,
+                !cancelEnabled && styles.queuedMessageActionButtonDisabled,
+                pressed && cancelEnabled && styles.queuedMessageActionButtonPressed,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.queuedMessageActionLabel,
+                  styles.queuedMessageActionLabelDestructive,
+                  !cancelEnabled && styles.queuedMessageActionLabelDisabled,
+                ]}
+              >
+                Cancel
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={onSteerQueuedMessage}
+              disabled={!steerEnabled}
+              style={({ pressed }) => [
+                styles.queuedMessageActionButton,
+                !steerEnabled && styles.queuedMessageActionButtonDisabled,
+                pressed && steerEnabled && styles.queuedMessageActionButtonPressed,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.queuedMessageActionLabel,
+                  !steerEnabled && styles.queuedMessageActionLabelDisabled,
+                ]}
+              >
+                Steer
+              </Text>
+            </Pressable>
+          </View>
         </View>
-        <Ionicons
-          name={collapsed ? 'chevron-down-outline' : 'chevron-up-outline'}
-          size={16}
-          color={colors.textMuted}
-        />
-      </Pressable>
-
-      {collapsed ? null : (
-        <>
-          {plan.explanation ? (
-            <Text style={styles.planExplanationText}>{plan.explanation}</Text>
-          ) : null}
-
-          {hasSteps ? (
-            <View style={styles.planStepsList}>
-              {plan.steps.map((step, index) => (
-                <View key={`${plan.turnId}-${index}-${step.step}`} style={styles.planStepRow}>
-                  <Text
-                    style={[
-                      styles.planStepStatus,
-                      step.status === 'completed'
-                        ? styles.planStepStatusCompleted
-                        : step.status === 'inProgress'
-                          ? styles.planStepStatusInProgress
-                          : styles.planStepStatusPending,
-                    ]}
-                  >
-                    {renderPlanStatusGlyph(step.status)}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.planStepText,
-                      step.status === 'completed'
-                        ? styles.planStepTextCompleted
-                        : step.status === 'inProgress'
-                          ? styles.planStepTextInProgress
-                          : styles.planStepTextPending,
-                    ]}
-                  >
-                    {step.step}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          ) : hasStructuredUpdate ? (
-            <Text style={styles.planDeltaText}>(no steps provided)</Text>
-          ) : null}
-
-          {!hasStructuredUpdate && deltaPreview ? (
-            <Text style={styles.planDeltaText}>{deltaPreview}</Text>
-          ) : null}
-        </>
-      )}
+        <Text numberOfLines={3} style={styles.queuedMessageBody}>
+          {queuedMessage.content}
+        </Text>
+        {steerDisabledReason ? (
+          <Text style={styles.queuedMessageHint}>{steerDisabledReason}</Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -7709,6 +8104,42 @@ function toTurnPlanUpdate(
     explanation: readString(record.explanation),
     plan,
   };
+}
+
+function resolveCodexPlanTurnId(
+  value: Record<string, unknown> | null,
+  fallbackTurnId: string | null = null
+): string {
+  return (
+    readString(value?.turnId) ??
+    readString(value?.turn_id) ??
+    fallbackTurnId ??
+    'unknown-turn'
+  );
+}
+
+function toCodexTurnPlanUpdate(
+  value: Record<string, unknown> | null,
+  threadId: string,
+  fallbackTurnId: string | null = null
+): {
+  threadId: string;
+  turnId: string;
+  explanation: string | null;
+  plan: TurnPlanStep[];
+} | null {
+  if (!value) {
+    return null;
+  }
+
+  return toTurnPlanUpdate(
+    {
+      ...value,
+      threadId,
+      turnId: resolveCodexPlanTurnId(value, fallbackTurnId),
+    },
+    threadId
+  );
 }
 
 function toPendingUserInputRequest(value: unknown): PendingUserInputRequest | null {
@@ -8283,7 +8714,108 @@ function resolveSnapshotCollaborationMode(
     return 'default';
   }
 
-  return snapshot.pendingUserInputRequest ? 'plan' : 'default';
+  const hasActivePlanSnapshot =
+    Boolean(snapshot.plan) &&
+    (Boolean(snapshot.activeTurnId) || snapshot.activity?.title === 'Planning');
+  return snapshot.pendingUserInputRequest || hasActivePlanSnapshot ? 'plan' : 'default';
+}
+
+function resolveDisplayedThreadPlan(
+  snapshotPlan: ActivePlanState | null,
+  persistedPlan: ActivePlanState | null,
+  snapshot: ThreadRuntimeSnapshot | null | undefined
+): ActivePlanState | null {
+  if (!persistedPlan) {
+    return snapshotPlan;
+  }
+
+  if (!snapshotPlan) {
+    return persistedPlan;
+  }
+
+  if (snapshotPlan.turnId === persistedPlan.turnId) {
+    return {
+      ...snapshotPlan,
+      explanation: snapshotPlan.explanation ?? persistedPlan.explanation,
+      steps: snapshotPlan.steps.length > 0 ? snapshotPlan.steps : persistedPlan.steps,
+      updatedAt:
+        snapshotPlan.updatedAt > persistedPlan.updatedAt
+          ? snapshotPlan.updatedAt
+          : persistedPlan.updatedAt,
+    };
+  }
+
+  const hasActivePlanningSnapshot =
+    Boolean(snapshot?.activeTurnId) || snapshot?.activity?.title === 'Planning';
+  return hasActivePlanningSnapshot ? snapshotPlan : persistedPlan;
+}
+
+function toPersistedActivePlanState(
+  plan: Chat['latestPlan'],
+  fallbackUpdatedAt: string | null | undefined
+): ActivePlanState | null {
+  if (!plan) {
+    return null;
+  }
+
+  return {
+    threadId: plan.threadId,
+    turnId: plan.turnId,
+    explanation: plan.explanation,
+    steps: plan.steps,
+    deltaText: '',
+    updatedAt: fallbackUpdatedAt ?? new Date(0).toISOString(),
+  };
+}
+
+function resolveUndismissedPlanImplementationPrompt(
+  prompt: PendingPlanImplementationPrompt | null | undefined,
+  dismissedTurnId: string | null | undefined
+): PendingPlanImplementationPrompt | null {
+  if (!prompt) {
+    return null;
+  }
+
+  return dismissedTurnId && dismissedTurnId === prompt.turnId ? null : prompt;
+}
+
+function resolvePersistedPlanImplementationPrompt(
+  chat: Chat | null | undefined,
+  dismissedTurnId: string | null | undefined
+): PendingPlanImplementationPrompt | null {
+  if (!chat?.latestTurnPlan) {
+    return null;
+  }
+
+  if (dismissedTurnId && dismissedTurnId === chat.latestTurnPlan.turnId) {
+    return null;
+  }
+
+  return isCompletedPlanTurnStatus(chat.latestTurnStatus)
+    ? {
+        threadId: chat.id,
+        turnId: chat.latestTurnPlan.turnId,
+      }
+    : null;
+}
+
+function normalizePlanTurnStatus(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalized.length > 0 ? normalized : null;
+}
+
+function isCompletedPlanTurnStatus(value: string | null | undefined): boolean {
+  const normalized = normalizePlanTurnStatus(value);
+  return (
+    normalized === 'completed' ||
+    normalized === 'complete' ||
+    normalized === 'success' ||
+    normalized === 'succeeded'
+  );
 }
 
 function formatReasoningEffort(effort: ReasoningEffort): string {
@@ -8303,6 +8835,10 @@ function formatReasoningEffort(effort: ReasoningEffort): string {
 }
 
 function shouldAutoEnablePlanModeFromChat(chat: Chat): boolean {
+  if (chat.latestTurnPlan) {
+    return true;
+  }
+
   const latestAssistantMessage = [...chat.messages]
     .reverse()
     .find((message) => message.role === 'assistant');
@@ -8451,6 +8987,7 @@ function iconForAgentThread(
 
 function stripMarkdownInline(value: string): string {
   return value
+    .replace(/(^|\n)\s{0,3}#{1,6}\s*/g, '$1')
     .replace(/\*\*(.*?)\*\*/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/[_~]/g, '');
@@ -8923,6 +9460,126 @@ function toPendingApproval(value: unknown): PendingApproval | null {
 
 // ── Styles ─────────────────────────────────────────────────────────
 
+const workflowMarkdownStyles = StyleSheet.create({
+  body: {
+    ...typography.body,
+    color: colors.textPrimary,
+  },
+  paragraph: {
+    ...typography.body,
+    color: colors.textSecondary,
+    marginTop: 0,
+    marginBottom: spacing.xs,
+  },
+  heading1: {
+    ...typography.headline,
+    color: colors.textPrimary,
+    fontSize: 18,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  heading2: {
+    ...typography.headline,
+    color: colors.textPrimary,
+    fontSize: 16,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  heading3: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs / 2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  heading4: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs / 2,
+  },
+  heading5: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs / 2,
+  },
+  heading6: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs / 2,
+  },
+  bullet_list: {
+    marginTop: 0,
+    marginBottom: spacing.xs,
+  },
+  ordered_list: {
+    marginTop: 0,
+    marginBottom: spacing.xs,
+  },
+  list_item: {
+    marginTop: 0,
+    marginBottom: spacing.xs / 2,
+  },
+  strong: {
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  em: {
+    color: colors.textSecondary,
+    fontStyle: 'italic',
+  },
+  code_inline: {
+    ...typography.mono,
+    backgroundColor: colors.inlineCodeBg,
+    color: colors.inlineCodeText,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.inlineCodeBorder,
+    borderRadius: radius.sm,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  code_block: {
+    ...typography.mono,
+    backgroundColor: colors.bgInput,
+    color: colors.textPrimary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    borderRadius: radius.sm,
+    padding: spacing.md,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  fence: {
+    ...typography.mono,
+    backgroundColor: colors.bgInput,
+    color: colors.textPrimary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    borderRadius: radius.sm,
+    padding: spacing.md,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  blockquote: {
+    borderLeftWidth: 2,
+    borderLeftColor: colors.borderHighlight,
+    paddingLeft: spacing.sm,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
+  },
+  link: {
+    color: colors.accent,
+    textDecorationLine: 'underline',
+  },
+});
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -8941,17 +9598,15 @@ const styles = StyleSheet.create({
   composerContainerResting: {
     marginBottom: 0,
   },
+  queuedMessageDock: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.xs / 2,
+  },
   activityDock: {
     backgroundColor: colors.bgMain,
     paddingTop: spacing.xs,
     paddingBottom: spacing.xs / 2,
-    zIndex: 3,
-  },
-  queuedMessageDock: {
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xs / 2,
-    paddingBottom: spacing.xs,
     zIndex: 3,
   },
   sessionMetaRow: {
@@ -9212,6 +9867,31 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: spacing.xs,
   },
+  workflowSection: {
+    marginTop: spacing.md,
+    gap: spacing.xs,
+  },
+  workflowSectionEyebrow: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  workflowScrollViewport: {
+    marginTop: spacing.xs,
+  },
+  workflowScrollContent: {
+    paddingBottom: spacing.xs,
+  },
+  workflowSummaryText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    lineHeight: 18,
+  },
+  workflowMetaText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+  },
   queuedMessageActionButton: {
     flexShrink: 0,
     borderRadius: 999,
@@ -9279,6 +9959,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: spacing.sm,
+  },
+  planStepMarkdownWrap: {
+    flex: 1,
+    minWidth: 0,
   },
   planStepStatus: {
     ...typography.caption,
@@ -9525,14 +10209,23 @@ const styles = StyleSheet.create({
   planPromptOptionButtonPressed: {
     opacity: 0.88,
   },
+  planPromptOptionButtonDisabled: {
+    opacity: 0.45,
+  },
   planPromptOptionTitle: {
     ...typography.body,
     color: colors.textPrimary,
     fontWeight: '600',
   },
+  planPromptOptionTitleDisabled: {
+    color: colors.textMuted,
+  },
   planPromptOptionDescription: {
     ...typography.caption,
     color: colors.textSecondary,
+  },
+  planPromptOptionDescriptionDisabled: {
+    color: colors.textMuted,
   },
   userInputQuestionsList: {
     maxHeight: 380,
