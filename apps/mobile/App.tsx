@@ -312,6 +312,12 @@ export default function App() {
 
   const handleSelectChat = useCallback(
     (id: string) => {
+      const currentChatId = activeChat?.id ?? selectedChatId;
+      if (currentScreen === 'Main' && currentChatId === id) {
+        closeDrawer();
+        return;
+      }
+
       setSelectedChatId(id);
       setGitChat(null);
       setCurrentScreen('Main');
@@ -319,7 +325,7 @@ export default function App() {
       setPendingMainChatSnapshot(null);
       closeDrawer();
     },
-    [closeDrawer]
+    [activeChat?.id, closeDrawer, currentScreen, selectedChatId]
   );
 
   const handleNewChat = useCallback(() => {
