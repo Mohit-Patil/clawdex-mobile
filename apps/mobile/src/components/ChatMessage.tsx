@@ -1,14 +1,26 @@
 import { Ionicons } from '@expo/vector-icons';
-import { memo } from 'react';
-import { Image, Linking, Platform, StyleSheet, Text, View } from 'react-native';
+import { memo, useMemo, useState, type ReactElement } from 'react';
+import {
+  Image,
+  Pressable,
+  type ImageSourcePropType,
+  Linking,
+  Platform,
+  StyleSheet,
+  Text,
+  type TextProps,
+  View,
+} from 'react-native';
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
-import Animated, { FadeInUp, Layout } from 'react-native-reanimated';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
 import { colors, radius, spacing, typography } from '../theme';
+import { toMarkdownImageSource } from './chatImageSource';
 
 interface ChatMessageProps {
   message: ApiChatMessage;
+  bridgeUrl?: string | null;
+  bridgeToken?: string | null;
 }
 
 interface TimelineEntry {
@@ -16,39 +28,151 @@ interface TimelineEntry {
   details: string[];
 }
 
-function ChatMessageComponent({ message }: ChatMessageProps) {
-  const isUser = message.role === 'user';
+type UserMessageBlock =
+  | { kind: 'text'; value: string }
+  | { kind: 'file'; value: string }
+  | { kind: 'image'; source: ImageSourcePropType; accessibilityLabel?: string };
 
-  if (isUser) {
-    return (
-      <Animated.View
-        entering={FadeInUp.duration(300)}
-        layout={Layout.springify()}
-        style={[styles.messageWrapper, styles.messageWrapperUser]}
-      >
-        <View style={styles.userBubble}>
-          <Text style={styles.userMessageText}>{message.content}</Text>
+function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }: ChatMessageProps) {
+  const isUser = message.role === 'user';
+  const markdownRules = useMemo(
+    () => createMarkdownRules(bridgeUrl, bridgeToken),
+    [bridgeToken, bridgeUrl]
+  );
+  const [expandedTimelineEntries, setExpandedTimelineEntries] = useState<
+    Record<string, boolean>
+  >({});
+  const userBlocks = useMemo(
+    () =>
+      isUser ? parseUserMessageBlocks(message.content, bridgeUrl, bridgeToken) : [],
+    [bridgeToken, bridgeUrl, isUser, message.content]
+  );
+
+  const renderedMessage = isUser ? (
+    <View style={[styles.messageWrapper, styles.messageWrapperUser]}>
+      <View style={[styles.userBubble, userBlocks.length > 1 && styles.userBubbleWithAttachments]}>
+        <View style={styles.userBubbleContent}>
+          {userBlocks.map((block, index) => {
+            if (block.kind === 'image') {
+              return (
+                <MarkdownImage
+                  key={`${message.id}-image-${String(index)}`}
+                  source={block.source}
+                  accessibilityLabel={block.accessibilityLabel}
+                />
+              );
+            }
+
+            if (block.kind === 'file') {
+              return (
+                <View key={`${message.id}-file-${String(index)}`} style={styles.userFileChip}>
+                  <Ionicons name="document-text-outline" size={12} color={colors.textMuted} />
+                  <Text style={styles.userFileChipText} numberOfLines={1}>
+                    {block.value}
+                  </Text>
+                </View>
+              );
+            }
+
+            return (
+              <SelectableMessageText
+                key={`${message.id}-text-${String(index)}`}
+                style={styles.userMessageText}
+              >
+                {block.value}
+              </SelectableMessageText>
+            );
+          })}
         </View>
-      </Animated.View>
-    );
+      </View>
+    </View>
+  ) : null;
+
+  if (renderedMessage) {
+    return renderedMessage;
   }
 
   const timelineEntries =
     message.role === 'system' ? parseTimelineEntries(message.content) : null;
+  if (message.role === 'system' && message.systemKind === 'subAgent') {
+    const subAgentEntries =
+      timelineEntries && timelineEntries.length > 0
+        ? timelineEntries
+        : [{ title: message.content, details: [] }];
+
+    return (
+      <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
+        <View style={styles.subAgentCardStack}>
+          {subAgentEntries.map((entry, index) => {
+            const visual = toSubAgentVisual(entry.title);
+            return (
+              <View
+                key={`${message.id}-subagent-${String(index)}`}
+                style={[
+                  styles.subAgentCard,
+                  visual.isError && styles.subAgentCardError,
+                ]}
+              >
+                <View style={styles.subAgentHeader}>
+                  <Ionicons
+                    name={visual.icon}
+                    size={14}
+                    color={visual.isError ? colors.statusError : '#F5A524'}
+                  />
+                  <Text style={styles.subAgentTitle}>{entry.title}</Text>
+                </View>
+                {entry.details.length > 0 ? (
+                  <View style={styles.subAgentDetailWrap}>
+                    {entry.details.map((line, lineIndex) => (
+                      <SelectableMessageText
+                        key={`${message.id}-subagent-${String(index)}-line-${String(lineIndex)}`}
+                        style={styles.subAgentDetailLine}
+                      >
+                        {line}
+                      </SelectableMessageText>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    );
+  }
   if (timelineEntries && timelineEntries.length > 0) {
     return (
-      <Animated.View
-        entering={FadeInUp.duration(300).delay(50)}
-        layout={Layout.springify()}
-        style={[styles.messageWrapper, styles.messageWrapperAssistant]}
-      >
+      <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
         <View style={styles.timelineCardStack}>
           {timelineEntries.map((entry, index) => {
             const visual = toTimelineVisual(entry.title);
+            const timelineKey = `${message.id}-timeline-${String(index)}`;
+            const hasDetails = entry.details.length > 0;
+            const expanded = expandedTimelineEntries[timelineKey] === true;
+            const toggleLabel = expanded
+              ? 'Tap to hide output'
+              : entry.details.length <= 1
+                ? 'Tap to show output'
+                : `Tap to show ${String(entry.details.length)} lines`;
             return (
-              <View
+              <Pressable
                 key={`${message.id}-timeline-${String(index)}`}
-                style={[styles.timelineCard, visual.isError && styles.timelineCardError]}
+                disabled={!hasDetails}
+                onPress={() => {
+                  if (!hasDetails) {
+                    return;
+                  }
+                  setExpandedTimelineEntries((previous) => ({
+                    ...previous,
+                    [timelineKey]: !previous[timelineKey],
+                  }));
+                }}
+                style={({ pressed }) => [
+                  styles.timelineCard,
+                  visual.isError && styles.timelineCardError,
+                  hasDetails && styles.timelineCardInteractive,
+                  pressed && hasDetails && styles.timelineCardPressed,
+                ]}
               >
                 <View style={styles.timelineHeader}>
                   <Ionicons
@@ -61,40 +185,47 @@ function ChatMessageComponent({ message }: ChatMessageProps) {
                       styles.timelineTitle,
                       visual.useMonospaceTitle && styles.timelineTitleMono,
                     ]}
+                    numberOfLines={expanded ? 3 : 1}
                   >
                     {entry.title}
                   </Text>
+                  {hasDetails ? (
+                    <Ionicons
+                      name={expanded ? 'chevron-up' : 'chevron-down'}
+                      size={14}
+                      color={colors.textMuted}
+                    />
+                  ) : null}
                 </View>
-                {entry.details.length > 0 ? (
+                {hasDetails ? (
+                  <Text style={styles.timelineToggleText}>{toggleLabel}</Text>
+                ) : null}
+                {expanded && entry.details.length > 0 ? (
                   <View style={styles.timelineDetailWrap}>
                     {entry.details.map((line, lineIndex) => (
-                      <Text
+                      <SelectableMessageText
                         key={`${message.id}-timeline-${String(index)}-line-${String(lineIndex)}`}
                         style={styles.timelineDetailLine}
                       >
                         {line}
-                      </Text>
+                      </SelectableMessageText>
                     ))}
                   </View>
                 ) : null}
-              </View>
+              </Pressable>
             );
           })}
         </View>
-      </Animated.View>
+      </View>
     );
   }
 
   return (
-    <Animated.View
-      entering={FadeInUp.duration(300).delay(50)}
-      layout={Layout.springify()}
-      style={[styles.messageWrapper, styles.messageWrapperAssistant]}
-    >
+    <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
       <Markdown style={markdownStyles} rules={markdownRules}>
         {message.content || '\u258D'}
       </Markdown>
-    </Animated.View>
+    </View>
   );
 }
 
@@ -113,7 +244,10 @@ function areChatMessagePropsEqual(
     previous.id === next.id &&
     previous.role === next.role &&
     previous.content === next.content &&
-    previous.createdAt === next.createdAt
+    previous.createdAt === next.createdAt &&
+    previous.systemKind === next.systemKind &&
+    prevProps.bridgeUrl === nextProps.bridgeUrl &&
+    prevProps.bridgeToken === nextProps.bridgeToken
   );
 }
 
@@ -186,71 +320,133 @@ const markdownStyles = StyleSheet.create({
   },
 });
 
-const markdownRules: RenderRules = {
-  link: (node, children, _parent, styles, onLinkPress) => {
-    const href = readMarkdownAttr(node.attributes.href);
-    if (!href) {
-      return (
-        <Text key={node.key} style={styles.link}>
-          {children}
-        </Text>
-      );
-    }
-
-    const localFileReference = toLocalFileReferenceLabel(href);
-    if (localFileReference) {
-      return (
-        <Text key={node.key} style={styles.code_inline}>
-          {localFileReference}
-        </Text>
-      );
-    }
-
-    return (
-      <Text
-        key={node.key}
-        style={styles.link}
-        onPress={() => openMarkdownLink(href, onLinkPress)}
-      >
+function createMarkdownRules(
+  bridgeUrl: string | null,
+  bridgeToken: string | null
+): RenderRules {
+  return {
+    text: (node, _children, _parent, styles, inheritedStyles = {}) => (
+      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.text]}>
+        {node.content}
+      </SelectableMessageText>
+    ),
+    textgroup: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.textgroup}>
         {children}
-      </Text>
-    );
-  },
-  image: (
-    node,
-    _children,
-    _parent,
-    _styles,
-    allowedImageHandlers = [],
-    defaultImageHandler = '',
-  ) => {
-    const src = readMarkdownAttr(node.attributes.src);
-    if (!src) {
-      return null;
-    }
+      </SelectableMessageText>
+    ),
+    strong: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.strong}>
+        {children}
+      </SelectableMessageText>
+    ),
+    em: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.em}>
+        {children}
+      </SelectableMessageText>
+    ),
+    s: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.s}>
+        {children}
+      </SelectableMessageText>
+    ),
+    code_inline: (node, _children, _parent, styles, inheritedStyles = {}) => (
+      <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_inline]}>
+        {node.content}
+      </SelectableMessageText>
+    ),
+    code_block: (node, _children, _parent, styles, inheritedStyles = {}) => {
+      const content =
+        typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
+          ? node.content.substring(0, node.content.length - 1)
+          : node.content;
+      return (
+        <SelectableMessageText key={node.key} style={[inheritedStyles, styles.code_block]}>
+          {content}
+        </SelectableMessageText>
+      );
+    },
+    fence: (node, _children, _parent, styles, inheritedStyles = {}) => {
+      const content =
+        typeof node.content === 'string' && node.content.charAt(node.content.length - 1) === '\n'
+          ? node.content.substring(0, node.content.length - 1)
+          : node.content;
+      return (
+        <SelectableMessageText key={node.key} style={[inheritedStyles, styles.fence]}>
+          {content}
+        </SelectableMessageText>
+      );
+    },
+    hardbreak: (node, _children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.hardbreak}>
+        {'\n'}
+      </SelectableMessageText>
+    ),
+    softbreak: (node, _children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.softbreak}>
+        {'\n'}
+      </SelectableMessageText>
+    ),
+    inline: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.inline}>
+        {children}
+      </SelectableMessageText>
+    ),
+    span: (node, children, _parent, styles) => (
+      <SelectableMessageText key={node.key} style={styles.span}>
+        {children}
+      </SelectableMessageText>
+    ),
+    link: (node, children, _parent, styles, onLinkPress) => {
+      const href = readMarkdownAttr(node.attributes.href);
+      if (!href) {
+        return (
+          <SelectableMessageText key={node.key} style={styles.link}>
+            {children}
+          </SelectableMessageText>
+        );
+      }
 
-    const isAllowed = allowedImageHandlers.some((handler) =>
-      src.toLowerCase().startsWith(handler.toLowerCase())
-    );
-    if (!isAllowed && defaultImageHandler === null) {
-      return null;
-    }
+      const localFileReference = toLocalFileReferenceLabel(href);
+      if (localFileReference) {
+        return (
+          <SelectableMessageText key={node.key} style={styles.code_inline}>
+            {localFileReference}
+          </SelectableMessageText>
+        );
+      }
 
-    const uri = isAllowed ? src : `${defaultImageHandler}${src}`;
-    const alt = readMarkdownAttr(node.attributes.alt);
+      return (
+        <SelectableMessageText
+          key={node.key}
+          style={styles.link}
+          onPress={() => openMarkdownLink(href, onLinkPress)}
+        >
+          {children}
+        </SelectableMessageText>
+      );
+    },
+    image: (node) => {
+      const src = readMarkdownAttr(node.attributes.src);
+      if (!src) {
+        return null;
+      }
+      const source = toMarkdownImageSource(src, bridgeUrl, bridgeToken);
+      if (!source) {
+        return null;
+      }
+      const alt = readMarkdownAttr(node.attributes.alt);
 
-    return (
-      <Image
-        key={node.key}
-        source={{ uri }}
-        style={styles.markdownImage}
-        resizeMode="contain"
-        accessible={Boolean(alt)}
-        accessibilityLabel={alt ?? undefined}
-      />
-    );
-  },
-};
+      return (
+        <MarkdownImage
+          key={node.key}
+          source={source}
+          accessibilityLabel={alt ?? undefined}
+        />
+      );
+    },
+  };
+}
 
 const styles = StyleSheet.create({
   messageWrapper: {
@@ -271,22 +467,87 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
   },
+  userBubbleWithAttachments: {
+    minWidth: 196,
+  },
+  userBubbleContent: {
+    gap: spacing.sm,
+  },
   userMessageText: {
     fontFamily: monoFont,
     fontSize: 14,
     color: colors.textPrimary,
     lineHeight: 20,
   },
+  userFileChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: spacing.xs,
+    borderRadius: radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.userBubbleBorder,
+    backgroundColor: colors.bgMain,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    maxWidth: '100%',
+  },
+  userFileChipText: {
+    fontFamily: monoFont,
+    fontSize: 12,
+    lineHeight: 16,
+    color: colors.textMuted,
+    flexShrink: 1,
+  },
   markdownImage: {
     width: '100%',
-    minHeight: 120,
-    maxHeight: 260,
     borderRadius: radius.sm,
     marginVertical: spacing.sm,
     backgroundColor: colors.bgInput,
   },
+  markdownImageFallback: {
+    minHeight: 120,
+    maxHeight: 260,
+  },
   timelineCardStack: {
     gap: spacing.sm,
+  },
+  subAgentCardStack: {
+    gap: spacing.xs + 2,
+  },
+  subAgentCard: {
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(245, 165, 36, 0.35)',
+    backgroundColor: 'rgba(245, 165, 36, 0.08)',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 1,
+  },
+  subAgentCardError: {
+    borderColor: colors.statusError,
+    backgroundColor: colors.errorBg,
+  },
+  subAgentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  subAgentTitle: {
+    ...typography.body,
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  subAgentDetailWrap: {
+    marginTop: spacing.xs,
+    paddingLeft: spacing.lg + 2,
+    gap: 2,
+  },
+  subAgentDetailLine: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 16,
   },
   timelineCard: {
     borderRadius: radius.md,
@@ -299,6 +560,12 @@ const styles = StyleSheet.create({
   timelineCardError: {
     borderColor: colors.statusError,
     backgroundColor: colors.errorBg,
+  },
+  timelineCardInteractive: {
+    overflow: 'hidden',
+  },
+  timelineCardPressed: {
+    opacity: 0.82,
   },
   timelineHeader: {
     flexDirection: 'row',
@@ -324,6 +591,11 @@ const styles = StyleSheet.create({
     paddingTop: spacing.xs,
     gap: 2,
   },
+  timelineToggleText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
+  },
   timelineDetailLine: {
     fontFamily: monoFont,
     fontSize: 11,
@@ -334,6 +606,147 @@ const styles = StyleSheet.create({
 
 function readMarkdownAttr(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function SelectableMessageText({ children, ...props }: TextProps): ReactElement {
+  return (
+    <Text selectable={props.selectable ?? !props.onPress} {...props}>
+      {children}
+    </Text>
+  );
+}
+
+function MarkdownImage({
+  source,
+  accessibilityLabel,
+}: {
+  source: ImageSourcePropType;
+  accessibilityLabel?: string;
+}): ReactElement {
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+
+  return (
+    <Image
+      source={source}
+      style={[
+        styles.markdownImage,
+        aspectRatio ? { aspectRatio } : styles.markdownImageFallback,
+      ]}
+      resizeMode="contain"
+      accessible={Boolean(accessibilityLabel)}
+      accessibilityLabel={accessibilityLabel}
+      onLoad={(event) => {
+        const width = event.nativeEvent.source?.width;
+        const height = event.nativeEvent.source?.height;
+        if (
+          typeof width !== 'number' ||
+          typeof height !== 'number' ||
+          !Number.isFinite(width) ||
+          !Number.isFinite(height) ||
+          width <= 0 ||
+          height <= 0
+        ) {
+          return;
+        }
+
+        const nextAspectRatio = width / height;
+        setAspectRatio((previousAspectRatio) =>
+          previousAspectRatio === nextAspectRatio ? previousAspectRatio : nextAspectRatio
+        );
+      }}
+    />
+  );
+}
+
+function parseUserMessageBlocks(
+  content: string,
+  bridgeUrl: string | null,
+  bridgeToken: string | null
+): UserMessageBlock[] {
+  const blocks: UserMessageBlock[] = [];
+  const pendingTextLines: string[] = [];
+
+  const flushTextBlock = () => {
+    if (pendingTextLines.length === 0) {
+      return;
+    }
+
+    const value = pendingTextLines.join('\n');
+    pendingTextLines.length = 0;
+    if (!value.trim()) {
+      return;
+    }
+
+    blocks.push({
+      kind: 'text',
+      value,
+    });
+  };
+
+  for (const line of content.split('\n')) {
+    const localImageMatch = line.match(/^\[local image:\s*(.+?)\]$/i);
+    if (localImageMatch) {
+      const source = toMarkdownImageSource(localImageMatch[1], bridgeUrl, bridgeToken);
+      if (source) {
+        flushTextBlock();
+        blocks.push({
+          kind: 'image',
+          source,
+          accessibilityLabel: toPathBasename(localImageMatch[1]),
+        });
+        continue;
+      }
+    }
+
+    const remoteImageMatch = line.match(/^\[image:\s*(.+?)\]$/i);
+    if (remoteImageMatch) {
+      const source = toMarkdownImageSource(remoteImageMatch[1], bridgeUrl, bridgeToken);
+      if (source) {
+        flushTextBlock();
+        blocks.push({
+          kind: 'image',
+          source,
+          accessibilityLabel: toPathBasename(remoteImageMatch[1]),
+        });
+        continue;
+      }
+    }
+
+    const fileMatch = line.match(/^\[file:\s*(.+?)\]$/i);
+    if (fileMatch) {
+      flushTextBlock();
+      blocks.push({
+        kind: 'file',
+        value: toLocalFileReferenceLabel(fileMatch[1]) ?? toPathBasename(fileMatch[1]),
+      });
+      continue;
+    }
+
+    pendingTextLines.push(line);
+  }
+
+  flushTextBlock();
+
+  if (blocks.length === 0) {
+    return [
+      {
+        kind: 'text',
+        value: content,
+      },
+    ];
+  }
+
+  return blocks;
+}
+
+function toPathBasename(path: string): string {
+  const normalizedPath = path.trim().replace(/\\/g, '/');
+  if (!normalizedPath) {
+    return 'image';
+  }
+
+  const basename = normalizedPath.split('/').filter(Boolean).pop();
+  return basename && basename.length > 0 ? basename : normalizedPath;
 }
 
 function openMarkdownLink(
@@ -499,6 +912,48 @@ function toTimelineVisual(title: string): {
   return {
     icon: 'document-text-outline',
     useMonospaceTitle: false,
+    isError: false,
+  };
+}
+
+function toSubAgentVisual(title: string): {
+  icon: keyof typeof Ionicons.glyphMap;
+  isError: boolean;
+} {
+  const normalized = title.toLowerCase();
+  const isError =
+    normalized.includes('failed') || normalized.includes('error') || normalized.includes('aborted');
+
+  if (isError) {
+    return {
+      icon: 'alert-circle-outline',
+      isError: true,
+    };
+  }
+
+  if (normalized.includes('waiting')) {
+    return {
+      icon: 'pause-circle-outline',
+      isError: false,
+    };
+  }
+
+  if (normalized.includes('closed')) {
+    return {
+      icon: 'checkmark-circle-outline',
+      isError: false,
+    };
+  }
+
+  if (normalized.includes('spawn')) {
+    return {
+      icon: 'sparkles-outline',
+      isError: false,
+    };
+  }
+
+  return {
+    icon: 'git-branch-outline',
     isError: false,
   };
 }

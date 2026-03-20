@@ -6,7 +6,11 @@ import {
   type RawThread,
   toRawThread,
 } from './chatMapping';
+import { readAccountSnapshot } from './account';
+import { readAccountRateLimits as readSelectedAccountRateLimits } from './rateLimits';
 import type {
+  AccountSnapshot,
+  AccountRateLimitSnapshot,
   ApprovalPolicy,
   ApprovalDecision,
   CollaborationMode,
@@ -28,6 +32,7 @@ import type {
   ResolveUserInputRequest,
   ResolveUserInputResponse,
   SendChatMessageRequest,
+  SteerChatTurnRequest,
   MentionInput,
   LocalImageInput,
   UploadAttachmentRequest,
@@ -37,8 +42,12 @@ import type {
   ModelOption,
   ReasoningEffort,
   ModelReasoningEffortOption,
+  ServiceTier,
   TerminalExecRequest,
   TerminalExecResponse,
+  WorkspaceListResponse,
+  FileSystemListRequest,
+  FileSystemListResponse,
 } from './types';
 import type { HostBridgeWsClient } from './ws';
 
@@ -53,6 +62,10 @@ interface ApiClientOptions {
 }
 
 interface AppServerListResponse {
+  data?: unknown[];
+}
+
+interface AppServerLoadedThreadListResponse {
   data?: unknown[];
 }
 
@@ -80,8 +93,18 @@ interface AppServerModelListResponse {
   data?: unknown[];
 }
 
+interface AppServerConfigReadResponse {
+  config?: unknown;
+}
+
+interface AppServerAccountReadResponse {
+  account?: unknown;
+  requiresOpenaiAuth?: boolean;
+  requires_openai_auth?: boolean;
+}
+
 interface AppServerCollaborationMode {
-  mode: 'plan';
+  mode: 'plan' | 'default';
   settings: {
     model: string;
     reasoning_effort: ReasoningEffort | null;
@@ -89,11 +112,25 @@ interface AppServerCollaborationMode {
   };
 }
 
+interface AppServerThreadRuntimeSettings {
+  model: string | null;
+  effort: ReasoningEffort | null;
+}
+
 type AppServerThreadSetNameResponse = Record<string, never>;
 
 const CHAT_LIST_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer', 'unknown'] as const;
+const CHAT_LIST_SOURCE_KINDS_WITH_SUBAGENTS = [
+  ...CHAT_LIST_SOURCE_KINDS,
+  'subAgent',
+  'subAgentReview',
+  'subAgentCompact',
+  'subAgentThreadSpawn',
+  'subAgentOther',
+] as const;
 const MOBILE_DEVELOPER_INSTRUCTIONS =
   'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
+const MOBILE_DEFAULT_SANDBOX = 'danger-full-access';
 
 interface ChatSnapshot {
   rawThread: RawThread;
@@ -121,6 +158,10 @@ interface SendChatMessageOptions {
   onTurnStarted?: (turnId: string) => void;
 }
 
+interface ListChatsOptions {
+  includeSubAgents?: boolean;
+}
+
 const ACTIVE_TURN_STATUSES = new Set([
   'inprogress',
   'in_progress',
@@ -142,13 +183,32 @@ export class HostBridgeApiClient {
     return this.ws.request<HealthResponse>('bridge/health/read');
   }
 
-  async listChats(): Promise<ChatSummary[]> {
+  async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {
+    const response = await this.ws.request<Record<string, unknown>>('account/rateLimits/read');
+    return readSelectedAccountRateLimits(response);
+  }
+
+  async readAccount(): Promise<AccountSnapshot> {
+    const response = await this.ws.request<AppServerAccountReadResponse>('account/read', {
+      refreshToken: false,
+    });
+    return readAccountSnapshot(response);
+  }
+
+  async logoutAccount(): Promise<void> {
+    await this.ws.request('account/logout');
+  }
+
+  async listChats(options?: ListChatsOptions): Promise<ChatSummary[]> {
+    const includeSubAgents = options?.includeSubAgents === true;
     const response = await this.ws.request<AppServerListResponse>('thread/list', {
       cursor: null,
       limit: 200,
       sortKey: null,
       modelProviders: null,
-      sourceKinds: CHAT_LIST_SOURCE_KINDS,
+      sourceKinds: includeSubAgents
+        ? CHAT_LIST_SOURCE_KINDS_WITH_SUBAGENTS
+        : CHAT_LIST_SOURCE_KINDS,
       archived: false,
       cwd: null,
     });
@@ -178,22 +238,52 @@ export class HostBridgeApiClient {
         return mapped;
       })
       .filter((item): item is ChatSummary => item !== null)
-      .filter((item) => !isSubAgentSource(item.sourceKind))
+      .filter((item) => includeSubAgents || !isSubAgentSource(item.sourceKind))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async listLoadedChatIds(): Promise<string[]> {
+    const response = await this.ws.request<AppServerLoadedThreadListResponse>(
+      'thread/loaded/list',
+      undefined
+    );
+    const ids = Array.isArray(response.data) ? response.data : [];
+    return ids
+      .map((value) => readString(value)?.trim() ?? '')
+      .filter((value): value is string => value.length > 0);
+  }
+
+  async listWorkspaceRoots(limit = 200): Promise<WorkspaceListResponse> {
+    const response = await this.ws.request<Record<string, unknown>>('bridge/workspaces/list', {
+      limit,
+    });
+    return readWorkspaceListResponse(response);
+  }
+
+  async listFilesystemEntries(
+    request?: FileSystemListRequest
+  ): Promise<FileSystemListResponse> {
+    const response = await this.ws.request<Record<string, unknown>>('bridge/fs/list', {
+      path: normalizeCwd(request?.path) ?? null,
+      includeHidden: request?.includeHidden === true,
+      directoriesOnly: request?.directoriesOnly !== false,
+    });
+    return readFileSystemListResponse(response);
   }
 
   async createChat(body: CreateChatRequest): Promise<Chat> {
     const requestedCwd = normalizeCwd(body.cwd);
     const requestedModel = normalizeModel(body.model);
     const requestedEffort = normalizeEffort(body.effort);
+    const requestedServiceTier = normalizeServiceTier(body.serviceTier);
     const requestedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy) ?? 'untrusted';
     const started = await this.ws.request<AppServerStartResponse>('thread/start', {
       model: requestedModel ?? null,
       modelProvider: null,
       cwd: requestedCwd ?? null,
       approvalPolicy: requestedApprovalPolicy,
-      sandbox: 'workspace-write',
-      config: null,
+      sandbox: MOBILE_DEFAULT_SANDBOX,
+      config: toThreadConfig(requestedServiceTier),
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       personality: null,
@@ -309,7 +399,7 @@ export class HostBridgeApiClient {
       model?: string | null;
       approvalPolicy?: ApprovalPolicy | null;
     }
-  ): Promise<void> {
+  ): Promise<AppServerThreadRuntimeSettings> {
     const threadId = id.trim();
     if (!threadId) {
       throw new Error('thread id is required');
@@ -327,7 +417,7 @@ export class HostBridgeApiClient {
       modelProvider: null,
       cwd: normalizeCwd(options?.cwd) ?? null,
       approvalPolicy: requestedApprovalPolicy,
-      sandbox: 'workspace-write',
+      sandbox: MOBILE_DEFAULT_SANDBOX,
       config: null,
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
@@ -337,8 +427,11 @@ export class HostBridgeApiClient {
     };
 
     try {
-      await this.ws.request('thread/resume', primaryRequest);
-      return;
+      const response = await this.ws.request<Record<string, unknown>>(
+        'thread/resume',
+        primaryRequest
+      );
+      return readThreadRuntimeSettings(response);
     } catch (primaryError) {
       // First fallback: keep raw-event streaming enabled, but relax approval policy.
       const compatibilityRequest = {
@@ -346,8 +439,11 @@ export class HostBridgeApiClient {
         approvalPolicy: fallbackApprovalPolicy,
       };
       try {
-        await this.ws.request('thread/resume', compatibilityRequest);
-        return;
+        const response = await this.ws.request<Record<string, unknown>>(
+          'thread/resume',
+          compatibilityRequest
+        );
+        return readThreadRuntimeSettings(response);
       } catch (compatibilityError) {
         // Final compatibility fallback for older app-server builds that reject
         // experimentalRawEvents/developerInstructions on resume.
@@ -357,8 +453,11 @@ export class HostBridgeApiClient {
         };
         delete (legacyRequest as { experimentalRawEvents?: boolean }).experimentalRawEvents;
         try {
-          await this.ws.request('thread/resume', legacyRequest);
-          return;
+          const response = await this.ws.request<Record<string, unknown>>(
+            'thread/resume',
+            legacyRequest
+          );
+          return readThreadRuntimeSettings(response);
         } catch (legacyError) {
           throw new Error(
             `thread/resume failed: ${(primaryError as Error).message}; compatibility failed: ${(compatibilityError as Error).message}; legacy fallback failed: ${(legacyError as Error).message}`
@@ -385,14 +484,25 @@ export class HostBridgeApiClient {
     const normalizedCwd = normalizeCwd(body.cwd);
     const normalizedModel = normalizeModel(body.model);
     const normalizedEffort = normalizeEffort(body.effort);
+    const normalizedServiceTier = normalizeServiceTier(body.serviceTier);
     const normalizedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy);
     const normalizedMentions = normalizeMentions(body.mentions);
     const normalizedLocalImages = normalizeLocalImages(body.localImages);
-    const requestedPlanMode =
-      typeof body.collaborationMode === 'string' &&
-      body.collaborationMode.trim().toLowerCase() === 'plan';
-    let effectiveModel = normalizedModel;
-    if (requestedPlanMode && !effectiveModel) {
+    const requestedCollaborationMode = normalizeCollaborationMode(body.collaborationMode);
+    let resumedThreadSettings: AppServerThreadRuntimeSettings | null = null;
+
+    try {
+      resumedThreadSettings = await this.resumeThread(id, {
+        model: normalizedModel,
+        cwd: normalizedCwd,
+        approvalPolicy: normalizedApprovalPolicy,
+      });
+    } catch {
+      // Best effort: turn/start still works for recently started chats.
+    }
+
+    let effectiveModel = normalizedModel ?? resumedThreadSettings?.model ?? null;
+    if (requestedCollaborationMode && !effectiveModel) {
       try {
         const models = await this.listModels(false);
         effectiveModel =
@@ -401,21 +511,15 @@ export class HostBridgeApiClient {
         // Best effort: fall back to the current thread settings if model lookup fails.
       }
     }
+    const effectiveEffort =
+      requestedCollaborationMode
+        ? normalizedEffort ?? resumedThreadSettings?.effort ?? null
+        : normalizedEffort;
     const normalizedCollaborationMode = toTurnCollaborationMode(
-      body.collaborationMode,
+      requestedCollaborationMode,
       effectiveModel,
-      normalizedEffort
+      effectiveEffort
     );
-
-    try {
-      await this.resumeThread(id, {
-        model: effectiveModel,
-        cwd: normalizedCwd,
-        approvalPolicy: normalizedApprovalPolicy,
-      });
-    } catch {
-      // Best effort: turn/start still works for recently started chats.
-    }
 
     const turnStart = await this.ws.request<AppServerTurnResponse>('turn/start', {
       threadId: id,
@@ -424,7 +528,8 @@ export class HostBridgeApiClient {
       approvalPolicy: normalizedApprovalPolicy ?? null,
       sandboxPolicy: null,
       model: effectiveModel ?? null,
-      effort: normalizedEffort ?? null,
+      effort: effectiveEffort ?? null,
+      serviceTier: normalizedServiceTier ?? null,
       summary: null,
       personality: null,
       outputSchema: null,
@@ -437,6 +542,28 @@ export class HostBridgeApiClient {
     }
     options?.onTurnStarted?.(turnId);
     return this.getChatWithUserMessage(id, turnId, content);
+  }
+
+  async steerChatTurn(
+    threadId: string,
+    expectedTurnId: string,
+    body: SteerChatTurnRequest
+  ): Promise<void> {
+    const normalizedThreadId = threadId.trim();
+    const normalizedExpectedTurnId = expectedTurnId.trim();
+    const content = body.content.trim();
+    if (!normalizedThreadId || !normalizedExpectedTurnId || !content) {
+      return;
+    }
+
+    const normalizedMentions = normalizeMentions(body.mentions);
+    const normalizedLocalImages = normalizeLocalImages(body.localImages);
+
+    await this.ws.request<Record<string, never>>('turn/steer', {
+      threadId: normalizedThreadId,
+      expectedTurnId: normalizedExpectedTurnId,
+      input: buildTurnInput(content, normalizedMentions, normalizedLocalImages),
+    });
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
@@ -556,11 +683,13 @@ export class HostBridgeApiClient {
     options?: {
       cwd?: string;
       model?: string;
+      serviceTier?: ServiceTier;
       approvalPolicy?: ApprovalPolicy | null;
     }
   ): Promise<Chat> {
     const requestedApprovalPolicy =
       normalizeApprovalPolicy(options?.approvalPolicy) ?? 'untrusted';
+    const requestedServiceTier = normalizeServiceTier(options?.serviceTier);
     const response = await this.ws.request<AppServerForkResponse>('thread/fork', {
       threadId: id,
       path: null,
@@ -568,8 +697,8 @@ export class HostBridgeApiClient {
       modelProvider: null,
       cwd: normalizeCwd(options?.cwd) ?? null,
       approvalPolicy: requestedApprovalPolicy,
-      sandbox: 'workspace-write',
-      config: null,
+      sandbox: MOBILE_DEFAULT_SANDBOX,
+      config: toThreadConfig(requestedServiceTier),
       baseInstructions: null,
       developerInstructions: MOBILE_DEVELOPER_INSTRUCTIONS,
       persistExtendedHistory: true,
@@ -580,6 +709,15 @@ export class HostBridgeApiClient {
     }
 
     throw new Error('thread/fork did not return a chat payload');
+  }
+
+  async readServiceTierPreference(): Promise<ServiceTier | null> {
+    const response = await this.ws.request<AppServerConfigReadResponse>('config/read', {
+      includeLayers: false,
+      cwd: null,
+    });
+    const config = toRecord(response.config);
+    return normalizeServiceTier(readString(config?.service_tier));
   }
 
   listApprovals(): Promise<PendingApproval[]> {
@@ -817,6 +955,76 @@ function normalizeCwd(cwd: string | null | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function readWorkspaceListResponse(value: unknown): WorkspaceListResponse {
+  const record = toRecord(value) ?? {};
+  const workspacesRaw = Array.isArray(record.workspaces) ? record.workspaces : [];
+
+  return {
+    bridgeRoot: normalizeCwd(readString(record.bridgeRoot)) ?? '',
+    allowOutsideRootCwd: record.allowOutsideRootCwd === true,
+    workspaces: workspacesRaw
+      .map((entry) => {
+        const workspace = toRecord(entry);
+        if (!workspace) {
+          return null;
+        }
+
+        const path = normalizeCwd(readString(workspace.path));
+        if (!path) {
+          return null;
+        }
+
+        const rawChatCount = workspace.chatCount;
+        const chatCount =
+          typeof rawChatCount === 'number'
+            ? Math.max(0, Math.trunc(rawChatCount))
+            : typeof rawChatCount === 'string'
+              ? Math.max(0, Number.parseInt(rawChatCount, 10) || 0)
+              : 0;
+
+        return {
+          path,
+          chatCount,
+        };
+      })
+      .filter((entry): entry is WorkspaceListResponse['workspaces'][number] => entry !== null),
+  };
+}
+
+function readFileSystemListResponse(value: unknown): FileSystemListResponse {
+  const record = toRecord(value) ?? {};
+  const entriesRaw = Array.isArray(record.entries) ? record.entries : [];
+
+  return {
+    bridgeRoot: normalizeCwd(readString(record.bridgeRoot)) ?? '',
+    path: normalizeCwd(readString(record.path)) ?? '',
+    parentPath: normalizeCwd(readString(record.parentPath)) ?? null,
+    entries: entriesRaw
+      .map((entry) => {
+        const item = toRecord(entry);
+        if (!item) {
+          return null;
+        }
+
+        const path = normalizeCwd(readString(item.path));
+        const name = normalizeCwd(readString(item.name));
+        if (!path || !name) {
+          return null;
+        }
+
+        return {
+          name,
+          path,
+          kind: readString(item.kind) ?? 'directory',
+          hidden: item.hidden === true,
+          selectable: item.selectable !== false,
+          isGitRepo: item.isGitRepo === true,
+        };
+      })
+      .filter((entry): entry is FileSystemListResponse['entries'][number] => entry !== null),
+  };
+}
+
 function normalizeModel(model: string | null | undefined): string | null {
   if (typeof model !== 'string') {
     return null;
@@ -844,6 +1052,33 @@ function normalizeEffort(effort: string | null | undefined): ReasoningEffort | n
   }
 
   return null;
+}
+
+function normalizeServiceTier(
+  serviceTier: ServiceTier | string | null | undefined
+): ServiceTier | null {
+  if (typeof serviceTier !== 'string') {
+    return null;
+  }
+
+  const normalized = serviceTier.trim().toLowerCase();
+  if (normalized === 'flex' || normalized === 'fast') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function toThreadConfig(
+  serviceTier: ServiceTier | null
+): Record<string, ServiceTier> | null {
+  if (!serviceTier) {
+    return null;
+  }
+
+  return {
+    service_tier: serviceTier,
+  };
 }
 
 function normalizeApprovalPolicy(
@@ -988,7 +1223,7 @@ function toTurnCollaborationMode(
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized !== 'plan') {
+  if (normalized !== 'plan' && normalized !== 'default') {
     return null;
   }
 
@@ -997,12 +1232,37 @@ function toTurnCollaborationMode(
   }
 
   return {
-    mode: 'plan',
+    mode: normalized,
     settings: {
       model,
       reasoning_effort: effort,
       developer_instructions: null,
     },
+  };
+}
+
+function normalizeCollaborationMode(
+  value: CollaborationMode | string | null | undefined
+): CollaborationMode | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'plan' || normalized === 'default') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function readThreadRuntimeSettings(value: unknown): AppServerThreadRuntimeSettings {
+  const record = toRecord(value);
+  return {
+    model: normalizeModel(readString(record?.model)),
+    effort: normalizeEffort(
+      readString(record?.reasoningEffort) ?? readString(record?.reasoning_effort)
+    ),
   };
 }
 

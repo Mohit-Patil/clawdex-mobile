@@ -140,9 +140,10 @@ Expected response contains `"status":"ok"`.
 ### Choosing Start Directory
 
 1. Open sidebar
-2. Under `Start Directory`, pick:
-   - `Bridge default workspace`, or
-   - a discovered workspace path from existing chats
+2. Under `Start Directory`, pick either:
+   - `Bridge default workspace`
+   - a discovered workspace path from existing Codex chats
+   - any folder on the bridge host via the built-in folder browser or manual path entry
 
 Behavior:
 

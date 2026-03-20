@@ -778,9 +778,13 @@ function extractNotificationThreadId(
     toRecord(params?.threadState) ??
     toRecord(params?.thread_state) ??
     toRecord(msg?.thread);
+  const threadSourceRecord = toRecord(threadRecord?.source);
   const sourceRecord = toRecord(params?.source) ?? toRecord(msg?.source);
   const subagentThreadSpawnRecord = toRecord(
-    toRecord(sourceRecord?.subagent)?.thread_spawn
+    toRecord(sourceRecord?.subagent ?? sourceRecord?.subAgent)?.thread_spawn
+  );
+  const threadSubagentThreadSpawnRecord = toRecord(
+    toRecord(threadSourceRecord?.subagent ?? threadSourceRecord?.subAgent)?.thread_spawn
   );
 
   return (
@@ -804,6 +808,11 @@ function extractNotificationThreadId(
     readString(sourceRecord?.parent_thread_id) ??
     readString(sourceRecord?.parentThreadId) ??
     readString(subagentThreadSpawnRecord?.parent_thread_id) ??
+    readString(subagentThreadSpawnRecord?.parentThreadId) ??
+    readString(threadSourceRecord?.parent_thread_id) ??
+    readString(threadSourceRecord?.parentThreadId) ??
+    readString(threadSubagentThreadSpawnRecord?.parent_thread_id) ??
+    readString(threadSubagentThreadSpawnRecord?.parentThreadId) ??
     null
   );
 }

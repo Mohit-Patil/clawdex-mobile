@@ -2,6 +2,7 @@
   "expo": {
     "name": "Clawdex Mobile",
     "slug": "clawdex-mobile",
+    "scheme": "clawdex",
     "version": "2.0.1",
     "userInterfaceStyle": "dark",
     "orientation": "portrait",
@@ -13,13 +14,13 @@
     },
     "ios": {
       "supportsTablet": true,
+      "appleTeamId": "4NWUS8362L",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.mohitpatil973.clawdexmobile"
     },
     "android": {
-      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/brand/adaptive-icon.png",
         "backgroundColor": "#000000"
@@ -42,7 +43,6 @@
     "experiments": {
       "reactCompiler": true
     },
-    "jsEngine": "hermes",
     "plugins": [
       "./plugins/withAndroidCleartextTraffic",
       [

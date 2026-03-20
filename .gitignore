@@ -78,3 +78,8 @@ coverage/
 .clawdex-mobile-attachments/
 /app.json
 export-cheat-sheet.local.md
+.agents/
+skills-lock.json
+apps/store-screenshots/
+screenshot-preview.png
+.playwright-mcp/

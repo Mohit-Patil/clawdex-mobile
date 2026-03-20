@@ -1,6 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   type NativeSyntheticEvent,
@@ -16,6 +15,8 @@ import {
 } from 'react-native';
 
 import type { VoiceState } from '../hooks/useVoiceRecorder';
+import { resolveComposerBottomSpacing } from './chat-input-layout';
+import { VoiceRecordingWaveform } from './VoiceRecordingWaveform';
 import { colors, radius, spacing } from '../theme';
 
 interface ChatInputProps {
@@ -25,6 +26,7 @@ interface ChatInputProps {
   onSubmit: () => void;
   onStop?: () => void;
   onAttachPress: () => void;
+  attachDisabled?: boolean;
   attachments?: Array<{ id: string; label: string }>;
   onRemoveAttachment?: (id: string) => void;
   isLoading: boolean;
@@ -33,8 +35,11 @@ interface ChatInputProps {
   placeholder?: string;
   onVoiceToggle?: () => void;
   voiceState?: VoiceState;
+  voiceRecordingDurationMillis?: number;
+  voiceMetering?: number | null;
   safeAreaBottomInset?: number;
   keyboardVisible?: boolean;
+  footer?: ReactNode;
 }
 
 export function ChatInput({
@@ -44,6 +49,7 @@ export function ChatInput({
   onSubmit,
   onStop,
   onAttachPress,
+  attachDisabled = false,
   attachments = [],
   onRemoveAttachment,
   isLoading,
@@ -52,8 +58,11 @@ export function ChatInput({
   placeholder = 'Message Codex...',
   onVoiceToggle,
   voiceState = 'idle',
+  voiceRecordingDurationMillis = 0,
+  voiceMetering = null,
   safeAreaBottomInset = 0,
   keyboardVisible = false,
+  footer = null,
 }: ChatInputProps) {
   const INPUT_TEXT_LINE_HEIGHT = 20;
   const INPUT_TEXT_VERTICAL_PADDING = Platform.OS === 'ios' ? 2 : 0;
@@ -82,30 +91,24 @@ export function ChatInput({
   const showVoiceButton = Boolean(onVoiceToggle);
   const showSendButton = canSend || isLoading;
   const inputScrollEnabled = inputHeight >= INPUT_TEXT_MAX_HEIGHT;
+  const showVoiceRecordingUi = voiceState === 'recording';
+  const showVoiceTranscribingUi = voiceState === 'transcribing';
+  const showVoiceStatusUi = showVoiceRecordingUi || showVoiceTranscribingUi;
   const shouldShowActionButton =
     canStop || showSendButton || showVoiceButton || voiceState !== 'idle';
-  const baseBottomPadding =
-    Platform.OS === 'ios'
-      ? keyboardVisible
-        ? spacing.sm
-        : spacing.lg
-      : spacing.md;
-  const extraBottomInset = keyboardVisible ? 0 : safeAreaBottomInset;
+  const composerBottomSpacing = resolveComposerBottomSpacing(
+    Platform.OS,
+    safeAreaBottomInset,
+    keyboardVisible
+  );
 
   return (
     <View style={styles.shell}>
-      <BlurView
-        intensity={26}
-        tint={Platform.OS === 'ios' ? 'systemUltraThinMaterialDark' : 'dark'}
-        blurMethod="dimezisBlurViewSdk31Plus"
-        style={StyleSheet.absoluteFill}
-      />
       <View
         style={[
           styles.container,
           {
-            paddingBottom:
-              baseBottomPadding + extraBottomInset,
+            paddingBottom: composerBottomSpacing.totalBottomPadding,
           },
         ]}
       >
@@ -143,79 +146,102 @@ export function ChatInput({
 
         <View style={styles.row}>
           <Pressable
+            disabled={attachDisabled}
             onPress={onAttachPress}
-            style={({ pressed }) => [styles.plusBtn, pressed && styles.plusBtnPressed]}
+            style={({ pressed }) => [
+              styles.plusBtn,
+              attachDisabled && styles.plusBtnDisabled,
+              pressed && !attachDisabled && styles.plusBtnPressed,
+            ]}
           >
             <Ionicons name="add" size={20} color={colors.textMuted} />
           </Pressable>
 
-          <View style={styles.inputWrapper}>
-            <Text
-              pointerEvents="none"
-              accessibilityElementsHidden
-              importantForAccessibility="no-hide-descendants"
-              style={[
-                styles.inputMeasure,
-                {
-                  width: inputWidth,
-                  lineHeight: INPUT_TEXT_LINE_HEIGHT,
-                  paddingVertical: INPUT_TEXT_VERTICAL_PADDING,
-                },
-              ]}
-              onTextLayout={(event: NativeSyntheticEvent<TextLayoutEventData>) => {
-                if (inputWidth <= 0) {
-                  return;
-                }
-                const lineCount = Math.max(1, event.nativeEvent.lines.length);
-                const measuredHeight =
-                  lineCount * INPUT_TEXT_LINE_HEIGHT + INPUT_TEXT_VERTICAL_PADDING * 2;
-                updateInputHeight(measuredHeight);
-              }}
-            >
-              {value.length > 0 ? `${value}\u200b` : ' '}
-            </Text>
-            <TextInput
-              style={[styles.input, { height: inputHeight }]}
-              value={value}
-              onChangeText={onChangeText}
-              keyboardAppearance="dark"
-              onLayout={(event) => {
-                const nextWidth = Math.floor(event.nativeEvent.layout.width);
-                setInputWidth((previousWidth) =>
-                  previousWidth === nextWidth ? previousWidth : nextWidth
-                );
-              }}
-              onChange={(event: NativeSyntheticEvent<unknown>) => {
-                const nativeEvent = event.nativeEvent as {
-                  contentSize?: { height?: number };
-                };
-                const contentHeight = nativeEvent.contentSize?.height;
-                if (typeof contentHeight === 'number' && Number.isFinite(contentHeight)) {
-                  updateInputHeight(contentHeight);
-                }
-              }}
-              onFocus={onFocus}
-              placeholder={placeholder}
-              placeholderTextColor={colors.textMuted}
-              multiline
-              scrollEnabled={inputScrollEnabled}
-              onContentSizeChange={(event) => {
-                updateInputHeight(event.nativeEvent.contentSize.height);
-              }}
-              onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
-                const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
-                  shiftKey?: boolean;
-                };
-                if (
-                  Platform.OS === 'web' &&
-                  keyEvent.key === 'Enter' &&
-                  !keyEvent.shiftKey
-                ) {
-                  e.preventDefault();
-                  if (canSend) onSubmit();
-                }
-              }}
-            />
+          <View
+            style={[
+              styles.inputWrapper,
+              showVoiceStatusUi && styles.inputWrapperVoiceActive,
+            ]}
+          >
+            {showVoiceStatusUi ? (
+              showVoiceRecordingUi ? (
+                <VoiceRecordingWaveform
+                  durationMillis={voiceRecordingDurationMillis}
+                  metering={voiceMetering}
+                />
+              ) : (
+                <View
+                  accessible
+                  accessibilityLabel="Transcribing recorded audio into text"
+                  style={styles.voiceStatusContent}
+                >
+                  <View style={styles.voiceStatusLabelRow}>
+                    <View style={[styles.voiceStatusDot, styles.voiceStatusDotBusy]} />
+                    <Text style={styles.voiceStatusTitle}>Transcribing audio</Text>
+                  </View>
+                  <Text style={styles.voiceStatusHint}>
+                    Converting your latest recording into text.
+                  </Text>
+                </View>
+              )
+            ) : (
+              <>
+                <Text
+                  pointerEvents="none"
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants"
+                  style={[
+                    styles.inputMeasure,
+                    {
+                      width: inputWidth,
+                      lineHeight: INPUT_TEXT_LINE_HEIGHT,
+                      paddingVertical: INPUT_TEXT_VERTICAL_PADDING,
+                    },
+                  ]}
+                  onTextLayout={(event: NativeSyntheticEvent<TextLayoutEventData>) => {
+                    if (inputWidth <= 0) {
+                      return;
+                    }
+                    const lineCount = Math.max(1, event.nativeEvent.lines.length);
+                    const measuredHeight =
+                      lineCount * INPUT_TEXT_LINE_HEIGHT + INPUT_TEXT_VERTICAL_PADDING * 2;
+                    updateInputHeight(measuredHeight);
+                  }}
+                >
+                  {value.length > 0 ? `${value}\u200b` : ' '}
+                </Text>
+                <TextInput
+                  style={[styles.input, { height: inputHeight }]}
+                  value={value}
+                  onChangeText={onChangeText}
+                  keyboardAppearance="dark"
+                  onLayout={(event) => {
+                    const nextWidth = Math.floor(event.nativeEvent.layout.width);
+                    setInputWidth((previousWidth) =>
+                      previousWidth === nextWidth ? previousWidth : nextWidth
+                    );
+                  }}
+                  onFocus={onFocus}
+                  placeholder={placeholder}
+                  placeholderTextColor={colors.textMuted}
+                  multiline
+                  scrollEnabled={inputScrollEnabled}
+                  onKeyPress={(e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
+                    const keyEvent = e.nativeEvent as TextInputKeyPressEventData & {
+                      shiftKey?: boolean;
+                    };
+                    if (
+                      Platform.OS === 'web' &&
+                      keyEvent.key === 'Enter' &&
+                      !keyEvent.shiftKey
+                    ) {
+                      e.preventDefault();
+                      if (canSend) onSubmit();
+                    }
+                  }}
+                />
+              </>
+            )}
             {shouldShowActionButton ? (
               <View style={styles.actionButtons}>
                 {showVoiceButton || voiceState !== 'idle' ? (
@@ -272,6 +298,7 @@ export function ChatInput({
             ) : null}
           </View>
         </View>
+        {footer ? <View style={styles.footer}>{footer}</View> : null}
       </View>
     </View>
   );
@@ -280,19 +307,20 @@ export function ChatInput({
 const styles = StyleSheet.create({
   shell: {
     overflow: 'hidden',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
   },
   container: {
     gap: spacing.xs,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    backgroundColor: 'rgba(6, 9, 13, 0.42)',
+    paddingTop: spacing.sm,
   },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
+  },
+  footer: {
+    alignItems: 'flex-start',
+    marginTop: 2,
   },
   attachmentList: {
     maxHeight: 34,
@@ -333,6 +361,9 @@ const styles = StyleSheet.create({
   plusBtnPressed: {
     backgroundColor: colors.bgItem,
   },
+  plusBtnDisabled: {
+    opacity: 0.45,
+  },
   inputWrapper: {
     flex: 1,
     flexDirection: 'row',
@@ -345,6 +376,10 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     minHeight: 40,
     maxHeight: 120,
+  },
+  inputWrapperVoiceActive: {
+    minHeight: 58,
+    paddingVertical: spacing.sm,
   },
   input: {
     flex: 1,
@@ -361,6 +396,36 @@ const styles = StyleSheet.create({
     fontSize: 14,
     left: spacing.md,
     top: spacing.xs,
+  },
+  voiceStatusContent: {
+    flex: 1,
+    gap: 2,
+    justifyContent: 'center',
+    minHeight: 40,
+  },
+  voiceStatusLabelRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  voiceStatusDot: {
+    backgroundColor: colors.error,
+    borderRadius: 4,
+    height: 8,
+    width: 8,
+  },
+  voiceStatusDotBusy: {
+    opacity: 0.82,
+  },
+  voiceStatusTitle: {
+    color: colors.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  voiceStatusHint: {
+    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: 16,
   },
   actionButtons: {
     flexDirection: 'row',

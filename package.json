@@ -36,9 +36,9 @@
   },
   "dependencies": {
     "@types/react": "~19.2.10",
+    "expo": "^55.0.8",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "react-native": "0.83.2",
-    "expo": "^55.0.2"
+    "react-native": "0.83.2"
   }
 }

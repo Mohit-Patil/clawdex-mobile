@@ -2,11 +2,21 @@ export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
 
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
 
+export interface ChatMessageSubAgentMeta {
+  tool?: string;
+  prompt?: string;
+  senderThreadId?: string;
+  receiverThreadIds?: string[];
+  agentStatus?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatMessageRole;
   content: string;
   createdAt: string;
+  systemKind?: 'tool' | 'subAgent';
+  subAgentMeta?: ChatMessageSubAgentMeta;
 }
 
 export interface ChatSummary {
@@ -19,7 +29,11 @@ export interface ChatSummary {
   lastMessagePreview: string;
   cwd?: string;
   modelProvider?: string;
+  agentNickname?: string;
+  agentRole?: string;
   sourceKind?: string;
+  parentThreadId?: string;
+  subAgentDepth?: number;
   lastRunStartedAt?: string;
   lastRunFinishedAt?: string;
   lastRunDurationMs?: number;
@@ -28,8 +42,18 @@ export interface ChatSummary {
   lastError?: string;
 }
 
+export interface ChatPlanSnapshot {
+  threadId: string;
+  turnId: string;
+  explanation: string | null;
+  steps: TurnPlanStep[];
+}
+
 export interface Chat extends ChatSummary {
   messages: ChatMessage[];
+  latestPlan?: ChatPlanSnapshot | null;
+  latestTurnPlan?: ChatPlanSnapshot | null;
+  latestTurnStatus?: string | null;
 }
 
 export interface CreateChatRequest {
@@ -38,6 +62,7 @@ export interface CreateChatRequest {
   cwd?: string;
   model?: string;
   effort?: ReasoningEffort;
+  serviceTier?: ServiceTier;
   approvalPolicy?: ApprovalPolicy;
 }
 
@@ -49,8 +74,15 @@ export interface SendChatMessageRequest {
   cwd?: string;
   model?: string;
   effort?: ReasoningEffort;
+  serviceTier?: ServiceTier;
   approvalPolicy?: ApprovalPolicy;
   collaborationMode?: CollaborationMode;
+  mentions?: MentionInput[];
+  localImages?: LocalImageInput[];
+}
+
+export interface SteerChatTurnRequest {
+  content: string;
   mentions?: MentionInput[];
   localImages?: LocalImageInput[];
 }
@@ -82,6 +114,39 @@ export interface UploadAttachmentResponse {
   kind: AttachmentUploadKind;
 }
 
+export interface WorkspaceSummary {
+  path: string;
+  chatCount: number;
+}
+
+export interface WorkspaceListResponse {
+  bridgeRoot: string;
+  allowOutsideRootCwd: boolean;
+  workspaces: WorkspaceSummary[];
+}
+
+export interface FileSystemListRequest {
+  path?: string | null;
+  includeHidden?: boolean;
+  directoriesOnly?: boolean;
+}
+
+export interface FileSystemEntry {
+  name: string;
+  path: string;
+  kind: string;
+  hidden: boolean;
+  selectable: boolean;
+  isGitRepo: boolean;
+}
+
+export interface FileSystemListResponse {
+  bridgeRoot: string;
+  path: string;
+  parentPath: string | null;
+  entries: FileSystemEntry[];
+}
+
 export type ReasoningEffort =
   | 'none'
   | 'minimal'
@@ -89,6 +154,47 @@ export type ReasoningEffort =
   | 'medium'
   | 'high'
   | 'xhigh';
+
+export type ServiceTier = 'flex' | 'fast';
+
+export type PlanType =
+  | 'free'
+  | 'go'
+  | 'plus'
+  | 'pro'
+  | 'team'
+  | 'business'
+  | 'enterprise'
+  | 'edu'
+  | 'unknown';
+
+export interface AccountCreditsSnapshot {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+export interface AccountRateLimitWindow {
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: number | null;
+}
+
+export interface AccountRateLimitSnapshot {
+  limitId: string | null;
+  limitName: string | null;
+  primary: AccountRateLimitWindow | null;
+  secondary: AccountRateLimitWindow | null;
+  credits: AccountCreditsSnapshot | null;
+  planType: PlanType | null;
+}
+
+export interface AccountSnapshot {
+  type: 'apiKey' | 'chatgpt' | null;
+  email: string | null;
+  planType: PlanType | null;
+  requiresOpenaiAuth: boolean;
+}
 
 export type ApprovalPolicy =
   | 'untrusted'

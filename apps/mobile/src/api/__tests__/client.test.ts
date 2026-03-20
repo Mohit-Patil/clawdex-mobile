@@ -21,6 +21,181 @@ describe('HostBridgeApiClient', () => {
     expect(result.status).toBe('ok');
   });
 
+  it('readAccountRateLimits() requests account/rateLimits/read and prefers codex bucket', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: 'codex',
+          primary: {
+            usedPercent: 22,
+            windowDurationMins: 300,
+            resetsAt: 1_700_000_000,
+          },
+          secondary: {
+            usedPercent: 61,
+            windowDurationMins: 10_080,
+            resetsAt: 1_700_000_100,
+          },
+          planType: 'plus',
+        },
+      },
+      rateLimits: {
+        limitId: 'legacy',
+        primary: {
+          usedPercent: 99,
+          windowDurationMins: 60,
+          resetsAt: 1_700_000_200,
+        },
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccountRateLimits();
+
+    expect(ws.request).toHaveBeenCalledWith('account/rateLimits/read');
+    expect(result).toMatchObject({
+      limitId: 'codex',
+      planType: 'plus',
+      primary: {
+        usedPercent: 22,
+        windowDurationMins: 300,
+      },
+      secondary: {
+        usedPercent: 61,
+        windowDurationMins: 10080,
+      },
+    });
+  });
+
+  it('readAccountRateLimits() falls back to first populated keyed snapshot with snake_case payloads', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      rate_limits_by_limit_id: {
+        empty: {
+          limit_id: 'empty',
+          primary: null,
+          secondary: null,
+        },
+        shared: {
+          limit_id: 'shared',
+          limit_name: 'Shared',
+          primary: {
+            used_percent: '15',
+            window_duration_mins: '300',
+            resets_at: '1700000000',
+          },
+          secondary: null,
+          plan_type: 'team',
+        },
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccountRateLimits();
+
+    expect(result).toMatchObject({
+      limitId: 'shared',
+      limitName: 'Shared',
+      planType: 'team',
+      primary: {
+        usedPercent: 15,
+        windowDurationMins: 300,
+        resetsAt: 1700000000,
+      },
+      secondary: null,
+    });
+  });
+
+  it('readAccountRateLimits() falls back to top-level rate limits when keyed buckets are unavailable', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: 'codex',
+          primary: null,
+          secondary: null,
+        },
+      },
+      rate_limits: {
+        limit_id: 'legacy',
+        primary: {
+          used_percent: 44,
+          window_duration_mins: 60,
+          resets_at: 1700001234,
+        },
+        secondary: null,
+        plan_type: 'pro',
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccountRateLimits();
+
+    expect(result).toMatchObject({
+      limitId: 'legacy',
+      planType: 'pro',
+      primary: {
+        usedPercent: 44,
+        windowDurationMins: 60,
+        resetsAt: 1700001234,
+      },
+    });
+  });
+
+  it('readAccount() requests account/read and maps ChatGPT account details', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      account: {
+        type: 'chatgpt',
+        email: 'mohit@example.com',
+        planType: 'plus',
+      },
+      requiresOpenaiAuth: true,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccount();
+
+    expect(ws.request).toHaveBeenCalledWith('account/read', { refreshToken: false });
+    expect(result).toEqual({
+      type: 'chatgpt',
+      email: 'mohit@example.com',
+      planType: 'plus',
+      requiresOpenaiAuth: true,
+    });
+  });
+
+  it('readAccount() maps API key auth without ChatGPT fields', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      account: {
+        type: 'apiKey',
+      },
+      requires_openai_auth: false,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readAccount();
+
+    expect(result).toEqual({
+      type: 'apiKey',
+      email: null,
+      planType: null,
+      requiresOpenaiAuth: false,
+    });
+  });
+
+  it('logoutAccount() requests account/logout', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({});
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.logoutAccount();
+
+    expect(ws.request).toHaveBeenCalledWith('account/logout');
+  });
+
   it('listChats() maps app-server list response', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({
@@ -102,7 +277,7 @@ describe('HostBridgeApiClient', () => {
           updatedAt: 1700000002,
           status: { type: 'idle' },
           source: {
-            subAgent: {
+            subagent: {
               thread_spawn: {
                 parent_thread_id: 'thr_root',
                 depth: 1,
@@ -127,6 +302,148 @@ describe('HostBridgeApiClient', () => {
     const chats = await client.listChats();
 
     expect(chats.map((chat) => chat.id)).toEqual(['thr_root']);
+  });
+
+  it('listChats() can include sub-agent source kinds when requested', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      data: [
+        {
+          id: 'thr_root',
+          preview: 'root chat',
+          createdAt: 1700000000,
+          updatedAt: 1700000001,
+          status: { type: 'idle' },
+          source: 'appServer',
+          turns: [],
+        },
+        {
+          id: 'thr_sub',
+          preview: 'spawned worker',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: 'thr_root',
+                depth: 1,
+              },
+            },
+          },
+          turns: [],
+        },
+      ],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const chats = await client.listChats({ includeSubAgents: true });
+
+    expect(ws.request).toHaveBeenCalledWith('thread/list', {
+      cursor: null,
+      limit: 200,
+      sortKey: null,
+      modelProviders: null,
+      sourceKinds: [
+        'cli',
+        'vscode',
+        'exec',
+        'appServer',
+        'unknown',
+        'subAgent',
+        'subAgentReview',
+        'subAgentCompact',
+        'subAgentThreadSpawn',
+        'subAgentOther',
+      ],
+      archived: false,
+      cwd: null,
+    });
+    expect(chats.map((chat) => chat.id)).toEqual(['thr_sub', 'thr_root']);
+    expect(chats[0].parentThreadId).toBe('thr_root');
+    expect(chats[0].subAgentDepth).toBe(1);
+  });
+
+  it('listLoadedChatIds() returns loaded in-memory thread ids', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      data: ['thr_root', 'thr_sub', null, ''],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const ids = await client.listLoadedChatIds();
+
+    expect(ws.request).toHaveBeenCalledWith('thread/loaded/list', undefined);
+    expect(ids).toEqual(['thr_root', 'thr_sub']);
+  });
+
+  it('listWorkspaceRoots() requests bridge/workspaces/list and maps workspaces', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      bridgeRoot: '/Users/mohit/work',
+      allowOutsideRootCwd: true,
+      workspaces: [
+        { path: '/Users/mohit/work/app', chatCount: 3 },
+        { path: '/Users/mohit/work/docs', chatCount: '1' },
+        { path: '', chatCount: 99 },
+      ],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.listWorkspaceRoots();
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/workspaces/list', { limit: 200 });
+    expect(result).toEqual({
+      bridgeRoot: '/Users/mohit/work',
+      allowOutsideRootCwd: true,
+      workspaces: [
+        { path: '/Users/mohit/work/app', chatCount: 3 },
+        { path: '/Users/mohit/work/docs', chatCount: 1 },
+      ],
+    });
+  });
+
+  it('listFilesystemEntries() requests bridge/fs/list with directory browsing defaults', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      bridgeRoot: '/Users/mohit/work',
+      path: '/Users/mohit/work',
+      parentPath: '/Users/mohit',
+      entries: [
+        {
+          name: 'apps',
+          path: '/Users/mohit/work/apps',
+          kind: 'directory',
+          hidden: false,
+          selectable: true,
+          isGitRepo: false,
+        },
+      ],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.listFilesystemEntries({ path: '/Users/mohit/work' });
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/fs/list', {
+      path: '/Users/mohit/work',
+      includeHidden: false,
+      directoriesOnly: true,
+    });
+    expect(result).toEqual({
+      bridgeRoot: '/Users/mohit/work',
+      path: '/Users/mohit/work',
+      parentPath: '/Users/mohit',
+      entries: [
+        {
+          name: 'apps',
+          path: '/Users/mohit/work/apps',
+          kind: 'directory',
+          hidden: false,
+          selectable: true,
+          isGitRepo: false,
+        },
+      ],
+    });
   });
 
   it('sendChatMessage() starts a turn without waiting for completion', async () => {
@@ -339,6 +656,108 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('createChat() requests danger-full-access sandbox by default', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_sandbox',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.createChat({});
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        sandbox: 'danger-full-access',
+      })
+    );
+  });
+
+  it('createChat() forwards service tier in thread/start config', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_fast',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.createChat({ serviceTier: 'fast' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        config: {
+          service_tier: 'fast',
+        },
+      })
+    );
+  });
+
+  it('forkChat() forwards service tier in thread/fork config', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_fork_fast',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.forkChat('thr_parent', { serviceTier: 'fast' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/fork',
+      expect.objectContaining({
+        threadId: 'thr_parent',
+        config: {
+          service_tier: 'fast',
+        },
+      })
+    );
+  });
+
+  it('forkChat() requests danger-full-access sandbox by default', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'thr_fork_sandbox',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.forkChat('thr_parent');
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/fork',
+      expect.objectContaining({
+        threadId: 'thr_parent',
+        sandbox: 'danger-full-access',
+      })
+    );
+  });
+
   it('renameChat() retries with threadName when name payload is rejected', async () => {
     const ws = createWsMock();
     ws.request
@@ -425,6 +844,90 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('sendChatMessage() forwards service tier to turn/start', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_fast' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_fast',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_fast',
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_fast',
+                  content: [{ type: 'text', text: 'hello' }],
+                },
+                {
+                  type: 'agentMessage',
+                  id: 'a_fast',
+                  text: 'ok',
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.sendChatMessage('thr_fast', {
+      content: 'hello',
+      serviceTier: 'fast',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/resume', expect.any(Object));
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        serviceTier: 'fast',
+      })
+    );
+  });
+
+  it('steerChatTurn() forwards expected turn id and structured input', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({});
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.steerChatTurn('thr_steer', 'turn_steer', {
+      content: 'continue with this direction',
+      mentions: [{ path: '/tmp/src', name: 'src' }],
+      localImages: [{ path: '/tmp/screenshot.png' }],
+    });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'turn/steer',
+      expect.objectContaining({
+        threadId: 'thr_steer',
+        expectedTurnId: 'turn_steer',
+        input: [
+          {
+            type: 'text',
+            text: 'continue with this direction',
+            text_elements: [],
+          },
+          {
+            type: 'mention',
+            path: '/tmp/src',
+            name: 'src',
+          },
+          {
+            type: 'localImage',
+            path: '/tmp/screenshot.png',
+          },
+        ],
+      })
+    );
+  });
+
   it('sendChatMessage() forwards selected approval policy to resume and turn/start', async () => {
     const ws = createWsMock();
     ws.request
@@ -481,7 +984,10 @@ describe('HostBridgeApiClient', () => {
       .mockResolvedValueOnce({});
 
     const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
-    await expect(client.resumeThread('thr_resume')).resolves.toBeUndefined();
+    await expect(client.resumeThread('thr_resume')).resolves.toEqual({
+      model: null,
+      effort: null,
+    });
 
     expect(ws.request).toHaveBeenNthCalledWith(
       1,
@@ -490,6 +996,7 @@ describe('HostBridgeApiClient', () => {
         threadId: 'thr_resume',
         experimentalRawEvents: true,
         approvalPolicy: 'untrusted',
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -500,6 +1007,7 @@ describe('HostBridgeApiClient', () => {
         approvalPolicy: 'on-request',
         developerInstructions: expect.any(String),
         experimentalRawEvents: true,
+        sandbox: 'danger-full-access',
       })
     );
   });
@@ -512,7 +1020,10 @@ describe('HostBridgeApiClient', () => {
       .mockResolvedValueOnce({});
 
     const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
-    await expect(client.resumeThread('thr_resume_legacy')).resolves.toBeUndefined();
+    await expect(client.resumeThread('thr_resume_legacy')).resolves.toEqual({
+      model: null,
+      effort: null,
+    });
 
     expect(ws.request).toHaveBeenNthCalledWith(
       1,
@@ -521,6 +1032,7 @@ describe('HostBridgeApiClient', () => {
         threadId: 'thr_resume_legacy',
         experimentalRawEvents: true,
         approvalPolicy: 'untrusted',
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -531,6 +1043,7 @@ describe('HostBridgeApiClient', () => {
         approvalPolicy: 'on-request',
         developerInstructions: expect.any(String),
         experimentalRawEvents: true,
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -540,6 +1053,7 @@ describe('HostBridgeApiClient', () => {
         threadId: 'thr_resume_legacy',
         approvalPolicy: 'on-request',
         developerInstructions: null,
+        sandbox: 'danger-full-access',
       })
     );
 
@@ -556,7 +1070,10 @@ describe('HostBridgeApiClient', () => {
     const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
     await expect(
       client.resumeThread('thr_resume_never', { approvalPolicy: 'never' })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({
+      model: null,
+      effort: null,
+    });
 
     expect(ws.request).toHaveBeenNthCalledWith(
       1,
@@ -564,6 +1081,7 @@ describe('HostBridgeApiClient', () => {
       expect.objectContaining({
         threadId: 'thr_resume_never',
         approvalPolicy: 'never',
+        sandbox: 'danger-full-access',
       })
     );
     expect(ws.request).toHaveBeenNthCalledWith(
@@ -572,6 +1090,7 @@ describe('HostBridgeApiClient', () => {
       expect.objectContaining({
         threadId: 'thr_resume_never',
         approvalPolicy: 'never',
+        sandbox: 'danger-full-access',
       })
     );
   });
@@ -804,9 +1323,64 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('sendChatMessage() sends structured collaborationMode for default mode using resumed thread settings', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({
+        model: 'gpt-5.3-codex',
+        reasoningEffort: 'medium',
+      }) // thread/resume
+      .mockResolvedValueOnce({ turn: { id: 'turn_default' } }) // turn/start
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_default',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_default',
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_default',
+                  content: [{ type: 'text', text: 'implement it' }],
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.sendChatMessage('thr_default', {
+      content: 'implement it',
+      collaborationMode: 'default',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'turn/start',
+      expect.objectContaining({
+        model: 'gpt-5.3-codex',
+        effort: 'medium',
+        collaborationMode: {
+          mode: 'default',
+          settings: {
+            model: 'gpt-5.3-codex',
+            reasoning_effort: 'medium',
+            developer_instructions: null,
+          },
+        },
+      })
+    );
+  });
+
   it('sendChatMessage() resolves default model before plan mode turn when model is unset', async () => {
     const ws = createWsMock();
     ws.request
+      .mockResolvedValueOnce({}) // thread/resume
       .mockResolvedValueOnce({
         data: [
           {
@@ -816,7 +1390,6 @@ describe('HostBridgeApiClient', () => {
           },
         ],
       }) // model/list fallback
-      .mockResolvedValueOnce({}) // thread/resume
       .mockResolvedValueOnce({ turn: { id: 'turn_plan_fallback' } }) // turn/start
       .mockResolvedValueOnce({
         thread: {
@@ -847,7 +1420,7 @@ describe('HostBridgeApiClient', () => {
     });
 
     expect(ws.request).toHaveBeenNthCalledWith(
-      1,
+      2,
       'model/list',
       expect.objectContaining({
         includeHidden: false,

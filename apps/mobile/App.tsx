@@ -38,6 +38,7 @@ const SWIPE_OPEN_DISTANCE = 56;
 const SWIPE_CLOSE_DISTANCE = 56;
 const SWIPE_OPEN_VELOCITY = 0.4;
 const SWIPE_CLOSE_VELOCITY = -0.4;
+const DRAWER_CONTENT_SCALE = 0.94;
 const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
 const APP_SETTINGS_VERSION = 3;
 
@@ -79,10 +80,22 @@ export default function App() {
   const [defaultReasoningEffort, setDefaultReasoningEffort] =
     useState<ReasoningEffort | null>(null);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('normal');
+  const [showToolCalls, setShowToolCalls] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const { width: screenWidth } = useWindowDimensions();
+  const contentShiftOpen = Math.min(DRAWER_WIDTH - 12, screenWidth * 0.74);
+  const contentTranslateX = drawerAnim.interpolate({
+    inputRange: [-DRAWER_WIDTH, 0],
+    outputRange: [0, contentShiftOpen],
+    extrapolate: 'clamp',
+  });
+  const contentScale = drawerAnim.interpolate({
+    inputRange: [-DRAWER_WIDTH, 0],
+    outputRange: [1, DRAWER_CONTENT_SCALE],
+    extrapolate: 'clamp',
+  });
 
   useEffect(() => {
     if (!ws) {
@@ -97,9 +110,11 @@ export default function App() {
     async (
       nextBridgeUrl: string | null,
       nextBridgeToken: string | null,
+      nextDefaultStartCwd: string | null,
       nextModelId: string | null,
       nextEffort: ReasoningEffort | null,
-      nextApprovalMode: ApprovalMode
+      nextApprovalMode: ApprovalMode,
+      nextShowToolCalls: boolean
     ) => {
       const settingsPath = getAppSettingsPath();
       if (!settingsPath) {
@@ -110,9 +125,11 @@ export default function App() {
         version: APP_SETTINGS_VERSION,
         bridgeUrl: nextBridgeUrl,
         bridgeToken: nextBridgeToken,
+        defaultStartCwd: nextDefaultStartCwd,
         defaultModelId: nextModelId,
         defaultReasoningEffort: nextEffort,
         approvalMode: nextApprovalMode,
+        showToolCalls: nextShowToolCalls,
       });
 
       try {
@@ -128,9 +145,11 @@ export default function App() {
     let cancelled = false;
 
     const resetToDefaults = () => {
+      setDefaultStartCwd(null);
       setDefaultModelId(null);
       setDefaultReasoningEffort(null);
       setApprovalMode('normal');
+      setShowToolCalls(false);
     };
 
     const loadSettings = async () => {
@@ -154,9 +173,11 @@ export default function App() {
         const resolvedBridgeUrl = parsed.bridgeUrl ?? null;
         setBridgeUrl(resolvedBridgeUrl);
         setBridgeToken(parsed.bridgeToken ?? env.hostBridgeToken);
+        setDefaultStartCwd(parsed.defaultStartCwd);
         setDefaultModelId(parsed.defaultModelId);
         setDefaultReasoningEffort(parsed.defaultReasoningEffort);
         setApprovalMode(parsed.approvalMode);
+        setShowToolCalls(parsed.showToolCalls);
       } catch {
         if (!cancelled) {
           resetToDefaults();
@@ -295,6 +316,12 @@ export default function App() {
 
   const handleSelectChat = useCallback(
     (id: string) => {
+      const currentChatId = activeChat?.id ?? selectedChatId;
+      if (currentScreen === 'Main' && currentChatId === id) {
+        closeDrawer();
+        return;
+      }
+
       setSelectedChatId(id);
       setGitChat(null);
       setCurrentScreen('Main');
@@ -302,7 +329,7 @@ export default function App() {
       setPendingMainChatSnapshot(null);
       closeDrawer();
     },
-    [closeDrawer]
+    [activeChat?.id, closeDrawer, currentScreen, selectedChatId]
   );
 
   const handleNewChat = useCallback(() => {
@@ -325,12 +352,21 @@ export default function App() {
       void saveAppSettings(
         bridgeUrl,
         bridgeToken,
+        defaultStartCwd,
         normalizedModelId,
         normalizedEffort,
-        approvalMode
+        approvalMode,
+        showToolCalls
       );
     },
-    [approvalMode, bridgeToken, bridgeUrl, saveAppSettings]
+    [
+      approvalMode,
+      bridgeToken,
+      bridgeUrl,
+      defaultStartCwd,
+      saveAppSettings,
+      showToolCalls,
+    ]
   );
 
   const handleApprovalModeChange = useCallback(
@@ -340,12 +376,71 @@ export default function App() {
       void saveAppSettings(
         bridgeUrl,
         bridgeToken,
+        defaultStartCwd,
         defaultModelId,
         defaultReasoningEffort,
-        normalizedMode
+        normalizedMode,
+        showToolCalls
       );
     },
-    [bridgeToken, bridgeUrl, defaultModelId, defaultReasoningEffort, saveAppSettings]
+    [
+      bridgeToken,
+      bridgeUrl,
+      defaultStartCwd,
+      defaultModelId,
+      defaultReasoningEffort,
+      saveAppSettings,
+      showToolCalls,
+    ]
+  );
+
+  const handleShowToolCallsChange = useCallback(
+    (nextValue: boolean) => {
+      setShowToolCalls(nextValue);
+      void saveAppSettings(
+        bridgeUrl,
+        bridgeToken,
+        defaultStartCwd,
+        defaultModelId,
+        defaultReasoningEffort,
+        approvalMode,
+        nextValue
+      );
+    },
+    [
+      approvalMode,
+      bridgeToken,
+      bridgeUrl,
+      defaultStartCwd,
+      defaultModelId,
+      defaultReasoningEffort,
+      saveAppSettings,
+    ]
+  );
+
+  const handleDefaultStartCwdChange = useCallback(
+    (nextCwd: string | null) => {
+      const normalizedDefaultStartCwd = normalizeDefaultStartCwd(nextCwd);
+      setDefaultStartCwd(normalizedDefaultStartCwd);
+      void saveAppSettings(
+        bridgeUrl,
+        bridgeToken,
+        normalizedDefaultStartCwd,
+        defaultModelId,
+        defaultReasoningEffort,
+        approvalMode,
+        showToolCalls
+      );
+    },
+    [
+      approvalMode,
+      bridgeToken,
+      bridgeUrl,
+      defaultModelId,
+      defaultReasoningEffort,
+      saveAppSettings,
+      showToolCalls,
+    ]
   );
 
   const handleBridgeUrlSaved = useCallback(
@@ -365,9 +460,11 @@ export default function App() {
       void saveAppSettings(
         normalized,
         normalizeBridgeToken(nextBridgeToken),
+        defaultStartCwd,
         defaultModelId,
         defaultReasoningEffort,
-        approvalMode
+        approvalMode,
+        showToolCalls
       );
       setCurrentScreen(onboardingMode === 'edit' ? onboardingReturnScreen : 'Main');
       setOnboardingMode('edit');
@@ -376,11 +473,13 @@ export default function App() {
     [
       approvalMode,
       closeDrawer,
+      defaultStartCwd,
       defaultModelId,
       defaultReasoningEffort,
       onboardingMode,
       onboardingReturnScreen,
       saveAppSettings,
+      showToolCalls,
     ]
   );
 
@@ -402,14 +501,24 @@ export default function App() {
     setOnboardingMode('initial');
     setOnboardingReturnScreen('Main');
     setCurrentScreen('Onboarding');
-    void saveAppSettings(null, null, defaultModelId, defaultReasoningEffort, approvalMode);
+    void saveAppSettings(
+      null,
+      null,
+      defaultStartCwd,
+      defaultModelId,
+      defaultReasoningEffort,
+      approvalMode,
+      showToolCalls
+    );
     closeDrawer();
   }, [
     approvalMode,
     closeDrawer,
+    defaultStartCwd,
     defaultModelId,
     defaultReasoningEffort,
     saveAppSettings,
+    showToolCalls,
   ]);
 
   const handleCancelOnboarding = useCallback(() => {
@@ -505,13 +614,16 @@ export default function App() {
             ref={mainRef}
             api={activeApi}
             ws={activeWs}
+            bridgeUrl={bridgeUrl}
+            bridgeToken={bridgeToken}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
             approvalMode={approvalMode}
-            onDefaultStartCwdChange={setDefaultStartCwd}
+            showToolCalls={showToolCalls}
+            onDefaultStartCwdChange={handleDefaultStartCwdChange}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
             pendingOpenChatSnapshot={pendingMainChatSnapshot}
@@ -532,6 +644,8 @@ export default function App() {
             onDefaultModelSettingsChange={handleDefaultModelSettingsChange}
             approvalMode={approvalMode}
             onApprovalModeChange={handleApprovalModeChange}
+            showToolCalls={showToolCalls}
+            onShowToolCallsChange={handleShowToolCallsChange}
             onEditBridgeUrl={handleOpenBridgeUrlSettings}
             onResetOnboarding={handleResetOnboarding}
             onOpenDrawer={openDrawer}
@@ -559,13 +673,16 @@ export default function App() {
             ref={mainRef}
             api={activeApi}
             ws={activeWs}
+            bridgeUrl={bridgeUrl}
+            bridgeToken={bridgeToken}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
             defaultModelId={defaultModelId}
             defaultReasoningEffort={defaultReasoningEffort}
             approvalMode={approvalMode}
-            onDefaultStartCwdChange={setDefaultStartCwd}
+            showToolCalls={showToolCalls}
+            onDefaultStartCwdChange={handleDefaultStartCwdChange}
             onChatContextChange={handleChatContextChange}
             pendingOpenChatId={pendingMainChatId}
             pendingOpenChatSnapshot={pendingMainChatSnapshot}
@@ -582,9 +699,18 @@ export default function App() {
     <SafeAreaProvider>
       <View style={styles.root}>
         {/* Main content */}
-        <View style={[styles.screen, { width: screenWidth }]}>
+        <Animated.View
+          style={[
+            styles.screenFrame,
+            drawerOpen && styles.screenFrameOpen,
+            {
+              width: screenWidth,
+              transform: [{ translateX: contentTranslateX }, { scale: contentScale }],
+            },
+          ]}
+        >
           {renderScreen()}
-        </View>
+        </Animated.View>
 
         {/* Overlay */}
         <Animated.View
@@ -607,8 +733,6 @@ export default function App() {
             api={activeApi}
             ws={activeWs}
             selectedChatId={selectedChatId}
-            selectedDefaultCwd={defaultStartCwd}
-            onSelectDefaultCwd={setDefaultStartCwd}
             onSelectChat={handleSelectChat}
             onNewChat={handleNewChat}
             onNavigate={navigate}
@@ -637,17 +761,21 @@ function getAppSettingsPath(): string | null {
 function parseAppSettings(raw: string): {
   bridgeUrl: string | null;
   bridgeToken: string | null;
+  defaultStartCwd: string | null;
   defaultModelId: string | null;
   defaultReasoningEffort: ReasoningEffort | null;
   approvalMode: ApprovalMode;
+  showToolCalls: boolean;
 } {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return {
       bridgeUrl: null,
       bridgeToken: null,
+      defaultStartCwd: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
+      showToolCalls: false,
     };
   }
 
@@ -664,15 +792,20 @@ function parseAppSettings(raw: string): {
       return {
         bridgeUrl: null,
         bridgeToken: null,
+        defaultStartCwd: null,
         defaultModelId: null,
         defaultReasoningEffort: null,
         approvalMode: 'normal',
+        showToolCalls: false,
       };
     }
 
     return {
       bridgeUrl: normalizeBridgeUrl((parsed as { bridgeUrl?: unknown }).bridgeUrl),
       bridgeToken: normalizeBridgeToken((parsed as { bridgeToken?: unknown }).bridgeToken),
+      defaultStartCwd: normalizeDefaultStartCwd(
+        (parsed as { defaultStartCwd?: unknown }).defaultStartCwd
+      ),
       defaultModelId: normalizeModelId(
         (parsed as { defaultModelId?: unknown }).defaultModelId
       ),
@@ -682,14 +815,19 @@ function parseAppSettings(raw: string): {
       approvalMode: normalizeApprovalMode(
         (parsed as { approvalMode?: unknown }).approvalMode
       ),
+      showToolCalls: normalizeBoolean(
+        (parsed as { showToolCalls?: unknown }).showToolCalls
+      ),
     };
   } catch {
     return {
       bridgeUrl: null,
       bridgeToken: null,
+      defaultStartCwd: null,
       defaultModelId: null,
       defaultReasoningEffort: null,
       approvalMode: 'normal',
+      showToolCalls: false,
     };
   }
 }
@@ -703,6 +841,15 @@ function normalizeBridgeUrl(value: unknown): string | null {
 }
 
 function normalizeBridgeToken(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeDefaultStartCwd(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
   }
@@ -744,6 +891,10 @@ function normalizeApprovalMode(value: unknown): ApprovalMode {
   return value === 'yolo' ? 'yolo' : 'normal';
 }
 
+function normalizeBoolean(value: unknown): boolean {
+  return value === true;
+}
+
 const styles = StyleSheet.create({
   root: {
     flex: 1,
@@ -757,6 +908,16 @@ const styles = StyleSheet.create({
   },
   screen: {
     flex: 1,
+  },
+  screenFrame: {
+    flex: 1,
+    backgroundColor: colors.bgMain,
+  },
+  screenFrameOpen: {
+    borderRadius: 28,
+    borderCurve: 'continuous',
+    overflow: 'hidden',
+    boxShadow: '0 22px 48px rgba(0, 0, 0, 0.34)',
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,

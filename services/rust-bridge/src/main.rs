@@ -13,11 +13,15 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -596,6 +600,37 @@ impl AppServerBridge {
         }
 
         Ok(())
+    }
+
+    async fn request_internal(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        let internal_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel::<Result<Value, String>>();
+        self.internal_waiters.lock().await.insert(internal_id, tx);
+
+        let mut payload = json!({
+            "id": internal_id,
+            "method": method,
+        });
+        if let Some(params) = params {
+            payload["params"] = params;
+        }
+
+        if let Err(error) = self.write_json(payload).await {
+            self.internal_waiters.lock().await.remove(&internal_id);
+            return Err(format!(
+                "failed forwarding internal request to app-server: {error}"
+            ));
+        }
+
+        match timeout(Duration::from_secs(20), rx).await {
+            Ok(Ok(Ok(result))) => Ok(result),
+            Ok(Ok(Err(message))) => Err(message),
+            Ok(Err(_)) => Err("internal app-server waiter dropped".to_string()),
+            Err(_) => {
+                self.internal_waiters.lock().await.remove(&internal_id);
+                Err(format!("internal app-server request timed out: {method}"))
+            }
+        }
     }
 
     async fn list_pending_approvals(&self) -> Vec<PendingApproval> {
@@ -1506,10 +1541,7 @@ fn build_rollout_event_msg_notification(
     timestamp: Option<&str>,
 ) -> Option<(String, Value)> {
     let raw_type = read_string(payload.get("type"))?;
-    if matches!(
-        raw_type.as_str(),
-        "token_count" | "user_message" | "context_compacted"
-    ) {
+    if matches!(raw_type.as_str(), "user_message" | "context_compacted") {
         return None;
     }
 
@@ -1864,6 +1896,55 @@ struct AttachmentUploadRequest {
     kind: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceListRequest {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSummary {
+    path: String,
+    chat_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceListResponse {
+    bridge_root: String,
+    allow_outside_root_cwd: bool,
+    workspaces: Vec<WorkspaceSummary>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileSystemListRequest {
+    path: Option<String>,
+    include_hidden: Option<bool>,
+    directories_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileSystemEntry {
+    name: String,
+    path: String,
+    kind: String,
+    hidden: bool,
+    selectable: bool,
+    is_git_repo: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileSystemListResponse {
+    bridge_root: String,
+    path: String,
+    parent_path: Option<String>,
+    entries: Vec<FileSystemEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AttachmentUploadResponse {
@@ -1959,6 +2040,12 @@ struct RpcQuery {
     token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LocalImageQuery {
+    path: String,
+    token: Option<String>,
+}
+
 #[tokio::main]
 async fn main() {
     let config = match BridgeConfig::from_env() {
@@ -2014,6 +2101,7 @@ async fn main() {
     let app = Router::new()
         .route("/rpc", get(ws_handler))
         .route("/health", get(health_handler))
+        .route("/local-image", get(local_image_handler))
         .with_state(state);
 
     let bind_addr = format!("{}:{}", config.host, config.port);
@@ -2040,6 +2128,120 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
         "at": now_iso(),
         "uptimeSec": state.started_at.elapsed().as_secs(),
     }))
+}
+
+async fn local_image_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<LocalImageQuery>,
+) -> Response {
+    if !state.config.is_authorized(&headers, query.token.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": "unauthorized",
+                "message": "Missing or invalid bridge token"
+            })),
+        )
+            .into_response();
+    }
+
+    let path = match resolve_local_image_path(&query.path) {
+        Ok(path) => path,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "invalid_path",
+                    "message": message,
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let canonical = match fs::canonicalize(&path).await {
+        Ok(path) => normalize_path(&path),
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "not_found",
+                    "message": "Image file not found"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let metadata = match fs::metadata(&canonical).await {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "not_found",
+                    "message": "Image file not found"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !metadata.is_file() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_path",
+                "message": "Image path must reference a file"
+            })),
+        )
+            .into_response();
+    }
+
+    let content_type = match infer_image_content_type_from_path(&canonical) {
+        Some(content_type) => content_type,
+        None => {
+            return (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(json!({
+                    "error": "unsupported_media_type",
+                    "message": "Only image files can be served through /local-image"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let bytes = match fs::read(&canonical).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "read_failed",
+                    "message": format!("Failed to read image file: {error}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, content_type)
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "response_failed",
+                    "message": format!("Failed to build image response: {error}")
+                })),
+            )
+                .into_response()
+        })
 }
 
 async fn ws_handler(
@@ -2268,6 +2470,20 @@ async fn handle_bridge_method(
                 "earliestEventId": state.hub.earliest_event_id().await,
                 "latestEventId": state.hub.latest_event_id(),
             }))
+        }
+        "bridge/workspaces/list" => {
+            let request: WorkspaceListRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = list_workspace_roots(state, request).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/fs/list" => {
+            let request: FileSystemListRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = list_filesystem_entries(state, request).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/terminal/exec" => {
             let request: TerminalExecRequest =
@@ -2534,6 +2750,157 @@ async fn handle_bridge_method(
     }
 }
 
+async fn list_workspace_roots(
+    state: &Arc<AppState>,
+    request: WorkspaceListRequest,
+) -> Result<WorkspaceListResponse, BridgeError> {
+    let limit = request.limit.unwrap_or(200).clamp(1, 1000);
+    let result = state
+        .app_server
+        .request_internal(
+            "thread/list",
+            Some(json!({
+                "cursor": Value::Null,
+                "limit": limit,
+                "sortKey": Value::Null,
+                "modelProviders": Value::Null,
+                "sourceKinds": ["cli", "vscode", "exec", "appServer", "unknown"],
+                "archived": false,
+                "cwd": Value::Null,
+            })),
+        )
+        .await
+        .map_err(|error| BridgeError::server(&error))?;
+
+    let entries = result
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut workspaces_by_path: HashMap<String, (usize, u64)> = HashMap::new();
+
+    for entry in entries {
+        let Some(object) = entry.as_object() else {
+            continue;
+        };
+
+        let Some(raw_cwd) = read_string(object.get("cwd")) else {
+            continue;
+        };
+
+        let Some(canonical_path) =
+            normalize_existing_directory(&state.config.workdir, raw_cwd.as_str()).await
+        else {
+            continue;
+        };
+
+        let workspace_path = path_to_string(&canonical_path);
+        let updated_at = parse_internal_id(object.get("updatedAt")).unwrap_or(0);
+        let workspace_entry = workspaces_by_path
+            .entry(workspace_path)
+            .or_insert((0, updated_at));
+        workspace_entry.0 += 1;
+        workspace_entry.1 = workspace_entry.1.max(updated_at);
+    }
+
+    let mut workspaces = workspaces_by_path
+        .into_iter()
+        .map(|(path, (chat_count, updated_at))| (WorkspaceSummary { path, chat_count }, updated_at))
+        .collect::<Vec<_>>();
+
+    workspaces.sort_by(|(left, left_updated_at), (right, right_updated_at)| {
+        right_updated_at
+            .cmp(left_updated_at)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    Ok(WorkspaceListResponse {
+        bridge_root: path_to_string(&state.config.workdir),
+        allow_outside_root_cwd: state.config.allow_outside_root_cwd,
+        workspaces: workspaces
+            .into_iter()
+            .map(|(workspace, _)| workspace)
+            .collect(),
+    })
+}
+
+async fn list_filesystem_entries(
+    state: &Arc<AppState>,
+    request: FileSystemListRequest,
+) -> Result<FileSystemListResponse, BridgeError> {
+    let include_hidden = request.include_hidden.unwrap_or(false);
+    let directories_only = request.directories_only.unwrap_or(true);
+    let current_path =
+        resolve_browsable_directory(&state.config.workdir, request.path.as_deref()).await?;
+
+    let mut read_dir = fs::read_dir(&current_path)
+        .await
+        .map_err(|error| BridgeError::server(&format!("failed to read directory: {error}")))?;
+    let mut entries = Vec::new();
+
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(|error| BridgeError::server(&format!("failed to read directory entry: {error}")))?
+    {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.is_empty() {
+            continue;
+        }
+
+        let hidden = name.starts_with('.');
+        if hidden && !include_hidden {
+            continue;
+        }
+
+        let entry_path = normalize_path(&entry.path());
+        let metadata = match fs::metadata(&entry_path).await {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+
+        let is_directory = metadata.is_dir();
+        if directories_only && !is_directory {
+            continue;
+        }
+
+        let kind = if is_directory { "directory" } else { "file" }.to_string();
+        let is_git_repo = if is_directory {
+            fs::metadata(entry_path.join(".git")).await.is_ok()
+        } else {
+            false
+        };
+
+        entries.push(FileSystemEntry {
+            name,
+            path: path_to_string(&entry_path),
+            kind,
+            hidden,
+            selectable: is_directory,
+            is_git_repo,
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        right.selectable.cmp(&left.selectable).then_with(|| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+                .then_with(|| left.name.cmp(&right.name))
+        })
+    });
+
+    let parent_path = current_path.parent().map(path_to_string);
+
+    Ok(FileSystemListResponse {
+        bridge_root: path_to_string(&state.config.workdir),
+        path: path_to_string(&current_path),
+        parent_path,
+        entries,
+    })
+}
+
 async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, BridgeError> {
     let max_voice_transcription_bytes = resolve_max_voice_transcription_bytes();
     let estimated_size = estimate_base64_decoded_size(&request.data_base64)?;
@@ -2739,6 +3106,71 @@ fn resolve_bridge_workdir(raw_workdir: PathBuf) -> Result<PathBuf, String> {
             raw_workdir.to_string_lossy()
         )
     })?;
+
+    Ok(normalize_path(&canonical))
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+async fn normalize_existing_directory(base: &Path, raw_path: &str) -> Option<PathBuf> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        base.join(candidate)
+    };
+
+    let canonical = fs::canonicalize(&resolved).await.ok()?;
+    let metadata = fs::metadata(&canonical).await.ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+
+    Some(normalize_path(&canonical))
+}
+
+async fn resolve_browsable_directory(
+    base: &Path,
+    raw_path: Option<&str>,
+) -> Result<PathBuf, BridgeError> {
+    let trimmed = raw_path.map(str::trim).unwrap_or("");
+    let candidate = if trimmed.is_empty() {
+        base.to_path_buf()
+    } else {
+        let requested = PathBuf::from(trimmed);
+        if requested.is_absolute() {
+            requested
+        } else {
+            base.join(requested)
+        }
+    };
+
+    let canonical = fs::canonicalize(&candidate).await.map_err(|error| {
+        BridgeError::invalid_params(&format!(
+            "workspace directory is invalid or inaccessible ({}): {error}",
+            candidate.to_string_lossy()
+        ))
+    })?;
+
+    let metadata = fs::metadata(&canonical).await.map_err(|error| {
+        BridgeError::server(&format!(
+            "failed to inspect workspace directory ({}): {error}",
+            canonical.to_string_lossy()
+        ))
+    })?;
+
+    if !metadata.is_dir() {
+        return Err(BridgeError::invalid_params(
+            "workspace directory must point to a folder",
+        ));
+    }
 
     Ok(normalize_path(&canonical))
 }
@@ -3453,6 +3885,33 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
+fn resolve_local_image_path(raw_path: &str) -> Result<PathBuf, &'static str> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("Image path is required");
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("Image path must be absolute");
+    }
+
+    Ok(normalize_path(&path))
+}
+
+fn infer_image_content_type_from_path(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.trim().to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "heic" => Some("image/heic"),
+        "heif" => Some("image/heif"),
+        _ => None,
+    }
+}
+
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
 
@@ -3839,18 +4298,29 @@ mod tests {
     }
 
     #[test]
-    fn rollout_event_msg_mapping_ignores_noise_events() {
-        assert!(build_rollout_event_msg_notification(
+    fn rollout_event_msg_mapping_forwards_token_count_events() {
+        let token_count = build_rollout_event_msg_notification(
             json!({
                 "type": "token_count",
-                "info": {}
+                "info": {
+                    "model_context_window": 200000
+                }
             })
             .as_object()
             .expect("event payload object"),
             "thread-1",
             None,
         )
-        .is_none());
+        .expect("token count notification");
+
+        assert_eq!(token_count.0, "codex/event/token_count");
+        assert_eq!(token_count.1["msg"]["type"], "token_count");
+        assert_eq!(token_count.1["msg"]["thread_id"], "thread-1");
+        assert_eq!(token_count.1["msg"]["info"]["model_context_window"], 200000);
+    }
+
+    #[test]
+    fn rollout_event_msg_mapping_ignores_noise_events() {
         assert!(build_rollout_event_msg_notification(
             json!({
                 "type": "user_message",
@@ -4283,6 +4753,34 @@ mod tests {
         assert_eq!(
             normalize_path(Path::new("a/b/../c/./d")),
             PathBuf::from("a/c/d")
+        );
+    }
+
+    #[test]
+    fn resolve_local_image_path_requires_absolute_paths() {
+        assert_eq!(
+            resolve_local_image_path("/tmp/../tmp/example.png").unwrap(),
+            PathBuf::from("/tmp/example.png")
+        );
+        assert_eq!(
+            resolve_local_image_path("relative/example.png").unwrap_err(),
+            "Image path must be absolute"
+        );
+    }
+
+    #[test]
+    fn infer_image_content_type_from_path_supports_common_extensions() {
+        assert_eq!(
+            infer_image_content_type_from_path(Path::new("/tmp/example.png")),
+            Some("image/png")
+        );
+        assert_eq!(
+            infer_image_content_type_from_path(Path::new("/tmp/example.JPG")),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            infer_image_content_type_from_path(Path::new("/tmp/example.txt")),
+            None
         );
     }
 
