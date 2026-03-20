@@ -38,6 +38,7 @@ const SWIPE_OPEN_DISTANCE = 56;
 const SWIPE_CLOSE_DISTANCE = 56;
 const SWIPE_OPEN_VELOCITY = 0.4;
 const SWIPE_CLOSE_VELOCITY = -0.4;
+const DRAWER_CONTENT_SCALE = 0.94;
 const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
 const APP_SETTINGS_VERSION = 3;
 
@@ -84,6 +85,17 @@ export default function App() {
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayAnim = useRef(new Animated.Value(0)).current;
   const { width: screenWidth } = useWindowDimensions();
+  const contentShiftOpen = Math.min(DRAWER_WIDTH - 12, screenWidth * 0.74);
+  const contentTranslateX = drawerAnim.interpolate({
+    inputRange: [-DRAWER_WIDTH, 0],
+    outputRange: [0, contentShiftOpen],
+    extrapolate: 'clamp',
+  });
+  const contentScale = drawerAnim.interpolate({
+    inputRange: [-DRAWER_WIDTH, 0],
+    outputRange: [1, DRAWER_CONTENT_SCALE],
+    extrapolate: 'clamp',
+  });
 
   useEffect(() => {
     if (!ws) {
@@ -636,9 +648,18 @@ export default function App() {
     <SafeAreaProvider>
       <View style={styles.root}>
         {/* Main content */}
-        <View style={[styles.screen, { width: screenWidth }]}>
+        <Animated.View
+          style={[
+            styles.screenFrame,
+            drawerOpen && styles.screenFrameOpen,
+            {
+              width: screenWidth,
+              transform: [{ translateX: contentTranslateX }, { scale: contentScale }],
+            },
+          ]}
+        >
           {renderScreen()}
-        </View>
+        </Animated.View>
 
         {/* Overlay */}
         <Animated.View
@@ -820,6 +841,16 @@ const styles = StyleSheet.create({
   },
   screen: {
     flex: 1,
+  },
+  screenFrame: {
+    flex: 1,
+    backgroundColor: colors.bgMain,
+  },
+  screenFrameOpen: {
+    borderRadius: 28,
+    borderCurve: 'continuous',
+    overflow: 'hidden',
+    boxShadow: '0 22px 48px rgba(0, 0, 0, 0.34)',
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
