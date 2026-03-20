@@ -74,7 +74,6 @@ export function SettingsScreen({
   const [approvalModeModalVisible, setApprovalModeModalVisible] = useState(false);
   const [account, setAccount] = useState<AccountSnapshot | null>(null);
   const [accountLoading, setAccountLoading] = useState(false);
-  const [accountActionBusy, setAccountActionBusy] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
 
   const normalizedDefaultModelId = normalizeModelId(defaultModelId);
@@ -166,10 +165,7 @@ export function SettingsScreen({
   useEffect(
     () =>
       ws.onEvent((event) => {
-        if (
-          event.method === 'account/updated' ||
-          event.method === 'account/login/completed'
-        ) {
+        if (event.method === 'account/updated') {
           void loadAccount();
         }
       }),
@@ -296,23 +292,6 @@ export function SettingsScreen({
     ],
     [normalizedApprovalMode, selectApprovalMode]
   );
-
-  const handleLogout = useCallback(async () => {
-    if (accountActionBusy) {
-      return;
-    }
-
-    setAccountActionBusy(true);
-    try {
-      await api.logoutAccount();
-      await loadAccount();
-      setAccountError(null);
-    } catch (err) {
-      setAccountError((err as Error).message);
-    } finally {
-      setAccountActionBusy(false);
-    }
-  }, [accountActionBusy, api, loadAccount]);
 
   const modelPickerOptions = useMemo<SelectionSheetOption[]>(
     () => [
@@ -497,31 +476,8 @@ export function SettingsScreen({
                 <Row
                   label="Bridge auth"
                   value={account?.requiresOpenaiAuth ? 'Required' : 'Optional'}
-                  isLast={!account?.type}
+                  isLast
                 />
-
-                {account?.type ? (
-                  <Pressable
-                    onPress={() => {
-                      void handleLogout();
-                    }}
-                    disabled={accountActionBusy}
-                    style={({ pressed }) => [
-                      styles.accountActionBtn,
-                      pressed && !accountActionBusy && styles.accountActionBtnPressed,
-                      accountActionBusy && styles.accountActionBtnDisabled,
-                    ]}
-                  >
-                    <Ionicons
-                      name="log-out-outline"
-                      size={15}
-                      color={colors.textPrimary}
-                    />
-                    <Text style={styles.accountActionBtnText}>
-                      {accountActionBusy ? 'Signing out…' : 'Sign out'}
-                    </Text>
-                  </Pressable>
-                ) : null}
               </>
             )}
           </BlurView>
@@ -801,29 +757,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.sm,
-  },
-  accountActionBtn: {
-    marginBottom: spacing.md,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    paddingVertical: spacing.sm,
-  },
-  accountActionBtnPressed: {
-    opacity: 0.82,
-  },
-  accountActionBtnDisabled: {
-    opacity: 0.56,
-  },
-  accountActionBtnText: {
-    ...typography.caption,
-    color: colors.textPrimary,
-    fontWeight: '600',
   },
   refreshBtn: {
     flexDirection: 'row',

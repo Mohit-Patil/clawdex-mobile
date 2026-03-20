@@ -57,8 +57,13 @@ Status: In progress (first implementation pass completed)
   - no richer per-agent live status/dashboard view
 
 ### Gap 3: Account/Auth UX
-- No dedicated mobile flow for login state, logout, account details, or rate limits.
-- Auth refresh is still operationally env-driven in bridge, not user-driven in app.
+- Status: In progress
+- Mobile Settings now exposes read-only account state via `account/read`, including ChatGPT email + plan type when available.
+- Remaining:
+  - no dedicated standalone account screen outside Settings
+  - login/logout is not user-driven in mobile UI yet
+  - auth refresh is still operationally env-driven in bridge, not user-driven in app
+  - no API-key entry flow in mobile UI
 
 ### Gap 4: MCP + Tooling UX
 - No end-to-end UI for MCP server status, reload, OAuth login, or remote skills list/export.
