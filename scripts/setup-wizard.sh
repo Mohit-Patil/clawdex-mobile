@@ -1152,59 +1152,6 @@ confirm_phone_network_ready() {
   esac
 }
 
-has_mobile_react_native_runtime() {
-  local root_touchable="$ROOT_DIR/node_modules/react-native/Libraries/Components/Touchable/BoundingDimensions.js"
-  local workspace_touchable="$ROOT_DIR/apps/mobile/node_modules/react-native/Libraries/Components/Touchable/BoundingDimensions.js"
-  local root_devtools="$ROOT_DIR/node_modules/react-native/src/private/devsupport/rndevtools/specs/NativeReactDevToolsRuntimeSettingsModule.js"
-  local workspace_devtools="$ROOT_DIR/apps/mobile/node_modules/react-native/src/private/devsupport/rndevtools/specs/NativeReactDevToolsRuntimeSettingsModule.js"
-
-  local touchable_ok="false"
-  local devtools_ok="false"
-
-  if [[ -f "$root_touchable" ]] || [[ -f "$workspace_touchable" ]]; then
-    touchable_ok="true"
-  fi
-  if [[ -f "$root_devtools" ]] || [[ -f "$workspace_devtools" ]]; then
-    devtools_ok="true"
-  fi
-
-  [[ "$touchable_ok" == "true" ]] && [[ "$devtools_ok" == "true" ]]
-}
-
-repair_mobile_runtime_dependencies() {
-  info "Repairing mobile runtime dependencies (React Native + Expo toolchain)..."
-  run_quiet_command "React Native dependency repair" bash -lc "cd \"$ROOT_DIR\" && npm install --include=dev --force && npm install --include=dev --force -w apps/mobile && npm dedupe"
-}
-
-install_project_dependencies() {
-  local should_install="false"
-  local need_install="false"
-
-  if [[ ! -d "$ROOT_DIR/node_modules" ]] || [[ ! -d "$ROOT_DIR/node_modules/@codex" ]]; then
-    need_install="true"
-  fi
-
-  if [[ "$need_install" == "true" ]]; then
-    if confirm_prompt "Install project npm dependencies now?" "Y"; then
-      should_install="true"
-    else
-      if [[ "$AUTO_START" == "true" ]]; then
-        abort_wizard "Dependencies are required before starting the bridge."
-      fi
-    fi
-  else
-    if [[ "$FLOW" == "manual" ]] && confirm_prompt "Refresh npm dependencies now?" "N"; then
-      should_install="true"
-    fi
-  fi
-
-  if [[ "$should_install" == "true" ]]; then
-    info "Installing npm dependencies (including dev tooling; this can take a few minutes)..."
-    run_quiet_command "Project dependency install" bash -lc "cd \"$ROOT_DIR\" && npm install --include=dev && npm dedupe"
-    ok "Dependencies installed."
-  fi
-}
-
 start_bridge_foreground() {
   rail_echo "Starting bridge in foreground."
   rail_echo "Press Ctrl+C to stop the bridge."
@@ -1242,7 +1189,6 @@ else
   ensure_local_rust_build_toolchain
 fi
 ensure_codex_cli
-install_project_dependencies
 
 section "Config handling"
 choose_config_action

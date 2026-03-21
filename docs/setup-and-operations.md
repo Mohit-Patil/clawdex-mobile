@@ -13,6 +13,8 @@ After `clawdex init`, expected sequence:
 
 Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `linux-x64`, and `win32-x64`. On those hosts, normal bridge startup does not require a Rust compile. Intel Macs fall back to a local Rust build.
 
+`clawdex init` does not run a project-local `npm install` for the published CLI path. The only required npm install there is `npm install -g clawdex-mobile@latest`.
+
 ## Manual Secure Setup (No Wizard)
 
 ### 1) Install dependencies

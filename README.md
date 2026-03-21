@@ -43,6 +43,8 @@ This is the primary starting point.
 
 Published npm releases bundle prebuilt Rust bridge binaries for `darwin-arm64`, `linux-x64`, and `win32-x64`, so supported hosts do not need to compile the bridge during normal startup. Intel Macs are not packaged in the npm release and fall back to a local Rust build if needed. The interactive shell-based setup helpers are still macOS/Linux-oriented today.
 
+`clawdex init` does not run a project-local `npm install`. The global package install is the only npm install needed for the published bridge flow.
+
 `clawdex init` guides you through:
 
 1. bridge mode selection: `Local (LAN)` or `Tailscale`

@@ -4,6 +4,7 @@
 
 - `clawdex init` no longer starts Expo for the shipped app.
 - Published npm installs should use a bundled bridge binary on `darwin-arm64`, `linux-x64`, and `win32-x64`.
+- `clawdex init` should not run a repo `npm install` on the published CLI path.
 - If startup is still compiling Rust, you are usually on a source checkout, an unsupported host, or a package without bundled bridge binaries.
 - The slow parts are usually npm dependency install/repair or the first Rust bridge build on source-based setups.
 - If you want to skip the interactive wizard after initial setup, use `npm run secure:bridge`.
