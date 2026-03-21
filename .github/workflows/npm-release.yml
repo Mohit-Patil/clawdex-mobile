@@ -104,8 +104,31 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           pattern: bridge-binaries-*
-          path: .
-          merge-multiple: true
+          path: .artifacts/bridge-binaries
+
+      - name: Restage packaged bridge binaries
+        run: |
+          rm -rf vendor/bridge-binaries
+          mkdir -p vendor/bridge-binaries
+          for target in darwin-arm64 darwin-x64 linux-x64 win32-x64; do
+            case "$target" in
+              win32-x64) binary_name="codex-rust-bridge.exe" ;;
+              *) binary_name="codex-rust-bridge" ;;
+            esac
+            source_path=".artifacts/bridge-binaries/bridge-binaries-${target}/${binary_name}"
+            if [ ! -f "$source_path" ]; then
+              echo "Missing downloaded bridge artifact for ${target}: ${source_path}"
+              exit 1
+            fi
+            node scripts/bridge-binary.js stage --target "$target" --from "$source_path"
+          done
+
+      - name: Verify packaged bridge bundle layout
+        run: |
+          test -f vendor/bridge-binaries/darwin-arm64/codex-rust-bridge
+          test -f vendor/bridge-binaries/darwin-x64/codex-rust-bridge
+          test -f vendor/bridge-binaries/linux-x64/codex-rust-bridge
+          test -f vendor/bridge-binaries/win32-x64/codex-rust-bridge.exe
 
       - name: Verify Rust bridge compiles
         working-directory: services/rust-bridge
@@ -133,6 +156,15 @@ jobs:
 
       - name: Show package contents
         run: npm pack --dry-run
+
+      - name: Verify tarball contains packaged bridge targets
+        run: |
+          TMPDIR="$(mktemp -d)"
+          TARBALL="$(npm pack --silent --pack-destination "$TMPDIR" | tail -n 1)"
+          tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/darwin-arm64/codex-rust-bridge$'
+          tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/darwin-x64/codex-rust-bridge$'
+          tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/linux-x64/codex-rust-bridge$'
+          tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/win32-x64/codex-rust-bridge.exe$'
 
       - name: Resolve publish target
         id: publish_target
