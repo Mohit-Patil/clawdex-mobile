@@ -38,12 +38,13 @@ jobs:
             binary_path: services/rust-bridge/target/x86_64-pc-windows-msvc/release/codex-rust-bridge.exe
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
+          package-manager-cache: false
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -61,7 +62,7 @@ jobs:
         run: node scripts/bridge-binary.js stage --target ${{ matrix.package_target }} --from ${{ matrix.binary_path }}
 
       - name: Upload bridge artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bridge-binaries-${{ matrix.package_target }}
           path: vendor/bridge-binaries/${{ matrix.package_target }}/
@@ -73,17 +74,18 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
           cache: npm
           cache-dependency-path: package-lock.json
+          package-manager-cache: false
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -95,7 +97,7 @@ jobs:
         run: npm ci
 
       - name: Download packaged bridge binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: bridge-binaries-*
           path: .
