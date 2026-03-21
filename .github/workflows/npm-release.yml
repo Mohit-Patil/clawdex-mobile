@@ -28,7 +28,7 @@ jobs:
             package_target: darwin-arm64
             rust_target: aarch64-apple-darwin
             binary_path: services/rust-bridge/target/aarch64-apple-darwin/release/codex-rust-bridge
-          - runner: macos-13
+          - runner: macos-15-intel
             package_target: darwin-x64
             rust_target: x86_64-apple-darwin
             binary_path: services/rust-bridge/target/x86_64-apple-darwin/release/codex-rust-bridge
