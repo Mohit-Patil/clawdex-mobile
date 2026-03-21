@@ -24,10 +24,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-26
             package_target: darwin-arm64
             rust_target: aarch64-apple-darwin
             binary_path: services/rust-bridge/target/aarch64-apple-darwin/release/codex-rust-bridge
+          - runner: macos-26-intel
+            package_target: darwin-x64
+            rust_target: x86_64-apple-darwin
+            binary_path: services/rust-bridge/target/x86_64-apple-darwin/release/codex-rust-bridge
           - runner: ubuntu-latest
             package_target: linux-x64
             rust_target: x86_64-unknown-linux-gnu

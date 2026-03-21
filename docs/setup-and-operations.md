@@ -11,7 +11,7 @@ After `clawdex init`, expected sequence:
 3. A pairing QR is printed for the mobile app
 4. Bridge logs stay attached until you stop the process
 
-Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `linux-x64`, and `win32-x64`. On those hosts, normal bridge startup does not require a Rust compile. Intel Macs fall back to a local Rust build.
+Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, and `win32-x64`. On those hosts, normal bridge startup does not require a Rust compile.
 
 `clawdex init` does not run a project-local `npm install` for the published CLI path. The only required npm install there is `npm install -g clawdex-mobile@latest`.
 

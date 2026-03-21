@@ -12,6 +12,12 @@ const SUPPORTED_RUNTIME_TARGETS = {
     rustTarget: "aarch64-apple-darwin",
     binaryName: "codex-rust-bridge",
   },
+  "darwin-x64": {
+    platform: "darwin",
+    arch: "x64",
+    rustTarget: "x86_64-apple-darwin",
+    binaryName: "codex-rust-bridge",
+  },
   "linux-x64": {
     platform: "linux",
     arch: "x64",
