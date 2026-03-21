@@ -3,7 +3,7 @@
     "name": "Clawdex Mobile",
     "slug": "clawdex-mobile",
     "scheme": "clawdex",
-    "version": "3.0.0",
+    "version": "4.0.0",
     "userInterfaceStyle": "dark",
     "orientation": "portrait",
     "icon": "./assets/brand/app-icon.png",

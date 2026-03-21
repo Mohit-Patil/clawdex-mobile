@@ -1,6 +1,6 @@
 {
   "name": "clawdex-mobile",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "homepage": "https://github.com/Mohit-Patil/clawdex-mobile#readme",
   "repository": {
     "type": "git",
@@ -21,11 +21,12 @@
     "ios": "./scripts/start-expo.sh ios",
     "android": "./scripts/start-expo.sh android",
     "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/rust-bridge dev",
+    "bridge:package:stage-current": "node ./scripts/bridge-binary.js stage-current",
     "setup:wizard": "./scripts/setup-wizard.sh",
     "stop:services": "./scripts/stop-services.sh",
     "secure:setup": "./scripts/setup-secure-dev.sh",
-    "secure:bridge": "./scripts/start-bridge-secure.sh",
-    "secure:bridge:dev": "BRIDGE_RUN_MODE=dev ./scripts/start-bridge-secure.sh",
+    "secure:bridge": "node ./scripts/start-bridge-secure.js",
+    "secure:bridge:dev": "node ./scripts/start-bridge-secure.js --dev",
     "bridge:ts": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "version:sync": "node scripts/sync-versions.js",
     "build": "npm run --workspaces build",

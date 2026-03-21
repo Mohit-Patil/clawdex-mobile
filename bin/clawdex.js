@@ -10,13 +10,14 @@ function printUsage() {
   console.log(`Usage: clawdex <command> [options]
 
 Commands:
-  init [--no-start] [--platform <mobile|ios|android>]
-      Run interactive onboarding and secure setup.
-      By default, this also starts bridge + Expo at the end.
-      Use --no-start to skip auto-launch.
+  init [--no-start]
+      Run interactive bridge onboarding and secure setup.
+      By default, this also starts the secure bridge in the foreground.
+      Use --no-start to configure only.
 
   stop
-      Stop bridge + Expo services for this project.
+      Stop bridge services for this project.
+      Also stops a local Expo dev process if one was started from this checkout.
 
   upgrade [--version <latest|x.y.z>] [--restart]
   update  [--version <latest|x.y.z>] [--restart]
@@ -146,7 +147,7 @@ function runUpgrade(args) {
 
   console.log(`Current clawdex-mobile version: ${previousVersion}`);
   if (!options.noStop) {
-    console.log("Stopping running bridge/Expo services before upgrade...");
+    console.log("Stopping running local services before upgrade...");
     const stopResult = runScript("stop-services.sh", [], { exitOnComplete: false });
     if (!stopResult.ok) {
       console.error("error: failed to stop services before upgrade.");

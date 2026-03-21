@@ -1,6 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { BlurView } from 'expo-blur';
 import { CameraView, type BarcodeScanningResult, useCameraPermissions } from 'expo-camera';
+import * as Clipboard from 'expo-clipboard';
+import { LinearGradient } from 'expo-linear-gradient';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -42,10 +45,59 @@ type ConnectionCheck =
   | { kind: 'error'; message: string };
 type OnboardingStep = 'intro' | 'connect';
 type PairingPayload = { bridgeToken: string; bridgeUrl?: string };
-type BridgeModePreset = 'local' | 'tailscale';
+type IntroFeature = {
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+  description: string;
+};
 
-const LOCAL_EXAMPLE_URL = 'http://192.168.1.20:8787';
-const TAILSCALE_EXAMPLE_URL = 'http://100.101.102.103:8787';
+const BRIDGE_SETUP_COMMANDS = 'npm install -g clawdex-mobile@latest\nclawdex init';
+const INTRO_FEATURES: IntroFeature[] = [
+  {
+    icon: 'pulse-outline',
+    title: 'Start and monitor runs',
+    description: 'Launch new Codex work from your phone and follow streaming updates as it runs.',
+  },
+  {
+    icon: 'chatbubble-ellipses-outline',
+    title: 'Resume threads',
+    description: 'Pick up existing chats and keep active work moving without going back to desktop.',
+  },
+  {
+    icon: 'shield-checkmark-outline',
+    title: 'Review approvals',
+    description: 'Handle clarification prompts and approve commands or file changes in-app.',
+  },
+  {
+    icon: 'folder-open-outline',
+    title: 'Browse workspaces',
+    description: 'Open recent folders or navigate server directories before starting work.',
+  },
+  {
+    icon: 'git-branch-outline',
+    title: 'Git actions',
+    description: 'Review diffs, commit, and push chat workspaces from the Git view.',
+  },
+  {
+    icon: 'mic-outline',
+    title: 'Voice, files, images',
+    description: 'Use push-to-talk and attach workspace files or phone images to prompts.',
+  },
+];
+const SETUP_STAGES = [
+  {
+    title: 'Start bridge',
+    description: 'Run the CLI on your server and wait for the pairing QR.',
+  },
+  {
+    title: 'Pair bridge',
+    description: 'Scan QR or paste the bridge URL and token.',
+  },
+  {
+    title: 'Verify auth',
+    description: 'Confirm health and authenticated RPC before continuing.',
+  },
+] as const;
 
 export function OnboardingScreen({
   mode = 'initial',
@@ -83,7 +135,6 @@ export function OnboardingScreen({
   }, [initialBridgeToken]);
 
   const showIntroStep = mode === 'initial' && onboardingStep === 'intro';
-
   const normalizedBridgeUrl = useMemo(
     () => normalizeBridgeUrlInput(urlInput),
     [urlInput]
@@ -98,11 +149,25 @@ export function OnboardingScreen({
       : null;
   }, [allowInsecureRemoteBridge, normalizedBridgeUrl]);
 
-  const modeTitle = mode === 'edit' ? 'Update Bridge URL' : 'Connect Your Bridge';
+  const modeTitle = mode === 'edit' ? 'Update Bridge URL' : 'Pair Your Bridge';
   const modeDescription =
     mode === 'edit'
-      ? 'Switch to another host bridge without rebuilding the app.'
-      : 'Set the host bridge URL once, then use Codex from LAN, VPN, or Tailscale.';
+      ? 'Switch this phone to another bridge without rebuilding the app.'
+      : 'Connect this phone to your private bridge and verify that it responds.';
+  const normalizedTokenPreview = tokenInput.trim();
+  const showOnboardingDock = mode === 'initial';
+  const currentSetupStage = useMemo(() => {
+    if (showIntroStep) {
+      return 1;
+    }
+    if (connectionCheck.kind === 'success') {
+      return 3;
+    }
+    if (normalizedBridgeUrl || normalizedTokenPreview) {
+      return 2;
+    }
+    return 1;
+  }, [connectionCheck.kind, normalizedBridgeUrl, normalizedTokenPreview, showIntroStep]);
 
   const validateInput = useCallback((): { bridgeUrl: string; bridgeToken: string } | null => {
     const normalized = normalizeBridgeUrlInput(urlInput);
@@ -209,16 +274,6 @@ export function OnboardingScreen({
     await runConnectionCheck(validated.bridgeUrl, normalizedToken);
   }, [normalizeTokenInput, runConnectionCheck, validateInput]);
 
-  const applyPreset = useCallback((value: string) => {
-    setUrlInput(value);
-    setFormError(null);
-    setConnectionCheck({ kind: 'idle' });
-  }, []);
-
-  const applyModePreset = useCallback((preset: BridgeModePreset) => {
-    applyPreset(preset === 'local' ? LOCAL_EXAMPLE_URL : TAILSCALE_EXAMPLE_URL);
-  }, [applyPreset]);
-
   const goToConnectStep = useCallback(() => {
     setOnboardingStep('connect');
   }, []);
@@ -281,6 +336,20 @@ export function OnboardingScreen({
 
   return (
     <View style={styles.container}>
+      <LinearGradient
+        colors={['#020304', '#05070C', '#0A0E16']}
+        style={StyleSheet.absoluteFill}
+      />
+      <View pointerEvents="none" style={styles.ambientCanvas}>
+        <LinearGradient
+          colors={['rgba(181, 189, 204, 0.20)', 'rgba(181, 189, 204, 0.04)', 'transparent']}
+          style={styles.ambientOrbPrimary}
+        />
+        <LinearGradient
+          colors={['rgba(255, 255, 255, 0.10)', 'rgba(255, 255, 255, 0.02)', 'transparent']}
+          style={styles.ambientOrbSecondary}
+        />
+      </View>
       <SafeAreaView style={styles.safeArea}>
         <KeyboardAvoidingView
           behavior={Platform.select({ ios: 'padding', default: undefined })}
@@ -288,64 +357,70 @@ export function OnboardingScreen({
         >
           {showIntroStep ? (
             <View style={styles.introRoot}>
-              <View style={styles.introBrandRow}>
-                <BrandMark size={24} />
-                <Text style={styles.introBrandName}>Clawdex</Text>
+              <View style={styles.introHeader}>
+                <View style={styles.introBrandRow}>
+                  <BrandMark size={24} />
+                  <Text style={styles.introBrandName}>Clawdex</Text>
+                </View>
+                <AmbientBadge icon="lock-closed-outline" label="Private bridge" />
               </View>
-              <View style={styles.introMain}>
-                <View style={styles.heroCard}>
-                  <View style={styles.heroTopRow}>
-                    <View style={styles.heroIconWrap}>
-                      <Ionicons name="phone-portrait-outline" size={20} color={colors.textPrimary} />
-                    </View>
-                  </View>
-                  <Text style={styles.heroTitle}>Codex on mobile</Text>
-                  <Text style={styles.heroDescription}>
-                    Run your host-side Codex workflows from your phone across LAN, VPN, or Tailscale.
+
+              <ScrollView
+                style={styles.introScroll}
+                contentContainerStyle={styles.introScrollContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <LinearGradient
+                  colors={[
+                    'rgba(181, 189, 204, 0.22)',
+                    'rgba(34, 39, 48, 0.75)',
+                    'rgba(7, 9, 12, 0.96)',
+                  ]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.introHero}
+                >
+                  <Text style={styles.introHeroEyebrow}>Mobile control surface</Text>
+                  <Text style={styles.introHeroTitle}>Run Codex away from your desk.</Text>
+                  <Text style={styles.introHeroDescription}>
+                    Continue threads, review work, and approve changes from a paired private
+                    bridge.
+                  </Text>
+                </LinearGradient>
+
+                <View style={styles.introSectionHeader}>
+                  <Text style={styles.introSectionTitle}>What you can do from mobile</Text>
+                  <Text style={styles.introSectionSubtitle}>
+                    The phone UI should feel like a control surface, not a read-only mirror.
                   </Text>
                 </View>
 
-                <View style={[styles.formCard, styles.introFeaturesCard]}>
-                  <ScrollView
-                    style={styles.introFeaturesList}
-                    contentContainerStyle={styles.introFeaturesListContent}
-                    showsVerticalScrollIndicator
-                  >
-                    <Text style={styles.introSectionTitle}>What You Can Do</Text>
-                    <IntroFeatureRow
-                      icon="chatbubble-ellipses-outline"
-                      title="Continue threads"
-                      description="Follow active chats and start new runs from your phone."
+                <View style={styles.introFeatureGrid}>
+                  {INTRO_FEATURES.map((feature) => (
+                    <IntroFeatureCard
+                      key={feature.title}
+                      icon={feature.icon}
+                      title={feature.title}
+                      description={feature.description}
                     />
-                    <IntroFeatureRow
-                      icon="pulse-outline"
-                      title="Track run progress"
-                      description="See live status and streaming updates as Codex works."
-                    />
-                    <IntroFeatureRow
-                      icon="git-branch-outline"
-                      title="Handle git tasks"
-                      description="Review status, diffs, and commits for chat workspaces."
-                    />
-                    <IntroFeatureRow
-                      icon="mic-outline"
-                      title="Talk to Codex"
-                      description="Use voice input to speak your prompts directly from mobile."
-                    />
-                    <IntroFeatureRow
-                      icon="attach-outline"
-                      title="Share files and images"
-                      description="Attach workspace files and phone media to your prompts."
-                    />
-                    <IntroFeatureRow
-                      icon="shield-checkmark-outline"
-                      title="Approve actions"
-                      description="Review and approve command and file changes in-app."
-                    />
-                  </ScrollView>
+                  ))}
                 </View>
-              </View>
+
+                <BlurView intensity={40} tint="dark" style={styles.introContextCard}>
+                  <Text style={styles.introContextTitle}>Best on trusted networks</Text>
+                  <Text style={styles.introContextText}>
+                    Built for your own machine and private network paths. Pair over LAN nearby, or
+                    use Tailscale when the bridge lives on another device.
+                  </Text>
+                  <View style={styles.introContextPillRow}>
+                    <AmbientBadge icon="git-network-outline" label="Private network only" />
+                    <AmbientBadge icon="shield-checkmark-outline" label="Token auth required" />
+                  </View>
+                </BlurView>
+              </ScrollView>
+
               <View style={styles.introFooter}>
+                {showOnboardingDock ? <OnboardingStepDock currentStage={currentSetupStage} /> : null}
                 <Pressable
                   onPress={goToConnectStep}
                   style={({ pressed }) => [
@@ -353,18 +428,29 @@ export function OnboardingScreen({
                     pressed && styles.introNextButtonPressed,
                   ]}
                 >
-                  <Text style={styles.introNextButtonText}>Next</Text>
+                  <Text style={styles.introNextButtonText}>Pair your bridge</Text>
                   <Ionicons name="arrow-forward" size={19} color={colors.black} />
                 </Pressable>
               </View>
             </View>
           ) : (
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.scrollContent}
-              keyboardShouldPersistTaps="handled"
-            >
-                <View style={styles.heroCard}>
+            <View style={styles.connectRoot}>
+              <ScrollView
+                style={styles.scroll}
+                contentContainerStyle={styles.scrollContent}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+              >
+                <LinearGradient
+                  colors={[
+                    'rgba(181, 189, 204, 0.18)',
+                    'rgba(22, 25, 31, 0.82)',
+                    'rgba(7, 9, 12, 0.98)',
+                  ]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.connectHero}
+                >
                   <View style={styles.heroTopRow}>
                     <View style={styles.heroIconWrap}>
                       <Ionicons name="hardware-chip-outline" size={20} color={colors.textPrimary} />
@@ -379,99 +465,35 @@ export function OnboardingScreen({
                       </Pressable>
                     ) : null}
                   </View>
+                  <Text style={styles.connectEyebrow}>Bridge pairing</Text>
                   <Text style={styles.heroTitle}>{modeTitle}</Text>
                   <Text style={styles.heroDescription}>{modeDescription}</Text>
-                </View>
+                </LinearGradient>
 
-                <View style={styles.formCard}>
-                  <Text style={styles.label}>Bridge Mode</Text>
-                  <View style={styles.modeRow}>
-                    <Pressable
-                      onPress={() => applyModePreset('local')}
-                      style={({ pressed }) => [
-                        styles.modeButton,
-                        pressed && styles.modeButtonPressed,
-                      ]}
-                    >
-                      <Ionicons name="wifi-outline" size={16} color={colors.textPrimary} />
-                      <Text style={styles.modeButtonText}>Local (LAN)</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => applyModePreset('tailscale')}
-                      style={({ pressed }) => [
-                        styles.modeButton,
-                        pressed && styles.modeButtonPressed,
-                      ]}
-                    >
-                      <Ionicons name="shield-outline" size={16} color={colors.textPrimary} />
-                      <Text style={styles.modeButtonText}>Tailscale</Text>
-                    </Pressable>
-                  </View>
-                  <Text style={styles.helperText}>
-                    Pick the same mode used while starting the bridge, then adjust the IP if needed.
-                  </Text>
-
-                  <Text style={styles.label}>Bridge URL</Text>
-                  <TextInput
-                    value={urlInput}
-                    onChangeText={(value) => {
-                      setUrlInput(value);
-                      setFormError(null);
-                      setConnectionCheck({ kind: 'idle' });
-                    }}
-                    keyboardAppearance="dark"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    keyboardType="url"
-                    placeholder="http://100.101.102.103:8787"
-                    placeholderTextColor={colors.textMuted}
-                    style={styles.input}
-                    returnKeyType="done"
-                    onSubmitEditing={() => {
-                      void handleSave();
-                    }}
-                  />
-                  <View style={styles.tokenHeaderRow}>
-                    <Text style={styles.label}>Bridge Token</Text>
-                    <Text style={styles.optionalLabel}>Required</Text>
-                  </View>
-                  <View style={styles.tokenInputWrap}>
-                    <TextInput
-                      value={tokenInput}
-                      onChangeText={(value) => {
-                        setTokenInput(value);
-                        setConnectionCheck({ kind: 'idle' });
-                      }}
-                      keyboardAppearance="dark"
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      keyboardType="default"
-                      placeholder="Paste bridge token"
-                      placeholderTextColor={colors.textMuted}
-                      style={[styles.input, styles.tokenInput]}
-                      secureTextEntry={tokenHidden}
-                      returnKeyType="done"
-                      onSubmitEditing={() => {
-                        void handleSave();
-                      }}
-                    />
-                    <Pressable
-                      onPress={() => setTokenHidden((prev) => !prev)}
-                      style={({ pressed }) => [
-                        styles.tokenRevealBtn,
-                        pressed && styles.tokenRevealBtnPressed,
-                      ]}
-                    >
-                      <Ionicons
-                        name={tokenHidden ? 'eye-outline' : 'eye-off-outline'}
-                        size={16}
-                        color={colors.textSecondary}
-                      />
-                      <Text style={styles.tokenRevealBtnText}>
-                        {tokenHidden ? 'Show' : 'Hide'}
+                <BlurView intensity={55} tint="dark" style={styles.formCard}>
+                  <View style={styles.commandPanel}>
+                    <View style={styles.formSectionHeader}>
+                      <Text style={styles.formSectionEyebrow}>1. Start the bridge</Text>
+                      <Text style={styles.formSectionTitle}>
+                        Run these on your server first. This installs the CLI, starts the bridge,
+                        and prints the pairing QR used here.
                       </Text>
-                    </Pressable>
+                    </View>
+                    <CommandSnippet
+                      label="Run on your server"
+                      command={BRIDGE_SETUP_COMMANDS}
+                      hint="After it starts, scan the pairing QR in this screen."
+                    />
                   </View>
+
+                  <View style={styles.formSectionHeader}>
+                    <Text style={styles.formSectionEyebrow}>2. Pair the bridge</Text>
+                    <Text style={styles.formSectionTitle}>
+                      Scan the bridge QR first. If that is not available, enter the URL and token
+                      manually.
+                    </Text>
+                  </View>
+
                   <Pressable
                     onPress={() => {
                       void openScanner();
@@ -482,15 +504,96 @@ export function OnboardingScreen({
                     ]}
                   >
                     <Ionicons name="qr-code-outline" size={16} color={colors.textPrimary} />
-                    <Text style={styles.scanButtonText}>Scan Bridge QR</Text>
+                    <Text style={styles.scanButtonText}>Scan bridge QR</Text>
                   </Pressable>
+                  <Text style={styles.helperText}>
+                    Recommended first. QR fills the bridge URL and token together.
+                  </Text>
+
+                  <View style={styles.fieldGroup}>
+                    <Text style={styles.label}>Bridge URL</Text>
+                    <View style={styles.inputRow}>
+                      <View style={styles.inputIconWrap}>
+                        <Ionicons name="globe-outline" size={16} color={colors.textSecondary} />
+                      </View>
+                      <TextInput
+                        value={urlInput}
+                        onChangeText={(value) => {
+                          setUrlInput(value);
+                          setFormError(null);
+                          setConnectionCheck({ kind: 'idle' });
+                        }}
+                        keyboardAppearance="dark"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        keyboardType="url"
+                        placeholder="http://100.101.102.103:8787"
+                        placeholderTextColor={colors.textMuted}
+                        style={styles.inputText}
+                        returnKeyType="done"
+                        onSubmitEditing={() => {
+                          void handleSave();
+                        }}
+                      />
+                    </View>
+                  </View>
+
+                  <View style={styles.fieldGroup}>
+                    <View style={styles.tokenHeaderRow}>
+                      <Text style={styles.label}>Bridge Token</Text>
+                      <Text style={styles.optionalLabel}>Required</Text>
+                    </View>
+                    <View style={styles.tokenInputWrap}>
+                      <View style={styles.inputRow}>
+                        <View style={styles.inputIconWrap}>
+                          <Ionicons name="key-outline" size={16} color={colors.textSecondary} />
+                        </View>
+                        <TextInput
+                          value={tokenInput}
+                          onChangeText={(value) => {
+                            setTokenInput(value);
+                            setConnectionCheck({ kind: 'idle' });
+                          }}
+                          keyboardAppearance="dark"
+                          autoCapitalize="none"
+                          autoCorrect={false}
+                          keyboardType="default"
+                          placeholder="Paste bridge token"
+                          placeholderTextColor={colors.textMuted}
+                          style={styles.inputText}
+                          secureTextEntry={tokenHidden}
+                          returnKeyType="done"
+                          onSubmitEditing={() => {
+                            void handleSave();
+                          }}
+                        />
+                      </View>
+                      <Pressable
+                        onPress={() => setTokenHidden((prev) => !prev)}
+                        style={({ pressed }) => [
+                          styles.tokenRevealBtn,
+                          pressed && styles.tokenRevealBtnPressed,
+                        ]}
+                      >
+                        <Ionicons
+                          name={tokenHidden ? 'eye-outline' : 'eye-off-outline'}
+                          size={16}
+                          color={colors.textSecondary}
+                        />
+                        <Text style={styles.tokenRevealBtnText}>
+                          {tokenHidden ? 'Show' : 'Hide'}
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </View>
+
                   <Text style={styles.helperText}>
                     URL supports `http`, `https`, `ws`, and `wss`. `/rpc` is added automatically.
                   </Text>
 
                   {normalizedBridgeUrl ? (
                     <View style={styles.previewWrap}>
-                      <Text style={styles.previewLabel}>Normalized URL</Text>
+                      <Text style={styles.previewLabel}>Normalized target</Text>
                       <Text selectable style={styles.previewValue}>
                         {normalizedBridgeUrl}
                       </Text>
@@ -498,16 +601,37 @@ export function OnboardingScreen({
                   ) : null}
 
                   {insecureRemoteWarning ? (
-                    <Text style={styles.warningText}>{insecureRemoteWarning}</Text>
+                    <StatusBanner
+                      tone="warning"
+                      icon="warning-outline"
+                      message={insecureRemoteWarning}
+                    />
                   ) : null}
 
-                  {formError ? <Text style={styles.errorText}>{formError}</Text> : null}
+                  {formError ? (
+                    <StatusBanner tone="error" icon="close-circle-outline" message={formError} />
+                  ) : null}
                   {connectionCheck.kind === 'success' ? (
-                    <Text style={styles.successText}>{connectionCheck.message}</Text>
+                    <StatusBanner
+                      tone="success"
+                      icon="checkmark-circle-outline"
+                      message={connectionCheck.message}
+                    />
                   ) : null}
                   {connectionCheck.kind === 'error' ? (
-                    <Text style={styles.errorText}>{connectionCheck.message}</Text>
+                    <StatusBanner
+                      tone="error"
+                      icon="alert-circle-outline"
+                      message={connectionCheck.message}
+                    />
                   ) : null}
+
+                  <View style={styles.formSectionHeader}>
+                    <Text style={styles.formSectionEyebrow}>3. Verify and continue</Text>
+                    <Text style={styles.formSectionTitle}>
+                      Confirm the bridge responds before saving it into the app.
+                    </Text>
+                  </View>
 
                   <View style={styles.actionRow}>
                     <Pressable
@@ -549,15 +673,14 @@ export function OnboardingScreen({
                       </Text>
                     </Pressable>
                   </View>
+                </BlurView>
+              </ScrollView>
+              {showOnboardingDock ? (
+                <View style={styles.connectFooter}>
+                  <OnboardingStepDock currentStage={currentSetupStage} />
                 </View>
-
-                <View style={styles.hintCard}>
-                  <Text style={styles.hintTitle}>Quick Setup</Text>
-                  <Text style={styles.hintText}>1. Start the bridge in Local (LAN) or Tailscale mode.</Text>
-                  <Text style={styles.hintText}>2. Pick Local or Tailscale above, then confirm bridge URL.</Text>
-                  <Text style={styles.hintText}>3. Scan bridge QR, then test connection and continue.</Text>
-                </View>
-            </ScrollView>
+              ) : null}
+            </View>
           )}
           <Modal
             animationType="slide"
@@ -608,7 +731,7 @@ export function OnboardingScreen({
   );
 }
 
-function IntroFeatureRow({
+function IntroFeatureCard({
   icon,
   title,
   description,
@@ -618,7 +741,7 @@ function IntroFeatureRow({
   description: string;
 }) {
   return (
-    <View style={styles.introFeatureRow}>
+    <View style={styles.introFeatureCard}>
       <View style={styles.introFeatureIconWrap}>
         <Ionicons name={icon} size={16} color={colors.textPrimary} />
       </View>
@@ -626,6 +749,177 @@ function IntroFeatureRow({
         <Text style={styles.introFeatureTitle}>{title}</Text>
         <Text style={styles.introFeatureDescription}>{description}</Text>
       </View>
+    </View>
+  );
+}
+
+function AmbientBadge({
+  icon,
+  label,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+}) {
+  return (
+    <View style={styles.ambientBadge}>
+      <Ionicons name={icon} size={13} color={colors.textSecondary} />
+      <Text style={styles.ambientBadgeText}>{label}</Text>
+    </View>
+  );
+}
+
+function OnboardingStepDock({ currentStage }: { currentStage: number }) {
+  return (
+    <BlurView intensity={45} tint="dark" style={styles.stepperDock}>
+      <View style={styles.stepperDockRow}>
+        {SETUP_STAGES.map((stage, index) => {
+          const stepNumber = index + 1;
+          const isActive = stepNumber === currentStage;
+          const isComplete = stepNumber < currentStage;
+          return (
+            <View
+              key={stage.title}
+              style={[
+                styles.stepperPill,
+                isActive && styles.stepperPillActive,
+                isComplete && styles.stepperPillComplete,
+              ]}
+            >
+              <View
+                style={[
+                  styles.stepperPillIndex,
+                  isActive && styles.stepperPillIndexActive,
+                  isComplete && styles.stepperPillIndexComplete,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.stepperPillIndexText,
+                    (isActive || isComplete) && styles.stepperPillIndexTextActive,
+                  ]}
+                >
+                  {isComplete ? '✓' : String(stepNumber)}
+                </Text>
+              </View>
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.stepperPillTitle,
+                  isActive && styles.stepperPillTitleActive,
+                  isComplete && styles.stepperPillTitleComplete,
+                ]}
+              >
+                {stage.title}
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+    </BlurView>
+  );
+}
+
+function CommandSnippet({
+  label,
+  command,
+  hint,
+}: {
+  label: string;
+  command: string;
+  hint: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    await Clipboard.setStringAsync(command);
+    setCopied(true);
+    setTimeout(() => {
+      setCopied(false);
+    }, 1400);
+  }, [command]);
+
+  return (
+    <View style={styles.commandCard}>
+      <View style={styles.commandCardHeader}>
+        <View style={styles.commandCardHeaderLeft}>
+          <Ionicons name="terminal-outline" size={14} color={colors.textSecondary} />
+          <Text style={styles.commandCardLabel}>{label}</Text>
+        </View>
+        <Pressable
+          onPress={() => {
+            void handleCopy();
+          }}
+          style={({ pressed }) => [
+            styles.commandCopyButton,
+            copied && styles.commandCopyButtonCopied,
+            pressed && styles.commandCopyButtonPressed,
+          ]}
+        >
+          <Ionicons
+            name={copied ? 'checkmark-outline' : 'copy-outline'}
+            size={14}
+            color={copied ? colors.black : colors.textPrimary}
+          />
+          <Text
+            style={[
+              styles.commandCopyButtonText,
+              copied && styles.commandCopyButtonTextCopied,
+            ]}
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </Text>
+        </Pressable>
+      </View>
+      <View style={styles.commandCodeWrap}>
+        <Text selectable style={styles.commandCodeText}>
+          {command}
+        </Text>
+      </View>
+      <Text style={styles.commandCardHint}>{hint}</Text>
+    </View>
+  );
+}
+
+function StatusBanner({
+  tone,
+  icon,
+  message,
+}: {
+  tone: 'warning' | 'error' | 'success';
+  icon: keyof typeof Ionicons.glyphMap;
+  message: string;
+}) {
+  const iconColor =
+    tone === 'warning' ? '#F7D27E' : tone === 'success' ? colors.statusComplete : colors.error;
+
+  return (
+    <View
+      style={[
+        styles.statusBanner,
+        tone === 'warning'
+          ? styles.statusBannerWarning
+          : tone === 'success'
+            ? styles.statusBannerSuccess
+            : styles.statusBannerError,
+      ]}
+    >
+      <Ionicons
+        name={icon}
+        size={16}
+        color={iconColor}
+      />
+      <Text
+        style={[
+          styles.statusBannerText,
+          tone === 'warning'
+            ? styles.warningText
+            : tone === 'success'
+              ? styles.successText
+              : styles.errorText,
+        ]}
+      >
+        {message}
+      </Text>
     </View>
   );
 }
@@ -707,6 +1001,26 @@ const styles = StyleSheet.create({
   keyboardAvoiding: {
     flex: 1,
   },
+  ambientCanvas: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+  },
+  ambientOrbPrimary: {
+    position: 'absolute',
+    top: -110,
+    right: -70,
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+  },
+  ambientOrbSecondary: {
+    position: 'absolute',
+    bottom: 110,
+    left: -90,
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+  },
   introRoot: {
     flex: 1,
     paddingHorizontal: spacing.lg,
@@ -714,11 +1028,16 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xxl,
     gap: spacing.md,
   },
+  introHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
   introBrandRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    paddingHorizontal: spacing.xs,
   },
   introBrandName: {
     ...typography.headline,
@@ -726,23 +1045,223 @@ const styles = StyleSheet.create({
     fontSize: 18,
     letterSpacing: -0.2,
   },
-  introMain: {
+  introScroll: {
     flex: 1,
+  },
+  introScrollContent: {
+    paddingBottom: spacing.lg,
     gap: spacing.md,
   },
-  introFeaturesCard: {
+  introHero: {
+    borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    padding: spacing.lg,
+    gap: spacing.sm,
+    overflow: 'hidden',
+  },
+  introHeroEyebrow: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  introHeroTitle: {
+    ...typography.largeTitle,
+    fontSize: 22,
+    lineHeight: 26,
+    letterSpacing: -0.4,
+  },
+  introHeroDescription: {
+    ...typography.body,
+    color: colors.textSecondary,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  ambientBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    minHeight: 30,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.full,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+  },
+  ambientBadgeText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  stepperDock: {
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: 'rgba(12, 14, 18, 0.76)',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    overflow: 'hidden',
+  },
+  stepperDockRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  stepperPill: {
     flex: 1,
+    minHeight: 36,
+    borderRadius: radius.full,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    gap: 6,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+  },
+  stepperPillActive: {
+    backgroundColor: 'rgba(181, 189, 204, 0.10)',
+    borderColor: colors.borderHighlight,
+  },
+  stepperPillComplete: {
+    backgroundColor: 'rgba(198, 205, 217, 0.08)',
+    borderColor: 'rgba(198, 205, 217, 0.22)',
+  },
+  stepperPillIndex: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bgInput,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  stepperPillIndexActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  stepperPillIndexComplete: {
+    backgroundColor: colors.statusComplete,
+    borderColor: colors.statusComplete,
+  },
+  stepperPillIndexText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '700',
+    fontSize: 10,
+    lineHeight: 12,
+  },
+  stepperPillIndexTextActive: {
+    color: colors.black,
+  },
+  stepperPillTitle: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    fontSize: 10,
+    lineHeight: 12,
+  },
+  stepperPillTitleActive: {
+    color: colors.textPrimary,
+  },
+  stepperPillTitleComplete: {
+    color: colors.textPrimary,
+  },
+  introSectionHeader: {
+    gap: spacing.xs,
+    paddingHorizontal: spacing.xs,
+  },
+  introSectionTitle: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.9,
+  },
+  introSectionSubtitle: {
+    ...typography.body,
+    color: colors.textSecondary,
+  },
+  introFeatureGrid: {
+    gap: spacing.sm,
+  },
+  introFeatureCard: {
+    flexDirection: 'row',
+    gap: spacing.md,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: 'rgba(7, 9, 12, 0.72)',
+    paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
   },
-  introFeaturesList: {
-    flex: 1,
+  introFeatureIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
   },
-  introFeaturesListContent: {
+  introFeatureTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  introFeatureTitle: {
+    ...typography.headline,
+    fontSize: 14,
+  },
+  introFeatureDescription: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    lineHeight: 18,
+  },
+  introContextCard: {
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: 'rgba(12, 14, 18, 0.76)',
+    padding: spacing.lg,
     gap: spacing.sm,
-    paddingBottom: spacing.sm,
+    overflow: 'hidden',
+  },
+  introContextTitle: {
+    ...typography.headline,
+  },
+  introContextText: {
+    ...typography.body,
+    color: colors.textSecondary,
+  },
+  introContextPillRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
   },
   introFooter: {
-    paddingTop: spacing.sm,
+    gap: spacing.sm,
+  },
+  introNextButton: {
+    borderRadius: 18,
+    backgroundColor: colors.accent,
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  introNextButtonPressed: {
+    backgroundColor: colors.accentPressed,
+  },
+  introNextButtonText: {
+    ...typography.headline,
+    color: colors.black,
+    fontSize: 17,
+    fontWeight: '700',
   },
   scroll: {
     flex: 1,
@@ -753,13 +1272,20 @@ const styles = StyleSheet.create({
     paddingBottom: spacing.xxl,
     gap: spacing.md,
   },
-  heroCard: {
-    borderRadius: radius.lg,
+  connectRoot: {
+    flex: 1,
+  },
+  connectFooter: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.md,
+  },
+  connectHero: {
+    borderRadius: 22,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.borderHighlight,
-    backgroundColor: colors.black,
     padding: spacing.lg,
-    gap: spacing.sm,
+    gap: spacing.xs,
     overflow: 'hidden',
   },
   heroTopRow: {
@@ -768,9 +1294,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   heroIconWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -788,91 +1314,185 @@ const styles = StyleSheet.create({
   cancelBtnPressed: {
     opacity: 0.75,
   },
+  connectEyebrow: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
   heroTitle: {
     ...typography.largeTitle,
-    fontSize: 28,
-    letterSpacing: -0.5,
+    fontSize: 24,
+    lineHeight: 28,
+    letterSpacing: -0.45,
   },
   heroDescription: {
     ...typography.body,
     color: colors.textSecondary,
+    fontSize: 14,
+    lineHeight: 19,
   },
-  introSectionTitle: {
+  formCard: {
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderHighlight,
+    backgroundColor: 'rgba(12, 14, 18, 0.76)',
+    padding: spacing.lg,
+    gap: spacing.md,
+    overflow: 'hidden',
+  },
+  formSectionHeader: {
+    gap: spacing.xs,
+  },
+  formSectionEyebrow: {
     ...typography.caption,
-    textTransform: 'uppercase',
-    letterSpacing: 0.9,
     color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.85,
   },
-  introFeatureRow: {
+  formSectionTitle: {
+    ...typography.headline,
+    fontSize: 15,
+    lineHeight: 21,
+  },
+  modeCardGrid: {
     flexDirection: 'row',
     gap: spacing.sm,
-    borderRadius: radius.md,
+  },
+  modePresetCard: {
+    flex: 1,
+    minHeight: 146,
+    borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.borderLight,
-    backgroundColor: colors.black,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    minHeight: 62,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    padding: spacing.md,
+    gap: spacing.sm,
+    justifyContent: 'space-between',
   },
-  introFeatureIconWrap: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+  modePresetCardSelected: {
+    backgroundColor: 'rgba(181, 189, 204, 0.10)',
+    borderColor: colors.borderHighlight,
+  },
+  modePresetCardPressed: {
+    opacity: 0.84,
+  },
+  modePresetIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    marginTop: 2,
+    backgroundColor: colors.bgInput,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
   },
-  introFeatureTextWrap: {
-    flex: 1,
-    gap: 2,
+  modePresetIconWrapSelected: {
+    backgroundColor: 'rgba(181, 189, 204, 0.16)',
+    borderColor: colors.borderHighlight,
   },
-  introFeatureTitle: {
+  modePresetTitle: {
     ...typography.headline,
-    color: colors.textPrimary,
-    fontSize: 14,
+    fontSize: 15,
   },
-  introFeatureDescription: {
+  modePresetDescription: {
     ...typography.caption,
     color: colors.textSecondary,
     lineHeight: 18,
   },
-  introNextButton: {
-    borderRadius: radius.md,
-    backgroundColor: colors.accent,
-    minHeight: 62,
+  helperText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 18,
+  },
+  commandPanel: {
+    gap: spacing.sm,
+    paddingTop: spacing.xs,
+  },
+  commandCard: {
+    gap: spacing.xs,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    padding: spacing.md,
+  },
+  commandCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  commandCardHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+    minWidth: 0,
+  },
+  commandCardLabel: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+  },
+  commandCopyButton: {
+    minHeight: 30,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.full,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    backgroundColor: colors.bgInput,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.sm,
-    width: '100%',
+    gap: 4,
+    flexShrink: 0,
   },
-  introNextButtonPressed: {
-    backgroundColor: colors.accentPressed,
+  commandCopyButtonCopied: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
-  introNextButtonText: {
-    ...typography.headline,
+  commandCopyButtonPressed: {
+    opacity: 0.84,
+  },
+  commandCopyButtonText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontWeight: '600',
+  },
+  commandCopyButtonTextCopied: {
     color: colors.black,
-    fontSize: 18,
-    fontWeight: '700',
   },
-  formCard: {
-    borderRadius: radius.lg,
+  commandCodeWrap: {
+    borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.black,
-    padding: spacing.lg,
+    borderColor: colors.border,
+    backgroundColor: colors.bgInput,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  commandCodeText: {
+    ...typography.mono,
+    color: colors.textPrimary,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  commandCardHint: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 16,
+  },
+  fieldGroup: {
     gap: spacing.sm,
-    overflow: 'hidden',
   },
   label: {
     ...typography.caption,
     textTransform: 'uppercase',
-    letterSpacing: 0.9,
+    letterSpacing: 0.85,
     color: colors.textMuted,
   },
   tokenHeaderRow: {
-    marginTop: spacing.xs,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -883,32 +1503,46 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 11,
   },
+  inputRow: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    minHeight: 54,
+    paddingHorizontal: spacing.md,
+    gap: spacing.sm,
+  },
+  inputIconWrap: {
+    width: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inputText: {
+    flex: 1,
+    minWidth: 0,
+    ...typography.body,
+    color: colors.textPrimary,
+    paddingVertical: spacing.md,
+  },
   tokenInputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.xs,
-  },
-  input: {
-    ...typography.body,
-    color: colors.textPrimary,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    backgroundColor: colors.black,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-  },
-  tokenInput: {
-    flex: 1,
+    minWidth: 0,
   },
   tokenRevealBtn: {
     minWidth: 74,
-    borderRadius: radius.md,
+    minHeight: 54,
+    flexShrink: 0,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.bgMain,
+    backgroundColor: colors.bgInput,
     paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -922,39 +1556,12 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontWeight: '600',
   },
-  modeRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginBottom: spacing.xs,
-  },
-  modeButton: {
-    flex: 1,
-    minHeight: 44,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-  },
-  modeButtonPressed: {
-    opacity: 0.82,
-  },
-  modeButtonText: {
-    ...typography.caption,
-    color: colors.textPrimary,
-    fontWeight: '700',
-  },
   scanButton: {
-    marginTop: spacing.xs,
-    borderRadius: radius.md,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.bgMain,
-    minHeight: 44,
+    backgroundColor: colors.bgInput,
+    minHeight: 50,
     paddingHorizontal: spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
@@ -965,19 +1572,15 @@ const styles = StyleSheet.create({
     opacity: 0.82,
   },
   scanButtonText: {
-    ...typography.caption,
+    ...typography.headline,
     color: colors.textPrimary,
     fontWeight: '700',
   },
-  helperText: {
-    ...typography.caption,
-    color: colors.textMuted,
-  },
   previewWrap: {
-    borderRadius: radius.md,
+    borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.borderLight,
-    backgroundColor: colors.black,
+    backgroundColor: 'rgba(255,255,255,0.03)',
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     gap: spacing.xs,
@@ -990,6 +1593,32 @@ const styles = StyleSheet.create({
     ...typography.mono,
     color: colors.textPrimary,
     fontSize: 13,
+  },
+  statusBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  statusBannerWarning: {
+    backgroundColor: 'rgba(247, 210, 126, 0.08)',
+    borderColor: 'rgba(247, 210, 126, 0.22)',
+  },
+  statusBannerSuccess: {
+    backgroundColor: 'rgba(198, 205, 217, 0.10)',
+    borderColor: 'rgba(198, 205, 217, 0.22)',
+  },
+  statusBannerError: {
+    backgroundColor: colors.errorBg,
+    borderColor: 'rgba(239, 68, 68, 0.28)',
+  },
+  statusBannerText: {
+    flex: 1,
+    ...typography.caption,
+    lineHeight: 18,
   },
   warningText: {
     ...typography.caption,
@@ -1006,7 +1635,6 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: 'row',
     gap: spacing.sm,
-    marginTop: spacing.sm,
   },
   secondaryButton: {
     flex: 1,
@@ -1016,9 +1644,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.bgMain,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
+    backgroundColor: colors.bgInput,
+    borderRadius: 16,
+    minHeight: 54,
   },
   secondaryButtonPressed: {
     opacity: 0.8,
@@ -1038,8 +1666,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.accent,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
+    borderRadius: 16,
+    minHeight: 54,
   },
   primaryButtonPressed: {
     backgroundColor: colors.accentPressed,
@@ -1059,10 +1687,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
   },
   scannerSheet: {
-    borderRadius: radius.lg,
+    borderRadius: 22,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.borderHighlight,
-    backgroundColor: colors.black,
+    backgroundColor: '#07090C',
     padding: spacing.lg,
     gap: spacing.md,
   },
@@ -1091,11 +1719,11 @@ const styles = StyleSheet.create({
   scannerCameraFrame: {
     width: '100%',
     aspectRatio: 1,
-    borderRadius: radius.md,
+    borderRadius: 18,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.borderLight,
-    backgroundColor: colors.bgMain,
+    backgroundColor: colors.bgItem,
   },
   scannerCamera: {
     flex: 1,
@@ -1114,21 +1742,5 @@ const styles = StyleSheet.create({
   scannerHintText: {
     ...typography.caption,
     color: colors.textMuted,
-  },
-  hintCard: {
-    borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.black,
-    padding: spacing.lg,
-    gap: spacing.sm,
-  },
-  hintTitle: {
-    ...typography.headline,
-    color: colors.textPrimary,
-  },
-  hintText: {
-    ...typography.caption,
-    color: colors.textSecondary,
   },
 });

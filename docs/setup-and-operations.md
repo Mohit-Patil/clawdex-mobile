@@ -6,11 +6,12 @@ This guide is the detailed companion to the top-level `README.md`.
 
 After `clawdex init`, expected sequence:
 
-1. Bridge health passes (`Bridge health check passed.`)
-2. Expo starts (`Starting Expo (mobile) in background...`)
-3. You may briefly see a spinner (`Waiting for Expo output - ...`)
-4. Expo output begins (`expo start --host lan`, QR block, `Metro waiting on exp://...`)
-5. Press Enter to detach onboarding while Expo + bridge keep running
+1. Secure config is written or reused
+2. The bridge starts in the foreground
+3. A pairing QR is printed for the mobile app
+4. Bridge logs stay attached until you stop the process
+
+Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, and `win32-x64`. On those hosts, normal bridge startup does not require a Rust compile.
 
 ## Manual Secure Setup (No Wizard)
 
@@ -37,7 +38,13 @@ Creates/updates:
 npm run secure:bridge
 ```
 
-### 4) Start Expo
+### 4) Pair from the mobile app
+
+Open the installed mobile app on your phone, then scan the bridge QR. If needed, enter the bridge URL manually (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). The chosen bridge URL is stored on-device and can be changed later in Settings.
+
+## Local Mobile Development Only
+
+If you are developing the mobile app from this repo, start Expo separately:
 
 ```bash
 npm run mobile
@@ -45,15 +52,12 @@ npm run mobile
 
 `npm run mobile` uses `scripts/start-expo.sh`, which sets `REACT_NATIVE_PACKAGER_HOSTNAME` from your secure config so QR resolution is predictable.
 
-On first app launch, onboarding will ask for your bridge URL (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). This URL is stored on-device and can be changed later in Settings.
-
 ## Advanced Knobs
 
 Optional environment variables:
 
 - `CLAWDEX_SETUP_VERBOSE=true` — show full installer output
-- `BRIDGE_HEALTH_WAIT_SECS=300` — max wait for bridge `/health`
-- `EXPO_OUTPUT_WAIT_SECS=90` — spinner timeout before streaming Expo logs
+- `CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD=true` — ignore a bundled bridge binary and build from local Rust sources instead
 - `EXPO_AUTO_REPAIR=true` — auto-repair React Native runtime on `npm run mobile`
 - `EXPO_CLEAR_CACHE=true` — force `expo start --clear` via `npm run mobile`
 
@@ -65,7 +69,8 @@ npm run teardown
 
 Can:
 
-- stop Expo + bridge
+- stop the bridge
+- also stop local Expo if you started it from this repo
 - remove generated artifacts (`.env.secure`, `.bridge.log`, `.expo.log`, pid files)
 - optionally reset `apps/mobile/.env` from `.env.example`
 - optionally run `tailscale down`
@@ -94,7 +99,7 @@ npm run teardown -- --yes
 
 | Variable | Purpose |
 |---|---|
-| `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` | token sent by mobile client |
+| `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` | token used by local mobile dev builds |
 | `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH` | query-token behavior for WebSocket auth fallback |
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |

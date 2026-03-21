@@ -1,23 +1,16 @@
 # Troubleshooting
 
-## Onboarding looks stuck before Expo logs appear
+## Bridge startup seems slow
 
-- Expo startup can be slow on first launch.
-- You should see: `Waiting for Expo output ...`
-- Increase timeout if needed:
-
-```bash
-EXPO_OUTPUT_WAIT_SECS=180 clawdex init
-```
-
-- If Expo never emits logs:
-
-```bash
-tail -n 120 .expo.log
-```
+- `clawdex init` no longer starts Expo for the shipped app.
+- Published npm installs should use a bundled bridge binary on `darwin-arm64`, `darwin-x64`, `linux-x64`, and `win32-x64`.
+- If startup is still compiling Rust, you are usually on a source checkout, an unsupported host, or a package without bundled bridge binaries.
+- The slow parts are usually npm dependency install/repair or the first Rust bridge build on source-based setups.
+- If you want to skip the interactive wizard after initial setup, use `npm run secure:bridge`.
 
 ## Expo starts but QR/network is wrong
 
+- This only applies when you are developing the mobile app locally from the repo.
 - Re-run `npm run secure:setup`
 - Confirm `.env.secure` has correct `BRIDGE_HOST`
 - Restart `npm run mobile`
@@ -38,13 +31,14 @@ npm run stop:services
 
 ## Bridge auth errors (`401`, invalid token)
 
-- Ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` in `apps/mobile/.env`
-- Restart bridge + Expo after token changes
+- For the shipped mobile app, rescan the bridge QR or update the stored token in Settings.
+- For a local dev build, also ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` in `apps/mobile/.env`.
+- Restart the bridge after token changes.
 
 ## Tailscale issues
 
 - Verify host and phone are on the same Tailscale network
-- Check host IP (`tailscale ip -4`) and mobile `.env` URL
+- Check host IP (`tailscale ip -4`) and the bridge URL saved in the mobile app
 
 ## `codex` not found
 
@@ -52,6 +46,8 @@ npm run stop:services
 - Or set `CODEX_CLI_BIN` explicitly
 
 ## Bridge build fails with `linker 'cc' not found`
+
+This only applies when the bridge is building from Rust source instead of using a bundled binary.
 
 Install C build tools:
 
@@ -106,7 +102,7 @@ npm run start -- --clear
 
 ## Plan mode errors (`RPC-32600` invalid `collaborationMode`)
 
-- Restart Expo and reload app bundle
+- Restart the app and reconnect to the bridge
 - Ensure bridge/mobile revisions match
 - Run API test if needed:
 
@@ -118,4 +114,4 @@ npm run -w apps/mobile test -- --runInBand src/api/__tests__/client.test.ts
 
 - Ensure revision supports `turn/interrupt`
 - If run already finished, stop button disappears by design
-- Pull latest, restart bridge, reload Expo bundle
+- Pull latest, restart bridge, then retry from the mobile app

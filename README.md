@@ -41,12 +41,16 @@ clawdex init
 
 This is the primary starting point.
 
+Published npm releases bundle prebuilt Rust bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, and `win32-x64`, so supported hosts do not need to compile the bridge during normal startup. The bridge runtime is packaged for those targets; the interactive shell-based setup helpers are still macOS/Linux-oriented today.
+
 `clawdex init` guides you through:
 
 1. bridge mode selection: `Local (LAN)` or `Tailscale`
 2. secure bridge config generation (`.env.secure`)
 3. phone readiness checks for selected mode
 4. optional bridge launch in the foreground (release build)
+
+This flow is bridge-only. The mobile app is already shipped, so no Expo dev server is required to pair your phone.
 
 When the bridge starts, it prints a pairing QR:
 
@@ -103,7 +107,7 @@ Optional for simulators/emulators:
 From repo root:
 
 - `npm run setup:wizard` — guided secure setup + optional bridge start
-- `npm run stop:services` — stop running bridge (and Expo if running)
+- `npm run stop:services` — stop running bridge (and local Expo if running)
 - `npm run secure:setup` — generate/update secure env
 - `npm run secure:bridge` — start rust bridge from `.env.secure` (release profile)
 - `npm run secure:bridge:dev` — start rust bridge in dev profile
@@ -140,7 +144,14 @@ npm run secure:bridge
 
 Keep `npm run secure:bridge` running in foreground. It prints pairing QR and bridge logs.
 
-In a second terminal, start the app runtime:
+On supported published installs, this uses the bundled bridge binary directly instead of compiling Rust on startup. Source checkouts still build from Cargo when a packaged binary is unavailable.
+
+Then open the installed mobile app and pair it:
+
+- preferred: scan the bridge QR to autofill URL + token
+- fallback: enter the bridge URL and token manually
+
+For local mobile development only, start Expo from the repo:
 
 ```bash
 npm run mobile
@@ -150,7 +161,7 @@ npm run mobile
 
 On first launch (or after reset):
 
-1. choose mode (`Local` or `Tailscale`)
+1. start the bridge on your server
 2. scan bridge QR to autofill URL + token
 3. use `Test Connection` (health + authenticated RPC check)
 4. tap `Continue`

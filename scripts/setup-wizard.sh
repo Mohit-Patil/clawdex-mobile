@@ -28,16 +28,7 @@ NETWORK_MODE=""
 TAILSCALE_IP=""
 BRIDGE_HOST=""
 BRIDGE_PORT=""
-EXPO_MODE="mobile"
 AUTO_START="true"
-TARGET_PLATFORM="mobile"
-BRIDGE_PID=""
-EXPO_PID=""
-BRIDGE_LOG="$ROOT_DIR/.bridge.log"
-EXPO_LOG="$ROOT_DIR/.expo.log"
-BRIDGE_PID_FILE="$ROOT_DIR/.bridge.pid"
-EXPO_PID_FILE="$ROOT_DIR/.expo.pid"
-KEEP_SERVICES_RUNNING="false"
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MENU_RESULT=""
 SECTION_COUNT=0
@@ -45,8 +36,6 @@ RAIL_GLYPH="${DIM}│${RESET}"
 RAIL_BRANCH="${DIM}├─${RESET}"
 RAIL_CHILD="${DIM}│${RESET}"
 OS_NAME="$(uname -s)"
-EXPO_STOP_PATTERN="$ROOT_DIR/.*/expo start|$ROOT_DIR/node_modules/.bin/expo start"
-BRIDGE_STOP_PATTERN="$ROOT_DIR/services/rust-bridge|codex-rust-bridge|@codex/rust-bridge"
 
 rail_echo() { printf "%s %s\n" "$RAIL_GLYPH" "$1"; }
 rail_blank() { printf "%s\n" "$RAIL_GLYPH"; }
@@ -79,46 +68,6 @@ run_quiet_command() {
   done < <(tail -n 40 "$log_file")
   warn "Full installer log: $log_file"
   return 1
-}
-
-list_matching_pids() {
-  local pattern="$1"
-  pgrep -f "$pattern" 2>/dev/null || true
-}
-
-stop_process_group_by_pattern() {
-  local label="$1"
-  local pattern="$2"
-  local pids=""
-  local remaining=""
-  local pid=""
-
-  pids="$(list_matching_pids "$pattern")"
-  if [[ -z "$pids" ]]; then
-    return 0
-  fi
-
-  info "Stopping $label process group: $pids"
-  while IFS= read -r pid; do
-    [[ -z "$pid" ]] && continue
-    kill -TERM "$pid" >/dev/null 2>&1 || true
-  done <<<"$pids"
-
-  sleep 1
-
-  while IFS= read -r pid; do
-    [[ -z "$pid" ]] && continue
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      remaining+="$pid "
-      kill -KILL "$pid" >/dev/null 2>&1 || true
-    fi
-  done <<<"$pids"
-
-  if [[ -n "${remaining// }" ]]; then
-    warn "Force-stopped $label processes: $remaining"
-  fi
-
-  return 0
 }
 
 print_usage() {
@@ -823,9 +772,20 @@ ensure_core_tools() {
     fail "openssl is required."
     exit 1
   fi
+}
 
+has_packaged_bridge_binary() {
+  node "$SCRIPT_DIR/bridge-binary.js" has-current-packaged >/dev/null 2>&1
+}
+
+ensure_local_rust_build_toolchain() {
   if ! ensure_or_install_command "cc" "C compiler/linker (cc)" install_c_toolchain_cli "Y"; then
     fail "C compiler/linker is required for Rust crate builds."
+    exit 1
+  fi
+
+  if ! ensure_or_install_command "cargo" "Rust/Cargo toolchain" install_rust_toolchain "Y"; then
+    fail "Rust/Cargo is required for the rust bridge."
     exit 1
   fi
 }
@@ -1245,137 +1205,6 @@ install_project_dependencies() {
   fi
 }
 
-cleanup_bridge() {
-  if [[ "$KEEP_SERVICES_RUNNING" == "true" ]]; then
-    return
-  fi
-
-  stop_process_group_by_pattern "Expo" "$EXPO_STOP_PATTERN"
-  stop_process_group_by_pattern "Rust bridge" "$BRIDGE_STOP_PATTERN"
-
-  rm -f "$BRIDGE_PID_FILE" "$EXPO_PID_FILE"
-}
-
-wait_for_bridge_health() {
-  local host="$1"
-  local port="$2"
-  local max_wait_secs="${BRIDGE_HEALTH_WAIT_SECS:-300}"
-  local elapsed=0
-
-  if ! command -v curl >/dev/null 2>&1; then
-    return 0
-  fi
-
-  while true; do
-    if curl --max-time 1 -fsS "http://$host:$port/health" >/dev/null 2>&1; then
-      return 0
-    fi
-
-    if [[ -n "$BRIDGE_PID" ]] && ! kill -0 "$BRIDGE_PID" >/dev/null 2>&1; then
-      return 1
-    fi
-
-    sleep 1
-    elapsed=$((elapsed + 1))
-    if (( elapsed % 5 == 0 )); then
-      info "Waiting for bridge health... ${elapsed}s elapsed"
-    fi
-
-    if (( elapsed >= max_wait_secs )); then
-      return 2
-    fi
-  done
-}
-
-stream_expo_output_until_enter() {
-  local tail_pid=""
-  local _user_input=""
-  local waited=0
-  local max_wait_secs="${EXPO_OUTPUT_WAIT_SECS:-90}"
-  local -a spinner_frames=("-" "\\" "|" "/")
-  local frame="-"
-
-  rail_echo "Expo output is live below."
-  rail_echo "Press Enter to exit onboarding and keep Expo + bridge running (Ctrl+D also detaches)."
-  echo ""
-
-  if [[ ! -s "$EXPO_LOG" ]]; then
-    while true; do
-      if [[ -s "$EXPO_LOG" ]]; then
-        printf "\r\033[2K%s Expo output started.\n" "$RAIL_GLYPH"
-        break
-      fi
-
-      if [[ -n "$EXPO_PID" ]] && ! kill -0 "$EXPO_PID" >/dev/null 2>&1; then
-        printf "\r\033[2K%s Expo process exited before output appeared.\n" "$RAIL_GLYPH"
-        return 1
-      fi
-
-      if (( waited >= max_wait_secs )); then
-        printf "\r\033[2K%s Still waiting for Expo output...\n" "$RAIL_GLYPH"
-        break
-      fi
-
-      frame="${spinner_frames[$((waited % ${#spinner_frames[@]}))]}"
-      printf "\r\033[2K%s Waiting for Expo output %s %ss" "$RAIL_GLYPH" "$frame" "$waited"
-      sleep 1
-      waited=$((waited + 1))
-    done
-  fi
-
-  tail -n +1 -f "$EXPO_LOG" &
-  tail_pid="$!"
-  if ! IFS= read -r _user_input 2>/dev/null; then
-    rail_echo "Input stream closed; detaching onboarding."
-  fi
-  kill -TERM "$tail_pid" >/dev/null 2>&1 || true
-  wait "$tail_pid" 2>/dev/null || true
-  return 0
-}
-
-start_expo_process_background() {
-  local log_file="$1"
-
-  if command -v script >/dev/null 2>&1; then
-    if [[ "$OS_NAME" == "Darwin" ]]; then
-      # Feed script from a never-ending pipe to avoid EOF-triggered Expo shutdown.
-      nohup bash -lc "cd \"$ROOT_DIR\" && tail -f /dev/null | script -q \"$log_file\" npm run \"$EXPO_MODE\"" >/dev/null 2>&1 &
-      EXPO_PID="$!"
-      return 0
-    fi
-
-    # util-linux script uses -c for command mode.
-    nohup bash -lc "cd \"$ROOT_DIR\" && tail -f /dev/null | script -q -f -c \"npm run $EXPO_MODE\" \"$log_file\"" >/dev/null 2>&1 &
-    EXPO_PID="$!"
-    return 0
-  fi
-
-  nohup bash -lc "cd \"$ROOT_DIR\" && npm run \"$EXPO_MODE\"" >"$log_file" 2>&1 </dev/null &
-  EXPO_PID="$!"
-}
-
-start_expo_background() {
-  info "Starting Expo ($EXPO_MODE) in background..."
-  : >"$EXPO_LOG"
-  start_expo_process_background "$EXPO_LOG"
-  echo "$EXPO_PID" > "$EXPO_PID_FILE"
-
-  sleep 1
-  if ! kill -0 "$EXPO_PID" >/dev/null 2>&1; then
-    fail "Expo failed to start. Recent logs:"
-    tail -n 80 "$EXPO_LOG" || true
-    exit 1
-  fi
-
-  KEEP_SERVICES_RUNNING="true"
-  ok "Bridge + Expo are running in background."
-  rail_echo "Bridge logs: $BRIDGE_LOG"
-  rail_echo "Expo logs: $EXPO_LOG"
-  rail_echo "To stop later:"
-  rail_echo "pkill -TERM -f '$EXPO_STOP_PATTERN'; pkill -TERM -f '$BRIDGE_STOP_PATTERN'"
-  stream_expo_output_until_enter
-}
-
 start_bridge_foreground() {
   rail_echo "Starting bridge in foreground."
   rail_echo "Press Ctrl+C to stop the bridge."
@@ -1406,9 +1235,11 @@ choose_flow
 
 section "Prerequisites"
 ensure_core_tools
-if ! ensure_or_install_command "cargo" "Rust/Cargo toolchain" install_rust_toolchain "Y"; then
-  fail "Rust/Cargo is required for the rust bridge."
-  exit 1
+if has_packaged_bridge_binary; then
+  ok "Found packaged Rust bridge binary for this host."
+else
+  info "No packaged bridge binary found for this host. Falling back to local Rust build."
+  ensure_local_rust_build_toolchain
 fi
 ensure_codex_cli
 install_project_dependencies
@@ -1517,6 +1348,6 @@ fi
 
 section "Next steps"
 rail_echo "1) cd $ROOT_DIR && npm run secure:bridge"
-rail_echo "2) Open the iOS app and use onboarding to connect (mode + URL + token QR)."
+rail_echo "2) Open the mobile app and use onboarding to connect (URL + token QR)."
 rail_blank
 rail_echo "${DIM}You can rerun this anytime: npm run setup:wizard${RESET}"

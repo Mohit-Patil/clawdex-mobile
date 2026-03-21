@@ -16,8 +16,63 @@ permissions:
   contents: write
 
 jobs:
+  build_bridge_binaries:
+    name: Build bridge binary (${{ matrix.package_target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            package_target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            binary_path: services/rust-bridge/target/aarch64-apple-darwin/release/codex-rust-bridge
+          - runner: macos-13
+            package_target: darwin-x64
+            rust_target: x86_64-apple-darwin
+            binary_path: services/rust-bridge/target/x86_64-apple-darwin/release/codex-rust-bridge
+          - runner: ubuntu-latest
+            package_target: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+            binary_path: services/rust-bridge/target/x86_64-unknown-linux-gnu/release/codex-rust-bridge
+          - runner: windows-latest
+            package_target: win32-x64
+            rust_target: x86_64-pc-windows-msvc
+            binary_path: services/rust-bridge/target/x86_64-pc-windows-msvc/release/codex-rust-bridge.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build bridge binary
+        working-directory: services/rust-bridge
+        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+
+      - name: Stage packaged bridge binary
+        run: node scripts/bridge-binary.js stage --target ${{ matrix.package_target }} --from ${{ matrix.binary_path }}
+
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-binaries-${{ matrix.package_target }}
+          path: vendor/bridge-binaries/${{ matrix.package_target }}/
+
   publish:
     name: Publish package to npm
+    needs: build_bridge_binaries
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -42,6 +97,13 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Download packaged bridge binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-binaries-*
+          path: .
+          merge-multiple: true
 
       - name: Verify Rust bridge compiles
         working-directory: services/rust-bridge
