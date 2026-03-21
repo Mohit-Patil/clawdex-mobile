@@ -9,8 +9,6 @@ fi
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MOBILE_ENV_FILE="$ROOT_DIR/apps/mobile/.env"
 MOBILE_ENV_EXAMPLE="$ROOT_DIR/apps/mobile/.env.example"
-RUST_ENV_FILE="$ROOT_DIR/services/rust-bridge/.env"
-RUST_ENV_EXAMPLE="$ROOT_DIR/services/rust-bridge/.env.example"
 
 upsert_env_key() {
   local file="$1"
@@ -199,19 +197,20 @@ resolve_local_ipv4() {
   printf '%s' "$ip"
 }
 
+has_local_mobile_workspace() {
+  [[ -f "$MOBILE_ENV_EXAMPLE" ]]
+}
+
 if ! command -v openssl >/dev/null 2>&1; then
   echo "error: openssl not found. Install OpenSSL first." >&2
   exit 1
 fi
 
-mkdir -p "$(dirname "$MOBILE_ENV_FILE")" "$(dirname "$RUST_ENV_FILE")"
-
-if [[ ! -f "$MOBILE_ENV_FILE" ]]; then
-  cp "$MOBILE_ENV_EXAMPLE" "$MOBILE_ENV_FILE"
-fi
-
-if [[ ! -f "$RUST_ENV_FILE" ]]; then
-  cp "$RUST_ENV_EXAMPLE" "$RUST_ENV_FILE"
+if has_local_mobile_workspace; then
+  mkdir -p "$(dirname "$MOBILE_ENV_FILE")"
+  if [[ ! -f "$MOBILE_ENV_FILE" ]]; then
+    cp "$MOBILE_ENV_EXAMPLE" "$MOBILE_ENV_FILE"
+  fi
 fi
 
 BRIDGE_HOST="${BRIDGE_HOST_OVERRIDE:-}"
@@ -264,11 +263,13 @@ EOT
 
 chmod 600 "$SECURE_ENV_FILE"
 
-upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_HOST_BRIDGE_TOKEN" "$BRIDGE_TOKEN"
-# Backward compatibility for older app builds that still read MAC_BRIDGE token key.
-upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_MAC_BRIDGE_TOKEN" "$BRIDGE_TOKEN"
-upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH" "true"
-upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE" "true"
+if has_local_mobile_workspace; then
+  upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_HOST_BRIDGE_TOKEN" "$BRIDGE_TOKEN"
+  # Backward compatibility for older app builds that still read MAC_BRIDGE token key.
+  upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_MAC_BRIDGE_TOKEN" "$BRIDGE_TOKEN"
+  upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH" "true"
+  upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE" "true"
+fi
 
 echo "Secure dev setup complete."
 echo ""
@@ -276,8 +277,16 @@ echo "Bridge network mode: $BRIDGE_NETWORK_MODE"
 echo "Bridge host: $BRIDGE_HOST ($HOST_SOURCE)"
 echo "Bridge port: $BRIDGE_PORT"
 echo "Token source: $SECURE_ENV_FILE"
-echo "Mobile env updated: $MOBILE_ENV_FILE"
+if has_local_mobile_workspace; then
+  echo "Mobile env updated: $MOBILE_ENV_FILE"
+else
+  echo "Local mobile env: skipped (installed mobile app flow)"
+fi
 echo ""
 echo "Next steps:"
 echo "  1) npm run secure:bridge"
-echo "  2) npm run mobile"
+if has_local_mobile_workspace; then
+  echo "  2) npm run mobile"
+else
+  echo "  2) Open the installed mobile app and pair with the QR"
+fi

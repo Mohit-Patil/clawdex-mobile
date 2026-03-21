@@ -45,6 +45,8 @@ Published npm releases bundle prebuilt Rust bridge binaries for `darwin-arm64`, 
 
 `clawdex init` does not run a project-local `npm install`. The global package install is the only npm install needed for the published bridge flow.
 
+The published CLI package is bridge-only. It does not install Expo, React Native, or the mobile app source tree.
+
 `clawdex init` guides you through:
 
 1. bridge mode selection: `Local (LAN)` or `Tailscale`
@@ -147,6 +149,8 @@ npm run secure:bridge
 Keep `npm run secure:bridge` running in foreground. It prints pairing QR and bridge logs.
 
 On supported published installs, this uses the bundled bridge binary directly instead of compiling Rust on startup. Source checkouts still build from Cargo when a packaged binary is unavailable.
+
+Published CLI installs write `.env.secure` for the bridge and skip repo-only mobile env files.
 
 Then open the installed mobile app and pair it:
 

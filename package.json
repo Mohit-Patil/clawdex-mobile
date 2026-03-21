@@ -1,6 +1,6 @@
 {
   "name": "clawdex-mobile",
-  "version": "5.0.1",
+  "version": "5.0.2",
   "homepage": "https://github.com/Mohit-Patil/clawdex-mobile#readme",
   "repository": {
     "type": "git",
@@ -12,6 +12,23 @@
   "bin": {
     "clawdex": "./bin/clawdex.js"
   },
+  "files": [
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "bin/clawdex.js",
+    "docs/setup-and-operations.md",
+    "docs/troubleshooting.md",
+    "scripts/bridge-binary.js",
+    "scripts/setup-secure-dev.sh",
+    "scripts/setup-wizard.sh",
+    "scripts/start-bridge-secure.js",
+    "scripts/stop-services.sh",
+    "services/rust-bridge/Cargo.lock",
+    "services/rust-bridge/Cargo.toml",
+    "services/rust-bridge/src",
+    "vendor/bridge-binaries"
+  ],
   "workspaces": [
     "apps/*",
     "services/*"
@@ -34,12 +51,5 @@
     "lint": "npm run --workspaces lint",
     "test": "npm run test -w @codex/mac-bridge && npm run test -w apps/mobile && npm run test -w @codex/rust-bridge",
     "teardown": "./scripts/teardown.sh"
-  },
-  "dependencies": {
-    "@types/react": "~19.2.10",
-    "expo": "^55.0.8",
-    "react": "19.2.0",
-    "react-dom": "19.2.0",
-    "react-native": "0.83.2"
   }
 }

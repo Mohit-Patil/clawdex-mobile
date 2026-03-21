@@ -15,6 +15,8 @@ Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `darw
 
 `clawdex init` does not run a project-local `npm install` for the published CLI path. The only required npm install there is `npm install -g clawdex-mobile@latest`.
 
+Published CLI installs are bridge-only. They do not include the Expo workspace or mobile app source files.
+
 ## Manual Secure Setup (No Wizard)
 
 ### 1) Install dependencies
@@ -32,7 +34,7 @@ npm run secure:setup
 Creates/updates:
 
 - `.env.secure` (bridge runtime config + token)
-- `apps/mobile/.env` (mobile token + optional runtime knobs)
+- `apps/mobile/.env` (repo checkout only, for local mobile dev builds)
 
 ### 3) Start bridge
 
