@@ -56,6 +56,9 @@ export function WorkspacePickerModal({
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const [searchQuery, setSearchQuery] = useState('');
+  const [pendingSelectionPath, setPendingSelectionPath] = useState<string | null>(
+    selectedPath ?? currentPath ?? bridgeRoot
+  );
   const topInset = Math.max(insets.top + spacing.lg, 72);
   const bottomInset = Math.max(insets.bottom + spacing.lg, 72);
   const cardHeight = Math.min(
@@ -69,6 +72,13 @@ export function WorkspacePickerModal({
     }
   }, [visible]);
 
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    setPendingSelectionPath(selectedPath ?? currentPath ?? bridgeRoot);
+  }, [bridgeRoot, currentPath, selectedPath, visible]);
+
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredRecentWorkspaces = recentWorkspaces.filter((workspace) =>
     matchesSearch([workspace.path, toPathBasename(workspace.path)], normalizedSearch)
@@ -77,7 +87,21 @@ export function WorkspacePickerModal({
     matchesSearch([entry.name, entry.path], normalizedSearch)
   );
   const breadcrumbs = buildPathBreadcrumbs(currentPath ?? bridgeRoot);
-  const footerPath = currentPath ?? bridgeRoot ?? 'Bridge default workspace';
+  const footerPath = pendingSelectionPath ?? currentPath ?? bridgeRoot ?? 'Bridge default workspace';
+
+  const handleBrowsePath = (path: string | null) => {
+    setPendingSelectionPath(path);
+    onBrowsePath(path);
+  };
+
+  const handleSelectPath = (path: string | null) => {
+    setPendingSelectionPath(path);
+  };
+
+  const handleCommitSelection = (path: string | null) => {
+    setPendingSelectionPath(path);
+    onSelectPath(path);
+  };
 
   return (
     <Modal
@@ -154,32 +178,64 @@ export function WorkspacePickerModal({
                     keyboardShouldPersistTaps="handled"
                   >
                     {filteredRecentWorkspaces.map((workspace, index) => (
-                      <Pressable
+                      <View
                         key={workspace.path}
-                        onPress={() => onBrowsePath(workspace.path)}
-                        style={({ pressed }) => [
+                        style={[
                           styles.recentRow,
-                          workspace.path === currentPath && styles.recentRowSelected,
-                          index === filteredRecentWorkspaces.length - 1 &&
-                            styles.recentRowLast,
-                          pressed && styles.pressed,
+                          workspace.path === pendingSelectionPath && styles.recentRowSelected,
+                          index === filteredRecentWorkspaces.length - 1 && styles.recentRowLast,
                         ]}
                       >
-                        <View style={styles.recentIconWrap}>
-                          <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
-                        </View>
-                        <View style={styles.recentCopy}>
-                          <Text style={styles.recentTitle} numberOfLines={1}>
-                            {toPathBasename(workspace.path)}
+                        <Pressable
+                          onPress={() => handleSelectPath(workspace.path)}
+                          style={({ pressed }) => [styles.rowMainAction, pressed && styles.pressed]}
+                        >
+                          <View style={styles.recentIconWrap}>
+                            <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
+                          </View>
+                          <View style={styles.recentCopy}>
+                            <Text style={styles.recentTitle} numberOfLines={1}>
+                              {toPathBasename(workspace.path)}
+                            </Text>
+                            <Text style={styles.recentPath} numberOfLines={1}>
+                              {workspace.path}
+                            </Text>
+                          </View>
+                          <Text style={styles.recentMeta}>
+                            {formatWorkspaceMeta(workspace)}
                           </Text>
-                          <Text style={styles.recentPath} numberOfLines={1}>
-                            {workspace.path}
-                          </Text>
+                        </Pressable>
+                        <View style={styles.rowActions}>
+                          <Pressable
+                            onPress={() => handleCommitSelection(workspace.path)}
+                            style={({ pressed }) => [
+                              styles.rowSelectButton,
+                              workspace.path === pendingSelectionPath &&
+                                styles.rowSelectButtonActive,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.rowSelectButtonText,
+                                workspace.path === pendingSelectionPath &&
+                                  styles.rowSelectButtonTextActive,
+                              ]}
+                            >
+                              Select
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => handleBrowsePath(workspace.path)}
+                            style={({ pressed }) => [
+                              styles.rowOpenButton,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <Text style={styles.rowOpenButtonText}>Open</Text>
+                          </Pressable>
                         </View>
-                        <Text style={styles.recentMeta}>
-                          {formatWorkspaceMeta(workspace)}
-                        </Text>
-                      </Pressable>
+                      </View>
                     ))}
                   </ScrollView>
                 ) : (
@@ -194,11 +250,13 @@ export function WorkspacePickerModal({
                 )}
               </View>
 
-              <Text style={styles.helperText}>Open a recent folder or browse below.</Text>
+              <Text style={styles.helperText}>
+                Use Select for this exact folder. Use Open to browse inside it.
+              </Text>
 
               <View style={styles.breadcrumbRow}>
                 <Pressable
-                  onPress={() => parentPath && onBrowsePath(parentPath)}
+                  onPress={() => parentPath && handleBrowsePath(parentPath)}
                   disabled={!parentPath || loadingEntries}
                   style={({ pressed }) => [
                     styles.upButton,
@@ -222,7 +280,7 @@ export function WorkspacePickerModal({
                           <View key={item.key} style={styles.breadcrumbItem}>
                             {index > 0 ? <Text style={styles.breadcrumbSlash}>/</Text> : null}
                             <Pressable
-                              onPress={() => onBrowsePath(item.path)}
+                              onPress={() => handleBrowsePath(item.path)}
                               style={({ pressed }) => [
                                 styles.breadcrumbChip,
                                 isLast && styles.breadcrumbChipActive,
@@ -260,30 +318,62 @@ export function WorkspacePickerModal({
                     keyboardShouldPersistTaps="handled"
                   >
                     {filteredEntries.map((entry, index) => (
-                      <Pressable
+                      <View
                         key={entry.path}
-                        onPress={() => onBrowsePath(entry.path)}
-                        style={({ pressed }) => [
+                        style={[
                           styles.entryRow,
-                          entry.path === selectedPath && styles.entryRowSelected,
+                          entry.path === pendingSelectionPath && styles.entryRowSelected,
                           index === filteredEntries.length - 1 && styles.entryRowLast,
-                          pressed && styles.pressed,
                         ]}
                       >
-                        <View style={styles.entryIconWrap}>
-                          <Ionicons
-                            name={entry.isGitRepo ? 'git-branch-outline' : 'folder-outline'}
-                            size={18}
-                            color={colors.textSecondary}
-                          />
+                        <Pressable
+                          onPress={() => handleSelectPath(entry.path)}
+                          style={({ pressed }) => [styles.rowMainAction, pressed && styles.pressed]}
+                        >
+                          <View style={styles.entryIconWrap}>
+                            <Ionicons
+                              name={entry.isGitRepo ? 'git-branch-outline' : 'folder-outline'}
+                              size={18}
+                              color={colors.textSecondary}
+                            />
+                          </View>
+                          <View style={styles.entryCopy}>
+                            <Text style={styles.entryName} numberOfLines={1}>
+                              {entry.name}
+                            </Text>
+                          </View>
+                        </Pressable>
+                        <View style={styles.rowActions}>
+                          <Pressable
+                            onPress={() => handleCommitSelection(entry.path)}
+                            style={({ pressed }) => [
+                              styles.rowSelectButton,
+                              entry.path === pendingSelectionPath &&
+                                styles.rowSelectButtonActive,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.rowSelectButtonText,
+                                entry.path === pendingSelectionPath &&
+                                  styles.rowSelectButtonTextActive,
+                              ]}
+                            >
+                              Select
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => handleBrowsePath(entry.path)}
+                            style={({ pressed }) => [
+                              styles.rowOpenButton,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <Text style={styles.rowOpenButtonText}>Open</Text>
+                          </Pressable>
                         </View>
-                        <View style={styles.entryCopy}>
-                          <Text style={styles.entryName} numberOfLines={1}>
-                            {entry.name}
-                          </Text>
-                        </View>
-                        <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-                      </Pressable>
+                      </View>
                     ))}
                   </ScrollView>
                 ) : (
@@ -298,7 +388,7 @@ export function WorkspacePickerModal({
               </View>
 
               <View style={styles.footer}>
-                <Text style={styles.footerPath} numberOfLines={1}>
+                <Text style={styles.footerPath}>
                   {footerPath}
                 </Text>
                 <View style={styles.footerActions}>
@@ -313,16 +403,19 @@ export function WorkspacePickerModal({
                     <Text style={styles.footerButtonSecondaryText}>Cancel</Text>
                   </Pressable>
                   <Pressable
-                    onPress={() => currentPath && onSelectPath(currentPath)}
-                    disabled={!currentPath || loadingEntries}
+                    onPress={() => pendingSelectionPath && onSelectPath(pendingSelectionPath)}
+                    disabled={!pendingSelectionPath || loadingEntries}
                     style={({ pressed }) => [
                       styles.footerButton,
                       styles.footerButtonPrimary,
-                      (!currentPath || loadingEntries) && styles.buttonDisabled,
-                      pressed && currentPath && !loadingEntries && styles.footerButtonPrimaryPressed,
+                      (!pendingSelectionPath || loadingEntries) && styles.buttonDisabled,
+                      pressed &&
+                        pendingSelectionPath &&
+                        !loadingEntries &&
+                        styles.footerButtonPrimaryPressed,
                     ]}
                   >
-                    <Text style={styles.footerButtonPrimaryText}>Select Folder</Text>
+                    <Text style={styles.footerButtonPrimaryText}>Use Selected Folder</Text>
                   </Pressable>
                 </View>
               </View>
@@ -646,6 +739,57 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.borderLight,
+  },
+  rowMainAction: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  rowActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  rowSelectButton: {
+    minHeight: 30,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.borderHighlight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  rowSelectButtonActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  rowSelectButtonText: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.textPrimary,
+    fontWeight: '700',
+  },
+  rowSelectButtonTextActive: {
+    color: colors.black,
+  },
+  rowOpenButton: {
+    minHeight: 30,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bgInput,
+  },
+  rowOpenButtonText: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '700',
   },
   recentRowSelected: {
     backgroundColor: colors.bgInput,

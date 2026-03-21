@@ -7149,12 +7149,13 @@ function ComposeView({
       <Pressable
         style={({ pressed }) => [
           styles.workspaceSelectBtn,
+          styles.workspacePathSelectBtn,
           pressed && styles.workspaceSelectBtnPressed,
         ]}
         onPress={onOpenWorkspacePicker}
       >
         <Ionicons name="folder-open-outline" size={16} color={colors.textMuted} />
-        <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
+        <Text style={[styles.workspaceSelectLabel, styles.workspacePathSelectLabel]}>
           {startWorkspaceLabel}
         </Text>
         <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
@@ -10362,6 +10363,11 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     marginBottom: spacing.xl * 2,
   },
+  workspacePathSelectBtn: {
+    alignItems: 'flex-start',
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
+  },
   workspaceSelectBtnPressed: {
     opacity: 0.85,
   },
@@ -10369,6 +10375,10 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textSecondary,
     flex: 1,
+  },
+  workspacePathSelectLabel: {
+    flexShrink: 1,
+    lineHeight: 18,
   },
   suggestions: {
     flexDirection: 'row',
