@@ -24,6 +24,19 @@ const SUPPORTED_RUNTIME_TARGETS = {
     rustTarget: "x86_64-unknown-linux-gnu",
     binaryName: "codex-rust-bridge",
   },
+  "linux-arm64": {
+    platform: "linux",
+    arch: "arm64",
+    rustTarget: "aarch64-unknown-linux-gnu",
+    binaryName: "codex-rust-bridge",
+  },
+  "linux-armv7l": {
+    platform: "linux",
+    arch: "arm",
+    machine: ["armv7l", "armv8l"],
+    rustTarget: "armv7-unknown-linux-gnueabihf",
+    binaryName: "codex-rust-bridge",
+  },
   "win32-x64": {
     platform: "win32",
     arch: "x64",
@@ -36,11 +49,19 @@ function repoRoot() {
   return path.resolve(__dirname, "..");
 }
 
-function resolveRuntimeTarget(platform = os.platform(), arch = os.arch()) {
+function currentMachine() {
+  return typeof os.machine === "function" ? os.machine() : "";
+}
+
+function resolveRuntimeTarget(platform = os.platform(), arch = os.arch(), machine = currentMachine()) {
   for (const [target, metadata] of Object.entries(SUPPORTED_RUNTIME_TARGETS)) {
-    if (metadata.platform === platform && metadata.arch === arch) {
-      return target;
+    if (metadata.platform !== platform || metadata.arch !== arch) {
+      continue;
     }
+    if (metadata.machine && !metadata.machine.includes(machine)) {
+      continue;
+    }
+    return target;
   }
   return null;
 }
