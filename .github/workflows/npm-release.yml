@@ -84,13 +84,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.apt_packages }}
 
+      - name: Configure cross linker
+        if: matrix.linker_env != ''
+        shell: bash
+        run: |
+          echo "${{ matrix.linker_env }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
       - name: Build bridge binary
         working-directory: services/rust-bridge
-        run: |
-          if [ -n "${{ matrix.linker_env }}" ]; then
-            export "${{ matrix.linker_env }}=${{ matrix.linker }}"
-          fi
-          cargo build --release --locked --target ${{ matrix.rust_target }}
+        run: cargo build --release --locked --target ${{ matrix.rust_target }}
 
       - name: Stage packaged bridge binary
         run: node scripts/bridge-binary.js stage --target ${{ matrix.package_target }} --from ${{ matrix.binary_path }}
