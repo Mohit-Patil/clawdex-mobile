@@ -41,7 +41,7 @@ clawdex init
 
 This is the primary starting point.
 
-Published npm releases bundle prebuilt Rust bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, and `win32-x64`, so supported hosts do not need to compile the bridge during normal startup. The interactive shell-based setup helpers are still macOS/Linux-oriented today.
+Published npm releases bundle prebuilt Rust bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `linux-armv7l`, and `win32-x64`, so supported hosts do not need to compile the bridge during normal startup. The interactive shell-based setup helpers are still macOS/Linux-oriented today.
 
 `clawdex init` does not run a project-local `npm install`. The global package install is the only npm install needed for the published bridge flow.
 

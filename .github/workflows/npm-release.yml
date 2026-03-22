@@ -36,10 +36,30 @@ jobs:
             package_target: linux-x64
             rust_target: x86_64-unknown-linux-gnu
             binary_path: services/rust-bridge/target/x86_64-unknown-linux-gnu/release/codex-rust-bridge
+            apt_packages: ""
+            linker: ""
+            linker_env: ""
+          - runner: ubuntu-latest
+            package_target: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+            binary_path: services/rust-bridge/target/aarch64-unknown-linux-gnu/release/codex-rust-bridge
+            apt_packages: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+          - runner: ubuntu-latest
+            package_target: linux-armv7l
+            rust_target: armv7-unknown-linux-gnueabihf
+            binary_path: services/rust-bridge/target/armv7-unknown-linux-gnueabihf/release/codex-rust-bridge
+            apt_packages: gcc-arm-linux-gnueabihf
+            linker: arm-linux-gnueabihf-gcc
+            linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
           - runner: windows-latest
             package_target: win32-x64
             rust_target: x86_64-pc-windows-msvc
             binary_path: services/rust-bridge/target/x86_64-pc-windows-msvc/release/codex-rust-bridge.exe
+            apt_packages: ""
+            linker: ""
+            linker_env: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -58,9 +78,19 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Linux cross toolchain
+        if: matrix.apt_packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+
       - name: Build bridge binary
         working-directory: services/rust-bridge
-        run: cargo build --release --locked --target ${{ matrix.rust_target }}
+        run: |
+          if [ -n "${{ matrix.linker_env }}" ]; then
+            export "${{ matrix.linker_env }}=${{ matrix.linker }}"
+          fi
+          cargo build --release --locked --target ${{ matrix.rust_target }}
 
       - name: Stage packaged bridge binary
         run: node scripts/bridge-binary.js stage --target ${{ matrix.package_target }} --from ${{ matrix.binary_path }}
@@ -110,7 +140,7 @@ jobs:
         run: |
           rm -rf vendor/bridge-binaries
           mkdir -p vendor/bridge-binaries
-          for target in darwin-arm64 darwin-x64 linux-x64 win32-x64; do
+          for target in darwin-arm64 darwin-x64 linux-x64 linux-arm64 linux-armv7l win32-x64; do
             case "$target" in
               win32-x64) binary_name="codex-rust-bridge.exe" ;;
               *) binary_name="codex-rust-bridge" ;;
@@ -128,6 +158,8 @@ jobs:
           test -f vendor/bridge-binaries/darwin-arm64/codex-rust-bridge
           test -f vendor/bridge-binaries/darwin-x64/codex-rust-bridge
           test -f vendor/bridge-binaries/linux-x64/codex-rust-bridge
+          test -f vendor/bridge-binaries/linux-arm64/codex-rust-bridge
+          test -f vendor/bridge-binaries/linux-armv7l/codex-rust-bridge
           test -f vendor/bridge-binaries/win32-x64/codex-rust-bridge.exe
 
       - name: Verify Rust bridge compiles
@@ -164,6 +196,8 @@ jobs:
           tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/darwin-arm64/codex-rust-bridge$'
           tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/darwin-x64/codex-rust-bridge$'
           tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/linux-x64/codex-rust-bridge$'
+          tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/linux-arm64/codex-rust-bridge$'
+          tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/linux-armv7l/codex-rust-bridge$'
           tar -tzf "$TMPDIR/$TARBALL" | grep -q '^package/vendor/bridge-binaries/win32-x64/codex-rust-bridge.exe$'
 
       - name: Resolve publish target
