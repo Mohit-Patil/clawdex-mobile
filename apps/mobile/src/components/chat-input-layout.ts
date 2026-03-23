@@ -1,7 +1,6 @@
 import { spacing } from '../theme';
 
 const IOS_HOME_INDICATOR_THRESHOLD = 20;
-const ANDROID_NAV_BUTTONS_THRESHOLD = 16;
 
 export interface ComposerBottomSpacing {
   baseBottomPadding: number;
@@ -48,11 +47,7 @@ function resolveRestingBottomInset(platform: string, safeAreaBottomInset: number
   }
 
   if (platform === 'android') {
-    if (safeAreaBottomInset >= ANDROID_NAV_BUTTONS_THRESHOLD) {
-      return spacing.sm;
-    }
-
-    return safeAreaBottomInset > 0 ? 2 : 0;
+    return safeAreaBottomInset;
   }
 
   return safeAreaBottomInset;

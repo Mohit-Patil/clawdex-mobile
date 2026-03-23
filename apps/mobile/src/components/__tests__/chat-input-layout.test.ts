@@ -17,19 +17,19 @@ describe('resolveComposerBottomSpacing', () => {
     });
   });
 
-  it('treats Android gesture navigation as nearly flush', () => {
-    expect(resolveComposerBottomSpacing('android', 8, false)).toEqual({
+  it('stays flush on Android when the system reports no bottom inset', () => {
+    expect(resolveComposerBottomSpacing('android', 0, false)).toEqual({
       baseBottomPadding: 8,
-      extraBottomInset: 2,
-      totalBottomPadding: 10,
+      extraBottomInset: 0,
+      totalBottomPadding: 8,
     });
   });
 
-  it('keeps extra clearance for Android phones with visible nav buttons', () => {
+  it('uses the full reported Android bottom inset when nav buttons are visible', () => {
     expect(resolveComposerBottomSpacing('android', 24, false)).toEqual({
       baseBottomPadding: 8,
-      extraBottomInset: 8,
-      totalBottomPadding: 16,
+      extraBottomInset: 24,
+      totalBottomPadding: 32,
     });
   });
 });

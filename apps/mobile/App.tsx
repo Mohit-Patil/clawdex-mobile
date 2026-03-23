@@ -12,7 +12,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 
 import { HostBridgeApiClient } from './src/api/client';
 import type { ApprovalMode, Chat, ReasoningEffort } from './src/api/types';
@@ -568,7 +568,7 @@ export default function App() {
 
   if (!settingsLoaded) {
     return (
-      <SafeAreaProvider>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
         <View style={styles.loadingRoot}>
           <ActivityIndicator size="large" color={colors.textMuted} />
         </View>
@@ -582,7 +582,7 @@ export default function App() {
     const mode: OnboardingMode = bridgeUrl ? onboardingMode : 'initial';
     const canCancel = mode === 'edit' && Boolean(bridgeUrl);
     return (
-      <SafeAreaProvider>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
         <OnboardingScreen
           mode={mode}
           initialBridgeUrl={initialUrl}
@@ -696,7 +696,7 @@ export default function App() {
   };
 
   return (
-    <SafeAreaProvider>
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
       <View style={styles.root}>
         {/* Main content */}
         <Animated.View
