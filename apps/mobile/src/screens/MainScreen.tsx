@@ -4607,7 +4607,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
 
             codexReasoningBufferRef.current += delta;
-            upsertLiveReasoningMessage(activeThreadId, delta);
             const heading =
               extractFirstBoldSnippet(codexReasoningBufferRef.current, 56) ??
               extractFirstBoldSnippet(delta, 56);
@@ -5090,7 +5089,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (itemType === 'reasoning') {
-            upsertLiveReasoningMessage(threadId);
+            if (selectedChatRef.current?.engine === 'opencode') {
+              upsertLiveReasoningMessage(threadId);
+            }
             setActivity({
               tone: 'running',
               title: 'Reasoning',
@@ -5257,7 +5258,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           bumpRunWatchdog();
           const delta = readString(params?.delta);
-          if (delta) {
+          if (delta && selectedChatRef.current?.engine === 'opencode') {
             upsertLiveReasoningMessage(threadId, delta);
           }
           setActivity((prev) =>
@@ -7477,7 +7478,10 @@ function ChatView({
   bottomInset: number;
 }) {
   const transcriptView = useMemo(() => {
-    const childVisibleMessages = getVisibleTranscriptMessages(chat.messages, showToolCalls);
+    const childVisibleMessages = getVisibleTranscriptMessages(
+      filterReasoningMessagesForEngine(chat.messages, chat.engine),
+      showToolCalls
+    );
     if (!chat.parentThreadId || !parentChat) {
       return {
         messages: childVisibleMessages,
@@ -7485,7 +7489,10 @@ function ChatView({
       };
     }
 
-    const parentVisibleMessages = getVisibleTranscriptMessages(parentChat.messages, showToolCalls);
+    const parentVisibleMessages = getVisibleTranscriptMessages(
+      filterReasoningMessagesForEngine(parentChat.messages, parentChat.engine),
+      showToolCalls
+    );
     return trimInheritedParentMessages(parentVisibleMessages, childVisibleMessages, chat.id);
   }, [chat.messages, chat.parentThreadId, parentChat, showToolCalls]);
   const visibleMessages = useMemo(
@@ -9164,6 +9171,17 @@ function formatLiveReasoningMessage(text: string): string {
 
   const [first, ...rest] = lines;
   return ['• Reasoning', `  └ ${first}`, ...rest.map((line) => `    ${line}`)].join('\n');
+}
+
+function filterReasoningMessagesForEngine(
+  messages: ChatTranscriptMessage[],
+  engine: Chat['engine'] | undefined
+): ChatTranscriptMessage[] {
+  if (engine !== 'codex') {
+    return messages;
+  }
+
+  return messages.filter((message) => message.systemKind !== 'reasoning');
 }
 
 function describeStartedToolEvent(
