@@ -98,6 +98,76 @@ describe('chatMapping', () => {
     expect(systemMessages[3].content).toContain('• Applied file changes');
   });
 
+  it('maps reasoning items into visible transcript system messages', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_reasoning',
+        preview: 'thinking',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'reasoning',
+                id: 'reasoning1',
+                text: 'Inspecting the current workspace before making changes.',
+              },
+              {
+                type: 'agentMessage',
+                id: 'assistant1',
+                text: 'I found the issue.',
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(2);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('reasoning');
+    expect(chat.messages[0].content).toContain('• Reasoning');
+    expect(chat.messages[0].content).toContain('Inspecting the current workspace');
+    expect(chat.messages[1].role).toBe('assistant');
+  });
+
+  it('maps Codex reasoning items that use content arrays', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_codex_reasoning',
+        preview: 'thinking',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'reasoning',
+                id: 'reasoning_codex_1',
+                summary: ['Inspecting workspace'],
+                content: [
+                  'Checking how the bridge forwards live events.',
+                  'Comparing persisted thread items with live deltas.',
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('reasoning');
+    expect(chat.messages[0].content).toContain('Checking how the bridge forwards live events.');
+    expect(chat.messages[0].content).toContain('Comparing persisted thread items with live deltas.');
+  });
+
   it('extracts the latest structured persisted plan for workflow rehydration', () => {
     const chat = mapChat(
       toRawThread({

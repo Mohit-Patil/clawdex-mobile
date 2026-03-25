@@ -37,6 +37,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import { readAccountRateLimitSnapshot } from '../api/rateLimits';
+import { getChatEngineLabel } from '../chatEngines';
 import type {
   AccountRateLimitSnapshot,
   ApprovalMode,
@@ -64,7 +65,7 @@ import { ActivityBar, type ActivityTone } from '../components/ActivityBar';
 import { ApprovalBanner } from '../components/ApprovalBanner';
 import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
-import { ChatMessage } from '../components/ChatMessage';
+import { ChatMessage, ToolActivityGroup } from '../components/ChatMessage';
 import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
 import { BrandMark } from '../components/BrandMark';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
@@ -88,8 +89,10 @@ import {
 } from './planCardState';
 import { trimInheritedParentMessages } from './subAgentTranscript';
 import {
+  buildTranscriptDisplayItems,
   getVisibleTranscriptMessages,
   syncVisibleSubAgentStatuses,
+  type TranscriptDisplayItem,
 } from './transcriptMessages';
 import { colors, radius, spacing, typography } from '../theme';
 
@@ -571,7 +574,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [pendingPlanImplementationPrompts, setPendingPlanImplementationPrompts] =
       useState<Record<string, PendingPlanImplementationPrompt>>({});
     const safeAreaInsets = useSafeAreaInsets();
-    const scrollRef = useRef<FlatList<ChatTranscriptMessage>>(null);
+    const scrollRef = useRef<FlatList<TranscriptDisplayItem>>(null);
     const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const autoScrollStateRef = useRef<AutoScrollState>({
       shouldStickToBottom: true,
@@ -688,6 +691,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const hadCommandRef = useRef(false);
     const reasoningSummaryRef = useRef<Record<string, string>>({});
     const codexReasoningBufferRef = useRef('');
+    const liveReasoningBuffersRef = useRef<Record<string, string>>({});
+    const liveReasoningMessageIdsRef = useRef<Record<string, string>>({});
     const runWatchdogUntilRef = useRef(0);
     const runWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [runWatchdogNow, setRunWatchdogNow] = useState(() => Date.now());
@@ -2920,6 +2925,83 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [scrollToBottomIfPinned, selectedChatId]
     );
 
+    const upsertLiveReasoningMessage = useCallback(
+      (threadId: string, delta?: string | null) => {
+        if (!threadId || chatIdRef.current !== threadId) {
+          return;
+        }
+
+        const previousBuffer = liveReasoningBuffersRef.current[threadId] ?? '';
+        const nextBuffer =
+          typeof delta === 'string' && delta.length > 0
+            ? mergeStreamingDelta(previousBuffer, delta)
+            : previousBuffer;
+
+        if (nextBuffer) {
+          liveReasoningBuffersRef.current[threadId] = nextBuffer;
+        }
+
+        const createdAt = new Date().toISOString();
+        const messageId =
+          liveReasoningMessageIdsRef.current[threadId] ??
+          `local-reasoning-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        liveReasoningMessageIdsRef.current[threadId] = messageId;
+        const content = formatLiveReasoningMessage(
+          liveReasoningBuffersRef.current[threadId] ?? ''
+        );
+
+        setSelectedChat((prev) => {
+          if (!prev || prev.id !== threadId) {
+            return prev;
+          }
+
+          let found = false;
+          const messages = prev.messages.map((message) => {
+            if (message.id !== messageId) {
+              return message;
+            }
+
+            found = true;
+            return {
+              ...message,
+              role: 'system' as const,
+              systemKind: 'reasoning' as const,
+              content,
+            };
+          });
+
+          return {
+            ...prev,
+            updatedAt: createdAt,
+            statusUpdatedAt: createdAt,
+            messages: found
+              ? messages
+              : [
+                  ...messages,
+                  {
+                    id: messageId,
+                    role: 'system',
+                    systemKind: 'reasoning',
+                    content,
+                    createdAt,
+                  },
+                ],
+          };
+        });
+
+        scrollToBottomIfPinned(true);
+      },
+      [scrollToBottomIfPinned]
+    );
+
+    const clearLiveReasoningMessage = useCallback((threadId: string | null | undefined) => {
+      if (!threadId) {
+        return;
+      }
+      delete liveReasoningBuffersRef.current[threadId];
+      delete liveReasoningMessageIdsRef.current[threadId];
+    }, []);
+
     const appendStopSystemMessageIfNeeded = useCallback(() => {
       if (stopSystemMessageLoggedRef.current) {
         return;
@@ -4503,6 +4585,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (codexEventType === 'taskstarted') {
+            clearLiveReasoningMessage(activeThreadId);
             delete planItemTurnIdByThreadRef.current[activeThreadId];
             clearPendingPlanImplementationPrompt(activeThreadId);
             setActivity({
@@ -4524,6 +4607,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
 
             codexReasoningBufferRef.current += delta;
+            upsertLiveReasoningMessage(activeThreadId, delta);
             const heading =
               extractFirstBoldSnippet(codexReasoningBufferRef.current, 56) ??
               extractFirstBoldSnippet(delta, 56);
@@ -4839,6 +4923,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!threadId) {
             return;
           }
+          clearLiveReasoningMessage(threadId);
           delete planItemTurnIdByThreadRef.current[threadId];
           const startedContextUsage = readThreadContextUsage(params);
           const turn = toRecord(params?.turn);
@@ -5005,6 +5090,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           if (itemType === 'reasoning') {
+            upsertLiveReasoningMessage(threadId);
             setActivity({
               tone: 'running',
               title: 'Reasoning',
@@ -5170,6 +5256,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           }
 
           bumpRunWatchdog();
+          const delta = readString(params?.delta);
+          if (delta) {
+            upsertLiveReasoningMessage(threadId, delta);
+          }
           setActivity((prev) =>
             prev.tone === 'running' && prev.title === 'Reasoning'
               ? prev
@@ -5409,6 +5499,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             status === 'completed' &&
             Boolean(planTurnId) &&
             (!completedTurnId || completedTurnId === planTurnId);
+          clearLiveReasoningMessage(threadId);
           delete planItemTurnIdByThreadRef.current[threadId];
           if (currentId !== threadId) {
             delete threadReasoningBuffersRef.current[threadId];
@@ -5773,12 +5864,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       cacheThreadActiveCommand,
       cacheThreadActivity,
       cacheThreadContextUsage,
-        cacheThreadPendingApproval,
-        cacheThreadPendingUserInputRequest,
-        cacheThreadPlan,
-        cacheThreadStreamingDelta,
-        cacheThreadTurnState,
+      cacheThreadPendingApproval,
+      cacheThreadPendingUserInputRequest,
+      cacheThreadPlan,
+      cacheThreadStreamingDelta,
+      cacheThreadTurnState,
       clearPendingPlanImplementationPrompt,
+      clearLiveReasoningMessage,
       clearRunWatchdog,
       readThreadContextUsage,
       refreshPendingApprovalsForThread,
@@ -5786,6 +5878,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       registerTurnStarted,
       pushActiveCommand,
       scrollToBottomIfPinned,
+      upsertLiveReasoningMessage,
       upsertThreadRuntimeSnapshot,
     ]);
 
@@ -6467,6 +6560,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         <ChatHeader
           onOpenDrawer={onOpenDrawer}
           title={headerTitle}
+          engineLabel={selectedChat ? getChatEngineLabel(selectedChat.engine) : undefined}
           onOpenTitleMenu={selectedChat ? openChatTitleMenu : undefined}
           rightIconName="git-branch-outline"
           onRightActionPress={selectedChat ? handleOpenGit : undefined}
@@ -7374,7 +7468,7 @@ function ChatView({
   bridgeToken: string | null;
   showToolCalls: boolean;
   agentThreadStatusById: ReadonlyMap<string, Chat['status']>;
-  scrollRef: React.RefObject<FlatList<ChatTranscriptMessage> | null>;
+  scrollRef: React.RefObject<FlatList<TranscriptDisplayItem> | null>;
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
   onPinnedAutoScroll: (animated?: boolean) => void;
@@ -7405,9 +7499,13 @@ function ChatView({
     () => visibleMessages.slice(visibleStartIndex),
     [visibleMessages, visibleStartIndex]
   );
-  const displayMessages = useMemo(
-    () => [...paginatedMessages].reverse(),
+  const displayItems = useMemo(
+    () => buildTranscriptDisplayItems(paginatedMessages),
     [paginatedMessages]
+  );
+  const displayMessages = useMemo(
+    () => [...displayItems].reverse(),
+    [displayItems]
   );
   const olderMessageCount = visibleStartIndex;
   const hasOlderMessages = olderMessageCount > 0;
@@ -7450,10 +7548,22 @@ function ChatView({
     () => [styles.messageListContent, { paddingBottom: bottomInset }],
     [bottomInset]
   );
-  const isLargeChat = visibleMessages.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
-  const keyExtractor = useCallback((msg: ChatTranscriptMessage) => msg.id, []);
-  const renderMessageItem = useCallback<ListRenderItem<ChatTranscriptMessage>>(
-    ({ item: msg }) => {
+  const isLargeChat = displayItems.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
+  const keyExtractor = useCallback(
+    (item: TranscriptDisplayItem) => (item.kind === 'message' ? item.message.id : item.id),
+    []
+  );
+  const renderMessageItem = useCallback<ListRenderItem<TranscriptDisplayItem>>(
+    ({ item }) => {
+      if (item.kind === 'toolGroup') {
+        return (
+          <View style={styles.chatMessageBlock}>
+            <ToolActivityGroup messages={item.messages} />
+          </View>
+        );
+      }
+
+      const msg = item.message;
       const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
       return (
         <View style={styles.chatMessageBlock}>
@@ -9036,6 +9146,24 @@ function mergeStreamingDelta(previous: string | null, delta: string): string {
   }
 
   return prev + delta;
+}
+
+function formatLiveReasoningMessage(text: string): string {
+  const normalized = text.trim();
+  if (!normalized) {
+    return '• Reasoning';
+  }
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  if (lines.length === 0) {
+    return '• Reasoning';
+  }
+
+  const [first, ...rest] = lines;
+  return ['• Reasoning', `  └ ${first}`, ...rest.map((line) => `    ${line}`)].join('\n');
 }
 
 function describeStartedToolEvent(

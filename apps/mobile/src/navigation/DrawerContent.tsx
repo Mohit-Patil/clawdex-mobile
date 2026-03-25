@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
+import { getChatEngineBadgeColors, getChatEngineLabel } from '../chatEngines';
 import { BrandMark } from '../components/BrandMark';
 import { filterDrawerChats } from './drawerChats';
 import { describeAgentThreadSource } from '../screens/agentThreads';
@@ -467,6 +468,7 @@ export function DrawerContent({
                 const previewText = isSubAgent
                   ? `${describeAgentThreadSource(chat, item.rootThreadId)} • ${formatChatPreview(chat)}`
                   : formatChatPreview(chat);
+                const engineBadgeColors = getChatEngineBadgeColors(chat.engine);
                 return (
                   <Pressable
                     style={({ pressed }) => [
@@ -508,6 +510,26 @@ export function DrawerContent({
                         >
                           {chat.title || 'Untitled'}
                         </Text>
+                        <View
+                          style={[
+                            styles.engineBadge,
+                            {
+                              backgroundColor: engineBadgeColors.backgroundColor,
+                              borderColor: engineBadgeColors.borderColor,
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.engineBadgeText,
+                              {
+                                color: engineBadgeColors.textColor,
+                              },
+                            ]}
+                          >
+                            {getChatEngineLabel(chat.engine)}
+                          </Text>
+                        </View>
                         <Text
                           style={[styles.chatAge, isSelected && styles.chatAgeSelected]}
                         >
@@ -1027,6 +1049,20 @@ const styles = StyleSheet.create({
   },
   chatTitleSelected: {
     color: colors.textPrimary,
+  },
+  engineBadge: {
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    flexShrink: 0,
+  },
+  engineBadgeText: {
+    ...typography.caption,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
   },
   chatAge: {
     ...typography.caption,

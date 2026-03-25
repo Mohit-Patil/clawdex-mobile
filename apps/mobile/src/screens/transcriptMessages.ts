@@ -1,12 +1,30 @@
 import type { ChatMessage, ChatStatus } from '../api/types';
 
+export interface ToolTranscriptGroup {
+  kind: 'toolGroup';
+  id: string;
+  messages: ChatMessage[];
+}
+
+export type TranscriptDisplayItem =
+  | {
+      kind: 'message';
+      message: ChatMessage;
+    }
+  | ToolTranscriptGroup;
+
 export function getVisibleTranscriptMessages(
   messages: ChatMessage[],
   showToolCalls: boolean
 ): ChatMessage[] {
   const filtered = messages.filter((msg) => {
     const text = msg.content || '';
-    if (!showToolCalls && msg.role === 'system' && msg.systemKind !== 'subAgent') {
+    if (
+      !showToolCalls &&
+      msg.role === 'system' &&
+      msg.systemKind !== 'subAgent' &&
+      msg.systemKind !== 'reasoning'
+    ) {
       return false;
     }
     if (text.includes('FINAL_TASK_RESULT_JSON')) {
@@ -32,6 +50,51 @@ export function getVisibleTranscriptMessages(
     const next = filtered[index + 1];
     return !next || next.role !== 'assistant';
   });
+}
+
+export function buildTranscriptDisplayItems(
+  messages: ChatMessage[]
+): TranscriptDisplayItem[] {
+  const items: TranscriptDisplayItem[] = [];
+  let toolBuffer: ChatMessage[] = [];
+
+  const flushToolBuffer = () => {
+    if (toolBuffer.length === 0) {
+      return;
+    }
+
+    if (toolBuffer.length === 1) {
+      items.push({
+        kind: 'message',
+        message: toolBuffer[0],
+      });
+    } else {
+      items.push({
+        kind: 'toolGroup',
+        id: `tool-group-${toolBuffer[0]?.id ?? 'start'}-${toolBuffer[toolBuffer.length - 1]?.id ?? 'end'}`,
+        messages: toolBuffer,
+      });
+    }
+
+    toolBuffer = [];
+  };
+
+  for (const message of messages) {
+    const isToolMessage = message.role === 'system' && message.systemKind === 'tool';
+    if (isToolMessage) {
+      toolBuffer.push(message);
+      continue;
+    }
+
+    flushToolBuffer();
+    items.push({
+      kind: 'message',
+      message,
+    });
+  }
+
+  flushToolBuffer();
+  return items;
 }
 
 export function syncVisibleSubAgentStatuses(

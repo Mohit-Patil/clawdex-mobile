@@ -1,5 +1,6 @@
 import type { ChatMessage } from '../../api/types';
 import {
+  buildTranscriptDisplayItems,
   getVisibleTranscriptMessages,
   syncVisibleSubAgentStatuses,
 } from '../transcriptMessages';
@@ -65,6 +66,22 @@ describe('getVisibleTranscriptMessages', () => {
     ]);
   });
 
+  it('keeps reasoning rows visible when tool calls are disabled', () => {
+    const messages = [
+      message('u1', 'user', 'Explain what you are checking'),
+      message('r1', 'system', '• Reasoning\n  └ Inspecting the workspace state', {
+        systemKind: 'reasoning',
+      }),
+      message('a1', 'assistant', 'I found the issue.'),
+    ];
+
+    expect(getVisibleTranscriptMessages(messages, false).map((entry) => entry.id)).toEqual([
+      'u1',
+      'r1',
+      'a1',
+    ]);
+  });
+
   it('keeps only the last message in a consecutive assistant run', () => {
     const messages = [
       message('u1', 'user', 'Answer this'),
@@ -93,5 +110,55 @@ describe('getVisibleTranscriptMessages', () => {
 
     expect(synced[0]?.content).toContain('Status: complete');
     expect(synced[0]?.subAgentMeta?.agentStatus).toBe('complete');
+  });
+});
+
+describe('buildTranscriptDisplayItems', () => {
+  it('groups consecutive tool messages into one toolGroup item', () => {
+    const messages = [
+      message('u1', 'user', 'Audit this'),
+      message('t1', 'system', '• Ran `pwd`', { systemKind: 'tool' }),
+      message('t2', 'system', '• Ran `ls`', { systemKind: 'tool' }),
+      message('a1', 'assistant', 'Done.'),
+    ];
+
+    expect(buildTranscriptDisplayItems(messages)).toEqual([
+      {
+        kind: 'message',
+        message: messages[0],
+      },
+      {
+        kind: 'toolGroup',
+        id: 'tool-group-t1-t2',
+        messages: [messages[1], messages[2]],
+      },
+      {
+        kind: 'message',
+        message: messages[3],
+      },
+    ]);
+  });
+
+  it('keeps a single tool message as a normal message', () => {
+    const messages = [
+      message('u1', 'user', 'Audit this'),
+      message('t1', 'system', '• Ran `pwd`', { systemKind: 'tool' }),
+      message('a1', 'assistant', 'Done.'),
+    ];
+
+    expect(buildTranscriptDisplayItems(messages)).toEqual([
+      {
+        kind: 'message',
+        message: messages[0],
+      },
+      {
+        kind: 'message',
+        message: messages[1],
+      },
+      {
+        kind: 'message',
+        message: messages[2],
+      },
+    ]);
   });
 });

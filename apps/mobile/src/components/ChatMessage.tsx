@@ -23,6 +23,10 @@ interface ChatMessageProps {
   bridgeToken?: string | null;
 }
 
+interface ToolActivityGroupProps {
+  messages: ApiChatMessage[];
+}
+
 interface TimelineEntry {
   title: string;
   details: string[];
@@ -40,6 +44,9 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
     [bridgeToken, bridgeUrl]
   );
   const [expandedTimelineEntries, setExpandedTimelineEntries] = useState<
+    Record<string, boolean>
+  >({});
+  const [expandedReasoningEntries, setExpandedReasoningEntries] = useState<
     Record<string, boolean>
   >({});
   const userBlocks = useMemo(
@@ -94,6 +101,87 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
 
   const timelineEntries =
     message.role === 'system' ? parseTimelineEntries(message.content) : null;
+  if (message.role === 'system' && message.systemKind === 'reasoning') {
+    const reasoningEntries =
+      timelineEntries && timelineEntries.length > 0
+        ? timelineEntries
+        : [{ title: 'Reasoning', details: [message.content] }];
+
+    return (
+      <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
+        <View style={styles.reasoningStack}>
+          {reasoningEntries.map((entry, index) => {
+            const reasoningKey = `${message.id}-reasoning-${String(index)}`;
+            const hasDetails = entry.details.length > 0;
+            const expanded = expandedReasoningEntries[reasoningKey] === true;
+            const preview = hasDetails ? summarizeReasoningPreview(entry.details) : null;
+
+            return (
+              <Pressable
+                key={reasoningKey}
+                disabled={!hasDetails}
+                onPress={() => {
+                  if (!hasDetails) {
+                    return;
+                  }
+                  setExpandedReasoningEntries((previous) => ({
+                    ...previous,
+                    [reasoningKey]: !previous[reasoningKey],
+                  }));
+                }}
+                style={({ pressed }) => [
+                  styles.reasoningCard,
+                  hasDetails && styles.reasoningCardInteractive,
+                  pressed && hasDetails && styles.reasoningCardPressed,
+                ]}
+              >
+                <View style={styles.reasoningHeader}>
+                  <Ionicons
+                    name="sparkles-outline"
+                    size={13}
+                    color={colors.textMuted}
+                  />
+                  <Text style={styles.reasoningTitle}>{entry.title}</Text>
+                  {hasDetails ? (
+                    <Ionicons
+                      name={expanded ? 'chevron-up' : 'chevron-down'}
+                      size={14}
+                      color={colors.textMuted}
+                    />
+                  ) : null}
+                </View>
+                {!expanded && preview ? (
+                  <SelectableMessageText
+                    style={styles.reasoningPreview}
+                    numberOfLines={3}
+                  >
+                    {preview}
+                  </SelectableMessageText>
+                ) : null}
+                {expanded && hasDetails ? (
+                  <View style={styles.reasoningDetailWrap}>
+                    {entry.details.map((line, lineIndex) => (
+                      <SelectableMessageText
+                        key={`${reasoningKey}-line-${String(lineIndex)}`}
+                        style={styles.reasoningDetailLine}
+                      >
+                        {line}
+                      </SelectableMessageText>
+                    ))}
+                  </View>
+                ) : null}
+                {hasDetails ? (
+                  <Text style={styles.reasoningToggleText}>
+                    {expanded ? 'Tap to hide thinking' : 'Tap to show thinking'}
+                  </Text>
+                ) : null}
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+    );
+  }
   if (message.role === 'system' && message.systemKind === 'subAgent') {
     const subAgentEntries =
       timelineEntries && timelineEntries.length > 0
@@ -253,6 +341,79 @@ function areChatMessagePropsEqual(
 
 export const ChatMessage = memo(ChatMessageComponent, areChatMessagePropsEqual);
 ChatMessage.displayName = 'ChatMessage';
+
+export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
+  messages,
+}: ToolActivityGroupProps) {
+  const [expanded, setExpanded] = useState(false);
+  const entries = useMemo(() => {
+    const flattened: Array<{ id: string; title: string }> = [];
+    for (const message of messages) {
+      const parsed = parseTimelineEntries(message.content);
+      if (parsed && parsed.length > 0) {
+        parsed.forEach((entry, index) => {
+          flattened.push({
+            id: `${message.id}-${String(index)}`,
+            title: entry.title,
+          });
+        });
+        continue;
+      }
+
+      flattened.push({
+        id: message.id,
+        title: message.content.trim(),
+      });
+    }
+    return flattened.filter((entry) => entry.title.length > 0);
+  }, [messages]);
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const previewEntries = expanded ? entries : entries.slice(0, 3);
+  const hiddenCount = Math.max(entries.length - previewEntries.length, 0);
+  const summary = summarizeToolGroup(entries.map((entry) => entry.title));
+
+  return (
+    <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
+      <Pressable
+        onPress={() => setExpanded((previous) => !previous)}
+        style={({ pressed }) => [
+          styles.toolGroupCard,
+          styles.toolGroupCardInteractive,
+          pressed && styles.toolGroupCardPressed,
+        ]}
+      >
+        <View style={styles.toolGroupHeader}>
+          <Ionicons name="construct-outline" size={14} color={colors.textMuted} />
+          <Text style={styles.toolGroupTitle}>{summary}</Text>
+          <Ionicons
+            name={expanded ? 'chevron-up' : 'chevron-down'}
+            size={14}
+            color={colors.textMuted}
+          />
+        </View>
+
+        <View style={styles.toolGroupList}>
+          {previewEntries.map((entry) => (
+            <View key={entry.id} style={styles.toolGroupRow}>
+              <Text style={styles.toolGroupBullet}>{'\u2022'}</Text>
+              <Text style={styles.toolGroupRowText} numberOfLines={1}>
+                {entry.title}
+              </Text>
+            </View>
+          ))}
+          {!expanded && hiddenCount > 0 ? (
+            <Text style={styles.toolGroupMoreText}>{`+${String(hiddenCount)} more`}</Text>
+          ) : null}
+        </View>
+      </Pressable>
+    </View>
+  );
+});
+ToolActivityGroup.displayName = 'ToolActivityGroup';
 
 const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
@@ -514,6 +675,110 @@ const styles = StyleSheet.create({
   },
   subAgentCardStack: {
     gap: spacing.xs + 2,
+  },
+  reasoningStack: {
+    gap: spacing.xs,
+  },
+  reasoningCard: {
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(208, 213, 223, 0.18)',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 1,
+  },
+  reasoningCardInteractive: {
+    overflow: 'hidden',
+  },
+  reasoningCardPressed: {
+    opacity: 0.84,
+  },
+  reasoningHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  reasoningTitle: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontSize: 12,
+    letterSpacing: 0.2,
+    textTransform: 'none',
+    flex: 1,
+  },
+  reasoningPreview: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 17,
+    marginTop: spacing.xs,
+  },
+  reasoningDetailWrap: {
+    marginTop: spacing.xs,
+    gap: spacing.xs,
+  },
+  reasoningDetailLine: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    lineHeight: 17,
+  },
+  reasoningToggleText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
+  },
+  toolGroupCard: {
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.borderLight,
+    backgroundColor: colors.bgItem,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 2,
+  },
+  toolGroupCardInteractive: {
+    overflow: 'hidden',
+  },
+  toolGroupCardPressed: {
+    opacity: 0.84,
+  },
+  toolGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  toolGroupTitle: {
+    ...typography.body,
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  toolGroupList: {
+    marginTop: spacing.xs,
+    gap: 4,
+  },
+  toolGroupRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  toolGroupBullet: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 16,
+    width: 8,
+  },
+  toolGroupRowText: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    lineHeight: 16,
+    flex: 1,
+    fontFamily: monoFont,
+  },
+  toolGroupMoreText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginTop: 2,
+    paddingLeft: spacing.lg,
   },
   subAgentCard: {
     borderRadius: radius.md,
@@ -858,6 +1123,31 @@ function normalizeTimelineDetail(line: string): string | null {
   }
 
   return withoutMarker;
+}
+
+function summarizeReasoningPreview(details: string[]): string | null {
+  const preview = details
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(' ');
+  return preview.length > 0 ? preview : null;
+}
+
+function summarizeToolGroup(titles: string[]): string {
+  const normalized = titles.map((title) => title.trim().toLowerCase());
+  if (normalized.every((title) => title.startsWith('ran '))) {
+    return `${String(titles.length)} command${titles.length === 1 ? '' : 's'}`;
+  }
+  if (normalized.every((title) => title.startsWith('called tool'))) {
+    return `${String(titles.length)} tool call${titles.length === 1 ? '' : 's'}`;
+  }
+  if (normalized.every((title) => title.startsWith('searched web'))) {
+    return `${String(titles.length)} web search${titles.length === 1 ? '' : 'es'}`;
+  }
+  if (normalized.every((title) => title.startsWith('applied file changes'))) {
+    return `${String(titles.length)} file change${titles.length === 1 ? '' : 's'}`;
+  }
+  return `${String(titles.length)} tool call${titles.length === 1 ? '' : 's'}`;
 }
 
 function toTimelineVisual(title: string): {

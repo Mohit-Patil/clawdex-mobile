@@ -1,4 +1,5 @@
 export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
+export type ChatEngine = 'codex' | 'opencode';
 
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
 
@@ -15,7 +16,7 @@ export interface ChatMessage {
   role: ChatMessageRole;
   content: string;
   createdAt: string;
-  systemKind?: 'tool' | 'subAgent';
+  systemKind?: 'tool' | 'reasoning' | 'subAgent';
   subAgentMeta?: ChatMessageSubAgentMeta;
 }
 
@@ -28,6 +29,7 @@ export interface ChatSummary {
   statusUpdatedAt: string;
   lastMessagePreview: string;
   cwd?: string;
+  engine?: ChatEngine;
   modelProvider?: string;
   agentNickname?: string;
   agentRole?: string;
@@ -426,6 +428,17 @@ export interface VoiceTranscribeRequest {
 
 export interface VoiceTranscribeResponse {
   text: string;
+}
+
+export interface BridgeCapabilities {
+  activeEngine: ChatEngine;
+  availableEngines: ChatEngine[];
+  unifiedChatList: boolean;
+  supports: {
+    reviewStart: boolean;
+    turnSteer: boolean;
+    commandOutputDelta: boolean;
+  };
 }
 
 export interface RpcNotification {

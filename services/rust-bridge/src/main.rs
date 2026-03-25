@@ -29,6 +29,7 @@ use axum::{
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use reqwest::{Client as HttpClient, Method as HttpMethod, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use services::{GitService, TerminalService};
@@ -62,6 +63,9 @@ const ROLLOUT_LIVE_SYNC_MAX_TRACKED_FILES: usize = 64;
 const ROLLOUT_LIVE_SYNC_MAX_FILE_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 2);
 const ROLLOUT_LIVE_SYNC_INITIAL_TAIL_BYTES: u64 = 64 * 1024;
 const ROLLOUT_LIVE_SYNC_DEDUP_CAPACITY: usize = 8_192;
+const OPENCODE_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
+const OPENCODE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const OPENCODE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -69,6 +73,12 @@ struct BridgeConfig {
     port: u16,
     workdir: PathBuf,
     cli_bin: String,
+    opencode_cli_bin: String,
+    active_engine: BridgeRuntimeEngine,
+    opencode_host: String,
+    opencode_port: u16,
+    opencode_server_username: String,
+    opencode_server_password: Option<String>,
     auth_token: Option<String>,
     auth_enabled: bool,
     allow_insecure_no_auth: bool,
@@ -93,10 +103,34 @@ impl BridgeConfig {
         let workdir = resolve_bridge_workdir(configured_workdir)?;
 
         let cli_bin = env::var("CODEX_CLI_BIN").unwrap_or_else(|_| "codex".to_string());
+        let opencode_cli_bin =
+            env::var("OPENCODE_CLI_BIN").unwrap_or_else(|_| "opencode".to_string());
+        let active_engine = match env::var("BRIDGE_ACTIVE_ENGINE") {
+            Ok(raw) => parse_bridge_runtime_engine(raw.trim())
+                .ok_or_else(|| format!("unsupported BRIDGE_ACTIVE_ENGINE value: {raw}"))?,
+            Err(_) => BridgeRuntimeEngine::Codex,
+        };
+        let opencode_host =
+            env::var("BRIDGE_OPENCODE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let opencode_port = env::var("BRIDGE_OPENCODE_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(4090);
         let auth_token = env::var("BRIDGE_AUTH_TOKEN")
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+        let opencode_server_username = env::var("BRIDGE_OPENCODE_SERVER_USERNAME")
+            .or_else(|_| env::var("OPENCODE_SERVER_USERNAME"))
+            .unwrap_or_else(|_| "opencode".to_string())
+            .trim()
+            .to_string();
+        let opencode_server_password = env::var("BRIDGE_OPENCODE_SERVER_PASSWORD")
+            .or_else(|_| env::var("OPENCODE_SERVER_PASSWORD"))
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or_else(|| auth_token.clone());
 
         let allow_insecure_no_auth = parse_bool_env("BRIDGE_ALLOW_INSECURE_NO_AUTH");
         if auth_token.is_none() && !allow_insecure_no_auth {
@@ -123,6 +157,12 @@ impl BridgeConfig {
             port,
             workdir,
             cli_bin,
+            opencode_cli_bin,
+            active_engine,
+            opencode_host,
+            opencode_port,
+            opencode_server_username,
+            opencode_server_password,
             auth_token,
             auth_enabled,
             allow_insecure_no_auth,
@@ -177,9 +217,352 @@ struct AppState {
     config: Arc<BridgeConfig>,
     started_at: Instant,
     hub: Arc<ClientHub>,
-    app_server: Arc<AppServerBridge>,
+    backend: Arc<RuntimeBackend>,
     terminal: Arc<TerminalService>,
     git: Arc<GitService>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum BridgeRuntimeEngine {
+    Codex,
+    Opencode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeCapabilities {
+    active_engine: BridgeRuntimeEngine,
+    available_engines: Vec<BridgeRuntimeEngine>,
+    unified_chat_list: bool,
+    supports: BridgeCapabilitySupport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeCapabilitySupport {
+    review_start: bool,
+    turn_steer: bool,
+    command_output_delta: bool,
+}
+
+impl AppState {
+    fn bridge_capabilities(&self) -> BridgeCapabilities {
+        self.backend.capabilities()
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeBackend {
+    preferred_engine: BridgeRuntimeEngine,
+    codex: Option<Arc<AppServerBridge>>,
+    opencode: Option<Arc<OpencodeBackend>>,
+}
+
+impl RuntimeBackend {
+    async fn start(config: &Arc<BridgeConfig>, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
+        let preferred_engine = config.active_engine;
+        let mut codex = None;
+        let mut opencode = None;
+
+        match preferred_engine {
+            BridgeRuntimeEngine::Codex => {
+                let app_server = AppServerBridge::start(
+                    &config.cli_bin,
+                    BridgeRuntimeEngine::Codex,
+                    hub.clone(),
+                )
+                .await?;
+                spawn_rollout_live_sync(hub.clone());
+                codex = Some(app_server);
+
+                match OpencodeBackend::start(config, hub).await {
+                    Ok(backend) => opencode = Some(backend),
+                    Err(error) => eprintln!(
+                        "opencode backend unavailable; continuing with codex only: {error}"
+                    ),
+                }
+            }
+            BridgeRuntimeEngine::Opencode => {
+                let backend = OpencodeBackend::start(config, hub.clone()).await?;
+                opencode = Some(backend);
+
+                match AppServerBridge::start(
+                    &config.cli_bin,
+                    BridgeRuntimeEngine::Codex,
+                    hub.clone(),
+                )
+                .await
+                {
+                    Ok(app_server) => {
+                        spawn_rollout_live_sync(hub);
+                        codex = Some(app_server);
+                    }
+                    Err(error) => eprintln!(
+                        "codex backend unavailable; continuing with opencode only: {error}"
+                    ),
+                }
+            }
+        }
+
+        Ok(Arc::new(Self {
+            preferred_engine,
+            codex,
+            opencode,
+        }))
+    }
+
+    fn engine(&self) -> BridgeRuntimeEngine {
+        self.preferred_engine
+    }
+
+    fn available_engines(&self) -> Vec<BridgeRuntimeEngine> {
+        let mut engines = Vec::new();
+        if self.codex.is_some() {
+            engines.push(BridgeRuntimeEngine::Codex);
+        }
+        if self.opencode.is_some() {
+            engines.push(BridgeRuntimeEngine::Opencode);
+        }
+        engines
+    }
+
+    fn capabilities(&self) -> BridgeCapabilities {
+        let active_engine = self.engine();
+        let supports = match active_engine {
+            BridgeRuntimeEngine::Codex => BridgeCapabilitySupport {
+                review_start: true,
+                turn_steer: true,
+                command_output_delta: true,
+            },
+            BridgeRuntimeEngine::Opencode => BridgeCapabilitySupport {
+                review_start: false,
+                turn_steer: false,
+                command_output_delta: false,
+            },
+        };
+        let available_engines = self.available_engines();
+
+        BridgeCapabilities {
+            active_engine,
+            unified_chat_list: available_engines.len() > 1,
+            available_engines,
+            supports,
+        }
+    }
+
+    fn backend_for_engine(
+        &self,
+        engine: BridgeRuntimeEngine,
+    ) -> Result<RuntimeBackendRef<'_>, String> {
+        match engine {
+            BridgeRuntimeEngine::Codex => self
+                .codex
+                .as_ref()
+                .map(RuntimeBackendRef::Codex)
+                .ok_or_else(|| "codex backend is unavailable".to_string()),
+            BridgeRuntimeEngine::Opencode => self
+                .opencode
+                .as_ref()
+                .map(RuntimeBackendRef::Opencode)
+                .ok_or_else(|| "opencode backend is unavailable".to_string()),
+        }
+    }
+
+    fn route_engine_for_method(
+        &self,
+        method: &str,
+        raw_params: Option<&Value>,
+    ) -> BridgeRuntimeEngine {
+        if is_dual_engine_aggregate_method(method) {
+            return self.preferred_engine;
+        }
+
+        route_engine_from_params(raw_params).unwrap_or(self.preferred_engine)
+    }
+
+    async fn forward_request(
+        &self,
+        client_id: u64,
+        client_request_id: Value,
+        method: &str,
+        raw_params: Option<Value>,
+    ) -> Result<(), String> {
+        if is_dual_engine_aggregate_method(method) {
+            let result = self.request_internal(method, raw_params).await?;
+            self.send_client_result(client_id, client_request_id, result)
+                .await;
+            return Ok(());
+        }
+
+        let target_engine = self.route_engine_for_method(method, raw_params.as_ref());
+        let normalized_params = raw_params.map(normalize_forwarded_ids);
+        match self.backend_for_engine(target_engine)? {
+            RuntimeBackendRef::Codex(bridge) => {
+                bridge
+                    .forward_request(client_id, client_request_id, method, normalized_params)
+                    .await
+            }
+            RuntimeBackendRef::Opencode(backend) => {
+                backend
+                    .forward_request(client_id, client_request_id, method, normalized_params)
+                    .await
+            }
+        }
+    }
+
+    async fn request_internal(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        if method == "thread/list" {
+            return self.aggregate_thread_list(params).await;
+        }
+        if method == "thread/loaded/list" {
+            return self.aggregate_loaded_thread_ids().await;
+        }
+
+        let target_engine = self.route_engine_for_method(method, params.as_ref());
+        let normalized_params = params.map(normalize_forwarded_ids);
+        match self.backend_for_engine(target_engine)? {
+            RuntimeBackendRef::Codex(bridge) => {
+                bridge.request_internal(method, normalized_params).await
+            }
+            RuntimeBackendRef::Opencode(backend) => {
+                backend.request_internal(method, normalized_params).await
+            }
+        }
+    }
+
+    async fn aggregate_thread_list(&self, params: Option<Value>) -> Result<Value, String> {
+        let mut results = Vec::new();
+
+        if let Some(codex) = &self.codex {
+            results.push((
+                BridgeRuntimeEngine::Codex,
+                codex
+                    .request_internal("thread/list", params.clone())
+                    .await?,
+            ));
+        }
+
+        if let Some(opencode) = &self.opencode {
+            results.push((
+                BridgeRuntimeEngine::Opencode,
+                opencode.request_internal("thread/list", params).await?,
+            ));
+        }
+
+        Ok(merge_thread_list_results(results))
+    }
+
+    async fn aggregate_loaded_thread_ids(&self) -> Result<Value, String> {
+        let mut results = Vec::new();
+
+        if let Some(codex) = &self.codex {
+            results.push((
+                BridgeRuntimeEngine::Codex,
+                codex.request_internal("thread/loaded/list", None).await?,
+            ));
+        }
+
+        if let Some(opencode) = &self.opencode {
+            results.push((
+                BridgeRuntimeEngine::Opencode,
+                opencode
+                    .request_internal("thread/loaded/list", None)
+                    .await?,
+            ));
+        }
+
+        Ok(merge_loaded_thread_ids_results(results))
+    }
+
+    async fn list_pending_approvals(&self) -> Vec<PendingApproval> {
+        let mut approvals = Vec::new();
+        if let Some(codex) = &self.codex {
+            approvals.extend(codex.list_pending_approvals().await);
+        }
+        if let Some(opencode) = &self.opencode {
+            approvals.extend(opencode.list_pending_approvals().await);
+        }
+        approvals.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+        approvals
+    }
+
+    async fn resolve_approval(
+        &self,
+        approval_id: &str,
+        decision: &Value,
+    ) -> Result<Option<PendingApproval>, String> {
+        if let Some(codex) = &self.codex {
+            if let Some(approval) = codex.resolve_approval(approval_id, decision).await? {
+                return Ok(Some(approval));
+            }
+        }
+
+        if let Some(opencode) = &self.opencode {
+            if let Some(approval) = opencode.resolve_approval(approval_id, decision).await? {
+                return Ok(Some(approval));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn resolve_user_input(
+        &self,
+        request_id: &str,
+        answers: &HashMap<String, UserInputAnswerPayload>,
+    ) -> Result<Option<PendingUserInputRequest>, String> {
+        if let Some(codex) = &self.codex {
+            if let Some(request) = codex.resolve_user_input(request_id, answers).await? {
+                return Ok(Some(request));
+            }
+        }
+
+        if let Some(opencode) = &self.opencode {
+            if let Some(request) = opencode.resolve_user_input(request_id, answers).await? {
+                return Ok(Some(request));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn send_client_result(&self, client_id: u64, client_request_id: Value, result: Value) {
+        self.send_client_result_error(client_id, client_request_id, Ok(result))
+            .await;
+    }
+
+    async fn send_client_result_error(
+        &self,
+        client_id: u64,
+        client_request_id: Value,
+        result: Result<Value, String>,
+    ) {
+        let payload = match result {
+            Ok(result) => json!({
+                "id": client_request_id,
+                "result": result,
+            }),
+            Err(error) => json!({
+                "id": client_request_id,
+                "error": {
+                    "code": -32000,
+                    "message": error,
+                }
+            }),
+        };
+        if let Some(codex) = &self.codex {
+            codex.hub.send_json(client_id, payload).await;
+        } else if let Some(opencode) = &self.opencode {
+            opencode.hub.send_json(client_id, payload).await;
+        }
+    }
+}
+
+enum RuntimeBackendRef<'a> {
+    Codex(&'a Arc<AppServerBridge>),
+    Opencode(&'a Arc<OpencodeBackend>),
 }
 
 struct ClientHub {
@@ -348,6 +731,7 @@ impl ClientHub {
 }
 
 struct AppServerBridge {
+    engine: BridgeRuntimeEngine,
     child: Mutex<Child>,
     writer: Mutex<ChildStdin>,
     pending_requests: Mutex<HashMap<u64, PendingRequest>>,
@@ -363,6 +747,7 @@ struct AppServerBridge {
 struct PendingRequest {
     client_id: u64,
     client_request_id: Value,
+    method: String,
 }
 
 #[derive(Clone, Copy)]
@@ -385,7 +770,11 @@ struct PendingUserInputEntry {
 }
 
 impl AppServerBridge {
-    async fn start(cli_bin: &str, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
+    async fn start(
+        cli_bin: &str,
+        engine: BridgeRuntimeEngine,
+        hub: Arc<ClientHub>,
+    ) -> Result<Arc<Self>, String> {
         let mut child = Command::new(cli_bin)
             .arg("app-server")
             .arg("--listen")
@@ -410,6 +799,7 @@ impl AppServerBridge {
             .ok_or_else(|| "app-server stderr unavailable".to_string())?;
 
         let bridge = Arc::new(Self {
+            engine,
             child: Mutex::new(child),
             writer: Mutex::new(stdin),
             pending_requests: Mutex::new(HashMap::new()),
@@ -582,6 +972,7 @@ impl AppServerBridge {
                 PendingRequest {
                     client_id,
                     client_request_id,
+                    method: method.to_string(),
                 },
             );
         }
@@ -836,7 +1227,7 @@ impl AppServerBridge {
             let approval = PendingApproval {
                 id: approval_id.clone(),
                 kind,
-                thread_id,
+                thread_id: encode_engine_qualified_id(self.engine, &thread_id),
                 turn_id,
                 item_id,
                 requested_at: now_iso(),
@@ -885,8 +1276,11 @@ impl AppServerBridge {
 
             let request = PendingUserInputRequest {
                 id: request_id.clone(),
-                thread_id: read_string(params_obj.and_then(|p| p.get("threadId")))
-                    .unwrap_or_else(|| "unknown-thread".to_string()),
+                thread_id: encode_engine_qualified_id(
+                    self.engine,
+                    &read_string(params_obj.and_then(|p| p.get("threadId")))
+                        .unwrap_or_else(|| "unknown-thread".to_string()),
+                ),
                 turn_id: read_string(params_obj.and_then(|p| p.get("turnId")))
                     .unwrap_or_else(|| "unknown-turn".to_string()),
                 item_id: read_string(params_obj.and_then(|p| p.get("itemId")))
@@ -1004,8 +1398,10 @@ impl AppServerBridge {
     }
 
     async fn handle_notification(&self, method: &str, params: Option<Value>) {
+        let normalized_params =
+            normalize_forwarded_notification(method, params.unwrap_or(Value::Null), self.engine);
         self.hub
-            .broadcast_notification(method, params.unwrap_or(Value::Null))
+            .broadcast_notification(method, normalized_params)
             .await;
     }
 
@@ -1046,9 +1442,14 @@ impl AppServerBridge {
                 "error": error,
             })
         } else {
+            let normalized_result = normalize_forwarded_result(
+                &pending.method,
+                object.get("result").cloned().unwrap_or(Value::Null),
+                self.engine,
+            );
             json!({
                 "id": pending.client_request_id,
-                "result": object.get("result").cloned().unwrap_or(Value::Null),
+                "result": normalized_result,
             })
         };
 
@@ -1061,6 +1462,1489 @@ impl AppServerBridge {
         writer.write_all(line.as_bytes()).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await
+    }
+}
+
+#[derive(Clone)]
+struct OpencodePendingApprovalEntry {
+    approval: PendingApproval,
+    directory: String,
+}
+
+#[derive(Clone)]
+struct OpencodePendingUserInputEntry {
+    request: PendingUserInputRequest,
+    directory: String,
+}
+
+struct OpencodeBackend {
+    child: Mutex<Child>,
+    hub: Arc<ClientHub>,
+    http: HttpClient,
+    base_url: Url,
+    username: String,
+    password: Option<String>,
+    fallback_directory: String,
+    session_directories: RwLock<HashMap<String, String>>,
+    session_statuses: RwLock<HashMap<String, String>>,
+    active_turns: RwLock<HashMap<String, String>>,
+    part_kinds: RwLock<HashMap<String, String>>,
+    interrupted_sessions: RwLock<HashSet<String>>,
+    pending_approvals: Mutex<HashMap<String, OpencodePendingApprovalEntry>>,
+    pending_user_inputs: Mutex<HashMap<String, OpencodePendingUserInputEntry>>,
+}
+
+impl OpencodeBackend {
+    async fn start(config: &Arc<BridgeConfig>, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
+        let mut command = Command::new(&config.opencode_cli_bin);
+        command
+            .arg("serve")
+            .arg("--hostname")
+            .arg(&config.opencode_host)
+            .arg("--port")
+            .arg(config.opencode_port.to_string())
+            .current_dir(&config.workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(password) = config.opencode_server_password.as_deref() {
+            command.env("OPENCODE_SERVER_PASSWORD", password);
+            command.env("OPENCODE_SERVER_USERNAME", &config.opencode_server_username);
+        }
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("failed to start opencode serve: {error}"))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "opencode stdout unavailable".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "opencode stderr unavailable".to_string())?;
+
+        let base_url = Url::parse(&format!(
+            "http://{}:{}/",
+            config.opencode_host, config.opencode_port
+        ))
+        .map_err(|error| format!("invalid opencode base url: {error}"))?;
+
+        let backend = Arc::new(Self {
+            child: Mutex::new(child),
+            hub,
+            http: HttpClient::builder()
+                .build()
+                .map_err(|error| format!("failed to build opencode http client: {error}"))?,
+            base_url,
+            username: config.opencode_server_username.clone(),
+            password: config.opencode_server_password.clone(),
+            fallback_directory: config.workdir.to_string_lossy().to_string(),
+            session_directories: RwLock::new(HashMap::new()),
+            session_statuses: RwLock::new(HashMap::new()),
+            active_turns: RwLock::new(HashMap::new()),
+            part_kinds: RwLock::new(HashMap::new()),
+            interrupted_sessions: RwLock::new(HashSet::new()),
+            pending_approvals: Mutex::new(HashMap::new()),
+            pending_user_inputs: Mutex::new(HashMap::new()),
+        });
+
+        backend.spawn_stdout_loop(stdout);
+        backend.spawn_stderr_loop(stderr);
+        backend.spawn_wait_loop();
+        backend.wait_until_healthy().await?;
+        backend.spawn_global_event_loop();
+
+        Ok(backend)
+    }
+
+    fn spawn_stdout_loop(self: &Arc<Self>, stdout: ChildStdout) {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => eprintln!("[opencode] {line}"),
+                    Ok(None) => break,
+                    Err(error) => {
+                        eprintln!("opencode stdout read error: {error}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_stderr_loop(self: &Arc<Self>, stderr: tokio::process::ChildStderr) {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => eprintln!("[opencode] {line}"),
+                    Ok(None) => break,
+                    Err(error) => {
+                        eprintln!("opencode stderr read error: {error}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_wait_loop(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let status_result = {
+                let mut child = this.child.lock().await;
+                child.wait().await
+            };
+
+            match status_result {
+                Ok(status) => eprintln!("opencode exited with status: {status}"),
+                Err(error) => eprintln!("failed waiting for opencode exit: {error}"),
+            }
+
+            this.pending_approvals.lock().await.clear();
+            this.pending_user_inputs.lock().await.clear();
+            this.session_statuses.write().await.clear();
+            this.active_turns.write().await.clear();
+            this.part_kinds.write().await.clear();
+            this.interrupted_sessions.write().await.clear();
+        });
+    }
+
+    async fn wait_until_healthy(&self) -> Result<(), String> {
+        let mut last_error = "opencode health probe did not run".to_string();
+        let deadline = Instant::now() + OPENCODE_HEALTH_TIMEOUT;
+        while Instant::now() < deadline {
+            match self
+                .request_json(HttpMethod::GET, "global/health", None, None, None)
+                .await
+            {
+                Ok(health) if health.get("healthy").and_then(Value::as_bool) == Some(true) => {
+                    return Ok(());
+                }
+                Ok(_) => {
+                    last_error = "opencode health probe returned unhealthy response".to_string();
+                }
+                Err(error) => {
+                    last_error = error;
+                }
+            }
+
+            tokio::time::sleep(OPENCODE_HEALTH_POLL_INTERVAL).await;
+        }
+
+        Err(format!("opencode failed health check: {last_error}"))
+    }
+
+    fn spawn_global_event_loop(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = this.consume_global_events().await {
+                    eprintln!("opencode global event stream failed: {error}");
+                }
+                if this.child_has_exited().await {
+                    break;
+                }
+                tokio::time::sleep(OPENCODE_EVENT_RECONNECT_DELAY).await;
+            }
+        });
+    }
+
+    async fn child_has_exited(&self) -> bool {
+        let mut child = self.child.lock().await;
+        match child.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(error) => {
+                eprintln!("failed to poll opencode child status: {error}");
+                true
+            }
+        }
+    }
+
+    async fn consume_global_events(&self) -> Result<(), String> {
+        let url = self
+            .base_url
+            .join("global/event")
+            .map_err(|error| format!("invalid opencode global event url: {error}"))?;
+
+        let mut request = self.http.request(HttpMethod::GET, url);
+        if let Some(password) = self.password.as_deref() {
+            request = request.basic_auth(&self.username, Some(password));
+        }
+
+        let mut response = request
+            .send()
+            .await
+            .map_err(|error| format!("failed to open opencode global event stream: {error}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "opencode global event stream returned {}: {}",
+                status.as_u16(),
+                body.trim()
+            ));
+        }
+
+        let mut buffer = String::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| format!("failed reading opencode event stream: {error}"))?
+        {
+            if chunk.is_empty() {
+                continue;
+            }
+
+            let text = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&text.replace("\r\n", "\n"));
+
+            while let Some(index) = buffer.find("\n\n") {
+                let frame = buffer[..index].to_string();
+                buffer.drain(..index + 2);
+                self.handle_sse_frame(&frame).await;
+            }
+        }
+
+        Err("opencode global event stream closed".to_string())
+    }
+
+    async fn handle_sse_frame(&self, frame: &str) {
+        let data = frame
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.trim().is_empty() {
+            return;
+        }
+
+        let Ok(payload) = serde_json::from_str::<Value>(&data) else {
+            return;
+        };
+        self.handle_global_event(payload).await;
+    }
+
+    async fn handle_global_event(&self, envelope: Value) {
+        let Some(envelope_object) = envelope.as_object() else {
+            return;
+        };
+        let directory = read_string(envelope_object.get("directory"));
+        let Some(payload) = envelope_object.get("payload").and_then(Value::as_object) else {
+            return;
+        };
+        let Some(event_type) = read_string(payload.get("type")) else {
+            return;
+        };
+        let properties = payload.get("properties").cloned().unwrap_or(Value::Null);
+
+        match event_type.as_str() {
+            "server.connected" | "server.heartbeat" => {}
+            "session.created" => {
+                if let Some(info) = properties.get("info") {
+                    self.cache_session_info(info).await;
+                    if let Some(session_id) = read_string(info.get("id")) {
+                        self.broadcast_json_notification(
+                            "thread/started",
+                            json!({
+                                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+            }
+            "session.updated" => {
+                if let Some(info) = properties.get("info") {
+                    self.cache_session_info(info).await;
+                    if let Some(session_id) = read_string(info.get("id")) {
+                        self.broadcast_json_notification(
+                            "thread/name/updated",
+                            json!({
+                                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+                                "threadName": read_string(info.get("title")),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+            }
+            "session.status" => {
+                self.handle_session_status_event(properties).await;
+            }
+            "session.error" => {
+                self.handle_session_error_event(properties).await;
+            }
+            "message.part.updated" => {
+                self.cache_message_part_kind(properties).await;
+            }
+            "message.part.delta" => {
+                self.handle_message_part_delta(properties).await;
+            }
+            "message.part.removed" => {
+                let session_id = read_string(properties.get("sessionID"));
+                let part_id = read_string(properties.get("partID"));
+                if let (Some(session_id), Some(part_id)) = (session_id, part_id) {
+                    self.part_kinds
+                        .write()
+                        .await
+                        .remove(&opencode_part_key(&session_id, &part_id));
+                }
+            }
+            "permission.asked" => {
+                self.handle_permission_asked(properties, directory).await;
+            }
+            "permission.replied" => {
+                self.handle_permission_replied(properties).await;
+            }
+            "question.asked" => {
+                self.handle_question_asked(properties, directory).await;
+            }
+            "question.replied" | "question.rejected" => {
+                self.handle_question_resolved(properties).await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_session_status_event(&self, properties: Value) {
+        let Some(session_id) = read_string(properties.get("sessionID")) else {
+            return;
+        };
+        let status_type = properties
+            .get("status")
+            .and_then(Value::as_object)
+            .and_then(|status| read_string(status.get("type")));
+        let Some(status_type) = status_type else {
+            return;
+        };
+
+        let previous_status = self
+            .session_statuses
+            .write()
+            .await
+            .insert(session_id.clone(), status_type.clone());
+        let was_active = opencode_status_is_active(previous_status.as_deref());
+        let is_active = opencode_status_is_active(Some(status_type.as_str()));
+        let thread_id = encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id);
+        let interrupted = if !is_active && was_active {
+            self.interrupted_sessions.write().await.remove(&session_id)
+        } else {
+            false
+        };
+
+        self.broadcast_json_notification(
+            "thread/status/changed",
+            json!({
+                "threadId": thread_id,
+                "status": if is_active {
+                    "running"
+                } else if was_active && interrupted {
+                    "interrupted"
+                } else if was_active {
+                    "completed"
+                } else {
+                    "idle"
+                },
+            }),
+        )
+        .await;
+
+        if is_active && !was_active {
+            let turn_id = self.active_turns.read().await.get(&session_id).cloned();
+            self.broadcast_json_notification(
+                "turn/started",
+                json!({
+                    "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+                    "turnId": turn_id,
+                }),
+            )
+            .await;
+            return;
+        }
+
+        if !is_active && was_active {
+            let turn_id = self.active_turns.write().await.remove(&session_id);
+            self.broadcast_json_notification(
+                "turn/completed",
+                json!({
+                    "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+                    "turnId": turn_id,
+                    "status": if interrupted { "interrupted" } else { "completed" },
+                }),
+            )
+            .await;
+        }
+    }
+
+    async fn handle_session_error_event(&self, properties: Value) {
+        let Some(session_id) = read_string(properties.get("sessionID")) else {
+            return;
+        };
+        let error_message = properties
+            .get("error")
+            .and_then(Value::as_object)
+            .and_then(|error| read_string(error.get("message")));
+        self.session_statuses
+            .write()
+            .await
+            .insert(session_id.clone(), "idle".to_string());
+        let turn_id = self.active_turns.write().await.remove(&session_id);
+        self.interrupted_sessions.write().await.remove(&session_id);
+
+        self.broadcast_json_notification(
+            "thread/status/changed",
+            json!({
+                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+                "status": "failed",
+                "error": {
+                    "message": error_message,
+                },
+            }),
+        )
+        .await;
+        self.broadcast_json_notification(
+            "turn/completed",
+            json!({
+                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+                "turnId": turn_id,
+                "status": "failed",
+                "error": {
+                    "message": error_message,
+                },
+            }),
+        )
+        .await;
+    }
+
+    async fn cache_message_part_kind(&self, properties: Value) {
+        let Some(part) = properties.get("part").and_then(Value::as_object) else {
+            return;
+        };
+        let Some(session_id) = read_string(part.get("sessionID")) else {
+            return;
+        };
+        let Some(part_id) = read_string(part.get("id")) else {
+            return;
+        };
+        let Some(kind) = read_string(part.get("type")) else {
+            return;
+        };
+        let storage_kind = if kind == "tool" {
+            let status = part
+                .get("state")
+                .and_then(Value::as_object)
+                .and_then(|state| read_string(state.get("status")))
+                .unwrap_or_else(|| "pending".to_string());
+            format!("tool:{status}")
+        } else {
+            kind.clone()
+        };
+        let part_key = opencode_part_key(&session_id, &part_id);
+        let previous = self
+            .part_kinds
+            .write()
+            .await
+            .insert(part_key, storage_kind.clone());
+
+        let thread_id = encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id);
+        if kind == "reasoning" && previous.is_none() {
+            self.broadcast_json_notification(
+                "item/started",
+                json!({
+                    "threadId": thread_id,
+                    "item": {
+                        "id": part_id,
+                        "type": "reasoning",
+                    }
+                }),
+            )
+            .await;
+            return;
+        }
+
+        if kind == "tool" {
+            if let Some((event_method, item)) = opencode_tool_part_bridge_event(part) {
+                let should_emit = previous.as_deref() != Some(storage_kind.as_str());
+                if should_emit {
+                    self.broadcast_json_notification(
+                        event_method,
+                        json!({
+                            "threadId": thread_id,
+                            "item": item,
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    async fn handle_message_part_delta(&self, properties: Value) {
+        let Some(session_id) = read_string(properties.get("sessionID")) else {
+            return;
+        };
+        let Some(part_id) = read_string(properties.get("partID")) else {
+            return;
+        };
+        let Some(field) = read_string(properties.get("field")) else {
+            return;
+        };
+        let Some(delta) = read_string(properties.get("delta")) else {
+            return;
+        };
+        if field != "text" || delta.is_empty() {
+            return;
+        }
+
+        let part_key = opencode_part_key(&session_id, &part_id);
+        let part_kind = self.part_kinds.read().await.get(&part_key).cloned();
+        let thread_id = encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id);
+        match part_kind.as_deref() {
+            Some("reasoning") => {
+                self.broadcast_json_notification(
+                    "item/reasoning/textDelta",
+                    json!({
+                        "threadId": thread_id,
+                        "itemId": part_id,
+                        "delta": delta,
+                    }),
+                )
+                .await;
+            }
+            Some("text") => {
+                self.broadcast_json_notification(
+                    "item/agentMessage/delta",
+                    json!({
+                        "threadId": thread_id,
+                        "itemId": part_id,
+                        "delta": delta,
+                    }),
+                )
+                .await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_permission_asked(&self, properties: Value, directory: Option<String>) {
+        let Some(request) = properties.as_object() else {
+            return;
+        };
+        let Some(id) = read_string(request.get("id")) else {
+            return;
+        };
+        let Some(session_id) = read_string(request.get("sessionID")) else {
+            return;
+        };
+        let directory = match directory {
+            Some(directory) => Some(directory),
+            None => self
+                .session_directories
+                .read()
+                .await
+                .get(&session_id)
+                .cloned(),
+        };
+        let Some(directory) = directory else {
+            return;
+        };
+
+        let tool = request.get("tool").and_then(Value::as_object);
+        let approval = PendingApproval {
+            id: id.clone(),
+            kind: opencode_permission_kind(read_string(request.get("permission")).as_deref())
+                .to_string(),
+            thread_id: encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+            turn_id: read_string(tool.and_then(|tool| tool.get("messageID")))
+                .unwrap_or_else(|| session_id.clone()),
+            item_id: read_string(tool.and_then(|tool| tool.get("callID")))
+                .unwrap_or_else(|| id.clone()),
+            requested_at: now_iso(),
+            reason: read_string(request.get("permission")),
+            command: request
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|metadata| {
+                    read_shell_command(metadata.get("command"))
+                        .or_else(|| read_string(metadata.get("command")))
+                }),
+            cwd: Some(directory.clone()),
+            grant_root: None,
+            proposed_execpolicy_amendment: None,
+        };
+
+        self.pending_approvals.lock().await.insert(
+            id.clone(),
+            OpencodePendingApprovalEntry {
+                approval: approval.clone(),
+                directory,
+            },
+        );
+
+        self.broadcast_json_notification(
+            "bridge/approval.requested",
+            serde_json::to_value(approval).unwrap_or(Value::Null),
+        )
+        .await;
+    }
+
+    async fn handle_permission_replied(&self, properties: Value) {
+        let Some(request_id) = read_string(properties.get("requestID")) else {
+            return;
+        };
+        let Some(pending) = self.pending_approvals.lock().await.remove(&request_id) else {
+            return;
+        };
+        let decision = match read_string(properties.get("reply")).as_deref() {
+            Some("always") => "acceptForSession",
+            Some("reject") => "decline",
+            _ => "accept",
+        };
+
+        self.broadcast_json_notification(
+            "bridge/approval.resolved",
+            json!({
+                "id": pending.approval.id,
+                "threadId": pending.approval.thread_id,
+                "decision": decision,
+                "resolvedAt": now_iso(),
+            }),
+        )
+        .await;
+    }
+
+    async fn handle_question_asked(&self, properties: Value, directory: Option<String>) {
+        let Some(request) = properties.as_object() else {
+            return;
+        };
+        let Some(id) = read_string(request.get("id")) else {
+            return;
+        };
+        let Some(session_id) = read_string(request.get("sessionID")) else {
+            return;
+        };
+        let directory = match directory {
+            Some(directory) => Some(directory),
+            None => self
+                .session_directories
+                .read()
+                .await
+                .get(&session_id)
+                .cloned(),
+        };
+        let Some(directory) = directory else {
+            return;
+        };
+
+        let tool = request.get("tool").and_then(Value::as_object);
+        let raw_questions = request
+            .get("questions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut questions = Vec::new();
+        for (index, raw_question) in raw_questions.iter().enumerate() {
+            let Some(question) = raw_question.as_object() else {
+                continue;
+            };
+            let Some(header) = read_string(question.get("header")) else {
+                continue;
+            };
+            let Some(question_text) = read_string(question.get("question")) else {
+                continue;
+            };
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(Value::as_object)
+                        .filter_map(|option| {
+                            let label = read_string(option.get("label"))?;
+                            let description =
+                                read_string(option.get("description")).unwrap_or_default();
+                            Some(PendingUserInputQuestionOption { label, description })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|options| !options.is_empty());
+
+            questions.push(PendingUserInputQuestion {
+                id: format!("{id}:{index}"),
+                header,
+                question: question_text,
+                is_other: read_bool(question.get("custom")).unwrap_or(true),
+                is_secret: false,
+                options,
+            });
+        }
+
+        if questions.is_empty() {
+            return;
+        }
+
+        let request_payload = PendingUserInputRequest {
+            id: id.clone(),
+            thread_id: encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, &session_id),
+            turn_id: read_string(tool.and_then(|tool| tool.get("messageID")))
+                .unwrap_or_else(|| session_id.clone()),
+            item_id: read_string(tool.and_then(|tool| tool.get("callID")))
+                .unwrap_or_else(|| id.clone()),
+            requested_at: now_iso(),
+            questions,
+        };
+
+        self.pending_user_inputs.lock().await.insert(
+            id.clone(),
+            OpencodePendingUserInputEntry {
+                request: request_payload.clone(),
+                directory,
+            },
+        );
+
+        self.broadcast_json_notification(
+            "bridge/userInput.requested",
+            serde_json::to_value(request_payload).unwrap_or(Value::Null),
+        )
+        .await;
+    }
+
+    async fn handle_question_resolved(&self, properties: Value) {
+        let Some(request_id) = read_string(properties.get("requestID")) else {
+            return;
+        };
+        let Some(pending) = self.pending_user_inputs.lock().await.remove(&request_id) else {
+            return;
+        };
+
+        self.broadcast_json_notification(
+            "bridge/userInput.resolved",
+            json!({
+                "id": pending.request.id,
+                "threadId": pending.request.thread_id,
+                "turnId": pending.request.turn_id,
+                "resolvedAt": now_iso(),
+            }),
+        )
+        .await;
+    }
+
+    async fn cache_session_info(&self, info: &Value) {
+        let Some(session_id) = read_string(info.get("id")) else {
+            return;
+        };
+        let Some(directory) = read_string(info.get("directory")) else {
+            return;
+        };
+        self.session_directories
+            .write()
+            .await
+            .insert(session_id, directory);
+    }
+
+    async fn current_directory_for_session(&self, session_id: &str) -> String {
+        self.session_directories
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| self.fallback_directory.clone())
+    }
+
+    async fn current_status_for_session(&self, session_id: &str) -> Option<String> {
+        self.session_statuses.read().await.get(session_id).cloned()
+    }
+
+    async fn forward_request(
+        &self,
+        client_id: u64,
+        client_request_id: Value,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<(), String> {
+        match self.dispatch_request(method, params).await {
+            Ok(result) => {
+                let normalized =
+                    normalize_forwarded_result(method, result, BridgeRuntimeEngine::Opencode);
+                self.hub
+                    .send_json(
+                        client_id,
+                        json!({ "id": client_request_id, "result": normalized }),
+                    )
+                    .await;
+                Ok(())
+            }
+            Err(error) => {
+                let code = if error.starts_with("unsupported opencode backend method:") {
+                    -32601
+                } else {
+                    -32000
+                };
+                self.hub
+                    .send_json(
+                        client_id,
+                        json!({
+                            "id": client_request_id,
+                            "error": {
+                                "code": code,
+                                "message": error,
+                            }
+                        }),
+                    )
+                    .await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn request_internal(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        self.dispatch_request(method, params).await
+    }
+
+    async fn list_pending_approvals(&self) -> Vec<PendingApproval> {
+        let mut approvals = self
+            .pending_approvals
+            .lock()
+            .await
+            .values()
+            .map(|entry| entry.approval.clone())
+            .collect::<Vec<_>>();
+        approvals.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+        approvals
+    }
+
+    async fn resolve_approval(
+        &self,
+        approval_id: &str,
+        decision: &Value,
+    ) -> Result<Option<PendingApproval>, String> {
+        let pending = self.pending_approvals.lock().await.remove(approval_id);
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+
+        let reply = match parse_approval_decision(decision) {
+            Some(ApprovalDecisionCanonical::AcceptForSession) => "always",
+            Some(ApprovalDecisionCanonical::Accept)
+            | Some(ApprovalDecisionCanonical::AcceptWithExecpolicyAmendment(_)) => "once",
+            Some(ApprovalDecisionCanonical::Decline) | Some(ApprovalDecisionCanonical::Cancel) => {
+                "reject"
+            }
+            None => {
+                self.pending_approvals
+                    .lock()
+                    .await
+                    .insert(approval_id.to_string(), pending.clone());
+                return Err("invalid approval decision payload".to_string());
+            }
+        };
+
+        let body = json!({ "reply": reply });
+        if let Err(error) = self
+            .request_json(
+                HttpMethod::POST,
+                &format!("permission/{approval_id}/reply"),
+                Some(&pending.directory),
+                None,
+                Some(body),
+            )
+            .await
+        {
+            self.pending_approvals
+                .lock()
+                .await
+                .insert(approval_id.to_string(), pending.clone());
+            return Err(error);
+        }
+
+        self.broadcast_json_notification(
+            "bridge/approval.resolved",
+            json!({
+                "id": pending.approval.id,
+                "threadId": pending.approval.thread_id,
+                "decision": decision,
+                "resolvedAt": now_iso(),
+            }),
+        )
+        .await;
+
+        Ok(Some(pending.approval))
+    }
+
+    async fn resolve_user_input(
+        &self,
+        request_id: &str,
+        answers: &HashMap<String, UserInputAnswerPayload>,
+    ) -> Result<Option<PendingUserInputRequest>, String> {
+        let pending = self.pending_user_inputs.lock().await.remove(request_id);
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+
+        let ordered_answers = pending
+            .request
+            .questions
+            .iter()
+            .map(|question| {
+                answers
+                    .get(&question.id)
+                    .map(|answer| answer.answers.clone())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+
+        let body = json!({ "answers": ordered_answers });
+        if let Err(error) = self
+            .request_json(
+                HttpMethod::POST,
+                &format!("question/{request_id}/reply"),
+                Some(&pending.directory),
+                None,
+                Some(body),
+            )
+            .await
+        {
+            self.pending_user_inputs
+                .lock()
+                .await
+                .insert(request_id.to_string(), pending.clone());
+            return Err(error);
+        }
+
+        self.broadcast_json_notification(
+            "bridge/userInput.resolved",
+            json!({
+                "id": pending.request.id,
+                "threadId": pending.request.thread_id,
+                "turnId": pending.request.turn_id,
+                "resolvedAt": now_iso(),
+            }),
+        )
+        .await;
+
+        Ok(Some(pending.request))
+    }
+
+    async fn dispatch_request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        match method {
+            "account/logout" => Ok(json!({})),
+            "account/rateLimits/read" => Ok(json!({})),
+            "account/read" => Ok(json!({
+                "account": Value::Null,
+                "requiresOpenaiAuth": false,
+            })),
+            "config/read" => Ok(json!({ "config": {} })),
+            "thread/list" => self.list_threads(params).await,
+            "thread/loaded/list" => self.list_loaded_threads().await,
+            "thread/read" => self.read_thread(params).await,
+            "thread/start" => self.start_thread(params).await,
+            "thread/name/set" => self.set_thread_name(params).await,
+            "thread/fork" => self.fork_thread(params).await,
+            "thread/resume" => Ok(json!({
+                "model": Value::Null,
+                "effort": Value::Null,
+            })),
+            "turn/start" => self.start_turn(params).await,
+            "turn/interrupt" => self.interrupt_turn(params).await,
+            "model/list" => Ok(json!({ "data": [] })),
+            _ => Err(format!("unsupported opencode backend method: {method}")),
+        }
+    }
+
+    async fn list_threads(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params.as_ref().and_then(Value::as_object);
+        let limit = params_object
+            .and_then(|params| params.get("limit"))
+            .and_then(Value::as_u64)
+            .unwrap_or(200)
+            .clamp(1, 1000);
+        let cwd = read_string(params_object.and_then(|params| params.get("cwd")));
+        let archived = params_object
+            .and_then(|params| params.get("archived"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let mut query = vec![("limit", limit.to_string())];
+        if let Some(cwd) = cwd.as_deref() {
+            query.push(("directory", cwd.to_string()));
+        }
+        if archived {
+            query.push(("archived", "true".to_string()));
+        }
+        let sessions = match self
+            .request_json(
+                HttpMethod::GET,
+                "experimental/session",
+                None,
+                Some(query.clone()),
+                None,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!(
+                    "opencode experimental session list unavailable; falling back to directory-scoped session list: {error}"
+                );
+                self.request_json(HttpMethod::GET, "session", None, Some(query), None)
+                    .await?
+            }
+        };
+        let statuses = self
+            .request_json(
+                HttpMethod::GET,
+                "session/status",
+                cwd.as_deref(),
+                None,
+                None,
+            )
+            .await
+            .ok();
+        let session_entries = sessions.as_array().cloned().unwrap_or_default();
+        let status_map = statuses.as_ref().and_then(Value::as_object);
+
+        let mut data = Vec::new();
+        for session in session_entries {
+            if !archived
+                && session
+                    .get("time")
+                    .and_then(Value::as_object)
+                    .and_then(|time| time.get("archived"))
+                    .is_some()
+            {
+                continue;
+            }
+
+            self.cache_session_info(&session).await;
+            let session_id = read_string(session.get("id")).unwrap_or_default();
+            let status = status_map
+                .and_then(|statuses| statuses.get(&session_id))
+                .and_then(Value::as_object)
+                .and_then(|status| read_string(status.get("type")));
+            let thread = self
+                .project_session_to_thread(&session, status.as_deref(), None)
+                .await;
+            data.push(thread);
+        }
+
+        data.sort_by(|a, b| {
+            let left = a.get("updatedAt").and_then(Value::as_u64).unwrap_or(0);
+            let right = b.get("updatedAt").and_then(Value::as_u64).unwrap_or(0);
+            right.cmp(&left)
+        });
+
+        Ok(json!({ "data": data }))
+    }
+
+    async fn list_loaded_threads(&self) -> Result<Value, String> {
+        let statuses = self
+            .request_json(HttpMethod::GET, "session/status", None, None, None)
+            .await?;
+        let ids = statuses
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(session_id, status)| {
+                let status_type = status
+                    .as_object()
+                    .and_then(|status| read_string(status.get("type")));
+                if opencode_status_is_active(status_type.as_deref()) {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "data": ids }))
+    }
+
+    async fn read_thread(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "thread/read requires params".to_string())?;
+        let session_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "thread/read requires threadId".to_string())?;
+        let include_turns = params_object
+            .get("includeTurns")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let directory = self.current_directory_for_session(&session_id).await;
+        let session = self
+            .request_json(
+                HttpMethod::GET,
+                &format!("session/{session_id}"),
+                Some(&directory),
+                None,
+                None,
+            )
+            .await?;
+        self.cache_session_info(&session).await;
+
+        let messages = if include_turns {
+            Some(
+                self.request_json(
+                    HttpMethod::GET,
+                    &format!("session/{session_id}/message"),
+                    Some(&directory),
+                    None,
+                    None,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let fetched_status = self
+            .request_json(
+                HttpMethod::GET,
+                "session/status",
+                Some(&directory),
+                None,
+                None,
+            )
+            .await
+            .ok()
+            .and_then(|statuses| {
+                statuses
+                    .as_object()
+                    .and_then(|statuses| statuses.get(&session_id).cloned())
+            })
+            .and_then(|status| {
+                status
+                    .as_object()
+                    .and_then(|status| read_string(status.get("type")))
+            });
+        let status = match fetched_status {
+            Some(status) => Some(status),
+            None => self.current_status_for_session(&session_id).await,
+        };
+        let thread = self
+            .project_session_to_thread(&session, status.as_deref(), messages.as_ref())
+            .await;
+        Ok(json!({ "thread": thread }))
+    }
+
+    async fn start_thread(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params.as_ref().and_then(Value::as_object);
+        let directory = read_string(params_object.and_then(|params| params.get("cwd")))
+            .unwrap_or_else(|| self.fallback_directory.clone());
+        let title = read_string(params_object.and_then(|params| params.get("threadName")))
+            .or_else(|| read_string(params_object.and_then(|params| params.get("name"))));
+        let body = title
+            .map(|title| json!({ "title": title }))
+            .unwrap_or_else(|| json!({}));
+        let session = self
+            .request_json(
+                HttpMethod::POST,
+                "session",
+                Some(&directory),
+                None,
+                Some(body),
+            )
+            .await?;
+        self.cache_session_info(&session).await;
+        let thread = self.project_session_to_thread(&session, None, None).await;
+        Ok(json!({ "thread": thread }))
+    }
+
+    async fn set_thread_name(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "thread/name/set requires params".to_string())?;
+        let session_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "thread/name/set requires threadId".to_string())?;
+        let thread_name = read_string(params_object.get("threadName"))
+            .or_else(|| read_string(params_object.get("name")))
+            .ok_or_else(|| "thread/name/set requires threadName".to_string())?;
+        let directory = self.current_directory_for_session(&session_id).await;
+
+        let session = self
+            .request_json(
+                HttpMethod::PATCH,
+                &format!("session/{session_id}"),
+                Some(&directory),
+                None,
+                Some(json!({ "title": thread_name })),
+            )
+            .await?;
+        self.cache_session_info(&session).await;
+        Ok(json!({}))
+    }
+
+    async fn fork_thread(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "thread/fork requires params".to_string())?;
+        let session_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "thread/fork requires threadId".to_string())?;
+        let directory = read_string(params_object.get("cwd"))
+            .unwrap_or_else(|| self.fallback_directory.clone());
+        let directory = if directory == self.fallback_directory {
+            self.current_directory_for_session(&session_id).await
+        } else {
+            directory
+        };
+
+        let session = self
+            .request_json(
+                HttpMethod::POST,
+                &format!("session/{session_id}/fork"),
+                Some(&directory),
+                None,
+                Some(json!({})),
+            )
+            .await?;
+        self.cache_session_info(&session).await;
+        let thread = self.project_session_to_thread(&session, None, None).await;
+        Ok(json!({ "thread": thread }))
+    }
+
+    async fn start_turn(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "turn/start requires params".to_string())?;
+        let session_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "turn/start requires threadId".to_string())?;
+        let directory = match read_string(params_object.get("cwd")) {
+            Some(directory) => directory,
+            None => self.current_directory_for_session(&session_id).await,
+        };
+        let input = params_object
+            .get("input")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let parts = opencode_prompt_parts_from_turn_input(&input);
+        if parts.is_empty() {
+            return Err("turn/start requires non-empty input".to_string());
+        }
+
+        let mut body = json!({
+            "parts": parts,
+        });
+        if let Some(model) = params_object
+            .get("model")
+            .and_then(Value::as_str)
+            .and_then(parse_opencode_model_selection)
+        {
+            body["model"] = model;
+        }
+
+        let before_message_id = self
+            .latest_user_message_id(&session_id, &directory)
+            .await
+            .ok()
+            .flatten();
+        self.request_json(
+            HttpMethod::POST,
+            &format!("session/{session_id}/prompt_async"),
+            Some(&directory),
+            None,
+            Some(body),
+        )
+        .await?;
+
+        let turn_id = self
+            .wait_for_new_user_message_id(&session_id, &directory, before_message_id.as_deref())
+            .await?
+            .unwrap_or_else(|| format!("turn-{}", Utc::now().timestamp_millis()));
+        self.active_turns
+            .write()
+            .await
+            .insert(session_id.clone(), turn_id.clone());
+
+        Ok(json!({
+            "turn": {
+                "id": turn_id,
+            }
+        }))
+    }
+
+    async fn interrupt_turn(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "turn/interrupt requires params".to_string())?;
+        let session_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "turn/interrupt requires threadId".to_string())?;
+        let directory = self.current_directory_for_session(&session_id).await;
+        self.request_json(
+            HttpMethod::POST,
+            &format!("session/{session_id}/abort"),
+            Some(&directory),
+            None,
+            None,
+        )
+        .await?;
+        self.interrupted_sessions.write().await.insert(session_id);
+        Ok(json!({}))
+    }
+
+    async fn latest_user_message_id(
+        &self,
+        session_id: &str,
+        directory: &str,
+    ) -> Result<Option<String>, String> {
+        let messages = self
+            .request_json(
+                HttpMethod::GET,
+                &format!("session/{session_id}/message"),
+                Some(directory),
+                None,
+                None,
+            )
+            .await?;
+        Ok(opencode_latest_user_message_id(&messages))
+    }
+
+    async fn wait_for_new_user_message_id(
+        &self,
+        session_id: &str,
+        directory: &str,
+        previous_id: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        for _ in 0..20 {
+            let latest = self.latest_user_message_id(session_id, directory).await?;
+            if let Some(latest) = latest {
+                if previous_id != Some(latest.as_str()) {
+                    return Ok(Some(latest));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Ok(None)
+    }
+
+    async fn project_session_to_thread(
+        &self,
+        session: &Value,
+        status: Option<&str>,
+        messages: Option<&Value>,
+    ) -> Value {
+        let session_object = session.as_object().cloned().unwrap_or_default();
+        let session_id = read_string(session_object.get("id")).unwrap_or_default();
+        let created_at_ms = session_object
+            .get("time")
+            .and_then(Value::as_object)
+            .and_then(|time| time.get("created"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let updated_at_ms = session_object
+            .get("time")
+            .and_then(Value::as_object)
+            .and_then(|time| time.get("updated"))
+            .and_then(Value::as_u64)
+            .unwrap_or(created_at_ms);
+        let active_turn_id = self.active_turns.read().await.get(&session_id).cloned();
+        let turns = messages.map(|messages| {
+            opencode_messages_to_turns(&session_id, messages, status, active_turn_id.as_deref())
+        });
+
+        let preview = messages
+            .and_then(opencode_thread_preview_from_messages)
+            .unwrap_or_default();
+        let source = read_string(session_object.get("parentID"))
+            .map(|parent_id| {
+                json!({
+                    "kind": "subAgentThreadSpawn",
+                    "parentThreadId": parent_id,
+                })
+            })
+            .unwrap_or_else(|| json!("appServer"));
+
+        let mut thread = json!({
+            "id": session_id,
+            "name": read_string(session_object.get("title")),
+            "title": read_string(session_object.get("title")),
+            "preview": preview,
+            "createdAt": created_at_ms / 1000,
+            "updatedAt": updated_at_ms / 1000,
+            "status": {
+                "type": if opencode_status_is_active(status) { "running" } else { "idle" }
+            },
+            "cwd": read_string(session_object.get("directory")),
+            "source": source,
+        });
+
+        if let Some(turns) = turns {
+            thread["turns"] = Value::Array(turns);
+        }
+
+        thread
+    }
+
+    async fn request_json(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        directory: Option<&str>,
+        query: Option<Vec<(&str, String)>>,
+        body: Option<Value>,
+    ) -> Result<Value, String> {
+        let mut url = self
+            .base_url
+            .join(path)
+            .map_err(|error| format!("invalid opencode path {path}: {error}"))?;
+        if let Some(query) = query {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in query {
+                pairs.append_pair(key, &value);
+            }
+        }
+
+        let mut request = self.http.request(method, url);
+        if let Some(password) = self.password.as_deref() {
+            request = request.basic_auth(&self.username, Some(password));
+        }
+        if let Some(directory) = directory
+            .map(str::trim)
+            .filter(|directory| !directory.is_empty())
+        {
+            request = request.header("x-opencode-directory", directory);
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("opencode request {path} failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "opencode request {path} failed with {}: {}",
+                status.as_u16(),
+                body.trim()
+            ));
+        }
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(Value::Null);
+        }
+
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("failed decoding opencode response for {path}: {error}"))
+    }
+
+    async fn broadcast_json_notification(&self, method: &str, params: Value) {
+        self.hub.broadcast_notification(method, params).await;
     }
 }
 
@@ -1524,8 +3408,10 @@ fn build_rollout_thread_status_notification(method: &str, params: &Value) -> Opt
         .as_object()
         .and_then(|value| value.get("msg"))
         .and_then(Value::as_object)?;
-    let thread_id =
-        read_string(msg.get("thread_id")).or_else(|| read_string(msg.get("threadId")))?;
+    let thread_id = encode_engine_qualified_id(
+        BridgeRuntimeEngine::Codex,
+        &read_string(msg.get("thread_id")).or_else(|| read_string(msg.get("threadId")))?,
+    );
 
     Some(json!({
         "threadId": thread_id,
@@ -1540,6 +3426,7 @@ fn build_rollout_event_msg_notification(
     thread_id: &str,
     timestamp: Option<&str>,
 ) -> Option<(String, Value)> {
+    let thread_id = encode_engine_qualified_id(BridgeRuntimeEngine::Codex, thread_id);
     let raw_type = read_string(payload.get("type"))?;
     if matches!(raw_type.as_str(), "user_message" | "context_compacted") {
         return None;
@@ -1592,6 +3479,7 @@ fn build_rollout_response_item_notification(
     thread_id: &str,
     timestamp: Option<&str>,
 ) -> Option<(String, Value)> {
+    let thread_id = encode_engine_qualified_id(BridgeRuntimeEngine::Codex, thread_id);
     let item_type = read_string(payload.get("type"))?;
     if item_type != "function_call" {
         return None;
@@ -2069,7 +3957,7 @@ async fn main() {
     }
 
     let hub = Arc::new(ClientHub::new());
-    let app_server = match AppServerBridge::start(&config.cli_bin, hub.clone()).await {
+    let backend = match RuntimeBackend::start(&config, hub.clone()).await {
         Ok(client) => client,
         Err(error) => {
             eprintln!("{error}");
@@ -2093,11 +3981,10 @@ async fn main() {
         config: config.clone(),
         started_at: Instant::now(),
         hub,
-        app_server,
+        backend,
         terminal,
         git,
     });
-    spawn_rollout_live_sync(state.hub.clone());
 
     let app = Router::new()
         .route("/rpc", get(ws_handler))
@@ -2435,7 +4322,7 @@ async fn handle_client_message(client_id: u64, text: String, state: &Arc<AppStat
     }
 
     if let Err(error) = state
-        .app_server
+        .backend
         .forward_request(client_id, id.clone(), method, params)
         .await
     {
@@ -2454,6 +4341,8 @@ async fn handle_bridge_method(
             "at": now_iso(),
             "uptimeSec": state.started_at.elapsed().as_secs(),
         })),
+        "bridge/capabilities/read" => serde_json::to_value(state.bridge_capabilities())
+            .map_err(|error| BridgeError::server(&error.to_string())),
         "bridge/events/replay" => {
             let request: EventReplayRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
@@ -2669,7 +4558,7 @@ async fn handle_bridge_method(
             Ok(push_value)
         }
         "bridge/approvals/list" => {
-            let list = state.app_server.list_pending_approvals().await;
+            let list = state.backend.list_pending_approvals().await;
             serde_json::to_value(list).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/approvals/resolve" => {
@@ -2684,7 +4573,7 @@ async fn handle_bridge_method(
             }
 
             let resolved = state
-                .app_server
+                .backend
                 .resolve_approval(&request.id, &request.decision)
                 .await
                 .map_err(|error| BridgeError::server(&error))?;
@@ -2721,7 +4610,7 @@ async fn handle_bridge_method(
             }
 
             let resolved = state
-                .app_server
+                .backend
                 .resolve_user_input(&request.id, &request.answers)
                 .await
                 .map_err(|error| BridgeError::server(&error))?;
@@ -2757,7 +4646,7 @@ async fn list_workspace_roots(
 ) -> Result<WorkspaceListResponse, BridgeError> {
     let limit = request.limit.unwrap_or(200).clamp(1, 1000);
     let result = state
-        .app_server
+        .backend
         .request_internal(
             "thread/list",
             Some(json!({
@@ -3331,6 +5220,953 @@ fn parse_csv_env(name: &str, fallback: &[&str]) -> HashSet<String> {
     }
 }
 
+impl BridgeRuntimeEngine {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+        }
+    }
+}
+
+fn parse_bridge_runtime_engine(value: &str) -> Option<BridgeRuntimeEngine> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "codex" => Some(BridgeRuntimeEngine::Codex),
+        "opencode" => Some(BridgeRuntimeEngine::Opencode),
+        _ => None,
+    }
+}
+
+fn is_known_engine(value: &str) -> bool {
+    matches!(value, "codex" | "opencode")
+}
+
+fn decode_engine_qualified_id(value: &str) -> String {
+    let trimmed = value.trim();
+    match trimmed.split_once(':') {
+        Some(("codex", raw)) | Some(("opencode", raw)) if !raw.trim().is_empty() => {
+            raw.trim().to_string()
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+fn encode_engine_qualified_id(engine: BridgeRuntimeEngine, value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    match trimmed.split_once(':') {
+        Some((prefix, raw)) if is_known_engine(prefix) && !raw.trim().is_empty() => {
+            format!("{prefix}:{}", raw.trim())
+        }
+        _ => format!("{}:{trimmed}", engine.as_str()),
+    }
+}
+
+fn normalize_forwarded_ids(value: Value) -> Value {
+    normalize_forwarded_ids_for_key(None, value)
+}
+
+fn normalize_forwarded_ids_for_key(key: Option<&str>, value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let normalized = object
+                .into_iter()
+                .map(|(child_key, child_value)| {
+                    let normalized_value =
+                        normalize_forwarded_ids_for_key(Some(child_key.as_str()), child_value);
+                    (child_key, normalized_value)
+                })
+                .collect();
+            Value::Object(normalized)
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|item| normalize_forwarded_ids_for_key(key, item))
+                .collect(),
+        ),
+        Value::String(raw) if key.is_some_and(is_engine_id_field) => {
+            Value::String(decode_engine_qualified_id(&raw))
+        }
+        other => other,
+    }
+}
+
+fn is_engine_id_field(key: &str) -> bool {
+    matches!(
+        key,
+        "threadId"
+            | "thread_id"
+            | "conversationId"
+            | "conversation_id"
+            | "parentThreadId"
+            | "parent_thread_id"
+    )
+}
+
+fn normalize_forwarded_notification(
+    method: &str,
+    params: Value,
+    engine: BridgeRuntimeEngine,
+) -> Value {
+    let normalized = qualify_engine_ids(params, engine);
+    if method.starts_with("thread/") {
+        return normalize_thread_payload_container(normalized, engine);
+    }
+
+    normalized
+}
+
+fn normalize_forwarded_result(method: &str, result: Value, engine: BridgeRuntimeEngine) -> Value {
+    let normalized = qualify_engine_ids(result, engine);
+    match method {
+        "thread/list" => normalize_thread_list_result(normalized, engine),
+        "thread/loaded/list" => normalize_loaded_thread_ids_result(normalized, engine),
+        "thread/read" | "thread/start" | "thread/fork" => {
+            normalize_thread_payload_container(normalized, engine)
+        }
+        _ => normalized,
+    }
+}
+
+fn qualify_engine_ids(value: Value, engine: BridgeRuntimeEngine) -> Value {
+    qualify_engine_ids_for_key(None, value, engine)
+}
+
+fn qualify_engine_ids_for_key(
+    key: Option<&str>,
+    value: Value,
+    engine: BridgeRuntimeEngine,
+) -> Value {
+    match value {
+        Value::Object(object) => {
+            let normalized = object
+                .into_iter()
+                .map(|(child_key, child_value)| {
+                    let normalized_value =
+                        qualify_engine_ids_for_key(Some(child_key.as_str()), child_value, engine);
+                    (child_key, normalized_value)
+                })
+                .collect();
+            Value::Object(normalized)
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|item| qualify_engine_ids_for_key(key, item, engine))
+                .collect(),
+        ),
+        Value::String(raw) if key.is_some_and(is_engine_id_field) => {
+            Value::String(encode_engine_qualified_id(engine, &raw))
+        }
+        other => other,
+    }
+}
+
+fn normalize_thread_list_result(value: Value, engine: BridgeRuntimeEngine) -> Value {
+    let Value::Object(mut object) = value else {
+        return value;
+    };
+
+    if let Some(Value::Array(entries)) = object.get_mut("data") {
+        for entry in entries.iter_mut() {
+            let next_value = match entry {
+                Value::String(raw_id) => json!(encode_engine_qualified_id(engine, raw_id)),
+                _ => normalize_thread_record(entry.take(), engine),
+            };
+            *entry = next_value;
+        }
+    }
+
+    Value::Object(object)
+}
+
+fn normalize_loaded_thread_ids_result(value: Value, engine: BridgeRuntimeEngine) -> Value {
+    let Value::Object(mut object) = value else {
+        return value;
+    };
+
+    if let Some(Value::Array(entries)) = object.get_mut("data") {
+        for entry in entries.iter_mut() {
+            if let Some(id) = entry.as_str() {
+                *entry = json!(encode_engine_qualified_id(engine, id));
+            }
+        }
+    }
+
+    Value::Object(object)
+}
+
+fn is_dual_engine_aggregate_method(method: &str) -> bool {
+    matches!(method, "thread/list" | "thread/loaded/list")
+}
+
+fn route_engine_from_params(params: Option<&Value>) -> Option<BridgeRuntimeEngine> {
+    let params = params?.as_object()?;
+    let thread_id = read_string(
+        params
+            .get("threadId")
+            .or_else(|| params.get("thread_id"))
+            .or_else(|| params.get("conversationId"))
+            .or_else(|| params.get("conversation_id"))
+            .or_else(|| params.get("parentThreadId"))
+            .or_else(|| params.get("parent_thread_id")),
+    )?;
+    parse_engine_qualified_id(&thread_id).map(|(engine, _)| engine)
+}
+
+fn parse_engine_qualified_id(value: &str) -> Option<(BridgeRuntimeEngine, String)> {
+    let trimmed = value.trim();
+    let (prefix, raw) = trimmed.split_once(':')?;
+    let engine = parse_bridge_runtime_engine(prefix)?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some((engine, raw.to_string()))
+}
+
+fn extract_thread_list_entries(result: &Value) -> Vec<Value> {
+    result
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn extract_loaded_thread_ids(result: &Value) -> Vec<String> {
+    result
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_thread_list_results(results: Vec<(BridgeRuntimeEngine, Value)>) -> Value {
+    let mut entries = Vec::new();
+
+    for (engine, result) in results {
+        let normalized = normalize_forwarded_result("thread/list", result, engine);
+        entries.extend(extract_thread_list_entries(&normalized));
+    }
+
+    entries.sort_by(|left, right| {
+        let left_updated = parse_internal_id(left.get("updatedAt")).unwrap_or(0);
+        let right_updated = parse_internal_id(right.get("updatedAt")).unwrap_or(0);
+        right_updated.cmp(&left_updated).then_with(|| {
+            read_string(left.get("id"))
+                .unwrap_or_default()
+                .cmp(&read_string(right.get("id")).unwrap_or_default())
+        })
+    });
+
+    json!({ "data": entries })
+}
+
+fn merge_loaded_thread_ids_results(results: Vec<(BridgeRuntimeEngine, Value)>) -> Value {
+    let mut ids = Vec::new();
+
+    for (engine, result) in results {
+        let normalized = normalize_forwarded_result("thread/loaded/list", result, engine);
+        ids.extend(extract_loaded_thread_ids(&normalized));
+    }
+
+    ids.sort();
+    ids.dedup();
+    json!({ "data": ids })
+}
+
+fn normalize_thread_payload_container(value: Value, engine: BridgeRuntimeEngine) -> Value {
+    let Value::Object(mut object) = value else {
+        return value;
+    };
+
+    if let Some(thread_value) = object.remove("thread") {
+        object.insert(
+            "thread".to_string(),
+            normalize_thread_record(thread_value, engine),
+        );
+        return Value::Object(object);
+    }
+
+    if looks_like_thread_record(&object) {
+        return normalize_thread_record(Value::Object(object), engine);
+    }
+
+    Value::Object(object)
+}
+
+fn normalize_thread_record(value: Value, engine: BridgeRuntimeEngine) -> Value {
+    let value = qualify_engine_ids(value, engine);
+    let Value::Object(mut object) = value else {
+        return value;
+    };
+
+    if let Some(id) = object.get("id").and_then(Value::as_str) {
+        object.insert(
+            "id".to_string(),
+            json!(encode_engine_qualified_id(engine, id)),
+        );
+    }
+    object.insert("engine".to_string(), json!(engine.as_str()));
+    Value::Object(object)
+}
+
+fn looks_like_thread_record(object: &serde_json::Map<String, Value>) -> bool {
+    object.contains_key("id")
+        || object.contains_key("turns")
+        || object.contains_key("updatedAt")
+        || object.contains_key("createdAt")
+        || object.contains_key("cwd")
+}
+
+fn opencode_part_key(session_id: &str, part_id: &str) -> String {
+    format!("{session_id}:{part_id}")
+}
+
+fn opencode_status_is_active(status: Option<&str>) -> bool {
+    matches!(status, Some("busy" | "retry"))
+}
+
+fn opencode_permission_kind(permission: Option<&str>) -> &'static str {
+    let normalized = permission.unwrap_or_default().trim().to_ascii_lowercase();
+    if normalized.contains("write")
+        || normalized.contains("edit")
+        || normalized.contains("patch")
+        || normalized.contains("delete")
+    {
+        return "fileChange";
+    }
+
+    "commandExecution"
+}
+
+fn parse_opencode_model_selection(value: &str) -> Option<Value> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (provider_id, model_id) = trimmed
+        .split_once('/')
+        .or_else(|| trimmed.split_once(':'))
+        .or_else(|| trimmed.split_once('|'))?;
+    let provider_id = provider_id.trim();
+    let model_id = model_id.trim();
+    if provider_id.is_empty() || model_id.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "providerID": provider_id,
+        "modelID": model_id,
+    }))
+}
+
+fn opencode_prompt_parts_from_turn_input(input: &[Value]) -> Vec<Value> {
+    let mut parts = Vec::new();
+
+    for item in input {
+        let Some(item_object) = item.as_object() else {
+            continue;
+        };
+        let Some(item_type) = read_string(item_object.get("type")) else {
+            continue;
+        };
+
+        match item_type.as_str() {
+            "text" => {
+                if let Some(text) =
+                    read_string(item_object.get("text")).filter(|text| !text.is_empty())
+                {
+                    parts.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
+            }
+            "mention" => {
+                if let Some(path) =
+                    read_string(item_object.get("path")).filter(|path| !path.is_empty())
+                {
+                    let filename = Path::new(&path)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+                    let mime = if Path::new(&path).is_dir() {
+                        "application/x-directory"
+                    } else {
+                        "text/plain"
+                    };
+                    if let Ok(url) = Url::from_file_path(&path) {
+                        parts.push(json!({
+                            "type": "file",
+                            "url": url.to_string(),
+                            "filename": filename,
+                            "mime": mime,
+                        }));
+                    }
+                }
+            }
+            "localImage" => {
+                if let Some(path) =
+                    read_string(item_object.get("path")).filter(|path| !path.is_empty())
+                {
+                    let filename = Path::new(&path)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("image")
+                        .to_string();
+                    let mime =
+                        infer_image_content_type_from_path(Path::new(&path)).unwrap_or("image/png");
+                    if let Ok(url) = Url::from_file_path(&path) {
+                        parts.push(json!({
+                            "type": "file",
+                            "url": url.to_string(),
+                            "filename": filename,
+                            "mime": mime,
+                        }));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    parts
+}
+
+fn opencode_tool_part_bridge_event(
+    part: &serde_json::Map<String, Value>,
+) -> Option<(&'static str, Value)> {
+    let state = part.get("state")?.as_object()?;
+    let status = read_string(state.get("status"))?;
+    let status_for_item = opencode_tool_status_for_item(&status);
+
+    let event_method = if status == "pending" || status == "running" {
+        "item/started"
+    } else {
+        "item/completed"
+    };
+
+    let item = opencode_tool_part_item(part, status_for_item)?;
+
+    Some((event_method, item))
+}
+
+fn opencode_tool_input_command(input: &serde_json::Map<String, Value>) -> Option<String> {
+    read_shell_command(input.get("cmd"))
+        .or_else(|| read_shell_command(input.get("command")))
+        .or_else(|| read_string(input.get("cmd")))
+        .or_else(|| read_string(input.get("command")))
+}
+
+fn opencode_tool_status_for_item(status: &str) -> &'static str {
+    match status {
+        "pending" | "running" => "running",
+        "error" => "failed",
+        _ => "completed",
+    }
+}
+
+fn opencode_tool_part_item(
+    part: &serde_json::Map<String, Value>,
+    status_for_item: &str,
+) -> Option<Value> {
+    let tool_name = read_string(part.get("tool"))?;
+    let state = part.get("state")?.as_object()?;
+    let input = state.get("input").and_then(Value::as_object);
+    let metadata = state.get("metadata").and_then(Value::as_object);
+    let item_id = read_string(part.get("id")).unwrap_or_else(generate_opencode_local_id);
+    let result = opencode_tool_result_value(state, metadata);
+    let error = opencode_tool_error_value(state, metadata);
+
+    if let Some((server, tool)) = parse_rollout_mcp_tool_name(&tool_name) {
+        let mut item = json!({
+            "id": item_id,
+            "type": "mcpToolCall",
+            "server": server,
+            "tool": tool,
+            "status": status_for_item,
+        });
+        if !result.is_null() {
+            item["result"] = result;
+        }
+        if !error.is_null() {
+            item["error"] = error;
+        }
+        return Some(item);
+    }
+
+    if opencode_permission_kind(Some(&tool_name)) == "fileChange" {
+        let mut item = json!({
+            "id": item_id,
+            "type": "fileChange",
+            "status": status_for_item,
+        });
+        if !error.is_null() {
+            item["error"] = error;
+        }
+        return Some(item);
+    }
+
+    let command = input
+        .and_then(opencode_tool_input_command)
+        .unwrap_or(tool_name.clone());
+    let mut item = json!({
+        "id": item_id,
+        "type": "commandExecution",
+        "command": command,
+        "status": status_for_item,
+    });
+    if let Some(output) = opencode_tool_output_text(state, metadata) {
+        item["aggregatedOutput"] = json!(output);
+    }
+    if let Some(exit_code) = opencode_tool_exit_code(state, metadata) {
+        item["exitCode"] = json!(exit_code);
+    }
+    if !error.is_null() {
+        item["error"] = error;
+    }
+    Some(item)
+}
+
+fn opencode_tool_result_value(
+    state: &serde_json::Map<String, Value>,
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Value {
+    state
+        .get("output")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| {
+            metadata.and_then(|metadata| {
+                metadata
+                    .get("result")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+            })
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn opencode_tool_error_value(
+    state: &serde_json::Map<String, Value>,
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Value {
+    state
+        .get("error")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| {
+            metadata.and_then(|metadata| {
+                metadata
+                    .get("error")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+            })
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn opencode_tool_output_text(
+    state: &serde_json::Map<String, Value>,
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Option<String> {
+    read_string(state.get("output"))
+        .or_else(|| {
+            metadata
+                .and_then(|metadata| metadata.get("output"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            metadata
+                .and_then(|metadata| metadata.get("stdout"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            metadata
+                .and_then(|metadata| metadata.get("stderr"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn opencode_tool_exit_code(
+    state: &serde_json::Map<String, Value>,
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Option<u64> {
+    parse_internal_id(state.get("exitCode"))
+        .or_else(|| metadata.and_then(|metadata| parse_internal_id(metadata.get("exitCode"))))
+        .or_else(|| metadata.and_then(|metadata| parse_internal_id(metadata.get("exit_code"))))
+}
+
+fn opencode_latest_user_message_id(messages: &Value) -> Option<String> {
+    messages
+        .as_array()?
+        .iter()
+        .rev()
+        .filter_map(Value::as_object)
+        .find_map(|message| {
+            let info = message.get("info")?.as_object()?;
+            let role = read_string(info.get("role"))?;
+            if role != "user" {
+                return None;
+            }
+            read_string(info.get("id"))
+        })
+}
+
+fn opencode_thread_preview_from_messages(messages: &Value) -> Option<String> {
+    let messages = messages.as_array()?;
+    for message in messages.iter().rev() {
+        let Some(message_object) = message.as_object() else {
+            continue;
+        };
+        let text = opencode_assistant_message_text(message_object)
+            .or_else(|| opencode_user_message_text(message_object));
+        if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+            return Some(to_preview_like(&text));
+        }
+    }
+
+    None
+}
+
+fn opencode_messages_to_turns(
+    session_id: &str,
+    messages: &Value,
+    status: Option<&str>,
+    active_turn_id: Option<&str>,
+) -> Vec<Value> {
+    let mut turns = Vec::new();
+    let mut turn_index_by_user_message = HashMap::<String, usize>::new();
+
+    for message in messages.as_array().into_iter().flatten() {
+        let Some(message_object) = message.as_object() else {
+            continue;
+        };
+        let Some(info) = message_object.get("info").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(role) = read_string(info.get("role")) else {
+            continue;
+        };
+
+        if role == "user" {
+            let turn_id =
+                read_string(info.get("id")).unwrap_or_else(|| generate_opencode_local_id());
+            let user_content = opencode_user_content_items(message_object);
+            let mut turn = json!({
+                "id": turn_id.clone(),
+                "status": "completed",
+                "items": [],
+            });
+
+            if !user_content.is_empty() {
+                turn["items"] = json!([
+                    {
+                        "type": "userMessage",
+                        "id": turn_id.clone(),
+                        "content": user_content,
+                    }
+                ]);
+            }
+
+            turn_index_by_user_message.insert(turn_id, turns.len());
+            turns.push(turn);
+            continue;
+        }
+
+        if role != "assistant" {
+            continue;
+        }
+
+        let Some(parent_id) = read_string(info.get("parentID")) else {
+            continue;
+        };
+        let Some(index) = turn_index_by_user_message.get(&parent_id).copied() else {
+            continue;
+        };
+
+        let assistant_error = info
+            .get("error")
+            .and_then(Value::as_object)
+            .and_then(|error| read_string(error.get("message")));
+        let assistant_items = opencode_assistant_message_items(message_object);
+        let has_assistant_items = !assistant_items.is_empty();
+
+        if let Some(items) = turns[index].get_mut("items").and_then(Value::as_array_mut) {
+            items.extend(assistant_items);
+        }
+
+        if !has_assistant_items {
+            if let Some(text) = assistant_error
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+            {
+                let item_id =
+                    read_string(info.get("id")).unwrap_or_else(|| generate_opencode_local_id());
+                if let Some(items) = turns[index].get_mut("items").and_then(Value::as_array_mut) {
+                    items.push(json!({
+                        "type": "agentMessage",
+                        "id": item_id,
+                        "text": text,
+                    }));
+                }
+            }
+        }
+
+        if let Some(error_message) = assistant_error {
+            turns[index]["status"] = json!("failed");
+            turns[index]["error"] = json!({
+                "message": error_message,
+            });
+            continue;
+        }
+
+        turns[index]["status"] = json!("completed");
+    }
+
+    if let Some(last_turn) = turns.last_mut() {
+        if opencode_status_is_active(status) {
+            last_turn["status"] = json!("in_progress");
+            if let Some(active_turn_id) = active_turn_id {
+                last_turn["id"] = json!(active_turn_id);
+            }
+        } else if last_turn
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            last_turn["status"] = json!("completed");
+        }
+    }
+
+    if turns.is_empty() && opencode_status_is_active(status) {
+        turns.push(json!({
+            "id": active_turn_id.unwrap_or(session_id),
+            "status": "in_progress",
+            "items": [],
+        }));
+    }
+
+    turns
+}
+
+fn opencode_assistant_message_items(message: &serde_json::Map<String, Value>) -> Vec<Value> {
+    let Some(parts) = message.get("parts").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut items = Vec::new();
+    for part in parts {
+        let Some(part_object) = part.as_object() else {
+            continue;
+        };
+        let Some(part_type) = read_string(part_object.get("type")) else {
+            continue;
+        };
+        let item_id = read_string(part_object.get("id")).unwrap_or_else(generate_opencode_local_id);
+
+        match part_type.as_str() {
+            "text" => {
+                if let Some(text) =
+                    read_string(part_object.get("text")).filter(|text| !text.trim().is_empty())
+                {
+                    items.push(json!({
+                        "type": "agentMessage",
+                        "id": item_id,
+                        "text": text,
+                    }));
+                }
+            }
+            "reasoning" => {
+                if let Some(text) =
+                    read_string(part_object.get("text")).filter(|text| !text.trim().is_empty())
+                {
+                    items.push(json!({
+                        "type": "reasoning",
+                        "id": item_id,
+                        "text": text,
+                    }));
+                }
+            }
+            "tool" => {
+                if let Some(state) = part_object.get("state").and_then(Value::as_object) {
+                    let status =
+                        read_string(state.get("status")).unwrap_or_else(|| "completed".to_string());
+                    if let Some(item) =
+                        opencode_tool_part_item(part_object, opencode_tool_status_for_item(&status))
+                    {
+                        items.push(item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    items
+}
+
+fn opencode_user_content_items(message: &serde_json::Map<String, Value>) -> Vec<Value> {
+    let Some(parts) = message.get("parts").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut content = Vec::new();
+    for part in parts {
+        let Some(part_object) = part.as_object() else {
+            continue;
+        };
+        let Some(part_type) = read_string(part_object.get("type")) else {
+            continue;
+        };
+
+        match part_type.as_str() {
+            "text" => {
+                if let Some(text) =
+                    read_string(part_object.get("text")).filter(|text| !text.is_empty())
+                {
+                    content.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
+            }
+            "file" => {
+                let Some(url) = read_string(part_object.get("url")) else {
+                    continue;
+                };
+                let Some(path) = opencode_file_url_to_path(&url) else {
+                    continue;
+                };
+                let mime = read_string(part_object.get("mime")).unwrap_or_default();
+                if mime.starts_with("image/") {
+                    content.push(json!({
+                        "type": "localImage",
+                        "path": path,
+                    }));
+                } else {
+                    content.push(json!({
+                        "type": "mention",
+                        "path": path,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    content
+}
+
+fn opencode_user_message_text(message: &serde_json::Map<String, Value>) -> Option<String> {
+    let content = opencode_user_content_items(message);
+    let mut parts = Vec::new();
+    for item in content {
+        let Some(item_object) = item.as_object() else {
+            continue;
+        };
+        let item_type = read_string(item_object.get("type")).unwrap_or_default();
+        match item_type.as_str() {
+            "text" => {
+                if let Some(text) =
+                    read_string(item_object.get("text")).filter(|text| !text.is_empty())
+                {
+                    parts.push(text);
+                }
+            }
+            "mention" => {
+                if let Some(path) = read_string(item_object.get("path")) {
+                    parts.push(format!("[file: {path}]"));
+                }
+            }
+            "localImage" => {
+                if let Some(path) = read_string(item_object.get("path")) {
+                    parts.push(format!("[local image: {path}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+fn opencode_assistant_message_text(message: &serde_json::Map<String, Value>) -> Option<String> {
+    let parts = message.get("parts").and_then(Value::as_array)?;
+    let text_parts = parts
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|part| {
+            let part_type = read_string(part.get("type"))?;
+            if part_type != "text" {
+                return None;
+            }
+            read_string(part.get("text")).filter(|text| !text.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if !text_parts.is_empty() {
+        return Some(text_parts.join("\n"));
+    }
+
+    let reasoning = parts
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|part| {
+            let part_type = read_string(part.get("type"))?;
+            if part_type != "reasoning" {
+                return None;
+            }
+            read_string(part.get("text")).filter(|text| !text.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    if reasoning.is_empty() {
+        None
+    } else {
+        Some(reasoning.join("\n"))
+    }
+}
+
+fn opencode_file_url_to_path(raw: &str) -> Option<String> {
+    Url::parse(raw)
+        .ok()
+        .and_then(|url| url.to_file_path().ok())
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn generate_opencode_local_id() -> String {
+    format!("opencode-local-{}", Utc::now().timestamp_millis())
+}
+
+fn to_preview_like(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() <= 180 {
+        return collapsed;
+    }
+
+    format!("{}...", &collapsed[..177])
+}
+
 fn is_forwarded_method(method: &str) -> bool {
     matches!(
         method,
@@ -3634,7 +6470,7 @@ async fn save_uploaded_attachment(
 
     let mut attachment_dir = state.config.workdir.join(MOBILE_ATTACHMENTS_DIR);
     if let Some(thread_id) = request.thread_id.as_deref() {
-        let normalized_thread = sanitize_path_segment(thread_id);
+        let normalized_thread = sanitize_path_segment(&decode_engine_qualified_id(thread_id));
         if !normalized_thread.is_empty() {
             attachment_dir = attachment_dir.join(normalized_thread);
         }
@@ -3954,6 +6790,7 @@ mod tests {
         let writer = child.stdin.take().expect("child stdin available");
 
         Arc::new(AppServerBridge {
+            engine: BridgeRuntimeEngine::Codex,
             child: Mutex::new(child),
             writer: Mutex::new(writer),
             pending_requests: Mutex::new(HashMap::new()),
@@ -3973,6 +6810,73 @@ mod tests {
         let _ = child.wait().await;
     }
 
+    async fn build_test_opencode_backend(hub: Arc<ClientHub>) -> Arc<OpencodeBackend> {
+        let child = Command::new("cat")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cat process");
+
+        Arc::new(OpencodeBackend {
+            child: Mutex::new(child),
+            hub,
+            http: HttpClient::builder().build().expect("build reqwest client"),
+            base_url: Url::parse("http://127.0.0.1:4090/").expect("valid opencode base url"),
+            username: "opencode".to_string(),
+            password: Some("secret-token".to_string()),
+            fallback_directory: "/tmp/workdir".to_string(),
+            session_directories: RwLock::new(HashMap::new()),
+            session_statuses: RwLock::new(HashMap::new()),
+            active_turns: RwLock::new(HashMap::new()),
+            part_kinds: RwLock::new(HashMap::new()),
+            interrupted_sessions: RwLock::new(HashSet::new()),
+            pending_approvals: Mutex::new(HashMap::new()),
+            pending_user_inputs: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn shutdown_test_opencode_backend(backend: &Arc<OpencodeBackend>) {
+        let mut child = backend.child.lock().await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    fn test_codex_backend(backend: &Arc<RuntimeBackend>) -> &Arc<AppServerBridge> {
+        backend
+            .codex
+            .as_ref()
+            .expect("expected codex backend in test")
+    }
+
+    async fn shutdown_test_backend(backend: &Arc<RuntimeBackend>) {
+        if let Some(codex) = &backend.codex {
+            shutdown_test_bridge(codex).await;
+        }
+        if let Some(opencode) = &backend.opencode {
+            shutdown_test_opencode_backend(opencode).await;
+        }
+    }
+
+    async fn build_test_runtime_backend(
+        hub: Arc<ClientHub>,
+        preferred_engine: BridgeRuntimeEngine,
+        include_opencode: bool,
+    ) -> Arc<RuntimeBackend> {
+        let codex = Some(build_test_bridge(hub.clone()).await);
+        let opencode = if include_opencode {
+            Some(build_test_opencode_backend(hub).await)
+        } else {
+            None
+        };
+
+        Arc::new(RuntimeBackend {
+            preferred_engine,
+            codex,
+            opencode,
+        })
+    }
+
     async fn build_test_state() -> Arc<AppState> {
         let workdir = normalize_path(&env::temp_dir());
         let config = Arc::new(BridgeConfig {
@@ -3980,6 +6884,12 @@ mod tests {
             port: 8787,
             workdir: workdir.clone(),
             cli_bin: "cat".to_string(),
+            opencode_cli_bin: "opencode".to_string(),
+            active_engine: BridgeRuntimeEngine::Codex,
+            opencode_host: "127.0.0.1".to_string(),
+            opencode_port: 4090,
+            opencode_server_username: "opencode".to_string(),
+            opencode_server_password: Some("secret-token".to_string()),
             auth_token: Some("secret-token".to_string()),
             auth_enabled: true,
             allow_insecure_no_auth: false,
@@ -3991,7 +6901,8 @@ mod tests {
         });
 
         let hub = Arc::new(ClientHub::new());
-        let app_server = build_test_bridge(hub.clone()).await;
+        let backend =
+            build_test_runtime_backend(hub.clone(), BridgeRuntimeEngine::Codex, true).await;
         let terminal = Arc::new(TerminalService::new(
             config.workdir.clone(),
             config.terminal_allowed_commands.clone(),
@@ -4008,10 +6919,360 @@ mod tests {
             config,
             started_at: Instant::now(),
             hub,
-            app_server,
+            backend,
             terminal,
             git,
         })
+    }
+
+    #[test]
+    fn decode_engine_qualified_id_strips_known_prefixes() {
+        assert_eq!(decode_engine_qualified_id("codex:thr_123"), "thr_123");
+        assert_eq!(decode_engine_qualified_id("opencode:ses_456"), "ses_456");
+        assert_eq!(
+            decode_engine_qualified_id(" custom-prefix:value "),
+            "custom-prefix:value"
+        );
+        assert_eq!(decode_engine_qualified_id("thr_plain"), "thr_plain");
+    }
+
+    #[test]
+    fn encode_engine_qualified_id_prefixes_raw_values_and_preserves_known_prefixes() {
+        assert_eq!(
+            encode_engine_qualified_id(BridgeRuntimeEngine::Codex, "thr_123"),
+            "codex:thr_123"
+        );
+        assert_eq!(
+            encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, "opencode:ses_456"),
+            "opencode:ses_456"
+        );
+        assert_eq!(
+            encode_engine_qualified_id(BridgeRuntimeEngine::Codex, " opencode:ses_789 "),
+            "opencode:ses_789"
+        );
+    }
+
+    #[test]
+    fn normalize_forwarded_ids_recursively_decodes_thread_fields() {
+        let normalized = normalize_forwarded_ids(json!({
+            "threadId": "codex:thr_1",
+            "conversationId": "opencode:ses_2",
+            "parentThreadId": "codex:thr_parent",
+            "nested": {
+                "thread_id": "opencode:ses_3",
+                "items": [
+                    { "threadId": "codex:thr_4" },
+                    { "other": "codex:thr_keep" }
+                ]
+            }
+        }));
+
+        assert_eq!(normalized["threadId"], "thr_1");
+        assert_eq!(normalized["conversationId"], "ses_2");
+        assert_eq!(normalized["parentThreadId"], "thr_parent");
+        assert_eq!(normalized["nested"]["thread_id"], "ses_3");
+        assert_eq!(normalized["nested"]["items"][0]["threadId"], "thr_4");
+        assert_eq!(normalized["nested"]["items"][1]["other"], "codex:thr_keep");
+    }
+
+    #[test]
+    fn normalize_forwarded_result_qualifies_thread_records_for_mobile() {
+        let normalized = normalize_forwarded_result(
+            "thread/list",
+            json!({
+                "data": [
+                    {
+                        "id": "thr_1",
+                        "source": {
+                            "parentThreadId": "thr_parent"
+                        },
+                        "updatedAt": 1700000000
+                    }
+                ]
+            }),
+            BridgeRuntimeEngine::Codex,
+        );
+
+        assert_eq!(normalized["data"][0]["id"], "codex:thr_1");
+        assert_eq!(normalized["data"][0]["engine"], "codex");
+        assert_eq!(
+            normalized["data"][0]["source"]["parentThreadId"],
+            "codex:thr_parent"
+        );
+    }
+
+    #[test]
+    fn normalize_forwarded_result_qualifies_loaded_thread_ids() {
+        let normalized = normalize_forwarded_result(
+            "thread/loaded/list",
+            json!({
+                "data": ["thr_1", "opencode:ses_2"]
+            }),
+            BridgeRuntimeEngine::Codex,
+        );
+
+        assert_eq!(normalized["data"][0], "codex:thr_1");
+        assert_eq!(normalized["data"][1], "opencode:ses_2");
+    }
+
+    #[test]
+    fn merge_thread_list_results_qualifies_and_sorts_across_engines() {
+        let merged = merge_thread_list_results(vec![
+            (
+                BridgeRuntimeEngine::Codex,
+                json!({
+                    "data": [
+                        {
+                            "id": "thr_old",
+                            "updatedAt": 100,
+                        }
+                    ]
+                }),
+            ),
+            (
+                BridgeRuntimeEngine::Opencode,
+                json!({
+                    "data": [
+                        {
+                            "id": "ses_new",
+                            "updatedAt": 200,
+                        },
+                        {
+                            "id": "ses_mid",
+                            "updatedAt": 150,
+                        }
+                    ]
+                }),
+            ),
+        ]);
+
+        assert_eq!(merged["data"][0]["id"], "opencode:ses_new");
+        assert_eq!(merged["data"][0]["engine"], "opencode");
+        assert_eq!(merged["data"][1]["id"], "opencode:ses_mid");
+        assert_eq!(merged["data"][2]["id"], "codex:thr_old");
+    }
+
+    #[test]
+    fn merge_loaded_thread_ids_results_dedups_and_sorts_across_engines() {
+        let merged = merge_loaded_thread_ids_results(vec![
+            (
+                BridgeRuntimeEngine::Codex,
+                json!({
+                    "data": ["thr_2", "thr_1"]
+                }),
+            ),
+            (
+                BridgeRuntimeEngine::Opencode,
+                json!({
+                    "data": ["ses_9", "opencode:ses_9"]
+                }),
+            ),
+        ]);
+
+        assert_eq!(
+            merged["data"],
+            json!(["codex:thr_1", "codex:thr_2", "opencode:ses_9"])
+        );
+    }
+
+    #[test]
+    fn route_engine_from_params_prefers_engine_qualified_thread_ids() {
+        assert_eq!(
+            route_engine_from_params(Some(&json!({ "threadId": "opencode:ses_1" }))),
+            Some(BridgeRuntimeEngine::Opencode)
+        );
+        assert_eq!(
+            route_engine_from_params(Some(&json!({ "parentThreadId": "codex:thr_1" }))),
+            Some(BridgeRuntimeEngine::Codex)
+        );
+        assert_eq!(
+            route_engine_from_params(Some(&json!({ "threadId": "thr_1" }))),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_prompt_parts_mapping_preserves_text_mentions_and_images() {
+        let parts = opencode_prompt_parts_from_turn_input(&[
+            json!({
+                "type": "text",
+                "text": "Inspect the repo"
+            }),
+            json!({
+                "type": "mention",
+                "path": "/tmp/project/README.md"
+            }),
+            json!({
+                "type": "localImage",
+                "path": "/tmp/project/screenshot.png"
+            }),
+        ]);
+
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Inspect the repo");
+        assert_eq!(parts[1]["type"], "file");
+        assert_eq!(parts[1]["mime"], "text/plain");
+        assert_eq!(parts[2]["type"], "file");
+        assert_eq!(parts[2]["mime"], "image/png");
+    }
+
+    #[test]
+    fn opencode_message_projection_builds_turns_for_mobile_contract() {
+        let turns = opencode_messages_to_turns(
+            "ses_1",
+            &json!([
+                {
+                    "info": {
+                        "id": "msg_user_1",
+                        "sessionID": "ses_1",
+                        "role": "user",
+                        "time": { "created": 1000 }
+                    },
+                    "parts": [
+                        {
+                            "id": "part_user_text",
+                            "sessionID": "ses_1",
+                            "messageID": "msg_user_1",
+                            "type": "text",
+                            "text": "hello"
+                        }
+                    ]
+                },
+                {
+                    "info": {
+                        "id": "msg_assistant_1",
+                        "sessionID": "ses_1",
+                        "role": "assistant",
+                        "parentID": "msg_user_1",
+                        "time": { "created": 1001, "completed": 1002 }
+                    },
+                    "parts": [
+                        {
+                            "id": "part_assistant_text",
+                            "sessionID": "ses_1",
+                            "messageID": "msg_assistant_1",
+                            "type": "text",
+                            "text": "world"
+                        }
+                    ]
+                }
+            ]),
+            Some("idle"),
+            None,
+        );
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["id"], "msg_user_1");
+        assert_eq!(turns[0]["status"], "completed");
+        assert_eq!(turns[0]["items"][0]["type"], "userMessage");
+        assert_eq!(turns[0]["items"][1]["type"], "agentMessage");
+        assert_eq!(turns[0]["items"][1]["text"], "world");
+    }
+
+    #[test]
+    fn opencode_message_projection_preserves_reasoning_and_tool_items_in_order() {
+        let turns = opencode_messages_to_turns(
+            "ses_1",
+            &json!([
+                {
+                    "info": {
+                        "id": "msg_user_1",
+                        "sessionID": "ses_1",
+                        "role": "user",
+                        "time": { "created": 1000 }
+                    },
+                    "parts": [
+                        {
+                            "id": "part_user_text",
+                            "sessionID": "ses_1",
+                            "messageID": "msg_user_1",
+                            "type": "text",
+                            "text": "inspect"
+                        }
+                    ]
+                },
+                {
+                    "info": {
+                        "id": "msg_assistant_1",
+                        "sessionID": "ses_1",
+                        "role": "assistant",
+                        "parentID": "msg_user_1",
+                        "time": { "created": 1001, "completed": 1002 }
+                    },
+                    "parts": [
+                        {
+                            "id": "part_reasoning",
+                            "type": "reasoning",
+                            "text": "Checking the workspace first"
+                        },
+                        {
+                            "id": "part_tool",
+                            "type": "tool",
+                            "tool": "bash",
+                            "state": {
+                                "status": "completed",
+                                "input": {
+                                    "command": "pwd"
+                                },
+                                "output": "/tmp/project\n",
+                                "exitCode": 0
+                            }
+                        },
+                        {
+                            "id": "part_assistant_text",
+                            "type": "text",
+                            "text": "Done."
+                        }
+                    ]
+                }
+            ]),
+            Some("idle"),
+            None,
+        );
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["items"][1]["type"], "reasoning");
+        assert_eq!(turns[0]["items"][1]["text"], "Checking the workspace first");
+        assert_eq!(turns[0]["items"][2]["type"], "commandExecution");
+        assert_eq!(turns[0]["items"][2]["command"], "pwd");
+        assert_eq!(turns[0]["items"][2]["aggregatedOutput"], "/tmp/project\n");
+        assert_eq!(turns[0]["items"][2]["exitCode"], 0);
+        assert_eq!(turns[0]["items"][3]["type"], "agentMessage");
+        assert_eq!(turns[0]["items"][3]["text"], "Done.");
+    }
+
+    #[tokio::test]
+    async fn bridge_capabilities_reflect_active_engine() {
+        let state = build_test_state().await;
+
+        let capabilities = state.bridge_capabilities();
+        assert_eq!(capabilities.active_engine, BridgeRuntimeEngine::Codex);
+        assert_eq!(
+            capabilities.available_engines,
+            vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode]
+        );
+        assert!(capabilities.unified_chat_list);
+        assert!(capabilities.supports.review_start);
+
+        shutdown_test_backend(&state.backend).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_capabilities_reflect_single_engine_state() {
+        let hub = Arc::new(ClientHub::new());
+        let backend = build_test_runtime_backend(hub, BridgeRuntimeEngine::Codex, false).await;
+
+        let capabilities = backend.capabilities();
+        assert_eq!(capabilities.active_engine, BridgeRuntimeEngine::Codex);
+        assert_eq!(
+            capabilities.available_engines,
+            vec![BridgeRuntimeEngine::Codex]
+        );
+        assert!(!capabilities.unified_chat_list);
+        assert!(capabilities.supports.review_start);
+
+        shutdown_test_backend(&backend).await;
     }
 
     async fn add_test_client(hub: &Arc<ClientHub>) -> (u64, mpsc::Receiver<Message>) {
@@ -4288,7 +7549,7 @@ mod tests {
         assert_eq!(reasoning.0, "codex/event/agent_reasoning_delta");
         assert_eq!(reasoning.1["msg"]["type"], "agent_reasoning_delta");
         assert_eq!(reasoning.1["msg"]["delta"], "**Inspecting workspace**");
-        assert_eq!(reasoning.1["msg"]["thread_id"], "thread-1");
+        assert_eq!(reasoning.1["msg"]["thread_id"], "codex:thread-1");
 
         let agent_message = build_rollout_event_msg_notification(
             json!({
@@ -4325,7 +7586,7 @@ mod tests {
 
         assert_eq!(token_count.0, "codex/event/token_count");
         assert_eq!(token_count.1["msg"]["type"], "token_count");
-        assert_eq!(token_count.1["msg"]["thread_id"], "thread-1");
+        assert_eq!(token_count.1["msg"]["thread_id"], "codex:thread-1");
         assert_eq!(token_count.1["msg"]["info"]["model_context_window"], 200000);
     }
 
@@ -4374,7 +7635,7 @@ mod tests {
 
         let running = build_rollout_thread_status_notification("codex/event/task_started", &params)
             .expect("running status");
-        assert_eq!(running["threadId"], "thread-1");
+        assert_eq!(running["threadId"], "codex:thread-1");
         assert_eq!(running["status"], "running");
 
         let completed =
@@ -4425,7 +7686,7 @@ mod tests {
 
         assert_eq!(exec_command.0, "codex/event/exec_command_begin");
         assert_eq!(exec_command.1["msg"]["type"], "exec_command_begin");
-        assert_eq!(exec_command.1["msg"]["thread_id"], "thread-1");
+        assert_eq!(exec_command.1["msg"]["thread_id"], "codex:thread-1");
         assert_eq!(
             exec_command.1["msg"]["command"],
             json!(["npm", "run", "test"])
@@ -4808,6 +8069,12 @@ mod tests {
             port: 8787,
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
+            opencode_cli_bin: "opencode".to_string(),
+            active_engine: BridgeRuntimeEngine::Codex,
+            opencode_host: "127.0.0.1".to_string(),
+            opencode_port: 4090,
+            opencode_server_username: "opencode".to_string(),
+            opencode_server_password: Some("secret-token".to_string()),
             auth_token: Some("secret-token".to_string()),
             auth_enabled: true,
             allow_insecure_no_auth: false,
@@ -4916,6 +8183,7 @@ mod tests {
 
         let hub = Arc::new(ClientHub::new());
         let bridge = Arc::new(AppServerBridge {
+            engine: BridgeRuntimeEngine::Codex,
             child: Mutex::new(child),
             writer: Mutex::new(writer),
             pending_requests: Mutex::new(HashMap::new()),
@@ -4989,7 +8257,7 @@ mod tests {
         assert_eq!(payload["id"], Value::Null);
         assert_eq!(payload["error"]["code"], -32700);
 
-        shutdown_test_bridge(&state.app_server).await;
+        shutdown_test_backend(&state.backend).await;
     }
 
     #[tokio::test]
@@ -5004,7 +8272,7 @@ mod tests {
         assert_eq!(payload["error"]["code"], -32600);
         assert_eq!(payload["error"]["message"], "Missing method");
 
-        shutdown_test_bridge(&state.app_server).await;
+        shutdown_test_backend(&state.backend).await;
     }
 
     #[tokio::test]
@@ -5027,7 +8295,7 @@ mod tests {
         assert_eq!(payload["id"], "abc");
         assert_eq!(payload["error"]["code"], -32601);
 
-        shutdown_test_bridge(&state.app_server).await;
+        shutdown_test_backend(&state.backend).await;
     }
 
     #[tokio::test]
@@ -5047,8 +8315,7 @@ mod tests {
         )
         .await;
 
-        state
-            .app_server
+        test_codex_backend(&state.backend)
             .handle_response(json!({
                 "id": 1,
                 "result": { "threadId": "thr_123" }
@@ -5057,8 +8324,31 @@ mod tests {
 
         let payload = recv_client_json(&mut rx).await;
         assert_eq!(payload["id"], "request-1");
-        assert_eq!(payload["result"]["threadId"], "thr_123");
+        assert_eq!(payload["result"]["threadId"], "codex:thr_123");
 
-        shutdown_test_bridge(&state.app_server).await;
+        shutdown_test_backend(&state.backend).await;
+    }
+
+    #[tokio::test]
+    async fn handle_notification_qualifies_thread_ids_for_mobile_clients() {
+        let hub = Arc::new(ClientHub::new());
+        let bridge = build_test_bridge(hub.clone()).await;
+        let (_client_id, mut rx) = add_test_client(&hub).await;
+
+        bridge
+            .handle_notification(
+                "turn/completed",
+                Some(json!({
+                    "threadId": "thr_done",
+                    "turnId": "turn_done"
+                })),
+            )
+            .await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["method"], "turn/completed");
+        assert_eq!(payload["params"]["threadId"], "codex:thr_done");
+
+        shutdown_test_bridge(&bridge).await;
     }
 }

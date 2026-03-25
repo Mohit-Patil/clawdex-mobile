@@ -42,6 +42,14 @@ Creates/updates:
 npm run secure:bridge
 ```
 
+Optional preferred engine selection:
+
+```bash
+BRIDGE_ACTIVE_ENGINE=opencode npm run secure:bridge
+```
+
+`codex` remains the default. The bridge will also try to start the other backend and merge chat lists when both runtimes are available. The `opencode` path is still bridge-only and still reuses the existing mobile websocket contract.
+
 ### 4) Pair from the mobile app
 
 Open the installed mobile app on your phone, then scan the bridge QR. If needed, enter the bridge URL manually (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). The chosen bridge URL is stored on-device and can be changed later in Settings.
@@ -96,6 +104,12 @@ npm run teardown -- --yes
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query-token auth fallback |
 | `CODEX_CLI_BIN` | codex executable |
+| `BRIDGE_ACTIVE_ENGINE` | preferred backend (`codex` default, `opencode` optional) |
+| `OPENCODE_CLI_BIN` | opencode executable for dual-engine startup |
+| `BRIDGE_OPENCODE_HOST` | loopback host for spawned opencode server |
+| `BRIDGE_OPENCODE_PORT` | loopback port for spawned opencode server |
+| `BRIDGE_OPENCODE_SERVER_USERNAME` | basic-auth username passed to opencode server |
+| `BRIDGE_OPENCODE_SERVER_PASSWORD` | basic-auth password passed to opencode server |
 | `BRIDGE_WORKDIR` | absolute working directory for terminal/git |
 | `BRIDGE_ALLOW_OUTSIDE_ROOT_CWD` | allow terminal/git `cwd` outside `BRIDGE_WORKDIR` |
 

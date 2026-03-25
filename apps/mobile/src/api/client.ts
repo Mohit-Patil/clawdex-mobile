@@ -13,6 +13,7 @@ import type {
   AccountRateLimitSnapshot,
   ApprovalPolicy,
   ApprovalDecision,
+  BridgeCapabilities,
   CollaborationMode,
   CreateChatRequest,
   Chat,
@@ -181,6 +182,10 @@ export class HostBridgeApiClient {
 
   health(): Promise<HealthResponse> {
     return this.ws.request<HealthResponse>('bridge/health/read');
+  }
+
+  readBridgeCapabilities(): Promise<BridgeCapabilities> {
+    return this.ws.request<BridgeCapabilities>('bridge/capabilities/read');
   }
 
   async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {
