@@ -216,6 +216,7 @@ export function toRawThread(value: unknown): RawThread {
     undefined;
   return {
     id: readString(record.id) ?? undefined,
+    engine: readString(record.engine) ?? undefined,
     name: threadName,
     title: threadName,
     preview: readString(record.preview) ?? undefined,

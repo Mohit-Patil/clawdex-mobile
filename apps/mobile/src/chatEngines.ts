@@ -16,9 +16,9 @@ export function getChatEngineBadgeColors(value: ChatEngine | null | undefined): 
   const engine = resolveChatEngine(value);
   if (engine === 'opencode') {
     return {
-      backgroundColor: 'rgba(78, 201, 140, 0.14)',
-      borderColor: 'rgba(78, 201, 140, 0.4)',
-      textColor: '#8FF0B8',
+      backgroundColor: 'rgba(143, 163, 191, 0.14)',
+      borderColor: 'rgba(143, 163, 191, 0.34)',
+      textColor: '#D7E3F7',
     };
   }
 
