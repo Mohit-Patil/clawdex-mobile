@@ -444,13 +444,13 @@ export function SettingsScreen({
         style={StyleSheet.absoluteFill}
       />
       <SafeAreaView style={styles.safeArea}>
-        <BlurView intensity={80} tint="dark" style={styles.header}>
+        <View style={styles.header}>
           <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
             <Ionicons name="menu" size={22} color={colors.textPrimary} />
           </Pressable>
           <Ionicons name="settings" size={16} color={colors.textPrimary} />
           <Text style={styles.headerTitle}>Settings</Text>
-        </BlurView>
+        </View>
 
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <Text style={styles.sectionLabel}>Chat Defaults</Text>
@@ -799,6 +799,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
+    backgroundColor: colors.bgMain,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.borderHighlight,
   },
