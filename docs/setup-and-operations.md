@@ -2,6 +2,24 @@
 
 This guide is the detailed companion to the top-level `README.md`.
 
+## Choosing a Runtime
+
+The bridge defaults to `codex`.
+
+Use the setup wizard to make `opencode` the preferred engine:
+
+```bash
+clawdex init --engine opencode
+```
+
+From a source checkout, the equivalent command is:
+
+```bash
+npm run setup:wizard -- --engine opencode
+```
+
+That writes `BRIDGE_ACTIVE_ENGINE=opencode` into `.env.secure`. To switch back, rerun setup with `--engine codex` or edit `.env.secure` directly.
+
 ## Onboarding Output Cues
 
 After `clawdex init`, expected sequence:
@@ -31,6 +49,12 @@ npm install
 npm run secure:setup
 ```
 
+To generate OpenCode-first config instead:
+
+```bash
+BRIDGE_ACTIVE_ENGINE=opencode npm run secure:setup
+```
+
 Creates/updates:
 
 - `.env.secure` (bridge runtime config + token)
@@ -41,6 +65,14 @@ Creates/updates:
 ```bash
 npm run secure:bridge
 ```
+
+If you want a one-off OpenCode launch without rewriting `.env.secure`:
+
+```bash
+BRIDGE_ACTIVE_ENGINE=opencode npm run secure:bridge
+```
+
+`codex` remains the default. When both CLIs are available, the bridge can start both backends and merge chat lists while still routing each thread by engine.
 
 ### 4) Pair from the mobile app
 
@@ -96,6 +128,12 @@ npm run teardown -- --yes
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query-token auth fallback |
 | `CODEX_CLI_BIN` | codex executable |
+| `BRIDGE_ACTIVE_ENGINE` | preferred backend (`codex` default, `opencode` optional) |
+| `OPENCODE_CLI_BIN` | opencode executable for dual-engine startup |
+| `BRIDGE_OPENCODE_HOST` | loopback host for spawned opencode server |
+| `BRIDGE_OPENCODE_PORT` | loopback port for spawned opencode server |
+| `BRIDGE_OPENCODE_SERVER_USERNAME` | basic-auth username passed to opencode server |
+| `BRIDGE_OPENCODE_SERVER_PASSWORD` | basic-auth password passed to opencode server |
 | `BRIDGE_WORKDIR` | absolute working directory for terminal/git |
 | `BRIDGE_ALLOW_OUTSIDE_ROOT_CWD` | allow terminal/git `cwd` outside `BRIDGE_WORKDIR` |
 

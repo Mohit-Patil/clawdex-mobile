@@ -1,245 +1,111 @@
 # Clawdex Mobile
 
 <p align="center">
-  <img src="./screenshots/social/clawdex-social-poster-1200x675.png" alt="Clawdex social banner" width="100%" />
+  <img src="https://raw.githubusercontent.com/Mohit-Patil/clawdex-mobile/main/screenshots/social/clawdex-social-poster-1200x675.png" alt="Clawdex social banner" width="100%" />
 </p>
 
-Control Clawdex from your phone using an Expo React Native app (`apps/mobile`) and a Rust bridge (`services/rust-bridge`) running on your host machine.
+Run Codex or OpenCode from your phone. `clawdex-mobile` ships the bridge CLI plus bundled Rust bridge binaries for supported hosts, and the mobile app pairs to that bridge over Tailscale or local LAN.
 
-This project is intended for trusted/private networking (Tailscale or local LAN). Do not expose the bridge publicly.
+This project is for trusted/private networking only. Do not expose the bridge publicly.
 
 ## What You Get
 
-- Mobile chat with Clawdex
-- Voice-to-text transcription (push-to-talk)
-- Live run/activity updates over WebSocket
-- Plan/default collaboration mode support
-- Clarification and approval flows in-app
-- File/image attachments from workspace and phone
-- Chat-scoped Git actions (status/diff/commit/push)
-- Bridge-backed terminal execution
+- Mobile chat for Codex and OpenCode
+- Live run updates over WebSocket
+- Approval and clarification flows in-app
+- Voice-to-text, attachments, terminal, and Git actions
+- One mobile shell backed by a private host bridge
 
 ## Quick Start
 
-## Download Mobile App
+Before you start:
 
-- Android APK: download from the latest GitHub release assets  
-  <https://github.com/Mohit-Patil/clawdex-mobile/releases/latest>
-- iOS: https://apple.co/4rNAHRF
+- Node.js 20+
+- npm 10+
+- `git`
+- `codex` in `PATH` for the default Codex flow
+- `opencode` in `PATH` if you want the OpenCode flow
 
-Recommended release-note format for Android:
+Install the mobile app:
 
-- `Android APK: <direct asset URL>`
-- `SHA-256: <apk checksum>`
+- Android APK: <https://github.com/Mohit-Patil/clawdex-mobile/releases/latest>
+- iOS: <https://apple.co/4rNAHRF>
 
-### Option A: Published CLI (recommended)
+Install the CLI and start the bridge:
 
 ```bash
 npm install -g clawdex-mobile@latest
 clawdex init
 ```
 
-This is the primary starting point.
+Then open the mobile app and scan the pairing QR.
 
-Published npm releases bundle prebuilt Rust bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `linux-armv7l`, and `win32-x64`, so supported hosts do not need to compile the bridge during normal startup. The interactive shell-based setup helpers are still macOS/Linux-oriented today.
+The npm package is bridge-only. It does not install Expo or the mobile source tree. On supported macOS, Linux, and Windows hosts it uses bundled bridge binaries, so normal startup does not compile Rust.
+The current interactive setup helpers are still macOS/Linux-oriented.
 
-`clawdex init` does not run a project-local `npm install`. The global package install is the only npm install needed for the published bridge flow.
-
-The published CLI package is bridge-only. It does not install Expo, React Native, or the mobile app source tree.
-
-`clawdex init` guides you through:
-
-1. bridge mode selection: `Local (LAN)` or `Tailscale`
-2. secure bridge config generation (`.env.secure`)
-3. phone readiness checks for selected mode
-4. optional bridge launch in the foreground (release build)
-
-This flow is bridge-only. The mobile app is already shipped, so no Expo dev server is required to pair your phone.
-
-When the bridge starts, it prints a pairing QR:
-
-- preferred: QR contains both `bridgeUrl + bridgeToken` (one-scan onboarding)
-- fallback: token-only QR if host is not a phone-connectable address
-
-Typical lifecycle:
+Typical operator flow:
 
 ```bash
-# install/update once
 npm install -g clawdex-mobile@latest
-
-# onboarding + start bridge
 clawdex init
-
-# stop services later
 clawdex stop
 ```
 
-### Option B: Monorepo checkout
+## OpenCode Setup
+
+OpenCode is supported directly from the CLI now.
+
+```bash
+npm install -g opencode-ai
+npm install -g clawdex-mobile@latest
+clawdex init --engine opencode
+```
+
+That writes `BRIDGE_ACTIVE_ENGINE=opencode` to `.env.secure` and uses OpenCode as the preferred runtime when the bridge starts.
+
+Notes:
+
+- `clawdex init` without `--engine` still defaults to Codex.
+- If both CLIs are installed, the bridge can surface chats from both engines in the mobile app.
+- To switch later, rerun `clawdex init --engine codex` or `clawdex init --engine opencode`.
+
+## Monorepo Development
+
+If you are working from source:
 
 ```bash
 npm install
 npm run setup:wizard
-```
-
-Use `npm run setup:wizard -- --no-start` to configure only (no bridge start).
-
-## Project Layout
-
-- `apps/mobile`: Expo client (UI + API client)
-- `services/rust-bridge`: primary bridge (WebSocket JSON-RPC + `codex app-server` adapter)
-- `services/mac-bridge`: legacy TypeScript bridge (reference only)
-- `scripts/`: onboarding/runtime helper scripts
-- `docs/`: setup, troubleshooting, architecture notes
-
-## Prerequisites
-
-- macOS or Linux
-- Node.js 20+
-- npm 10+
-- `codex` CLI in `PATH`
-- `git` in `PATH`
-- iOS app installed (TestFlight/App Store/dev build)
-- Tailscale on host + phone (recommended for remote/private networking)
-
-Optional for simulators/emulators:
-
-- Xcode + iOS Simulator
-- Android Studio + Android Emulator
-
-## Day-to-Day Commands
-
-From repo root:
-
-- `npm run setup:wizard` — guided secure setup + optional bridge start
-- `npm run stop:services` — stop running bridge (and local Expo if running)
-- `npm run secure:setup` — generate/update secure env
-- `npm run secure:bridge` — start rust bridge from `.env.secure` (release profile)
-- `npm run secure:bridge:dev` — start rust bridge in dev profile
-- `npm run mobile` — start Expo
-- `npm run ios` — start Expo (iOS target)
-- `npm run android` — start Expo (Android target)
-- `npm run teardown` — interactive cleanup
-- `npm run lint` / `npm run typecheck` / `npm run build`
-
-Published CLI:
-
-- `clawdex init`
-- `clawdex stop`
-- `clawdex upgrade` / `clawdex update`
-- `clawdex version`
-
-## Bridge Start Flow
-
-Recommended:
-
-```bash
-npm install -g clawdex-mobile@latest
-clawdex init
-```
-
-Monorepo/manual flow:
-
-```bash
-# from repo root
-npm install
-npm run secure:setup
-npm run secure:bridge
-```
-
-Keep `npm run secure:bridge` running in foreground. It prints pairing QR and bridge logs.
-
-On supported published installs, this uses the bundled bridge binary directly instead of compiling Rust on startup. Source checkouts still build from Cargo when a packaged binary is unavailable.
-
-Published CLI installs write `.env.secure` for the bridge and skip repo-only mobile env files.
-
-Then open the installed mobile app and pair it:
-
-- preferred: scan the bridge QR to autofill URL + token
-- fallback: enter the bridge URL and token manually
-
-For local mobile development only, start Expo from the repo:
-
-```bash
 npm run mobile
 ```
 
-## Onboarding In App
-
-On first launch (or after reset):
-
-1. start the bridge on your server
-2. scan bridge QR to autofill URL + token
-3. use `Test Connection` (health + authenticated RPC check)
-4. tap `Continue`
-
-## EAS Builds (Short)
-
-Run EAS commands from `apps/mobile` (that is where `app.json` and `eas.json` live):
+For an OpenCode-first repo checkout:
 
 ```bash
-cd apps/mobile
-eas build --platform ios --profile preview
-eas build --platform android --profile preview
+npm run setup:wizard -- --engine opencode
 ```
 
-For complete build/submit guidance, see [`docs/eas-builds.md`](docs/eas-builds.md).
+Use `npm run setup:wizard -- --no-start` if you only want to write config.
 
-## Local Builds (No EAS Cloud)
+## Main Commands
 
-Run from `apps/mobile`:
+- `clawdex init [--engine codex|opencode] [--no-start]`
+- `clawdex stop`
+- `clawdex upgrade` / `clawdex update`
+- `clawdex version`
+- `npm run setup:wizard`
+- `npm run secure:bridge`
+- `npm run mobile`
+- `npm run ios`
+- `npm run android`
+- `npm run stop:services`
+- `npm run teardown`
 
-```bash
-cd apps/mobile
-```
+## Docs
 
-iOS:
-
-```bash
-# iOS Simulator
-npx expo run:ios
-
-# Connected iPhone
-npx expo run:ios --device
-```
-
-Android:
-
-```bash
-# Android emulator or connected Android device
-npx expo run:android
-```
-
-Optional local EAS build:
-
-```bash
-# Requires local Android SDK / Xcode setup
-eas build --platform android --profile preview --local
-```
-
-## Documentation Map
-
-- Setup + operations: [`docs/setup-and-operations.md`](docs/setup-and-operations.md)
-- Troubleshooting: [`docs/troubleshooting.md`](docs/troubleshooting.md)
-- Realtime sync limits/mitigations: [`docs/realtime-streaming-limitations.md`](docs/realtime-streaming-limitations.md)
-- Voice transcription internals: [`docs/voice-transcription.md`](docs/voice-transcription.md)
-- Open-source license obligations: [`docs/open-source-license-requirements.md`](docs/open-source-license-requirements.md)
-- App review template: [`docs/app-review-notes.md`](docs/app-review-notes.md)
-- App-server/CLI gap tracking: [`docs/codex-app-server-cli-gap-tracker.md`](docs/codex-app-server-cli-gap-tracker.md)
-
-## Open Source License Requirements
-
-Follow project requirements in:
-
-- `LICENSE`
-- `docs/open-source-license-requirements.md`
-
-## Development Checks
-
-From repo root:
-
-```bash
-npm run lint
-npm run typecheck
-npm run build
-npm run test
-```
+- Setup + operations: <https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/setup-and-operations.md>
+- Troubleshooting: <https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/troubleshooting.md>
+- Realtime sync limits/mitigations: <https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/realtime-streaming-limitations.md>
+- Voice transcription internals: <https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/voice-transcription.md>
+- EAS builds: <https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/eas-builds.md>
+- Open-source/license notes: <https://github.com/Mohit-Patil/clawdex-mobile/blob/main/docs/open-source-license-requirements.md>

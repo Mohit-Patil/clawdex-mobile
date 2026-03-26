@@ -28,6 +28,8 @@ NETWORK_MODE=""
 TAILSCALE_IP=""
 BRIDGE_HOST=""
 BRIDGE_PORT=""
+ACTIVE_ENGINE="${BRIDGE_ACTIVE_ENGINE:-codex}"
+ENGINE_PRESET="false"
 AUTO_START="true"
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MENU_RESULT=""
@@ -44,6 +46,10 @@ warn() { rail_echo "${YELLOW}$*${RESET}"; }
 ok() { rail_echo "${GREEN}$*${RESET}"; }
 fail() { printf "%s ${RED}%s${RESET}\n" "$RAIL_GLYPH" "$*" >&2; }
 SETUP_VERBOSE_INSTALLS="${CLAWDEX_SETUP_VERBOSE:-false}"
+
+if [[ -n "${BRIDGE_ACTIVE_ENGINE:-}" ]]; then
+  ENGINE_PRESET="true"
+fi
 
 run_quiet_command() {
   local label="$1"
@@ -76,8 +82,32 @@ Usage: $(basename "$0") [options]
 
 Options:
   --no-start               Configure everything but do not start bridge
+  --engine <codex|opencode>
+                           Set preferred engine before writing .env.secure
   -h, --help               Show this help
 EOF
+}
+
+validate_engine_name() {
+  case "$1" in
+    codex|opencode)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+format_engine_name() {
+  case "$1" in
+    opencode)
+      printf 'OpenCode'
+      ;;
+    *)
+      printf 'Codex'
+      ;;
+  esac
 }
 
 parse_args() {
@@ -86,6 +116,21 @@ parse_args() {
       --no-start)
         AUTO_START="false"
         shift
+        ;;
+      --engine)
+        if (($# < 2)); then
+          echo "error: --engine requires a value ('codex' or 'opencode')." >&2
+          print_usage >&2
+          exit 1
+        fi
+        if ! validate_engine_name "$2"; then
+          echo "error: unsupported engine '$2'. Use 'codex' or 'opencode'." >&2
+          print_usage >&2
+          exit 1
+        fi
+        ACTIVE_ENGINE="$2"
+        ENGINE_PRESET="true"
+        shift 2
         ;;
       -h|--help)
         print_usage
@@ -628,6 +673,7 @@ print_existing_setup_summary() {
   local port=""
   local token=""
   local network_mode=""
+  local engine=""
   local source_path=""
 
   if [[ ! -f "$SECURE_ENV_FILE" ]]; then
@@ -638,6 +684,10 @@ print_existing_setup_summary() {
   port="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
   token="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
   network_mode="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
+  engine="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
+  if ! validate_engine_name "$engine"; then
+    engine="codex"
+  fi
 
   if [[ -z "$host" ]] && [[ -z "$port" ]] && [[ -z "$token" ]]; then
     return 1
@@ -652,6 +702,9 @@ print_existing_setup_summary() {
   echo "bridge.port: $port"
   if [[ -n "$network_mode" ]]; then
     echo "bridge.networkMode: $network_mode"
+  fi
+  if [[ -n "$engine" ]]; then
+    echo "bridge.engine: $engine"
   fi
   if [[ -n "$token" ]]; then
     echo "bridge.token: present"
@@ -735,6 +788,23 @@ choose_bridge_network_mode() {
   esac
 }
 
+choose_runtime_engine() {
+  menu_select "Preferred engine" "Codex" "OpenCode"
+  case "$MENU_RESULT" in
+    "Codex")
+      ACTIVE_ENGINE="codex"
+      info "Codex selected."
+      ;;
+    "OpenCode")
+      ACTIVE_ENGINE="opencode"
+      info "OpenCode selected."
+      ;;
+    *)
+      abort_wizard "Unexpected preferred engine."
+      ;;
+  esac
+}
+
 infer_network_mode_from_host() {
   local host="$1"
   host="$(printf '%s' "$host" | tr -d '[:space:]')"
@@ -801,9 +871,9 @@ ensure_codex_cli() {
       fi
     fi
 
-    if ! command -v codex >/dev/null 2>&1 && command -v open >/dev/null 2>&1; then
+    if ! command -v codex >/dev/null 2>&1; then
       if confirm_prompt "Open Codex docs in browser now?" "Y"; then
-        open "https://developers.openai.com/codex" || true
+        open_url "https://developers.openai.com/codex"
       fi
     fi
 
@@ -816,6 +886,48 @@ ensure_codex_cli() {
   if codex --version >/dev/null 2>&1; then
     info "codex version: $(codex --version 2>/dev/null | head -n1)"
   fi
+}
+
+ensure_opencode_cli() {
+  while ! command -v opencode >/dev/null 2>&1; do
+    warn "OpenCode CLI not found in PATH."
+    if confirm_prompt "Try installing OpenCode CLI via npm now?" "Y"; then
+      if npm install -g opencode-ai; then
+        hash -r
+      else
+        warn "Automatic install failed."
+      fi
+    fi
+
+    if ! command -v opencode >/dev/null 2>&1; then
+      if confirm_prompt "Open OpenCode docs in browser now?" "Y"; then
+        open_url "https://opencode.ai/docs/"
+      fi
+    fi
+
+    if ! command -v opencode >/dev/null 2>&1 && ! confirm_prompt "Retry OpenCode CLI check?" "Y"; then
+      abort_wizard "Install OpenCode CLI and rerun: clawdex init --engine opencode"
+    fi
+  done
+
+  ok "Found opencode: $(command -v opencode)"
+  if opencode --version >/dev/null 2>&1; then
+    info "opencode version: $(opencode --version 2>/dev/null | head -n1)"
+  fi
+}
+
+ensure_selected_engine_cli() {
+  case "$ACTIVE_ENGINE" in
+    codex)
+      ensure_codex_cli
+      ;;
+    opencode)
+      ensure_opencode_cli
+      ;;
+    *)
+      abort_wizard "Unsupported preferred engine '$ACTIVE_ENGINE'."
+      ;;
+  esac
 }
 
 ensure_tailscale_cli() {
@@ -1188,7 +1300,6 @@ else
   info "No packaged bridge binary found for this host. Falling back to local Rust build."
   ensure_local_rust_build_toolchain
 fi
-ensure_codex_cli
 
 section "Config handling"
 choose_config_action
@@ -1197,6 +1308,29 @@ if [[ "$CONFIG_ACTION" == "reset" ]]; then
   rm -f "$SECURE_ENV_FILE"
   ok "Previous secure config removed: $SECURE_ENV_FILE"
 fi
+
+section "Preferred engine"
+EXISTING_ACTIVE_ENGINE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
+if ! validate_engine_name "$EXISTING_ACTIVE_ENGINE"; then
+  EXISTING_ACTIVE_ENGINE="codex"
+fi
+if [[ "$CONFIG_ACTION" == "keep" ]]; then
+  if [[ "$ENGINE_PRESET" == "false" ]]; then
+    ACTIVE_ENGINE="$EXISTING_ACTIVE_ENGINE"
+    info "Keeping existing preferred engine: $(format_engine_name "$ACTIVE_ENGINE")."
+  else
+    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
+  fi
+else
+  if [[ "$ENGINE_PRESET" == "false" ]]; then
+    choose_runtime_engine
+  else
+    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
+  fi
+fi
+
+section "Runtime dependency"
+ensure_selected_engine_cli
 
 if [[ "$CONFIG_ACTION" != "keep" ]]; then
   section "Bridge network mode"
@@ -1221,7 +1355,7 @@ if [[ "$CONFIG_ACTION" != "keep" ]]; then
   esac
 
   section "Write secure config"
-  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" "$SCRIPT_DIR/setup-secure-dev.sh"
+  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
 else
   ok "Keeping existing secure config."
   NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
@@ -1246,7 +1380,10 @@ else
     fi
 
     section "Write secure config"
-    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" "$SCRIPT_DIR/setup-secure-dev.sh"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
+  elif [[ "$ACTIVE_ENGINE" != "$EXISTING_ACTIVE_ENGINE" ]]; then
+    section "Write secure config"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
   fi
 fi
 
@@ -1276,6 +1413,7 @@ BRIDGE_PORT="${BRIDGE_PORT:-8787}"
 section "Summary"
 rail_echo "Bridge mode: $NETWORK_MODE"
 rail_echo "Bridge endpoint: http://$BRIDGE_HOST:$BRIDGE_PORT"
+rail_echo "Preferred engine: $(format_engine_name "$ACTIVE_ENGINE")"
 rail_echo "Secure env: $SECURE_ENV_FILE"
 if [[ "$FLOW" == "quickstart" ]]; then
   rail_echo "${DIM}Tip: re-run with Manual mode for full control at each step.${RESET}"

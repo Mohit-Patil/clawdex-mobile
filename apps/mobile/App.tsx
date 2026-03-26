@@ -4,18 +4,30 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Animated,
   Keyboard,
-  PanResponder,
   Pressable,
   StyleSheet,
   useWindowDimensions,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated, {
+  cancelAnimation,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
 import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 
 import { HostBridgeApiClient } from './src/api/client';
-import type { ApprovalMode, Chat, ReasoningEffort } from './src/api/types';
+import type {
+  ApprovalMode,
+  Chat,
+  ChatEngine,
+  EngineDefaultSettingsMap,
+  ReasoningEffort,
+} from './src/api/types';
 import { HostBridgeWsClient } from './src/api/ws';
 import { normalizeBridgeUrlInput } from './src/bridgeUrl';
 import { env } from './src/config';
@@ -34,13 +46,20 @@ type OnboardingMode = 'initial' | 'edit';
 
 const DRAWER_WIDTH = 280;
 const EDGE_SWIPE_WIDTH = 24;
-const SWIPE_OPEN_DISTANCE = 56;
-const SWIPE_CLOSE_DISTANCE = 56;
-const SWIPE_OPEN_VELOCITY = 0.4;
-const SWIPE_CLOSE_VELOCITY = -0.4;
+const CHAT_GIT_BACK_DISTANCE = 56;
+const CHAT_GIT_BACK_VELOCITY = 900;
+const DRAWER_SNAP_OPEN_PROGRESS = 0.38;
+const DRAWER_SNAP_VELOCITY = 920;
+const DRAWER_VELOCITY_PROJECTION = 0.08;
+const DRAWER_RUBBER_BAND_STRENGTH = 0.2;
 const DRAWER_CONTENT_SCALE = 0.94;
+const DRAWER_CONTENT_PARALLAX = 18;
+const DRAWER_MAX_RADIUS = 28;
+const DRAWER_MAX_SHADOW_OPACITY = 0.24;
+const DRAWER_MAX_SHADOW_RADIUS = 26;
+const DRAWER_MAX_ELEVATION = 18;
 const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
-const APP_SETTINGS_VERSION = 3;
+const APP_SETTINGS_VERSION = 4;
 
 export default function App() {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -76,25 +95,51 @@ export default function App() {
   const [pendingMainChatId, setPendingMainChatId] = useState<string | null>(null);
   const [pendingMainChatSnapshot, setPendingMainChatSnapshot] = useState<Chat | null>(null);
   const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
-  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
-  const [defaultReasoningEffort, setDefaultReasoningEffort] =
-    useState<ReasoningEffort | null>(null);
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('normal');
+  const [defaultChatEngine, setDefaultChatEngine] = useState<ChatEngine>('codex');
+  const [defaultEngineSettings, setDefaultEngineSettings] = useState<EngineDefaultSettingsMap>(
+    createEmptyEngineDefaultSettingsMap
+  );
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('yolo');
   const [showToolCalls, setShowToolCalls] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
-  const overlayAnim = useRef(new Animated.Value(0)).current;
+  const [drawerVisible, setDrawerVisible] = useState(false);
+  const drawerOpenRef = useRef(false);
+  const drawerVisibleRef = useRef(false);
   const { width: screenWidth } = useWindowDimensions();
   const contentShiftOpen = Math.min(DRAWER_WIDTH - 12, screenWidth * 0.74);
-  const contentTranslateX = drawerAnim.interpolate({
-    inputRange: [-DRAWER_WIDTH, 0],
-    outputRange: [0, contentShiftOpen],
-    extrapolate: 'clamp',
-  });
-  const contentScale = drawerAnim.interpolate({
-    inputRange: [-DRAWER_WIDTH, 0],
-    outputRange: [1, DRAWER_CONTENT_SCALE],
-    extrapolate: 'clamp',
+  const drawerOffset = useSharedValue(-DRAWER_WIDTH);
+  const drawerDragStartOffset = useSharedValue(-DRAWER_WIDTH);
+
+  const screenFrameAnimatedStyle = useAnimatedStyle(() => {
+    const progress = getDrawerOpenProgress(drawerOffset.value);
+    return {
+      transform: [
+        { translateX: progress * contentShiftOpen },
+        { scale: 1 - (1 - DRAWER_CONTENT_SCALE) * progress },
+      ],
+      borderRadius: DRAWER_MAX_RADIUS * progress,
+      shadowOpacity: DRAWER_MAX_SHADOW_OPACITY * progress,
+      shadowRadius: DRAWER_MAX_SHADOW_RADIUS * progress,
+      elevation: DRAWER_MAX_ELEVATION * progress,
+    };
+  }, [contentShiftOpen]);
+
+  const overlayAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: getDrawerOpenProgress(drawerOffset.value),
+  }));
+
+  const drawerAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: drawerOffset.value }],
+  }));
+
+  const drawerContentAnimatedStyle = useAnimatedStyle(() => {
+    const progress = getDrawerOpenProgress(drawerOffset.value);
+    return {
+      opacity: 0.88 + progress * 0.12,
+      transform: [
+        { translateX: (1 - progress) * -DRAWER_CONTENT_PARALLAX },
+        { scale: 0.985 + progress * 0.015 },
+      ],
+    };
   });
 
   useEffect(() => {
@@ -111,8 +156,8 @@ export default function App() {
       nextBridgeUrl: string | null,
       nextBridgeToken: string | null,
       nextDefaultStartCwd: string | null,
-      nextModelId: string | null,
-      nextEffort: ReasoningEffort | null,
+      nextDefaultChatEngine: ChatEngine,
+      nextDefaultEngineSettings: EngineDefaultSettingsMap,
       nextApprovalMode: ApprovalMode,
       nextShowToolCalls: boolean
     ) => {
@@ -126,8 +171,8 @@ export default function App() {
         bridgeUrl: nextBridgeUrl,
         bridgeToken: nextBridgeToken,
         defaultStartCwd: nextDefaultStartCwd,
-        defaultModelId: nextModelId,
-        defaultReasoningEffort: nextEffort,
+        defaultChatEngine: nextDefaultChatEngine,
+        defaultEngineSettings: nextDefaultEngineSettings,
         approvalMode: nextApprovalMode,
         showToolCalls: nextShowToolCalls,
       });
@@ -146,9 +191,9 @@ export default function App() {
 
     const resetToDefaults = () => {
       setDefaultStartCwd(null);
-      setDefaultModelId(null);
-      setDefaultReasoningEffort(null);
-      setApprovalMode('normal');
+      setDefaultChatEngine('codex');
+      setDefaultEngineSettings(createEmptyEngineDefaultSettingsMap());
+      setApprovalMode('yolo');
       setShowToolCalls(false);
     };
 
@@ -174,8 +219,8 @@ export default function App() {
         setBridgeUrl(resolvedBridgeUrl);
         setBridgeToken(parsed.bridgeToken ?? env.hostBridgeToken);
         setDefaultStartCwd(parsed.defaultStartCwd);
-        setDefaultModelId(parsed.defaultModelId);
-        setDefaultReasoningEffort(parsed.defaultReasoningEffort);
+        setDefaultChatEngine(parsed.defaultChatEngine);
+        setDefaultEngineSettings(parsed.defaultEngineSettings);
         setApprovalMode(parsed.approvalMode);
         setShowToolCalls(parsed.showToolCalls);
       } catch {
@@ -197,113 +242,163 @@ export default function App() {
     };
   }, []);
 
-  const openDrawer = useCallback(() => {
+  const dismissKeyboard = useCallback(() => {
     Keyboard.dismiss();
-    setDrawerOpen(true);
-    Animated.parallel([
-      Animated.spring(drawerAnim, {
-        toValue: 0,
-        useNativeDriver: true,
-        bounciness: 0,
-        speed: 20,
-      }),
-      Animated.timing(overlayAnim, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [drawerAnim, overlayAnim]);
+  }, []);
 
-  const closeDrawer = useCallback(() => {
-    setDrawerOpen(false);
-    Animated.parallel([
-      Animated.spring(drawerAnim, {
-        toValue: -DRAWER_WIDTH,
-        useNativeDriver: true,
-        bounciness: 0,
-        speed: 20,
-      }),
-      Animated.timing(overlayAnim, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [drawerAnim, overlayAnim]);
+  const ensureDrawerVisible = useCallback(() => {
+    if (drawerVisibleRef.current) {
+      return;
+    }
 
-  const openSwipeResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gesture) => {
-          if (drawerOpen) {
-            return false;
-          }
+    drawerVisibleRef.current = true;
+    setDrawerVisible(true);
+  }, []);
 
-          if (gesture.dx <= 0) {
-            return false;
-          }
-
-          const isMostlyHorizontal = Math.abs(gesture.dx) > Math.abs(gesture.dy);
-          const isFromEdge = gesture.moveX <= EDGE_SWIPE_WIDTH + 12;
-
-          return isMostlyHorizontal && isFromEdge && gesture.dx > 8;
-        },
-        onPanResponderRelease: (_, gesture) => {
-          if (
-            gesture.dx > SWIPE_OPEN_DISTANCE ||
-            gesture.vx > SWIPE_OPEN_VELOCITY
-          ) {
-            if (currentScreen === 'ChatGit') {
-              const chatId = gitChat?.id ?? activeChat?.id ?? selectedChatId;
-              const resumeChat =
-                gitChat && gitChat.id === chatId
-                  ? gitChat
-                  : activeChat && activeChat.id === chatId
-                    ? activeChat
-                    : null;
-              setCurrentScreen('Main');
-              setGitChat(null);
-              if (chatId) {
-                setSelectedChatId(chatId);
-                setPendingMainChatId(chatId);
-                setPendingMainChatSnapshot(resumeChat);
-              }
-              return;
-            }
-
-            openDrawer();
-          }
-        },
-      }),
-    [activeChat, currentScreen, drawerOpen, gitChat, openDrawer, selectedChatId]
+  const handleDrawerSettled = useCallback(
+    (isOpen: boolean) => {
+      drawerOpenRef.current = isOpen;
+      drawerVisibleRef.current = isOpen;
+      setDrawerVisible(isOpen);
+    },
+    []
   );
 
-  const closeSwipeResponder = useMemo(
+  const animateDrawerTo = useCallback(
+    (shouldOpen: boolean, velocityX = 0) => {
+      if (!shouldOpen && !drawerVisibleRef.current) {
+        return;
+      }
+
+      if (shouldOpen) {
+        dismissKeyboard();
+      }
+
+      ensureDrawerVisible();
+      drawerOffset.value = withSpring(
+        shouldOpen ? 0 : -DRAWER_WIDTH,
+        buildDrawerSpringConfig(velocityX),
+        (finished) => {
+          if (finished) {
+            runOnJS(handleDrawerSettled)(shouldOpen);
+          }
+        }
+      );
+    },
+    [dismissKeyboard, drawerOffset, ensureDrawerVisible, handleDrawerSettled]
+  );
+
+  const openDrawer = useCallback(() => {
+    animateDrawerTo(true);
+  }, [animateDrawerTo]);
+
+  const closeDrawer = useCallback(() => {
+    animateDrawerTo(false);
+  }, [animateDrawerTo]);
+
+  const handleChatGitBack = useCallback(() => {
+    const chatId = gitChat?.id ?? activeChat?.id ?? selectedChatId;
+    const resumeChat =
+      gitChat && gitChat.id === chatId
+        ? gitChat
+        : activeChat && activeChat.id === chatId
+          ? activeChat
+          : null;
+    setCurrentScreen('Main');
+    setGitChat(null);
+    if (chatId) {
+      setSelectedChatId(chatId);
+      setPendingMainChatId(chatId);
+      setPendingMainChatSnapshot(resumeChat);
+    }
+  }, [activeChat, gitChat, selectedChatId]);
+
+  const chatGitBackGesture = useMemo(
     () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gesture) => {
-          if (!drawerOpen) {
-            return false;
-          }
-
-          if (gesture.dx >= 0) {
-            return false;
-          }
-
-          const isMostlyHorizontal = Math.abs(gesture.dx) > Math.abs(gesture.dy);
-          return isMostlyHorizontal && gesture.dx < -8;
-        },
-        onPanResponderRelease: (_, gesture) => {
+      Gesture.Pan()
+        .hitSlop({ right: 12 })
+        .activeOffsetX(12)
+        .failOffsetY([-18, 18])
+        .onEnd((event) => {
           if (
-            gesture.dx < -SWIPE_CLOSE_DISTANCE ||
-            gesture.vx < SWIPE_CLOSE_VELOCITY
+            event.translationX > CHAT_GIT_BACK_DISTANCE ||
+            event.velocityX > CHAT_GIT_BACK_VELOCITY
           ) {
-            closeDrawer();
+            runOnJS(handleChatGitBack)();
           }
-        },
-      }),
-    [closeDrawer, drawerOpen]
+        }),
+    [handleChatGitBack]
+  );
+
+  const openDrawerGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(currentScreen !== 'ChatGit')
+        .activeOffsetX(12)
+        .failOffsetY([-18, 18])
+        .onStart(() => {
+          cancelAnimation(drawerOffset);
+          drawerDragStartOffset.value = drawerOffset.value;
+          runOnJS(dismissKeyboard)();
+          runOnJS(ensureDrawerVisible)();
+        })
+        .onUpdate((event) => {
+          drawerOffset.value = applyDrawerRubberBand(
+            drawerDragStartOffset.value + event.translationX
+          );
+        })
+        .onEnd((event) => {
+          const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
+          const shouldOpen = shouldSettleDrawerOpen(nextOffset, event.velocityX);
+          drawerOffset.value = withSpring(
+            shouldOpen ? 0 : -DRAWER_WIDTH,
+            buildDrawerSpringConfig(event.velocityX),
+            (finished) => {
+              if (finished) {
+                runOnJS(handleDrawerSettled)(shouldOpen);
+              }
+            }
+          );
+        }),
+    [
+      currentScreen,
+      dismissKeyboard,
+      drawerDragStartOffset,
+      drawerOffset,
+      ensureDrawerVisible,
+      handleDrawerSettled,
+    ]
+  );
+
+  const visibleDrawerGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(drawerVisible)
+        .activeOffsetX([-8, 8])
+        .failOffsetY([-18, 18])
+        .onBegin(() => {
+          cancelAnimation(drawerOffset);
+          drawerDragStartOffset.value = drawerOffset.value;
+        })
+        .onUpdate((event) => {
+          drawerOffset.value = applyDrawerRubberBand(
+            drawerDragStartOffset.value + event.translationX
+          );
+        })
+        .onEnd((event) => {
+          const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
+          const shouldOpen = shouldSettleDrawerOpen(nextOffset, event.velocityX);
+          drawerOffset.value = withSpring(
+            shouldOpen ? 0 : -DRAWER_WIDTH,
+            buildDrawerSpringConfig(event.velocityX),
+            (finished) => {
+              if (finished) {
+                runOnJS(handleDrawerSettled)(shouldOpen);
+              }
+            }
+          );
+        }),
+    [drawerDragStartOffset, drawerOffset, drawerVisible, handleDrawerSettled]
   );
 
   const navigate = useCallback(
@@ -343,18 +438,16 @@ export default function App() {
     closeDrawer();
   }, [closeDrawer]);
 
-  const handleDefaultModelSettingsChange = useCallback(
-    (modelId: string | null, effort: ReasoningEffort | null) => {
-      const normalizedModelId = normalizeModelId(modelId);
-      const normalizedEffort = normalizeReasoningEffort(effort);
-      setDefaultModelId(normalizedModelId);
-      setDefaultReasoningEffort(normalizedEffort);
+  const handleDefaultChatEngineChange = useCallback(
+    (engine: ChatEngine) => {
+      const normalizedEngine = normalizeChatEngine(engine) ?? 'codex';
+      setDefaultChatEngine(normalizedEngine);
       void saveAppSettings(
         bridgeUrl,
         bridgeToken,
         defaultStartCwd,
-        normalizedModelId,
-        normalizedEffort,
+        normalizedEngine,
+        defaultEngineSettings,
         approvalMode,
         showToolCalls
       );
@@ -363,6 +456,42 @@ export default function App() {
       approvalMode,
       bridgeToken,
       bridgeUrl,
+      defaultEngineSettings,
+      defaultStartCwd,
+      saveAppSettings,
+      showToolCalls,
+    ]
+  );
+
+  const handleDefaultModelSettingsChange = useCallback(
+    (engine: ChatEngine, modelId: string | null, effort: ReasoningEffort | null) => {
+      const normalizedEngine = normalizeChatEngine(engine) ?? 'codex';
+      const normalizedModelId = normalizeModelId(modelId);
+      const normalizedEffort = normalizeReasoningEffort(effort);
+      const nextDefaultEngineSettings = {
+        ...defaultEngineSettings,
+        [normalizedEngine]: {
+          modelId: normalizedModelId,
+          effort: normalizedEffort,
+        },
+      };
+      setDefaultEngineSettings(nextDefaultEngineSettings);
+      void saveAppSettings(
+        bridgeUrl,
+        bridgeToken,
+        defaultStartCwd,
+        defaultChatEngine,
+        nextDefaultEngineSettings,
+        approvalMode,
+        showToolCalls
+      );
+    },
+    [
+      approvalMode,
+      bridgeToken,
+      bridgeUrl,
+      defaultChatEngine,
+      defaultEngineSettings,
       defaultStartCwd,
       saveAppSettings,
       showToolCalls,
@@ -377,8 +506,8 @@ export default function App() {
         bridgeUrl,
         bridgeToken,
         defaultStartCwd,
-        defaultModelId,
-        defaultReasoningEffort,
+        defaultChatEngine,
+        defaultEngineSettings,
         normalizedMode,
         showToolCalls
       );
@@ -386,9 +515,9 @@ export default function App() {
     [
       bridgeToken,
       bridgeUrl,
+      defaultChatEngine,
+      defaultEngineSettings,
       defaultStartCwd,
-      defaultModelId,
-      defaultReasoningEffort,
       saveAppSettings,
       showToolCalls,
     ]
@@ -401,8 +530,8 @@ export default function App() {
         bridgeUrl,
         bridgeToken,
         defaultStartCwd,
-        defaultModelId,
-        defaultReasoningEffort,
+        defaultChatEngine,
+        defaultEngineSettings,
         approvalMode,
         nextValue
       );
@@ -411,9 +540,9 @@ export default function App() {
       approvalMode,
       bridgeToken,
       bridgeUrl,
+      defaultChatEngine,
+      defaultEngineSettings,
       defaultStartCwd,
-      defaultModelId,
-      defaultReasoningEffort,
       saveAppSettings,
     ]
   );
@@ -426,8 +555,8 @@ export default function App() {
         bridgeUrl,
         bridgeToken,
         normalizedDefaultStartCwd,
-        defaultModelId,
-        defaultReasoningEffort,
+        defaultChatEngine,
+        defaultEngineSettings,
         approvalMode,
         showToolCalls
       );
@@ -436,8 +565,8 @@ export default function App() {
       approvalMode,
       bridgeToken,
       bridgeUrl,
-      defaultModelId,
-      defaultReasoningEffort,
+      defaultChatEngine,
+      defaultEngineSettings,
       saveAppSettings,
       showToolCalls,
     ]
@@ -461,8 +590,8 @@ export default function App() {
         normalized,
         normalizeBridgeToken(nextBridgeToken),
         defaultStartCwd,
-        defaultModelId,
-        defaultReasoningEffort,
+        defaultChatEngine,
+        defaultEngineSettings,
         approvalMode,
         showToolCalls
       );
@@ -473,9 +602,9 @@ export default function App() {
     [
       approvalMode,
       closeDrawer,
+      defaultChatEngine,
+      defaultEngineSettings,
       defaultStartCwd,
-      defaultModelId,
-      defaultReasoningEffort,
       onboardingMode,
       onboardingReturnScreen,
       saveAppSettings,
@@ -505,8 +634,8 @@ export default function App() {
       null,
       null,
       defaultStartCwd,
-      defaultModelId,
-      defaultReasoningEffort,
+      defaultChatEngine,
+      defaultEngineSettings,
       approvalMode,
       showToolCalls
     );
@@ -514,9 +643,9 @@ export default function App() {
   }, [
     approvalMode,
     closeDrawer,
+    defaultChatEngine,
+    defaultEngineSettings,
     defaultStartCwd,
-    defaultModelId,
-    defaultReasoningEffort,
     saveAppSettings,
     showToolCalls,
   ]);
@@ -568,11 +697,13 @@ export default function App() {
 
   if (!settingsLoaded) {
     return (
-      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
-        <View style={styles.loadingRoot}>
-          <ActivityIndicator size="large" color={colors.textMuted} />
-        </View>
-      </SafeAreaProvider>
+      <GestureHandlerRootView style={styles.root}>
+        <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+          <View style={styles.loadingRoot}>
+            <ActivityIndicator size="large" color={colors.textMuted} />
+          </View>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
     );
   }
 
@@ -582,17 +713,19 @@ export default function App() {
     const mode: OnboardingMode = bridgeUrl ? onboardingMode : 'initial';
     const canCancel = mode === 'edit' && Boolean(bridgeUrl);
     return (
-      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
-        <OnboardingScreen
-          mode={mode}
-          initialBridgeUrl={initialUrl}
-          initialBridgeToken={initialToken}
-          allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
-          allowQueryTokenAuth={env.allowWsQueryTokenAuth}
-          onSave={handleBridgeUrlSaved}
-          onCancel={canCancel ? handleCancelOnboarding : undefined}
-        />
-      </SafeAreaProvider>
+      <GestureHandlerRootView style={styles.root}>
+        <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+          <OnboardingScreen
+            mode={mode}
+            initialBridgeUrl={initialUrl}
+            initialBridgeToken={initialToken}
+            allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
+            allowQueryTokenAuth={env.allowWsQueryTokenAuth}
+            onSave={handleBridgeUrlSaved}
+            onCancel={canCancel ? handleCancelOnboarding : undefined}
+          />
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
     );
   }
 
@@ -619,8 +752,8 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
-            defaultModelId={defaultModelId}
-            defaultReasoningEffort={defaultReasoningEffort}
+            defaultChatEngine={defaultChatEngine}
+            defaultEngineSettings={defaultEngineSettings}
             approvalMode={approvalMode}
             showToolCalls={showToolCalls}
             onDefaultStartCwdChange={handleDefaultStartCwdChange}
@@ -639,8 +772,9 @@ export default function App() {
             api={activeApi}
             ws={activeWs}
             bridgeUrl={bridgeUrl}
-            defaultModelId={defaultModelId}
-            defaultReasoningEffort={defaultReasoningEffort}
+            defaultChatEngine={defaultChatEngine}
+            defaultEngineSettings={defaultEngineSettings}
+            onDefaultChatEngineChange={handleDefaultChatEngineChange}
             onDefaultModelSettingsChange={handleDefaultModelSettingsChange}
             approvalMode={approvalMode}
             onApprovalModeChange={handleApprovalModeChange}
@@ -678,8 +812,8 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             defaultStartCwd={defaultStartCwd}
-            defaultModelId={defaultModelId}
-            defaultReasoningEffort={defaultReasoningEffort}
+            defaultChatEngine={defaultChatEngine}
+            defaultEngineSettings={defaultEngineSettings}
             approvalMode={approvalMode}
             showToolCalls={showToolCalls}
             onDefaultStartCwdChange={handleDefaultStartCwdChange}
@@ -696,56 +830,59 @@ export default function App() {
   };
 
   return (
-    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
-      <View style={styles.root}>
-        {/* Main content */}
-        <Animated.View
-          style={[
-            styles.screenFrame,
-            drawerOpen && styles.screenFrameOpen,
-            {
-              width: screenWidth,
-              transform: [{ translateX: contentTranslateX }, { scale: contentScale }],
-            },
-          ]}
-        >
-          {renderScreen()}
-        </Animated.View>
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+        <View style={styles.root}>
+          <GestureDetector gesture={openDrawerGesture}>
+            <Animated.View
+              style={[
+                styles.screenFrame,
+                screenFrameAnimatedStyle,
+                { width: screenWidth },
+              ]}
+            >
+              {renderScreen()}
+            </Animated.View>
+          </GestureDetector>
 
-        {/* Overlay */}
-        <Animated.View
-          pointerEvents={drawerOpen ? 'auto' : 'none'}
-          {...closeSwipeResponder.panHandlers}
-          style={[styles.overlay, { opacity: overlayAnim }]}
-        >
-          <Pressable style={StyleSheet.absoluteFill} onPress={closeDrawer} />
-        </Animated.View>
+          <View pointerEvents={drawerVisible ? 'auto' : 'none'} style={styles.drawerLayer}>
+            <GestureDetector gesture={visibleDrawerGesture}>
+              <Animated.View style={[styles.overlay, overlayAnimatedStyle]}>
+                <Pressable style={StyleSheet.absoluteFill} onPress={closeDrawer} />
+              </Animated.View>
+            </GestureDetector>
 
-        {/* Drawer */}
-        <Animated.View
-          {...closeSwipeResponder.panHandlers}
-          style={[
-            styles.drawer,
-            { transform: [{ translateX: drawerAnim }] },
-          ]}
-        >
-          <DrawerContent
-            api={activeApi}
-            ws={activeWs}
-            selectedChatId={selectedChatId}
-            onSelectChat={handleSelectChat}
-            onNewChat={handleNewChat}
-            onNavigate={navigate}
-          />
-        </Animated.View>
+            <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
+              <Animated.View
+                style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
+              >
+                <DrawerContent
+                  api={activeApi}
+                  ws={activeWs}
+                  selectedChatId={selectedChatId}
+                  onSelectChat={handleSelectChat}
+                  onNewChat={handleNewChat}
+                  onNavigate={navigate}
+                />
+              </Animated.View>
 
-        <View
-          pointerEvents={drawerOpen ? 'none' : 'auto'}
-          style={styles.edgeSwipeZone}
-          {...openSwipeResponder.panHandlers}
-        />
-      </View>
-    </SafeAreaProvider>
+              <GestureDetector gesture={visibleDrawerGesture}>
+                <View style={styles.drawerDragZone} />
+              </GestureDetector>
+            </Animated.View>
+          </View>
+
+          {currentScreen === 'ChatGit' ? (
+            <GestureDetector gesture={chatGitBackGesture}>
+              <View
+                pointerEvents={drawerVisible ? 'none' : 'auto'}
+                style={styles.edgeSwipeZone}
+              />
+            </GestureDetector>
+          ) : null}
+        </View>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -762,8 +899,8 @@ function parseAppSettings(raw: string): {
   bridgeUrl: string | null;
   bridgeToken: string | null;
   defaultStartCwd: string | null;
-  defaultModelId: string | null;
-  defaultReasoningEffort: ReasoningEffort | null;
+  defaultChatEngine: ChatEngine;
+  defaultEngineSettings: EngineDefaultSettingsMap;
   approvalMode: ApprovalMode;
   showToolCalls: boolean;
 } {
@@ -772,9 +909,9 @@ function parseAppSettings(raw: string): {
       bridgeUrl: null,
       bridgeToken: null,
       defaultStartCwd: null,
-      defaultModelId: null,
-      defaultReasoningEffort: null,
-      approvalMode: 'normal',
+      defaultChatEngine: 'codex',
+      defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
+      approvalMode: 'yolo',
       showToolCalls: false,
     };
   }
@@ -787,18 +924,35 @@ function parseAppSettings(raw: string): {
       typeof parsed !== 'object' ||
       (parsedVersion !== 1 &&
         parsedVersion !== 2 &&
+        parsedVersion !== 3 &&
         parsedVersion !== APP_SETTINGS_VERSION)
     ) {
       return {
         bridgeUrl: null,
         bridgeToken: null,
         defaultStartCwd: null,
-        defaultModelId: null,
-        defaultReasoningEffort: null,
-        approvalMode: 'normal',
+        defaultChatEngine: 'codex',
+        defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
+        approvalMode: 'yolo',
         showToolCalls: false,
       };
     }
+
+    const legacyDefaultModelId = normalizeModelId(
+      (parsed as { defaultModelId?: unknown }).defaultModelId
+    );
+    const legacyDefaultReasoningEffort = normalizeReasoningEffort(
+      (parsed as { defaultReasoningEffort?: unknown }).defaultReasoningEffort
+    );
+    const defaultChatEngine =
+      normalizeChatEngine((parsed as { defaultChatEngine?: unknown }).defaultChatEngine) ??
+      inferChatEngineFromModelId(legacyDefaultModelId) ??
+      'codex';
+    const defaultEngineSettings = normalizeEngineDefaultSettingsMap(
+      (parsed as { defaultEngineSettings?: unknown }).defaultEngineSettings,
+      legacyDefaultModelId,
+      legacyDefaultReasoningEffort
+    );
 
     return {
       bridgeUrl: normalizeBridgeUrl((parsed as { bridgeUrl?: unknown }).bridgeUrl),
@@ -806,13 +960,9 @@ function parseAppSettings(raw: string): {
       defaultStartCwd: normalizeDefaultStartCwd(
         (parsed as { defaultStartCwd?: unknown }).defaultStartCwd
       ),
-      defaultModelId: normalizeModelId(
-        (parsed as { defaultModelId?: unknown }).defaultModelId
-      ),
-      defaultReasoningEffort: normalizeReasoningEffort(
-        (parsed as { defaultReasoningEffort?: unknown }).defaultReasoningEffort
-      ),
-      approvalMode: normalizeApprovalMode(
+      defaultChatEngine,
+      defaultEngineSettings,
+      approvalMode: normalizeStoredApprovalMode(
         (parsed as { approvalMode?: unknown }).approvalMode
       ),
       showToolCalls: normalizeBoolean(
@@ -824,9 +974,9 @@ function parseAppSettings(raw: string): {
       bridgeUrl: null,
       bridgeToken: null,
       defaultStartCwd: null,
-      defaultModelId: null,
-      defaultReasoningEffort: null,
-      approvalMode: 'normal',
+      defaultChatEngine: 'codex',
+      defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
+      approvalMode: 'yolo',
       showToolCalls: false,
     };
   }
@@ -867,6 +1017,75 @@ function normalizeModelId(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function normalizeChatEngine(value: unknown): ChatEngine | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'codex' || normalized === 'opencode') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function inferChatEngineFromModelId(value: string | null | undefined): ChatEngine | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.includes('/') ? 'opencode' : 'codex';
+}
+
+function createEmptyEngineDefaultSettingsMap(): EngineDefaultSettingsMap {
+  return {
+    codex: {
+      modelId: null,
+      effort: null,
+    },
+    opencode: {
+      modelId: null,
+      effort: null,
+    },
+  };
+}
+
+function normalizeEngineDefaultSettingsMap(
+  value: unknown,
+  legacyDefaultModelId: string | null,
+  legacyDefaultEffort: ReasoningEffort | null
+): EngineDefaultSettingsMap {
+  const base = createEmptyEngineDefaultSettingsMap();
+  const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+
+  for (const engine of ['codex', 'opencode'] as const) {
+    const entry =
+      record && typeof record[engine] === 'object'
+        ? (record[engine] as Record<string, unknown>)
+        : null;
+    if (!entry) {
+      continue;
+    }
+
+    base[engine] = {
+      modelId: normalizeModelId(entry.modelId),
+      effort: normalizeReasoningEffort(entry.effort),
+    };
+  }
+
+  if (legacyDefaultModelId) {
+    const legacyEngine = inferChatEngineFromModelId(legacyDefaultModelId) ?? 'codex';
+    base[legacyEngine] = {
+      modelId: legacyDefaultModelId,
+      effort: legacyDefaultEffort,
+    };
+  }
+
+  return base;
+}
+
 function normalizeReasoningEffort(value: unknown): ReasoningEffort | null {
   if (typeof value !== 'string') {
     return null;
@@ -891,8 +1110,67 @@ function normalizeApprovalMode(value: unknown): ApprovalMode {
   return value === 'yolo' ? 'yolo' : 'normal';
 }
 
+function normalizeStoredApprovalMode(value: unknown): ApprovalMode {
+  if (typeof value === 'undefined') {
+    return 'yolo';
+  }
+
+  return normalizeApprovalMode(value);
+}
+
 function normalizeBoolean(value: unknown): boolean {
   return value === true;
+}
+
+function clampDrawerOffset(value: number): number {
+  'worklet';
+  return Math.max(-DRAWER_WIDTH, Math.min(0, value));
+}
+
+function getDrawerOpenProgress(value: number): number {
+  'worklet';
+  return (clampDrawerOffset(value) + DRAWER_WIDTH) / DRAWER_WIDTH;
+}
+
+function applyDrawerRubberBand(value: number): number {
+  'worklet';
+  if (value > 0) {
+    return value * DRAWER_RUBBER_BAND_STRENGTH;
+  }
+
+  if (value < -DRAWER_WIDTH) {
+    return -DRAWER_WIDTH + (value + DRAWER_WIDTH) * DRAWER_RUBBER_BAND_STRENGTH;
+  }
+
+  return value;
+}
+
+function projectDrawerOffset(value: number, velocityX: number): number {
+  'worklet';
+  return clampDrawerOffset(value + velocityX * DRAWER_VELOCITY_PROJECTION);
+}
+
+function shouldSettleDrawerOpen(value: number, velocityX: number): boolean {
+  'worklet';
+  if (velocityX >= DRAWER_SNAP_VELOCITY) {
+    return true;
+  }
+
+  if (velocityX <= -DRAWER_SNAP_VELOCITY) {
+    return false;
+  }
+
+  return getDrawerOpenProgress(projectDrawerOffset(value, velocityX)) >= DRAWER_SNAP_OPEN_PROGRESS;
+}
+
+function buildDrawerSpringConfig(velocityX: number) {
+  'worklet';
+  return {
+    damping: 22,
+    stiffness: 260,
+    mass: 0.9,
+    velocity: Math.max(-1800, Math.min(1800, velocityX)),
+  };
 }
 
 const styles = StyleSheet.create({
@@ -912,16 +1190,18 @@ const styles = StyleSheet.create({
   screenFrame: {
     flex: 1,
     backgroundColor: colors.bgMain,
-  },
-  screenFrameOpen: {
-    borderRadius: 28,
-    borderCurve: 'continuous',
     overflow: 'hidden',
-    boxShadow: '0 22px 48px rgba(0, 0, 0, 0.34)',
+    borderCurve: 'continuous',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 16 },
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.52)',
+    zIndex: 10,
+  },
+  drawerLayer: {
+    ...StyleSheet.absoluteFillObject,
     zIndex: 10,
   },
   drawer: {
@@ -931,6 +1211,17 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: DRAWER_WIDTH,
     zIndex: 20,
+  },
+  drawerContentShell: {
+    flex: 1,
+  },
+  drawerDragZone: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 20,
+    zIndex: 25,
   },
   edgeSwipeZone: {
     position: 'absolute',

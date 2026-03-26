@@ -9,6 +9,8 @@ fi
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MOBILE_ENV_FILE="$ROOT_DIR/apps/mobile/.env"
 MOBILE_ENV_EXAMPLE="$ROOT_DIR/apps/mobile/.env.example"
+BRIDGE_ACTIVE_ENGINE="${BRIDGE_ACTIVE_ENGINE:-codex}"
+OPENCODE_CLI_BIN="${OPENCODE_CLI_BIN:-opencode}"
 
 upsert_env_key() {
   local file="$1"
@@ -226,6 +228,15 @@ case "$BRIDGE_NETWORK_MODE" in
     ;;
 esac
 
+case "$BRIDGE_ACTIVE_ENGINE" in
+  codex|opencode)
+    ;;
+  *)
+    echo "error: BRIDGE_ACTIVE_ENGINE must be 'codex' or 'opencode'." >&2
+    exit 1
+    ;;
+esac
+
 if [[ -n "$BRIDGE_HOST" ]]; then
   HOST_SOURCE="override"
 else
@@ -257,7 +268,9 @@ BRIDGE_HOST=$BRIDGE_HOST
 BRIDGE_PORT=$BRIDGE_PORT
 BRIDGE_AUTH_TOKEN=$BRIDGE_TOKEN
 BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true
+BRIDGE_ACTIVE_ENGINE=$BRIDGE_ACTIVE_ENGINE
 CODEX_CLI_BIN=codex
+OPENCODE_CLI_BIN=$OPENCODE_CLI_BIN
 BRIDGE_WORKDIR=$ROOT_DIR
 EOT
 
@@ -276,6 +289,7 @@ echo ""
 echo "Bridge network mode: $BRIDGE_NETWORK_MODE"
 echo "Bridge host: $BRIDGE_HOST ($HOST_SOURCE)"
 echo "Bridge port: $BRIDGE_PORT"
+echo "Preferred engine: $BRIDGE_ACTIVE_ENGINE"
 echo "Token source: $SECURE_ENV_FILE"
 if has_local_mobile_workspace; then
   echo "Mobile env updated: $MOBILE_ENV_FILE"

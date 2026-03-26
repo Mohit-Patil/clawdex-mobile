@@ -1,4 +1,12 @@
 export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
+export type ChatEngine = 'codex' | 'opencode';
+
+export interface EngineDefaultSettings {
+  modelId: string | null;
+  effort: ReasoningEffort | null;
+}
+
+export type EngineDefaultSettingsMap = Partial<Record<ChatEngine, EngineDefaultSettings>>;
 
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
 
@@ -15,7 +23,7 @@ export interface ChatMessage {
   role: ChatMessageRole;
   content: string;
   createdAt: string;
-  systemKind?: 'tool' | 'subAgent';
+  systemKind?: 'tool' | 'reasoning' | 'subAgent';
   subAgentMeta?: ChatMessageSubAgentMeta;
 }
 
@@ -28,6 +36,7 @@ export interface ChatSummary {
   statusUpdatedAt: string;
   lastMessagePreview: string;
   cwd?: string;
+  engine?: ChatEngine;
   modelProvider?: string;
   agentNickname?: string;
   agentRole?: string;
@@ -60,6 +69,7 @@ export interface CreateChatRequest {
   title?: string;
   message?: string;
   cwd?: string;
+  engine?: ChatEngine;
   model?: string;
   effort?: ReasoningEffort;
   serviceTier?: ServiceTier;
@@ -214,6 +224,10 @@ export interface ModelOption {
   id: string;
   displayName: string;
   description?: string;
+  providerId?: string;
+  providerName?: string;
+  connected?: boolean;
+  authRequired?: boolean;
   hidden?: boolean;
   supportsPersonality?: boolean;
   isDefault?: boolean;
@@ -426,6 +440,17 @@ export interface VoiceTranscribeRequest {
 
 export interface VoiceTranscribeResponse {
   text: string;
+}
+
+export interface BridgeCapabilities {
+  activeEngine: ChatEngine;
+  availableEngines: ChatEngine[];
+  unifiedChatList: boolean;
+  supports: {
+    reviewStart: boolean;
+    turnSteer: boolean;
+    commandOutputDelta: boolean;
+  };
 }
 
 export interface RpcNotification {

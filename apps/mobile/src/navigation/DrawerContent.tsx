@@ -12,10 +12,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
-import type { ChatSummary, RpcNotification } from '../api/types';
+import type { ChatEngine, ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
+import { getChatEngineBadgeColors, getChatEngineLabel } from '../chatEngines';
 import { BrandMark } from '../components/BrandMark';
-import { filterDrawerChats } from './drawerChats';
+import {
+  DEFAULT_DRAWER_CHAT_ENGINES,
+  filterDrawerChats,
+  filterDrawerChatsByEngines,
+} from './drawerChats';
 import { describeAgentThreadSource } from '../screens/agentThreads';
 import {
   buildChatWorkspaceSections,
@@ -53,6 +58,19 @@ const RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'web_search_begin',
   'background_event',
 ]);
+const CHAT_FILTER_OPTIONS: ReadonlyArray<{
+  key: ChatEngine;
+  label: string;
+}> = [
+  {
+    key: 'codex',
+    label: 'Codex',
+  },
+  {
+    key: 'opencode',
+    label: 'OpenCode',
+  },
+];
 
 export function DrawerContent({
   api,
@@ -65,12 +83,21 @@ export function DrawerContent({
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedChatEngines, setSelectedChatEngines] = useState<ChatEngine[]>(() => [
+    ...DEFAULT_DRAWER_CHAT_ENGINES,
+  ]);
+  const [filterMenuVisible, setFilterMenuVisible] = useState(false);
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
   const [runHeartbeatAtByThread, setRunHeartbeatAtByThread] = useState<Record<string, number>>({});
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const hasAppliedInitialCollapseRef = useRef(false);
   const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
-  const chatSections = useMemo(() => buildChatWorkspaceSections(chats), [chats]);
+  const allChatSections = useMemo(() => buildChatWorkspaceSections(chats), [chats]);
+  const filteredChats = useMemo(
+    () => filterDrawerChatsByEngines(chats, selectedChatEngines),
+    [chats, selectedChatEngines]
+  );
+  const chatSections = useMemo(() => buildChatWorkspaceSections(filteredChats), [filteredChats]);
   const visibleChatSections = useMemo(
     () =>
       chatSections.map((section) =>
@@ -268,6 +295,48 @@ export function DrawerContent({
   }, [chatSections]);
 
   useEffect(() => {
+    setCollapsedWorkspaceKeys((prev) => {
+      const validKeys = new Set(chatSections.map((section) => section.key));
+      let changed = false;
+      const next = new Set<string>();
+
+      for (const key of prev) {
+        if (validKeys.has(key)) {
+          next.add(key);
+        } else {
+          changed = true;
+        }
+      }
+
+      const everySectionCollapsed =
+        chatSections.length > 0 && chatSections.every((section) => next.has(section.key));
+      if (everySectionCollapsed) {
+        next.delete(chatSections[0]?.key ?? '');
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [chatSections]);
+
+  const filteredChatCount = filteredChats.length;
+  const selectedChatEngineSet = useMemo(
+    () => new Set(selectedChatEngines),
+    [selectedChatEngines]
+  );
+  const hasFilteredEngines = selectedChatEngines.length < DEFAULT_DRAWER_CHAT_ENGINES.length;
+  const singleSelectedEngine =
+    selectedChatEngines.length === 1 ? selectedChatEngines[0] : null;
+  const emptyTitle = singleSelectedEngine
+    ? `No ${getChatEngineLabel(singleSelectedEngine)} chats`
+    : 'No chats yet';
+  const emptyHint = singleSelectedEngine
+    ? `Turn ${getChatEngineLabel(
+        singleSelectedEngine === 'codex' ? 'opencode' : 'codex'
+      )} back on or start a new ${getChatEngineLabel(singleSelectedEngine)} chat.`
+    : 'Start a new chat and it will show up here with live activity.';
+
+  useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
         setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(chatSectionsRef.current));
@@ -290,6 +359,42 @@ export function DrawerContent({
         next.add(sectionKey);
       }
       return next;
+    });
+  }, []);
+
+  const handleSelectChat = useCallback(
+    (chatId: string) => {
+      setFilterMenuVisible(false);
+      onSelectChat(chatId);
+    },
+    [onSelectChat]
+  );
+
+  const handleNewChat = useCallback(() => {
+    setFilterMenuVisible(false);
+    onNewChat();
+  }, [onNewChat]);
+
+  const handleNavigate = useCallback(
+    (screen: Screen) => {
+      setFilterMenuVisible(false);
+      onNavigate(screen);
+    },
+    [onNavigate]
+  );
+
+  const toggleChatEngineFilter = useCallback((engine: ChatEngine) => {
+    setSelectedChatEngines((prev) => {
+      const hasEngine = prev.includes(engine);
+      if (hasEngine && prev.length === 1) {
+        return prev;
+      }
+
+      const next = hasEngine
+        ? prev.filter((entry) => entry !== engine)
+        : [...prev, engine];
+
+      return DEFAULT_DRAWER_CHAT_ENGINES.filter((entry) => next.includes(entry));
     });
   }, []);
 
@@ -353,7 +458,7 @@ export function DrawerContent({
                 <View style={styles.heroStatsDivider} />
                 <View style={styles.heroStat}>
                   <Text style={styles.heroStatValue}>
-                    {formatCompactCount(chatSections.length)}
+                    {formatCompactCount(allChatSections.length)}
                   </Text>
                   <Text style={styles.heroStatLabel}>Spaces</Text>
                 </View>
@@ -366,7 +471,7 @@ export function DrawerContent({
                   styles.primaryActionButton,
                   pressed && styles.primaryActionButtonPressed,
                 ]}
-                onPress={onNewChat}
+                onPress={handleNewChat}
               >
                 <Ionicons name="add" size={18} color={colors.black} />
                 <Text style={styles.primaryActionText}>New chat</Text>
@@ -376,10 +481,69 @@ export function DrawerContent({
 
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Chats</Text>
-            <View style={styles.sectionCountBadge}>
-              <Text style={styles.sectionCountText}>
-                {formatCompactCount(chats.length)}
-              </Text>
+            <View style={styles.sectionHeaderRight}>
+              <View style={styles.filterMenuAnchor}>
+                <Pressable
+                  accessibilityLabel="Filter chat engines"
+                  accessibilityRole="button"
+                  hitSlop={6}
+                  onPress={() => setFilterMenuVisible((prev) => !prev)}
+                  style={({ pressed }) => [
+                    styles.filterTriggerButton,
+                    filterMenuVisible && styles.filterTriggerButtonOpen,
+                    hasFilteredEngines && styles.filterTriggerButtonActive,
+                    pressed && styles.filterTriggerButtonPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="funnel-outline"
+                    size={14}
+                    color={hasFilteredEngines || filterMenuVisible ? colors.textPrimary : colors.textMuted}
+                  />
+                </Pressable>
+                {filterMenuVisible ? (
+                  <View style={styles.filterPopover}>
+                    {CHAT_FILTER_OPTIONS.map((option) => {
+                      const selected = selectedChatEngineSet.has(option.key);
+                      return (
+                        <Pressable
+                          key={option.key}
+                          accessibilityLabel={`Toggle ${option.label} chats`}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: selected }}
+                          onPress={() => toggleChatEngineFilter(option.key)}
+                          style={({ pressed }) => [
+                            styles.filterPopoverOption,
+                            selected && styles.filterPopoverOptionSelected,
+                            pressed && styles.filterPopoverOptionPressed,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.filterPopoverOptionText,
+                              selected && styles.filterPopoverOptionTextSelected,
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                          {selected ? (
+                            <Ionicons
+                              name="checkmark"
+                              size={14}
+                              color={colors.textPrimary}
+                            />
+                          ) : null}
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                ) : null}
+              </View>
+              <View style={styles.sectionCountBadge}>
+                <Text style={styles.sectionCountText}>
+                  {formatCompactCount(filteredChatCount)}
+                </Text>
+              </View>
             </View>
           </View>
 
@@ -392,12 +556,14 @@ export function DrawerContent({
           ) : chatSections.length === 0 ? (
             <View style={styles.emptyStateCard}>
               <View style={styles.emptyStateIconWrap}>
-                <Ionicons name="sparkles-outline" size={18} color={colors.textPrimary} />
+                <Ionicons
+                  name="chatbubbles-outline"
+                  size={18}
+                  color={colors.textPrimary}
+                />
               </View>
-              <Text style={styles.emptyTitle}>No chats yet</Text>
-              <Text style={styles.emptyHint}>
-                Start a new chat and it will show up here with live activity.
-              </Text>
+              <Text style={styles.emptyTitle}>{emptyTitle}</Text>
+              <Text style={styles.emptyHint}>{emptyHint}</Text>
             </View>
           ) : (
             <SectionList
@@ -467,6 +633,7 @@ export function DrawerContent({
                 const previewText = isSubAgent
                   ? `${describeAgentThreadSource(chat, item.rootThreadId)} • ${formatChatPreview(chat)}`
                   : formatChatPreview(chat);
+                const engineBadgeColors = getChatEngineBadgeColors(chat.engine);
                 return (
                   <Pressable
                     style={({ pressed }) => [
@@ -477,7 +644,7 @@ export function DrawerContent({
                       pressed && styles.chatItemPressed,
                       isLast && styles.chatItemLast,
                     ]}
-                    onPress={() => onSelectChat(chat.id)}
+                    onPress={() => handleSelectChat(chat.id)}
                   >
                     <View
                       style={[
@@ -508,6 +675,26 @@ export function DrawerContent({
                         >
                           {chat.title || 'Untitled'}
                         </Text>
+                        <View
+                          style={[
+                            styles.engineBadge,
+                            {
+                              backgroundColor: engineBadgeColors.backgroundColor,
+                              borderColor: engineBadgeColors.borderColor,
+                            },
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.engineBadgeText,
+                              {
+                                color: engineBadgeColors.textColor,
+                              },
+                            ]}
+                          >
+                            {getChatEngineLabel(chat.engine)}
+                          </Text>
+                        </View>
                         <Text
                           style={[styles.chatAge, isSelected && styles.chatAgeSelected]}
                         >
@@ -565,7 +752,7 @@ export function DrawerContent({
               styles.footerSettingsButton,
               pressed && styles.footerSettingsButtonPressed,
             ]}
-            onPress={() => onNavigate('Settings')}
+            onPress={() => handleNavigate('Settings')}
           >
             <Ionicons name="settings-outline" size={16} color={colors.textPrimary} />
             <Text style={styles.footerSettingsText}>Settings</Text>
@@ -677,6 +864,7 @@ const styles = StyleSheet.create({
   mainContent: {
     flex: 1,
     minHeight: 0,
+    position: 'relative',
   },
   topDeck: {
     paddingHorizontal: spacing.lg,
@@ -829,6 +1017,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingBottom: spacing.sm,
   },
+  sectionHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    zIndex: 2,
+  },
   sectionTitle: {
     ...typography.caption,
     color: colors.textMuted,
@@ -856,6 +1050,71 @@ const styles = StyleSheet.create({
     lineHeight: 12,
     fontWeight: '700',
     fontVariant: ['tabular-nums'],
+  },
+  filterMenuAnchor: {
+    position: 'relative',
+  },
+  filterTriggerButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: '#101317',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterTriggerButtonOpen: {
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: '#151A20',
+  },
+  filterTriggerButtonActive: {
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+  },
+  filterTriggerButtonPressed: {
+    opacity: 0.9,
+  },
+  filterPopover: {
+    position: 'absolute',
+    top: 36,
+    right: 0,
+    width: 156,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: '#0F1318',
+    padding: 6,
+    gap: 4,
+    shadowColor: colors.black,
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
+    zIndex: 6,
+  },
+  filterPopoverOption: {
+    minHeight: 34,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.xs,
+  },
+  filterPopoverOptionSelected: {
+    backgroundColor: '#171C22',
+  },
+  filterPopoverOptionPressed: {
+    opacity: 0.9,
+  },
+  filterPopoverOptionText: {
+    ...typography.body,
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  filterPopoverOptionTextSelected: {
+    color: colors.textPrimary,
   },
   list: {
     flex: 1,
@@ -1027,6 +1286,20 @@ const styles = StyleSheet.create({
   },
   chatTitleSelected: {
     color: colors.textPrimary,
+  },
+  engineBadge: {
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    flexShrink: 0,
+  },
+  engineBadgeText: {
+    ...typography.caption,
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
   },
   chatAge: {
     ...typography.caption,

@@ -13,6 +13,8 @@ import type {
   AccountRateLimitSnapshot,
   ApprovalPolicy,
   ApprovalDecision,
+  BridgeCapabilities,
+  ChatEngine,
   CollaborationMode,
   CreateChatRequest,
   Chat,
@@ -183,6 +185,10 @@ export class HostBridgeApiClient {
     return this.ws.request<HealthResponse>('bridge/health/read');
   }
 
+  readBridgeCapabilities(): Promise<BridgeCapabilities> {
+    return this.ws.request<BridgeCapabilities>('bridge/capabilities/read');
+  }
+
   async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {
     const response = await this.ws.request<Record<string, unknown>>('account/rateLimits/read');
     return readSelectedAccountRateLimits(response);
@@ -272,12 +278,14 @@ export class HostBridgeApiClient {
   }
 
   async createChat(body: CreateChatRequest): Promise<Chat> {
+    const requestedEngine = normalizeChatEngine(body.engine);
     const requestedCwd = normalizeCwd(body.cwd);
     const requestedModel = normalizeModel(body.model);
     const requestedEffort = normalizeEffort(body.effort);
     const requestedServiceTier = normalizeServiceTier(body.serviceTier);
     const requestedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy) ?? 'untrusted';
     const started = await this.ws.request<AppServerStartResponse>('thread/start', {
+      engine: requestedEngine ?? undefined,
       model: requestedModel ?? null,
       modelProvider: null,
       cwd: requestedCwd ?? null,
@@ -610,11 +618,24 @@ export class HostBridgeApiClient {
     return this.ws.request<VoiceTranscribeResponse>('bridge/voice/transcribe', body);
   }
 
-  async listModels(includeHidden = false): Promise<ModelOption[]> {
+  async listModels(
+    includeHidden = false,
+    options?: {
+      threadId?: string | null;
+      engine?: ChatEngine | null;
+    }
+  ): Promise<ModelOption[]> {
+    const normalizedThreadId =
+      typeof options?.threadId === 'string' && options.threadId.trim().length > 0
+        ? options.threadId.trim()
+        : null;
+    const normalizedEngine = normalizeChatEngine(options?.engine);
     const response = await this.ws.request<AppServerModelListResponse>('model/list', {
       cursor: null,
       limit: 200,
       includeHidden,
+      threadId: normalizedThreadId,
+      engine: normalizedEngine ?? undefined,
     });
 
     const rawList = Array.isArray(response.data) ? response.data : [];
@@ -633,6 +654,12 @@ export class HostBridgeApiClient {
 
       const displayName = readString(record.displayName) ?? id;
       const description = readString(record.description) ?? undefined;
+      const providerId = readString(record.providerId) ?? readString(record.providerID);
+      const providerName = readString(record.providerName);
+      const connected =
+        typeof record.connected === 'boolean' ? record.connected : undefined;
+      const authRequired =
+        typeof record.authRequired === 'boolean' ? record.authRequired : undefined;
       const hidden = typeof record.hidden === 'boolean' ? record.hidden : undefined;
       const supportsPersonality =
         typeof record.supportsPersonality === 'boolean'
@@ -651,6 +678,10 @@ export class HostBridgeApiClient {
         id,
         displayName,
         description,
+        providerId: providerId ?? undefined,
+        providerName: providerName ?? undefined,
+        connected,
+        authRequired,
         hidden,
         supportsPersonality,
         isDefault,
@@ -1275,6 +1306,19 @@ function normalizeCollaborationMode(
 
   const normalized = value.trim().toLowerCase();
   if (normalized === 'plan' || normalized === 'default') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function normalizeChatEngine(value: string | null | undefined): ChatEngine | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'codex' || normalized === 'opencode') {
     return normalized;
   }
 

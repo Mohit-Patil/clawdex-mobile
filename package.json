@@ -1,6 +1,16 @@
 {
   "name": "clawdex-mobile",
-  "version": "5.0.3",
+  "version": "5.0.4",
+  "description": "Private-network mobile bridge and CLI for Codex and OpenCode",
+  "keywords": [
+    "codex",
+    "opencode",
+    "mobile",
+    "bridge",
+    "expo",
+    "react-native"
+  ],
+  "license": "MIT",
   "homepage": "https://github.com/Mohit-Patil/clawdex-mobile#readme",
   "repository": {
     "type": "git",

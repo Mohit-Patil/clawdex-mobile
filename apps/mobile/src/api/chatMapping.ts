@@ -1,5 +1,6 @@
 import type {
   Chat,
+  ChatEngine,
   ChatMessage,
   ChatMessageSubAgentMeta,
   ChatPlanSnapshot,
@@ -42,6 +43,7 @@ export type RawThreadItem =
 
 export interface RawThread {
   id?: string;
+  engine?: string;
   name?: string;
   title?: string;
   preview?: string;
@@ -214,6 +216,7 @@ export function toRawThread(value: unknown): RawThread {
     undefined;
   return {
     id: readString(record.id) ?? undefined,
+    engine: readString(record.engine) ?? undefined,
     name: threadName,
     title: threadName,
     preview: readString(record.preview) ?? undefined,
@@ -279,6 +282,7 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
     statusUpdatedAt: updatedAt,
     lastMessagePreview: toPreview(raw.preview || ''),
     cwd: readString(raw.cwd) ?? undefined,
+    engine: readChatEngine(raw.engine),
     modelProvider: readString(raw.modelProvider) ?? undefined,
     agentNickname: readString(raw.agentNickname) ?? undefined,
     agentRole: readString(raw.agentRole) ?? undefined,
@@ -287,6 +291,11 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
     subAgentDepth: sourceMetadata.subAgentDepth,
     lastError: lastError ?? undefined,
   };
+}
+
+function readChatEngine(value: unknown): ChatEngine {
+  const normalized = normalizeLifecycleStatus(readString(value));
+  return normalized === 'opencode' ? 'opencode' : 'codex';
 }
 
 function readThreadSourceMetadata(source: unknown): ThreadSourceMetadata {
@@ -564,7 +573,12 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
 
       const toolLikeMessage = toToolLikeMessage(itemRecord);
       if (toolLikeMessage) {
-        const systemKind = itemType === 'collabToolCall' ? 'subAgent' : 'tool';
+        const systemKind =
+          itemType === 'collabToolCall'
+            ? 'subAgent'
+            : itemType === 'reasoning'
+              ? 'reasoning'
+              : 'tool';
         messages.push({
           id: readString(itemRecord.id) ?? generateLocalId(),
           role: 'system',
@@ -736,6 +750,11 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
   if (type === 'plan') {
     const text = normalizeMultiline(readString(item.text), 1800);
     return text || null;
+  }
+
+  if (type === 'reasoning') {
+    const text = normalizeMultiline(reasoningTextFromItem(item), 2400);
+    return withNestedDetail('• Reasoning', text);
   }
 
   if (type === 'commandexecution') {
@@ -943,6 +962,25 @@ function readReceiverThreadIds(item: Record<string, unknown>): string[] {
     .filter((value): value is string => value.length > 0);
 
   return singularIds;
+}
+
+function reasoningTextFromItem(item: Record<string, unknown>): string | null {
+  const directText = readString(item.text);
+  if (directText?.trim()) {
+    return directText;
+  }
+
+  const content = readStringArray(item.content);
+  if (content.length > 0) {
+    return content.join('\n');
+  }
+
+  const summary = readStringArray(item.summary);
+  if (summary.length > 0) {
+    return summary.join('\n');
+  }
+
+  return null;
 }
 
 function normalizeType(value: string): string {

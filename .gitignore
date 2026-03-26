@@ -80,6 +80,7 @@ coverage/
 export-cheat-sheet.local.md
 .agents/
 skills-lock.json
-apps/store-screenshots/
+apps/clawdex-store-screenshots/
+screenshots/
 screenshot-preview.png
 .playwright-mcp/

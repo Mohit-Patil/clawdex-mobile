@@ -10,10 +10,11 @@ function printUsage() {
   console.log(`Usage: clawdex <command> [options]
 
 Commands:
-  init [--no-start]
+  init [--no-start] [--engine codex|opencode]
       Run interactive bridge onboarding and secure setup.
       By default, this also starts the secure bridge in the foreground.
       Use --no-start to configure only.
+      Use --engine to set the preferred backend written to .env.secure.
 
   stop
       Stop bridge services for this project.

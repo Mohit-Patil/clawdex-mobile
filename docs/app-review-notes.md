@@ -8,98 +8,80 @@ Related engineering reference:
 
 ## Submission Snapshot
 
-- App name: Clawdex Mobile
-- Build: [fill in build/version]
-- Date prepared: February 21, 2026
+- App name: Clawdex
+- Version / build: [fill in]
+- Date prepared: [fill in]
 - Primary reviewer contact: [name + email + phone]
 - Time zone for live support: [time zone]
 
 ## What The App Does
 
-Clawdex Mobile is a client for a user-owned host machine.
-The iOS app connects to a bridge service running on the user's own machine and lets the user:
+Clawdex is a companion app for a bridge running on infrastructure the user controls.
+The iPhone and iPad app connects to that bridge and lets the user:
 
-- View and continue assistant threads
-- Review Git status and diffs
-- Create Git commits
-- Execute approved terminal commands on the user-owned host
+- Start new Codex runs and continue existing threads
+- Monitor run progress and respond to clarifications
+- Review approvals, Git status, and diffs
+- Create Git commits on the connected host
+- Execute allowed terminal commands on the connected host
+- Attach files or images from the workspace or device
 
-The app does not provide a public multi-tenant cloud shell.
+The app does not provide a public multi-tenant shell service.
 
 ## Test Setup For Review
 
-Reviewer can use either of the following:
+Reviewer should use a dedicated review bridge.
 
-1. Dedicated review host (recommended for first submission)
+- Provide a publicly reachable bridge URL and token directly in App Store Connect review notes.
+- Keep that bridge online during App Review hours.
+- Do not submit with placeholder or expired host details.
 
-- We provide a reachable test host bridge URL and token directly to App Review.
-- This host stays online during review hours.
-
-2. Local host setup (fallback)
-
-- Start bridge service on the host machine:
+Optional fallback if App Review specifically asks for self-host setup:
 
 ```bash
-npm install
-cp apps/mobile/.env.example apps/mobile/.env
-cp services/mac-bridge/.env.example services/mac-bridge/.env
-npm run bridge
+npm install -g clawdex-mobile@latest
+clawdex init
 ```
 
-- In `services/mac-bridge/.env`, set:
+Then:
 
-```env
-BRIDGE_AUTH_TOKEN=<review-token>
-BRIDGE_HOST=0.0.0.0
-BRIDGE_CORS_ORIGINS=http://localhost:19006,http://localhost:8081
-```
-
-- In `apps/mobile/.env`, set:
-
-```env
-EXPO_PUBLIC_HOST_BRIDGE_TOKEN=<review-token>
-EXPO_PUBLIC_PRIVACY_POLICY_URL=https://<your-policy-url>
-EXPO_PUBLIC_TERMS_OF_SERVICE_URL=https://<your-terms-url>
-```
-
-- In app onboarding, enter:
-
-```text
-http://<mac-lan-ip>:8787
-```
+- Start the bridge on a machine you control.
+- Use the generated bridge URL and token.
+- Pair from the app by scanning the bridge QR code or by entering the URL and token manually.
 
 ## Reviewer Walkthrough
 
-1. Launch app.
-2. Open Drawer and choose "Settings" to confirm bridge health is "OK".
-3. Open Drawer and choose "Privacy" to view in-app privacy details and policy URL.
-4. Open Drawer and choose "Terms" to view in-app terms information and terms URL.
-5. Open Drawer and choose "Terminal". Run `pwd` to confirm command execution flow.
-6. Open Drawer and choose "Git". Verify status/diff render and commit action path.
-7. Open a thread in Main and send a message to validate thread streaming behavior.
+1. Launch the app on iPhone or iPad.
+2. On `Connect Your Bridge`, scan the bridge QR code or enter the provided bridge URL and token.
+3. Tap `Test Connection`, then continue.
+4. Start a new run or open an existing thread.
+5. Send a prompt and confirm that a response is received.
+6. Open the Git screen and verify status / diff rendering.
+7. If prompted, review and approve an action.
+8. To attach an image, use the add action in the composer and choose an image from the device.
 
 ## Security And Privacy Notes For Review
 
 - Bridge auth token is required by default.
-- WebSocket auth uses Authorization headers and supports query-token fallback for Android compatibility.
-- Bridge can be run localhost-only; LAN mode is user-configured.
-- Terminal commands are constrained by server-side allowlist and can be fully disabled.
-- Requested command working directory is constrained within configured bridge root.
-- In-app Privacy and Terms screens are available at all times from Drawer and Settings.
+- The app is intended for trusted private networking such as LAN, VPN, or Tailscale.
+- Any remote execution happens only on infrastructure controlled by the user or review account owner.
+- Terminal commands are constrained by server-side allowlist controls and can be disabled entirely.
+- In-app Privacy and Terms screens remain accessible from Settings.
 
 ## Guideline Positioning Notes
 
-- The app is intended for access to user-owned host infrastructure, not a shared cloud shell.
-- Any remote execution happens on infrastructure controlled by the user or review account owner.
-- App requires host setup details disclosed above and does not hide companion dependency.
+- The app is for access to user-controlled infrastructure, not a shared cloud shell.
+- The bridge dependency is disclosed during onboarding and in review notes.
+- Reviewers do not need to create an external account when a review bridge URL and token are supplied.
 
 ## What To Provide In App Store Connect
 
 - Privacy Policy URL: [required final URL]
-- Terms of Service URL: [recommended final URL]
-- Demo host details for review: [URL + token + availability window]
+- Support URL: [required final URL]
+- Review bridge URL: [final public URL]
+- Review bridge token: [final token]
+- Review host availability window: [time range + time zone]
 - Support contact reachable during review: [contact details]
-- Any temporary review credentials: [if applicable]
 
 ## Open Source License Requirements
 
@@ -108,9 +90,10 @@ http://<mac-lan-ip>:8787
 
 ## Final Pre-Submit Checklist
 
-- [ ] Privacy Policy URL is live and matches in-app link.
-- [ ] Terms URL is live and matches in-app link.
-- [ ] Review host is reachable from external network used by App Review.
-- [ ] BRIDGE_AUTH_TOKEN set and validated.
-- [ ] Terminal allowlist reviewed for least privilege.
-- [ ] Notes for Review copied from this document and updated placeholders removed.
+- [ ] Privacy Policy URL is live and matches the in-app link.
+- [ ] Support URL is live and matches the listing.
+- [ ] Review bridge is reachable from the public internet and returns a healthy response.
+- [ ] Review bridge token has been tested in the current App Store build.
+- [ ] Review notes in App Store Connect were refreshed for the current version.
+- [ ] Build is attached to the App Store version.
+- [ ] `asc validate` returns no blocking errors.
