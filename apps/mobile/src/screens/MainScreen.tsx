@@ -3759,6 +3759,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return true;
           }
 
+          if (selectedChat?.engine === 'opencode') {
+            const detail = 'Review is not supported for OpenCode chats yet.';
+            setError(detail);
+            setActivity({
+              tone: 'error',
+              title: 'Review unavailable',
+              detail,
+            });
+            return true;
+          }
+
           try {
             setActivity({
               tone: 'running',
@@ -7889,19 +7900,7 @@ function ChatView({
   );
   const isLargeChat = displayItems.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
   const keyExtractor = useCallback(
-    (item: TranscriptDisplayItem, index: number) => {
-      if (item.kind !== 'message') {
-        return item.id;
-      }
-
-      if (item.message.role === 'user') {
-        return `user-${String(index)}-${normalizeChatMessageMatchContent(
-          item.message.content
-        )}`;
-      }
-
-      return item.message.id;
-    },
+    (item: TranscriptDisplayItem) => (item.kind === 'message' ? item.renderKey : item.id),
     []
   );
   const renderMessageItem = useCallback<ListRenderItem<TranscriptDisplayItem>>(

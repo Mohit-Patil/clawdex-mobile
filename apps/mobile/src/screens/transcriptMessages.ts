@@ -10,6 +10,7 @@ export type TranscriptDisplayItem =
   | {
       kind: 'message';
       message: ChatMessage;
+      renderKey: string;
     }
   | ToolTranscriptGroup;
 
@@ -57,6 +58,7 @@ export function buildTranscriptDisplayItems(
 ): TranscriptDisplayItem[] {
   const items: TranscriptDisplayItem[] = [];
   let toolBuffer: ChatMessage[] = [];
+  let userMessageOrdinal = 0;
 
   const flushToolBuffer = () => {
     if (toolBuffer.length === 0) {
@@ -67,6 +69,7 @@ export function buildTranscriptDisplayItems(
       items.push({
         kind: 'message',
         message: toolBuffer[0],
+        renderKey: toolBuffer[0]?.id ?? 'tool-message',
       });
     } else {
       items.push({
@@ -87,14 +90,30 @@ export function buildTranscriptDisplayItems(
     }
 
     flushToolBuffer();
+    if (message.role === 'user') {
+      userMessageOrdinal += 1;
+    }
     items.push({
       kind: 'message',
       message,
+      renderKey: buildTranscriptRenderKey(message, userMessageOrdinal),
     });
   }
 
   flushToolBuffer();
   return items;
+}
+
+function buildTranscriptRenderKey(message: ChatMessage, userMessageOrdinal: number): string {
+  if (message.role !== 'user') {
+    return message.id;
+  }
+
+  return `user-${String(userMessageOrdinal)}-${normalizeTranscriptKeyContent(message.content)}`;
+}
+
+function normalizeTranscriptKeyContent(value: string): string {
+  return value.replace(/\r\n/g, '\n').trim();
 }
 
 export function syncVisibleSubAgentStatuses(

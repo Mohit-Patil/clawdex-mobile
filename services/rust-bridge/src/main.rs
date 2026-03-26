@@ -2465,6 +2465,7 @@ impl OpencodeBackend {
                 "model": Value::Null,
                 "effort": Value::Null,
             })),
+            "review/start" => Err("review/start is not supported for opencode threads".to_string()),
             "turn/start" => self.start_turn(params).await,
             "turn/interrupt" => self.interrupt_turn(params).await,
             "model/list" => self.list_models(params).await,
@@ -7954,6 +7955,20 @@ mod tests {
         assert!(capabilities.supports.review_start);
 
         shutdown_test_backend(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn opencode_review_start_returns_explicit_error() {
+        let hub = Arc::new(ClientHub::new());
+        let backend = build_test_opencode_backend(hub).await;
+
+        let error = backend
+            .dispatch_request("review/start", None)
+            .await
+            .expect_err("review/start should be gated for opencode");
+        assert_eq!(error, "review/start is not supported for opencode threads");
+
+        shutdown_test_opencode_backend(&backend).await;
     }
 
     async fn add_test_client(hub: &Arc<ClientHub>) -> (u64, mpsc::Receiver<Message>) {

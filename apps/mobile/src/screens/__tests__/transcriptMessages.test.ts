@@ -3,6 +3,7 @@ import {
   buildTranscriptDisplayItems,
   getVisibleTranscriptMessages,
   syncVisibleSubAgentStatuses,
+  type TranscriptDisplayItem,
 } from '../transcriptMessages';
 
 function message(
@@ -126,6 +127,7 @@ describe('buildTranscriptDisplayItems', () => {
       {
         kind: 'message',
         message: messages[0],
+        renderKey: 'user-1-Audit this',
       },
       {
         kind: 'toolGroup',
@@ -135,6 +137,7 @@ describe('buildTranscriptDisplayItems', () => {
       {
         kind: 'message',
         message: messages[3],
+        renderKey: 'a1',
       },
     ]);
   });
@@ -150,15 +153,45 @@ describe('buildTranscriptDisplayItems', () => {
       {
         kind: 'message',
         message: messages[0],
+        renderKey: 'user-1-Audit this',
       },
       {
         kind: 'message',
         message: messages[1],
+        renderKey: 't1',
       },
       {
         kind: 'message',
         message: messages[2],
+        renderKey: 'a1',
       },
     ]);
+  });
+
+  it('keeps user render keys stable when non-user rows are inserted later', () => {
+    const baseMessages = [
+      message('u1', 'user', 'First prompt'),
+      message('a1', 'assistant', 'First answer'),
+      message('u2', 'user', 'Second prompt'),
+    ];
+    const withToolMessage = [
+      baseMessages[0],
+      message('t1', 'system', '• Ran `pwd`', { systemKind: 'tool' }),
+      ...baseMessages.slice(1),
+    ];
+
+    const isUserTranscriptItem = (
+      item: TranscriptDisplayItem
+    ): item is Extract<TranscriptDisplayItem, { kind: 'message' }> =>
+      item.kind === 'message' && item.message.role === 'user';
+
+    const baseUserKeys = buildTranscriptDisplayItems(baseMessages)
+      .filter(isUserTranscriptItem)
+      .map((item) => item.renderKey);
+    const insertedUserKeys = buildTranscriptDisplayItems(withToolMessage)
+      .filter(isUserTranscriptItem)
+      .map((item) => item.renderKey);
+
+    expect(insertedUserKeys).toEqual(baseUserKeys);
   });
 });

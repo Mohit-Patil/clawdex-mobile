@@ -2,6 +2,24 @@
 
 This guide is the detailed companion to the top-level `README.md`.
 
+## Choosing a Runtime
+
+The bridge defaults to `codex`.
+
+Use the setup wizard to make `opencode` the preferred engine:
+
+```bash
+clawdex init --engine opencode
+```
+
+From a source checkout, the equivalent command is:
+
+```bash
+npm run setup:wizard -- --engine opencode
+```
+
+That writes `BRIDGE_ACTIVE_ENGINE=opencode` into `.env.secure`. To switch back, rerun setup with `--engine codex` or edit `.env.secure` directly.
+
 ## Onboarding Output Cues
 
 After `clawdex init`, expected sequence:
@@ -31,6 +49,12 @@ npm install
 npm run secure:setup
 ```
 
+To generate OpenCode-first config instead:
+
+```bash
+BRIDGE_ACTIVE_ENGINE=opencode npm run secure:setup
+```
+
 Creates/updates:
 
 - `.env.secure` (bridge runtime config + token)
@@ -42,13 +66,13 @@ Creates/updates:
 npm run secure:bridge
 ```
 
-Optional preferred engine selection:
+If you want a one-off OpenCode launch without rewriting `.env.secure`:
 
 ```bash
 BRIDGE_ACTIVE_ENGINE=opencode npm run secure:bridge
 ```
 
-`codex` remains the default. The bridge will also try to start the other backend and merge chat lists when both runtimes are available. The `opencode` path is still bridge-only and still reuses the existing mobile websocket contract.
+`codex` remains the default. When both CLIs are available, the bridge can start both backends and merge chat lists while still routing each thread by engine.
 
 ### 4) Pair from the mobile app
 
