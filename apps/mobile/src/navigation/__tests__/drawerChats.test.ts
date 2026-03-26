@@ -1,5 +1,10 @@
 import type { ChatSummary } from '../../api/types';
-import { filterDrawerChats, isSubAgentChat } from '../drawerChats';
+import {
+  DEFAULT_DRAWER_CHAT_ENGINES,
+  filterDrawerChats,
+  filterDrawerChatsByEngines,
+  isSubAgentChat,
+} from '../drawerChats';
 
 function chat(
   id: string,
@@ -14,6 +19,7 @@ function chat(
     statusUpdatedAt: partial.statusUpdatedAt ?? '2026-03-20T00:00:00.000Z',
     lastMessagePreview: partial.lastMessagePreview ?? '',
     cwd: partial.cwd,
+    engine: partial.engine,
     modelProvider: partial.modelProvider,
     sourceKind: partial.sourceKind,
     parentThreadId: partial.parentThreadId,
@@ -61,5 +67,31 @@ describe('drawerChats', () => {
     ];
 
     expect(filterDrawerChats(chats).map((entry) => entry.id)).toEqual(['root']);
+  });
+
+  it('filters chats by selected engines and treats missing engine as Codex', () => {
+    const chats = [
+      chat('codex-explicit', { engine: 'codex' }),
+      chat('codex-implicit'),
+      chat('opencode', { engine: 'opencode' }),
+    ];
+
+    expect(filterDrawerChatsByEngines(chats, DEFAULT_DRAWER_CHAT_ENGINES).map((entry) => entry.id)).toEqual([
+      'codex-explicit',
+      'codex-implicit',
+      'opencode',
+    ]);
+    expect(filterDrawerChatsByEngines(chats, ['codex']).map((entry) => entry.id)).toEqual([
+      'codex-explicit',
+      'codex-implicit',
+    ]);
+    expect(filterDrawerChatsByEngines(chats, ['opencode']).map((entry) => entry.id)).toEqual([
+      'opencode',
+    ]);
+    expect(filterDrawerChatsByEngines(chats, []).map((entry) => entry.id)).toEqual([
+      'codex-explicit',
+      'codex-implicit',
+      'opencode',
+    ]);
   });
 });
