@@ -640,6 +640,30 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('createChat() forwards selected engine to thread/start', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'opencode:ses_new',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.createChat({ engine: 'opencode' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        engine: 'opencode',
+      })
+    );
+  });
+
   it('createChat() forwards selected approval policy to thread/start', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValueOnce({
@@ -1459,6 +1483,10 @@ describe('HostBridgeApiClient', () => {
           id: 'gpt-5.3-codex',
           displayName: 'GPT-5.3 Codex',
           description: 'Default coding model',
+          providerId: 'openai',
+          providerName: 'OpenAI',
+          connected: true,
+          authRequired: false,
           hidden: false,
           supportsPersonality: true,
           isDefault: true,
@@ -1483,6 +1511,10 @@ describe('HostBridgeApiClient', () => {
     );
     expect(models).toHaveLength(1);
     expect(models[0].id).toBe('gpt-5.3-codex');
+    expect(models[0].providerId).toBe('openai');
+    expect(models[0].providerName).toBe('OpenAI');
+    expect(models[0].connected).toBe(true);
+    expect(models[0].authRequired).toBe(false);
     expect(models[0].isDefault).toBe(true);
     expect(models[0].defaultReasoningEffort).toBe('medium');
     expect(models[0].reasoningEffort?.map((option) => option.effort)).toEqual([
@@ -1490,5 +1522,37 @@ describe('HostBridgeApiClient', () => {
       'medium',
       'high',
     ]);
+  });
+
+  it('listModels() can request models for the selected chat engine', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({ data: [] });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.listModels(false, { threadId: 'opencode:ses_123' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'model/list',
+      expect.objectContaining({
+        includeHidden: false,
+        threadId: 'opencode:ses_123',
+      })
+    );
+  });
+
+  it('listModels() can request models for a pending new-chat engine', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({ data: [] });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.listModels(false, { engine: 'opencode' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'model/list',
+      expect.objectContaining({
+        includeHidden: false,
+        engine: 'opencode',
+      })
+    );
   });
 });

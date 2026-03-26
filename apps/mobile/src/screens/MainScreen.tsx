@@ -37,13 +37,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import { readAccountRateLimitSnapshot } from '../api/rateLimits';
-import { getChatEngineLabel } from '../chatEngines';
+import { getChatEngineLabel, resolveChatEngine } from '../chatEngines';
 import type {
   AccountRateLimitSnapshot,
   ApprovalMode,
   ApprovalPolicy,
   ApprovalDecision,
+  BridgeCapabilities,
+  ChatEngine,
   CollaborationMode,
+  EngineDefaultSettingsMap,
   PendingApproval,
   PendingUserInputRequest,
   RpcNotification,
@@ -73,6 +76,10 @@ import { WorkspacePickerModal } from '../components/WorkspacePickerModal';
 import { buildComposerUsageLimitBadges } from '../components/usageLimitBadges';
 import { env } from '../config';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import {
+  formatModelOptionDescription,
+  formatModelOptionLabel,
+} from '../modelOptions';
 import {
   collectLiveAgentPanelThreadIds,
   collectRelatedAgentThreads,
@@ -109,8 +116,8 @@ interface MainScreenProps {
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
   defaultStartCwd?: string | null;
-  defaultModelId?: string | null;
-  defaultReasoningEffort?: ReasoningEffort | null;
+  defaultChatEngine?: ChatEngine | null;
+  defaultEngineSettings?: EngineDefaultSettingsMap | null;
   approvalMode?: ApprovalMode;
   showToolCalls?: boolean;
   onDefaultStartCwdChange?: (cwd: string | null) => void;
@@ -179,6 +186,11 @@ interface QueuedChatMessage {
   mentions: MentionInput[];
   localImages: LocalImageInput[];
   collaborationMode: CollaborationMode;
+}
+
+interface PendingOptimisticUserMessage {
+  message: ChatTranscriptMessage;
+  userOrdinal: number;
 }
 
 interface AutoScrollState {
@@ -461,8 +473,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       onOpenDrawer,
       onOpenGit,
       defaultStartCwd,
-      defaultModelId,
-      defaultReasoningEffort,
+      defaultChatEngine,
+      defaultEngineSettings,
       approvalMode,
       showToolCalls = false,
       onDefaultStartCwdChange,
@@ -533,8 +545,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [agentThreadMenuVisible, setAgentThreadMenuVisible] = useState(false);
     const [modelModalVisible, setModelModalVisible] = useState(false);
     const [modelSettingsMenuVisible, setModelSettingsMenuVisible] = useState(false);
+    const [engineModalVisible, setEngineModalVisible] = useState(false);
+    const [bridgeCapabilities, setBridgeCapabilities] = useState<BridgeCapabilities | null>(
+      null
+    );
     const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
     const [loadingModels, setLoadingModels] = useState(false);
+    const [pendingChatEngine, setPendingChatEngine] = useState<ChatEngine>(
+      () => defaultChatEngine ?? 'codex'
+    );
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
     const [selectedServiceTier, setSelectedServiceTier] = useState<ServiceTier | null>(
@@ -704,13 +723,31 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const externalStatusFullSyncNextAllowedAtRef = useRef(0);
     const threadRuntimeSnapshotsRef = useRef<Record<string, ThreadRuntimeSnapshot>>({});
     const threadReasoningBuffersRef = useRef<Record<string, string>>({});
+    const pendingOptimisticUserMessagesRef = useRef<
+      Record<string, PendingOptimisticUserMessage[]>
+    >({});
     const chatModelPreferencesRef = useRef<Record<string, ChatModelPreference>>({});
     const [chatModelPreferencesLoaded, setChatModelPreferencesLoaded] = useState(false);
     const chatPlanSnapshotsRef = useRef<Record<string, ActivePlanState>>({});
     const [, setChatPlanSnapshotsLoaded] = useState(false);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
-    const preferredDefaultModelId = normalizeModelId(defaultModelId);
-    const preferredDefaultEffort = normalizeReasoningEffort(defaultReasoningEffort);
+    const persistedDefaultChatEngine = resolveChatEngine(defaultChatEngine ?? 'codex');
+    const availableNewChatEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
+      ? bridgeCapabilities.availableEngines
+      : ['codex'];
+    const fallbackDefaultChatEngine = availableNewChatEngines.includes(persistedDefaultChatEngine)
+      ? persistedDefaultChatEngine
+      : availableNewChatEngines[0] ?? 'codex';
+    const preferredNewChatEngine = availableNewChatEngines.includes(pendingChatEngine)
+      ? pendingChatEngine
+      : fallbackDefaultChatEngine;
+    const activeChatEngine = selectedChat?.engine
+      ? resolveChatEngine(selectedChat.engine)
+      : preferredNewChatEngine;
+    const activeChatEngineLabel = getChatEngineLabel(activeChatEngine);
+    const pendingEngineDefaults = defaultEngineSettings?.[preferredNewChatEngine] ?? null;
+    const preferredDefaultModelId = normalizeModelId(pendingEngineDefaults?.modelId);
+    const preferredDefaultEffort = normalizeReasoningEffort(pendingEngineDefaults?.effort);
     const activeApprovalPolicy = toApprovalPolicyForMode(approvalMode);
     const attachmentWorkspace = selectedChat?.cwd ?? preferredStartCwd ?? null;
     const slashQuery = parseSlashQuery(draft);
@@ -731,6 +768,83 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         ),
       [attachmentFileCandidates, attachmentPathDraft, pendingMentionPaths]
     );
+
+    const queueOptimisticUserMessage = useCallback(
+      (
+        threadId: string,
+        message: ChatTranscriptMessage,
+        options?: { baseChat?: Chat | null }
+      ) => {
+        if (!threadId) {
+          return;
+        }
+
+        const existingPendingMessages =
+          pendingOptimisticUserMessagesRef.current[threadId] ?? [];
+        const visibleChat =
+          selectedChatRef.current?.id === threadId
+            ? selectedChatRef.current
+            : options?.baseChat ?? null;
+        const nextUserOrdinal =
+          Math.max(
+            countUserMessages(visibleChat?.messages ?? []),
+            existingPendingMessages[existingPendingMessages.length - 1]?.userOrdinal ?? 0
+          ) + 1;
+
+        pendingOptimisticUserMessagesRef.current[threadId] = [
+          ...existingPendingMessages,
+          {
+            message,
+            userOrdinal: nextUserOrdinal,
+          },
+        ];
+      },
+      []
+    );
+
+    const discardOptimisticUserMessage = useCallback(
+      (threadId: string, messageId: string) => {
+        if (!threadId || !messageId) {
+          return;
+        }
+
+        const existingPendingMessages =
+          pendingOptimisticUserMessagesRef.current[threadId] ?? [];
+        if (existingPendingMessages.length === 0) {
+          return;
+        }
+
+        const nextPendingMessages = existingPendingMessages.filter(
+          (entry) => entry.message.id !== messageId
+        );
+        if (nextPendingMessages.length > 0) {
+          pendingOptimisticUserMessagesRef.current[threadId] = nextPendingMessages;
+        } else {
+          delete pendingOptimisticUserMessagesRef.current[threadId];
+        }
+      },
+      []
+    );
+
+    const mergeChatWithPendingOptimisticMessages = useCallback((chat: Chat): Chat => {
+      const pendingMessages = pendingOptimisticUserMessagesRef.current[chat.id] ?? [];
+      if (pendingMessages.length === 0) {
+        return chat;
+      }
+
+      const {
+        chat: mergedChat,
+        remainingPendingMessages,
+      } = reconcileChatWithPendingOptimisticMessages(chat, pendingMessages);
+
+      if (remainingPendingMessages.length > 0) {
+        pendingOptimisticUserMessagesRef.current[chat.id] = remainingPendingMessages;
+      } else {
+        delete pendingOptimisticUserMessagesRef.current[chat.id];
+      }
+
+      return mergedChat;
+    }, []);
 
     useEffect(() => {
       if (!selectedChat?.id) {
@@ -1140,11 +1254,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       api
         .getChat(queuedThreadId)
         .then((latest) => {
+          const resolvedLatest = mergeChatWithPendingOptimisticMessages(latest);
           if (chatIdRef.current !== queuedThreadId) {
             return;
           }
-          setSelectedChat((prev) => (prev && prev.id === latest.id ? latest : prev));
-          if (isChatLikelyRunning(latest)) {
+          setSelectedChat((prev) =>
+            prev && prev.id === resolvedLatest.id ? resolvedLatest : prev
+          );
+          if (isChatLikelyRunning(resolvedLatest)) {
             bumpRunWatchdog();
             setActivity((prev) =>
               prev.tone === 'running' ? prev : { tone: 'running', title: 'Working' }
@@ -1156,7 +1273,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           externalStatusFullSyncInFlightRef.current = false;
           drainExternalStatusFullSyncQueue();
         });
-    }, [api, bumpRunWatchdog]);
+    }, [api, bumpRunWatchdog, mergeChatWithPendingOptimisticMessages]);
 
     const scheduleExternalStatusFullSync = useCallback(
       (threadId: string) => {
@@ -1752,6 +1869,40 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     }, [onChatContextChange, selectedChat]);
 
     useEffect(() => {
+      let cancelled = false;
+
+      const loadBridgeCapabilities = async () => {
+        try {
+          const capabilities = await api.readBridgeCapabilities();
+          if (!cancelled) {
+            setBridgeCapabilities(capabilities);
+          }
+        } catch {
+          if (!cancelled) {
+            setBridgeCapabilities(null);
+          }
+        }
+      };
+
+      void loadBridgeCapabilities();
+      return () => {
+        cancelled = true;
+      };
+    }, [api]);
+
+    useEffect(() => {
+      if (selectedChatId) {
+        return;
+      }
+
+      if (availableNewChatEngines.includes(pendingChatEngine)) {
+        return;
+      }
+
+      setPendingChatEngine(availableNewChatEngines[0] ?? 'codex');
+    }, [availableNewChatEngines, pendingChatEngine, selectedChatId]);
+
+    useEffect(() => {
       if (!chatModelPreferencesLoaded) {
         return;
       }
@@ -1777,6 +1928,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setSelectedServiceTier(defaultServiceTier);
     }, [
       defaultServiceTier,
+      pendingChatEngine,
       preferredDefaultEffort,
       preferredDefaultModelId,
       selectedChatId,
@@ -1784,13 +1936,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const serverDefaultModel = modelOptions.find((model) => model.isDefault) ?? null;
     const serverDefaultModelId = serverDefaultModel?.id ?? null;
-    const activeModelId =
-      selectedModelId ??
-      (selectedChatId ? null : preferredDefaultModelId) ??
-      serverDefaultModelId;
-    const activeModel = activeModelId
-      ? modelOptions.find((model) => model.id === activeModelId) ?? null
+    const selectedModel = selectedModelId
+      ? modelOptions.find((model) => model.id === selectedModelId) ?? null
       : null;
+    const preferredDefaultModel =
+      !selectedChatId && preferredDefaultModelId
+        ? modelOptions.find((model) => model.id === preferredDefaultModelId) ?? null
+        : null;
+    const activeModel =
+      selectedModel ?? preferredDefaultModel ?? serverDefaultModel ?? null;
+    const activeModelId =
+      selectedModel?.id ?? preferredDefaultModel?.id ?? serverDefaultModelId;
     const effortPickerModel = effortPickerModelId
       ? modelOptions.find((model) => model.id === effortPickerModelId) ?? null
       : activeModel;
@@ -1819,13 +1975,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         activeModelEffortOptions.some((option) => option.effort === requestedEffort));
     const activeEffort = supportsSelectedEffort ? requestedEffort : activeModelDefaultEffort;
     const activeModelLabel =
-      selectedModelId && activeModel
-        ? activeModel.displayName
-        : selectedModelId
-          ? selectedModelId
-          : activeModel
-            ? `Default (${activeModel.displayName})`
-            : 'Default model';
+      selectedModel
+        ? formatModelOptionLabel(selectedModel)
+        : activeModel
+          ? `Default (${formatModelOptionLabel(activeModel)})`
+          : 'Default model';
     const activeEffortLabel =
       requestedEffort && activeEffort
         ? formatReasoningEffort(activeEffort)
@@ -1885,6 +2039,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       loadChatRequestRef.current += 1;
       setSelectedChat(null);
       setSelectedChatId(null);
+      setPendingChatEngine(fallbackDefaultChatEngine);
       setSelectedCollaborationMode('default');
       setOpeningChatId(null);
       setDraft('');
@@ -1932,7 +2087,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       codexReasoningBufferRef.current = '';
       hadCommandRef.current = false;
       clearRunWatchdog();
-    }, [clearExternalStatusFullSync, clearRunWatchdog, defaultServiceTier]);
+    }, [
+      clearExternalStatusFullSync,
+      clearRunWatchdog,
+      defaultServiceTier,
+      fallbackDefaultChatEngine,
+    ]);
 
     const startNewChat = useCallback(() => {
       // New chat should land on compose/home so user can pick workspace first.
@@ -2167,14 +2327,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const refreshModelOptions = useCallback(async () => {
       setLoadingModels(true);
       try {
-        const models = await api.listModels(false);
+        const models = await api.listModels(false, {
+          threadId: selectedChatId,
+          engine: activeChatEngine,
+        });
         setModelOptions(models);
       } catch (err) {
         setError((err as Error).message);
       } finally {
         setLoadingModels(false);
       }
-    }, [api]);
+    }, [activeChatEngine, api, selectedChatId]);
 
     const openModelModal = useCallback(() => {
       setModelModalVisible(true);
@@ -2187,6 +2350,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       }
       setModelModalVisible(false);
     }, [loadingModels]);
+
+    const openEngineModal = useCallback(() => {
+      if (selectedChatId) {
+        return;
+      }
+      setEngineModalVisible(true);
+      setError(null);
+    }, [selectedChatId]);
+
+    const closeEngineModal = useCallback(() => {
+      setEngineModalVisible(false);
+    }, []);
 
     const openEffortModal = useCallback(
       (modelId?: string | null) => {
@@ -2250,6 +2425,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
       [activeServiceTier, modelOptions, rememberChatModelPreference, selectedChatId]
     );
+
+    const selectPendingChatEngine = useCallback((engine: ChatEngine) => {
+      if (selectedChatId) {
+        return;
+      }
+
+      const normalizedEngine = resolveChatEngine(engine);
+      setPendingChatEngine(normalizedEngine);
+      setSelectedModelId(null);
+      setSelectedEffort(null);
+      setEngineModalVisible(false);
+      setError(null);
+    }, [selectedChatId]);
 
     const loadAttachmentFileCandidates = useCallback(async () => {
       setLoadingAttachmentFileCandidates(true);
@@ -2696,6 +2884,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const modelSettingsMenuOptions = useMemo<SelectionSheetOption[]>(
       () => [
+        ...(!selectedChatId && availableNewChatEngines.length > 1
+          ? [
+              {
+                key: 'engine',
+                title: 'Change engine',
+                description: activeChatEngineLabel,
+                icon: 'layers-outline' as const,
+                onPress: () => {
+                  setModelSettingsMenuVisible(false);
+                  openEngineModal();
+                },
+              },
+            ]
+          : []),
         {
           key: 'model',
           title: 'Change model',
@@ -2750,7 +2952,29 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         openModelModal,
         selectedChatId,
         toggleFastMode,
+        activeChatEngineLabel,
+        availableNewChatEngines.length,
+        openEngineModal,
       ]
+    );
+
+    const enginePickerOptions = useMemo<SelectionSheetOption[]>(
+      () =>
+        availableNewChatEngines.map((engine) => ({
+          key: engine,
+          title: getChatEngineLabel(engine),
+          description:
+            engine === 'opencode'
+              ? 'Use the OpenCode backend and its connected provider models.'
+              : 'Use the Codex backend and its model catalog.',
+          icon:
+            engine === 'opencode'
+              ? ('layers-outline' as const)
+              : ('sparkles-outline' as const),
+          selected: activeChatEngine === engine,
+          onPress: () => selectPendingChatEngine(engine),
+        })),
+      [activeChatEngine, availableNewChatEngines, selectPendingChatEngine]
     );
 
     const modelPickerOptions = useMemo<SelectionSheetOption[]>(
@@ -2759,7 +2983,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           key: 'server-default',
           title: 'Use server default',
           description: serverDefaultModel
-            ? `Currently ${serverDefaultModel.displayName}.`
+            ? `Currently ${formatModelOptionLabel(serverDefaultModel)}.`
             : 'Follow the bridge default model.',
           icon: 'sparkles-outline',
           badge: 'Auto',
@@ -2768,8 +2992,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         },
         ...modelOptions.map((model) => ({
           key: model.id,
-          title: model.displayName,
-          description: model.description?.trim() || model.id,
+          title: formatModelOptionLabel(model),
+          description: formatModelOptionDescription(model),
           icon: 'hardware-chip-outline' as const,
           badge: model.isDefault ? 'Default' : undefined,
           meta: model.defaultReasoningEffort
@@ -2790,7 +3014,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             ? `Use ${formatReasoningEffort(effortPickerDefault)}`
             : 'Use model default',
           description: effortPickerModel
-            ? `Follow ${effortPickerModel.displayName}'s default reasoning.`
+            ? `Follow ${formatModelOptionLabel(effortPickerModel)}'s default reasoning.`
             : 'Follow the active model default.',
           icon: 'sparkles-outline',
           badge: 'Auto',
@@ -2840,10 +3064,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       try {
         setRenaming(true);
         const updated = await api.renameChat(activeChatId, nextName);
-        setSelectedChat({
-          ...updated,
-          title: nextName,
-        });
+        setSelectedChat(
+          mergeChatWithPendingOptimisticMessages({
+            ...updated,
+            title: nextName,
+          })
+        );
         setError(null);
         setRenameModalVisible(false);
       } catch (err) {
@@ -2851,7 +3077,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       } finally {
         setRenaming(false);
       }
-    }, [api, renameDraft, renaming, selectedChat?.id, selectedChatId]);
+    }, [
+      api,
+      mergeChatWithPendingOptimisticMessages,
+      renameDraft,
+      renaming,
+      selectedChat?.id,
+      selectedChatId,
+    ]);
 
     const appendLocalAssistantMessage = useCallback(
       (content: string) => {
@@ -3199,7 +3432,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return true;
           }
 
-          const models = modelOptions.length > 0 ? modelOptions : await api.listModels(false);
+          const models =
+            modelOptions.length > 0
+              ? modelOptions
+              : await api.listModels(false, {
+                  threadId: selectedChatId,
+                  engine: activeChatEngine,
+                });
           if (modelOptions.length === 0) {
             setModelOptions(models);
           }
@@ -3268,6 +3507,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           setSelectedCollaborationMode('plan');
           if (!selectedChatId) {
+            let createdChatId: string | null = null;
             const optimisticMessage: ChatTranscriptMessage = {
               id: `msg-${Date.now()}`,
               role: 'user',
@@ -3297,8 +3537,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 serviceTier: activeServiceTier ?? undefined,
                 approvalPolicy: activeApprovalPolicy,
               });
+              createdChatId = created.id;
 
               setSelectedChatId(created.id);
+              queueOptimisticUserMessage(created.id, optimisticMessage, {
+                baseChat: created,
+              });
               setSelectedChat({
                 ...created,
                 status: 'running',
@@ -3325,7 +3569,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               }, {
                 onTurnStarted: (turnId) => registerTurnStarted(created.id, turnId),
               });
-              const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+              const resolvedUpdated =
+                mergeChatWithPendingOptimisticMessages(updated);
+              const autoEnabledPlan =
+                shouldAutoEnablePlanModeFromChat(resolvedUpdated);
               if (autoEnabledPlan) {
                 setSelectedCollaborationMode('plan');
               }
@@ -3335,7 +3582,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 selectedEffort ?? activeEffort,
                 activeServiceTier
               );
-              setSelectedChat(updated);
+              setSelectedChat(resolvedUpdated);
               setError(null);
               setActivity({
                 tone: 'complete',
@@ -3347,6 +3594,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               });
               clearRunWatchdog();
             } catch (err) {
+              if (createdChatId) {
+                discardOptimisticUserMessage(createdChatId, optimisticMessage.id);
+              }
               handleTurnFailure(err);
             } finally {
               setCreating(false);
@@ -3361,23 +3611,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             createdAt: new Date().toISOString(),
           };
 
-            try {
-              setSending(true);
-              setActiveTurnId(null);
-              setStoppingTurn(false);
-              stopRequestedRef.current = false;
-              setActivePlan(null);
-              cacheThreadPlan(selectedChatId, null);
-              setPendingUserInputRequest(null);
-              setUserInputDrafts({});
-              setUserInputError(null);
-              setResolvingUserInput(false);
+          try {
+            setSending(true);
+            setActiveTurnId(null);
+            setStoppingTurn(false);
+            stopRequestedRef.current = false;
+            setActivePlan(null);
+            cacheThreadPlan(selectedChatId, null);
+            setPendingUserInputRequest(null);
+            setUserInputDrafts({});
+            setUserInputError(null);
+            setResolvingUserInput(false);
             setActivity({
               tone: 'running',
               title: 'Sending plan prompt',
             });
             bumpRunWatchdog();
             setDraft('');
+            queueOptimisticUserMessage(selectedChatId, optimisticMessage);
             setSelectedChat((prev) => {
               const baseChat =
                 selectedChat?.id === selectedChatId
@@ -3405,13 +3656,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }, {
               onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
             });
+            const resolvedUpdated =
+              mergeChatWithPendingOptimisticMessages(updated);
             rememberChatModelPreference(
               selectedChatId,
               activeModelId,
               selectedEffort ?? activeEffort,
               activeServiceTier
             );
-            setSelectedChat(updated);
+            setSelectedChat(resolvedUpdated);
             setError(null);
             setActivity({
               tone: 'complete',
@@ -3419,6 +3672,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             clearRunWatchdog();
           } catch (err) {
+            discardOptimisticUserMessage(selectedChatId, optimisticMessage.id);
             handleTurnFailure(err);
           } finally {
             setSending(false);
@@ -3459,7 +3713,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           try {
             setRenaming(true);
             const updated = await api.renameChat(activeChatId, argText);
-            setSelectedChat(updated);
+            setSelectedChat(mergeChatWithPendingOptimisticMessages(updated));
             setActivity({
               tone: 'complete',
               title: 'Chat renamed',
@@ -3549,7 +3803,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               selectedEffort ?? activeEffort,
               activeServiceTier
             );
-            setSelectedChat(forked);
+            setSelectedChat(mergeChatWithPendingOptimisticMessages(forked));
             setError(null);
             setActivity({
               tone: 'complete',
@@ -3592,12 +3846,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         appendLocalAssistantMessage,
         bumpRunWatchdog,
         clearRunWatchdog,
+        discardOptimisticUserMessage,
         fastModeEnabled,
+        mergeChatWithPendingOptimisticMessages,
         modelOptions,
         onOpenGit,
         openModelModal,
         openRenameModal,
         preferredStartCwd,
+        queueOptimisticUserMessage,
         registerTurnStarted,
         selectedChat,
         selectedChatId,
@@ -3618,7 +3875,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         loadChatRequestRef.current = requestId;
         let loadedSuccessfully = false;
         try {
-          const chat = await api.getChat(chatId);
+          const chat = mergeChatWithPendingOptimisticMessages(await api.getChat(chatId));
           if (requestId !== loadChatRequestRef.current) {
             return;
           }
@@ -3704,6 +3961,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         applyThreadRuntimeSnapshot,
         bumpRunWatchdog,
         clearRunWatchdog,
+        mergeChatWithPendingOptimisticMessages,
         refreshPendingApprovalsForThread,
         scrollToBottomIfPinned,
         scrollToBottomReliable,
@@ -3712,11 +3970,27 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const openChatThread = useCallback(
       (id: string, optimisticChat?: Chat | null) => {
+        const isSameChat = chatIdRef.current === id;
         const hasSnapshot = Boolean(
           optimisticChat &&
             optimisticChat.id === id &&
             optimisticChat.messages.length > 0
         );
+
+        if (isSameChat) {
+          setSelectedChatId(id);
+          setOpeningChatId(null);
+          setError(null);
+          if (hasSnapshot && optimisticChat) {
+            setSelectedChat(mergeChatWithPendingOptimisticMessages(optimisticChat));
+          }
+          void refreshPendingApprovalsForThread(id);
+          loadChat(id, {
+            forceScroll: true,
+            preserveRuntimeState: true,
+          }).catch(() => {});
+          return;
+        }
 
         setSelectedChatId(id);
         setOpeningChatId(hasSnapshot ? null : id);
@@ -3743,7 +4017,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         delete autoEnabledPlanTurnIdByThreadRef.current[id];
 
         if (hasSnapshot && optimisticChat) {
-          setSelectedChat(optimisticChat);
+          setSelectedChat(mergeChatWithPendingOptimisticMessages(optimisticChat));
         } else {
           setSelectedChat(null);
         }
@@ -3759,6 +4033,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [
         applyThreadRuntimeSnapshot,
         loadChat,
+        mergeChatWithPendingOptimisticMessages,
         refreshPendingApprovalsForThread,
       ]
     );
@@ -3977,6 +4252,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       setDraft('');
 
+      let createdChatId: string | null = null;
       try {
         setCreating(true);
         setActiveTurnId(null);
@@ -3992,14 +4268,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title: 'Creating chat',
         });
         const created = await api.createChat({
+          engine: activeChatEngine,
           cwd: preferredStartCwd ?? undefined,
           model: activeModelId ?? undefined,
           effort: activeEffort ?? undefined,
           serviceTier: activeServiceTier ?? undefined,
           approvalPolicy: activeApprovalPolicy,
         });
+        createdChatId = created.id;
 
         setSelectedChatId(created.id);
+        queueOptimisticUserMessage(created.id, optimisticMessage, {
+          baseChat: created,
+        });
         setSelectedChat({
           ...created,
           status: 'running',
@@ -4033,7 +4314,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             onTurnStarted: (turnId) => registerTurnStarted(created.id, turnId),
           }
         );
-        const autoEnabledPlan = shouldAutoEnablePlanModeFromChat(updated);
+        const resolvedUpdated =
+          mergeChatWithPendingOptimisticMessages(updated);
+        const autoEnabledPlan =
+          shouldAutoEnablePlanModeFromChat(resolvedUpdated);
         if (autoEnabledPlan) {
           setSelectedCollaborationMode('plan');
         }
@@ -4043,11 +4327,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           selectedEffort ?? activeEffort,
           activeServiceTier
         );
-        setSelectedChat(updated);
+        setSelectedChat(resolvedUpdated);
         setPendingMentionPaths([]);
         setPendingLocalImagePaths([]);
         setError(null);
-        if (updated.status === 'complete') {
+        if (resolvedUpdated.status === 'complete') {
           setActivity({
             tone: 'complete',
             title: 'Turn completed',
@@ -4057,11 +4341,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 : undefined,
           });
           clearRunWatchdog();
-        } else if (updated.status === 'error') {
+        } else if (resolvedUpdated.status === 'error') {
           setActivity({
             tone: 'error',
             title: 'Turn failed',
-            detail: updated.lastError ?? undefined,
+            detail: resolvedUpdated.lastError ?? undefined,
           });
           clearRunWatchdog();
         } else {
@@ -4073,6 +4357,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
         }
       } catch (err) {
+        if (createdChatId) {
+          discardOptimisticUserMessage(createdChatId, optimisticMessage.id);
+        }
         handleTurnFailure(err);
       } finally {
         setCreating(false);
@@ -4091,8 +4378,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedCollaborationMode,
       registerTurnStarted,
       handleTurnFailure,
+      discardOptimisticUserMessage,
       bumpRunWatchdog,
       clearRunWatchdog,
+      mergeChatWithPendingOptimisticMessages,
+      queueOptimisticUserMessage,
       rememberChatModelPreference,
       scrollToBottomReliable,
     ]);
@@ -4159,6 +4449,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (shouldClearComposer) {
             setDraft('');
           }
+          queueOptimisticUserMessage(selectedChatId, optimisticMessage);
           setSelectedChat((prev) => {
             const baseChat =
               selectedChat?.id === selectedChatId
@@ -4192,9 +4483,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
             }
           );
+          const resolvedUpdated =
+            mergeChatWithPendingOptimisticMessages(updated);
           const autoEnabledPlan =
             !options?.suppressPlanModeAutoEnable &&
-            shouldAutoEnablePlanModeFromChat(updated);
+            shouldAutoEnablePlanModeFromChat(resolvedUpdated);
           if (autoEnabledPlan) {
             setSelectedCollaborationMode('plan');
           }
@@ -4204,13 +4497,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             selectedEffort ?? activeEffort,
             activeServiceTier
           );
-          setSelectedChat(updated);
+          setSelectedChat(resolvedUpdated);
           if (shouldClearComposer) {
             setPendingMentionPaths([]);
             setPendingLocalImagePaths([]);
           }
           setError(null);
-          if (updated.status === 'complete') {
+          if (resolvedUpdated.status === 'complete') {
             setActivity({
               tone: 'complete',
               title: 'Turn completed',
@@ -4220,11 +4513,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   : undefined,
             });
             clearRunWatchdog();
-          } else if (updated.status === 'error') {
+          } else if (resolvedUpdated.status === 'error') {
             setActivity({
               tone: 'error',
               title: 'Turn failed',
-              detail: updated.lastError ?? undefined,
+              detail: resolvedUpdated.lastError ?? undefined,
             });
             clearRunWatchdog();
           } else {
@@ -4236,6 +4529,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             bumpRunWatchdog();
           }
         } catch (err) {
+          discardOptimisticUserMessage(selectedChatId, optimisticMessage.id);
           handleTurnFailure(err);
           return false;
         } finally {
@@ -4259,8 +4553,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         selectedChatId,
         registerTurnStarted,
         handleTurnFailure,
+        discardOptimisticUserMessage,
         bumpRunWatchdog,
         clearRunWatchdog,
+        mergeChatWithPendingOptimisticMessages,
+        queueOptimisticUserMessage,
         rememberChatModelPreference,
         scrollToBottomReliable,
       ]
@@ -5899,28 +6196,29 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         try {
           const latest = await api.getChat(selectedChatId);
+          const resolvedLatest = mergeChatWithPendingOptimisticMessages(latest);
           setSelectedChat((prev) => {
-            if (!prev || prev.id !== latest.id) {
-              return latest;
+            if (!prev || prev.id !== resolvedLatest.id) {
+              return resolvedLatest;
             }
 
             const isUnchanged =
-              prev.updatedAt === latest.updatedAt &&
-              prev.messages.length === latest.messages.length;
+              prev.updatedAt === resolvedLatest.updatedAt &&
+              prev.messages.length === resolvedLatest.messages.length;
 
-            return isUnchanged ? prev : latest;
+            return isUnchanged ? prev : resolvedLatest;
           });
 
           const currentSelectedChat = selectedChatRef.current;
           const hasTerminalStatus =
-            latest.status === 'complete' || latest.status === 'error';
+            resolvedLatest.status === 'complete' || resolvedLatest.status === 'error';
           const hasAssistantProgress =
             !hasTerminalStatus &&
-            didAssistantMessageProgress(currentSelectedChat, latest);
+            didAssistantMessageProgress(currentSelectedChat, resolvedLatest);
           const hasPendingUserMessage =
-            !hasTerminalStatus && hasRecentUnansweredUserTurn(latest);
+            !hasTerminalStatus && hasRecentUnansweredUserTurn(resolvedLatest);
           const shouldRunFromChat =
-            isChatLikelyRunning(latest) ||
+            isChatLikelyRunning(resolvedLatest) ||
             hasAssistantProgress ||
             hasPendingUserMessage;
           const shouldRunFromWatchdog =
@@ -5928,7 +6226,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const shouldShowRunning = shouldRunFromChat || shouldRunFromWatchdog;
           const shouldRefreshWatchdog = shouldRunFromChat;
           const watchdogDurationMs =
-            hasAssistantProgress && !isChatLikelyRunning(latest)
+            hasAssistantProgress && !isChatLikelyRunning(resolvedLatest)
               ? Math.floor(RUN_WATCHDOG_MS / 4)
               : RUN_WATCHDOG_MS;
 
@@ -5960,15 +6258,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             codexReasoningBufferRef.current = '';
             hadCommandRef.current = false;
             setActivity((prev) => {
-              if (latest.status === 'error') {
+              if (resolvedLatest.status === 'error') {
                 return {
                   tone: 'error',
                   title: 'Turn failed',
-                  detail: latest.lastError ?? undefined,
+                  detail: resolvedLatest.lastError ?? undefined,
                 };
               }
 
-              if (latest.status === 'complete') {
+              if (resolvedLatest.status === 'complete') {
                 return prev.tone === 'running'
                   ? {
                       tone: 'complete',
@@ -6025,6 +6323,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       pendingUserInputRequest?.id,
       bumpRunWatchdog,
       clearRunWatchdog,
+      mergeChatWithPendingOptimisticMessages,
     ]);
 
     const handleResolveApproval = useCallback(
@@ -6729,12 +7028,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           ) : (
             <ComposeView
               startWorkspaceLabel={defaultStartWorkspaceLabel}
+              showEnginePicker={availableNewChatEngines.length > 1}
+              engineLabel={activeChatEngineLabel}
               modelReasoningLabel={modelReasoningLabel}
               collaborationModeLabel={collaborationModeLabel}
               fastModeEnabled={fastModeEnabled}
               fastModeLabel={fastModeLabel}
               onSuggestion={(s) => setDraft(s)}
               onOpenWorkspacePicker={openWorkspaceModal}
+              onOpenEnginePicker={openEngineModal}
               onOpenModelReasoningPicker={openModelReasoningMenu}
               onOpenCollaborationModePicker={openCollaborationModeMenu}
               onToggleFastMode={() => {
@@ -6897,6 +7199,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onClose={() => setModelSettingsMenuVisible(false)}
         />
 
+        <SelectionSheet
+          visible={engineModalVisible}
+          eyebrow="Engine"
+          title="Select engine"
+          subtitle="Choose which backend new chats should start with."
+          options={enginePickerOptions}
+          onClose={closeEngineModal}
+        />
+
         <WorkspacePickerModal
           visible={workspaceModalVisible}
           selectedPath={preferredStartCwd}
@@ -6917,7 +7228,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           visible={modelModalVisible}
           eyebrow="Model"
           title="Select model"
-          subtitle="Choose a model for this chat or fall back to the bridge default."
+          subtitle={`Choose a ${activeChatEngineLabel} model for this chat or fall back to that engine's default.`}
           options={modelPickerOptions}
           loading={loadingModels}
           loadingLabel="Refreshing available models…"
@@ -6931,7 +7242,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title="Reasoning level"
           subtitle={
             effortPickerModel
-              ? `Current model: ${effortPickerModel.displayName}`
+              ? `Current model: ${formatModelOptionLabel(effortPickerModel)}`
               : 'Select how much reasoning depth to use.'
           }
           options={effortPickerSheetOptions}
@@ -7204,23 +7515,29 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
 function ComposeView({
   startWorkspaceLabel,
+  showEnginePicker,
+  engineLabel,
   modelReasoningLabel,
   collaborationModeLabel,
   fastModeEnabled,
   fastModeLabel,
   onSuggestion,
   onOpenWorkspacePicker,
+  onOpenEnginePicker,
   onOpenModelReasoningPicker,
   onOpenCollaborationModePicker,
   onToggleFastMode,
 }: {
   startWorkspaceLabel: string;
+  showEnginePicker: boolean;
+  engineLabel: string;
   modelReasoningLabel: string;
   collaborationModeLabel: string;
   fastModeEnabled: boolean;
   fastModeLabel: string;
   onSuggestion: (s: string) => void;
   onOpenWorkspacePicker: () => void;
+  onOpenEnginePicker: () => void;
   onOpenModelReasoningPicker: () => void;
   onOpenCollaborationModePicker: () => void;
   onToggleFastMode: () => void;
@@ -7255,6 +7572,21 @@ function ComposeView({
         </Text>
         <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
       </Pressable>
+      {showEnginePicker ? (
+        <Pressable
+          style={({ pressed }) => [
+            styles.workspaceSelectBtn,
+            pressed && styles.workspaceSelectBtnPressed,
+          ]}
+          onPress={onOpenEnginePicker}
+        >
+          <Ionicons name="layers-outline" size={16} color={colors.textMuted} />
+          <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
+            {engineLabel}
+          </Text>
+          <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+        </Pressable>
+      ) : null}
       <Pressable
         style={({ pressed }) => [
           styles.workspaceSelectBtn,
@@ -7557,7 +7889,19 @@ function ChatView({
   );
   const isLargeChat = displayItems.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
   const keyExtractor = useCallback(
-    (item: TranscriptDisplayItem) => (item.kind === 'message' ? item.message.id : item.id),
+    (item: TranscriptDisplayItem, index: number) => {
+      if (item.kind !== 'message') {
+        return item.id;
+      }
+
+      if (item.message.role === 'user') {
+        return `user-${String(index)}-${normalizeChatMessageMatchContent(
+          item.message.content
+        )}`;
+      }
+
+      return item.message.id;
+    },
     []
   );
   const renderMessageItem = useCallback<ListRenderItem<TranscriptDisplayItem>>(
@@ -8556,6 +8900,70 @@ function toOptimisticUserContent(
   const mentionLines = mentions.map((mention) => `[file: ${mention.path}]`);
   const localImageLines = localImages.map((image) => `[local image: ${image.path}]`);
   return [content, ...mentionLines, ...localImageLines].join('\n');
+}
+
+function countUserMessages(messages: ChatTranscriptMessage[]): number {
+  let count = 0;
+  for (const message of messages) {
+    if (message.role === 'user') {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function normalizeChatMessageMatchContent(value: string): string {
+  return value.replace(/\r\n/g, '\n').trim();
+}
+
+function reconcileChatWithPendingOptimisticMessages(
+  chat: Chat,
+  pendingMessages: PendingOptimisticUserMessage[]
+): {
+  chat: Chat;
+  remainingPendingMessages: PendingOptimisticUserMessage[];
+} {
+  if (pendingMessages.length === 0) {
+    return {
+      chat,
+      remainingPendingMessages: [],
+    };
+  }
+
+  const userMessages = chat.messages.filter((message) => message.role === 'user');
+  const remainingPendingMessages = pendingMessages.filter((entry) => {
+    const matchedUserMessage = userMessages[entry.userOrdinal - 1];
+    if (!matchedUserMessage) {
+      return true;
+    }
+
+    return (
+      normalizeChatMessageMatchContent(matchedUserMessage.content) !==
+      normalizeChatMessageMatchContent(entry.message.content)
+    );
+  });
+
+  if (remainingPendingMessages.length === 0) {
+    return {
+      chat,
+      remainingPendingMessages,
+    };
+  }
+
+  const lastPendingMessage = remainingPendingMessages[remainingPendingMessages.length - 1]?.message;
+  return {
+    chat: {
+      ...chat,
+      lastMessagePreview:
+        normalizeChatMessageMatchContent(lastPendingMessage?.content ?? '').slice(0, 120) ||
+        chat.lastMessagePreview,
+      messages: [
+        ...chat.messages,
+        ...remainingPendingMessages.map((entry) => entry.message),
+      ],
+    },
+    remainingPendingMessages,
+  };
 }
 
 function toPathBasename(path: string): string {

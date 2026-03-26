@@ -1,6 +1,13 @@
 export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
 export type ChatEngine = 'codex' | 'opencode';
 
+export interface EngineDefaultSettings {
+  modelId: string | null;
+  effort: ReasoningEffort | null;
+}
+
+export type EngineDefaultSettingsMap = Partial<Record<ChatEngine, EngineDefaultSettings>>;
+
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
 
 export interface ChatMessageSubAgentMeta {
@@ -62,6 +69,7 @@ export interface CreateChatRequest {
   title?: string;
   message?: string;
   cwd?: string;
+  engine?: ChatEngine;
   model?: string;
   effort?: ReasoningEffort;
   serviceTier?: ServiceTier;
@@ -216,6 +224,10 @@ export interface ModelOption {
   id: string;
   displayName: string;
   description?: string;
+  providerId?: string;
+  providerName?: string;
+  connected?: boolean;
+  authRequired?: boolean;
   hidden?: boolean;
   supportsPersonality?: boolean;
   isDefault?: boolean;
