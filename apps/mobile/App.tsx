@@ -99,7 +99,7 @@ export default function App() {
   const [defaultEngineSettings, setDefaultEngineSettings] = useState<EngineDefaultSettingsMap>(
     createEmptyEngineDefaultSettingsMap
   );
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('normal');
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('yolo');
   const [showToolCalls, setShowToolCalls] = useState(false);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const drawerOpenRef = useRef(false);
@@ -193,7 +193,7 @@ export default function App() {
       setDefaultStartCwd(null);
       setDefaultChatEngine('codex');
       setDefaultEngineSettings(createEmptyEngineDefaultSettingsMap());
-      setApprovalMode('normal');
+      setApprovalMode('yolo');
       setShowToolCalls(false);
     };
 
@@ -911,7 +911,7 @@ function parseAppSettings(raw: string): {
       defaultStartCwd: null,
       defaultChatEngine: 'codex',
       defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
-      approvalMode: 'normal',
+      approvalMode: 'yolo',
       showToolCalls: false,
     };
   }
@@ -933,7 +933,7 @@ function parseAppSettings(raw: string): {
         defaultStartCwd: null,
         defaultChatEngine: 'codex',
         defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
-        approvalMode: 'normal',
+        approvalMode: 'yolo',
         showToolCalls: false,
       };
     }
@@ -962,7 +962,7 @@ function parseAppSettings(raw: string): {
       ),
       defaultChatEngine,
       defaultEngineSettings,
-      approvalMode: normalizeApprovalMode(
+      approvalMode: normalizeStoredApprovalMode(
         (parsed as { approvalMode?: unknown }).approvalMode
       ),
       showToolCalls: normalizeBoolean(
@@ -976,7 +976,7 @@ function parseAppSettings(raw: string): {
       defaultStartCwd: null,
       defaultChatEngine: 'codex',
       defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
-      approvalMode: 'normal',
+      approvalMode: 'yolo',
       showToolCalls: false,
     };
   }
@@ -1108,6 +1108,14 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | null {
 
 function normalizeApprovalMode(value: unknown): ApprovalMode {
   return value === 'yolo' ? 'yolo' : 'normal';
+}
+
+function normalizeStoredApprovalMode(value: unknown): ApprovalMode {
+  if (typeof value === 'undefined') {
+    return 'yolo';
+  }
+
+  return normalizeApprovalMode(value);
 }
 
 function normalizeBoolean(value: unknown): boolean {
