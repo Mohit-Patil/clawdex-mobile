@@ -37,7 +37,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import { readAccountRateLimitSnapshot } from '../api/rateLimits';
-import { getChatEngineLabel, resolveChatEngine } from '../chatEngines';
+import {
+  DEFAULT_CHAT_ENGINE,
+  getChatEngineLabel,
+  getChatEngineMetadata,
+  resolveChatEngine,
+} from '../chatEngines';
 import type {
   AccountRateLimitSnapshot,
   ApprovalMode,
@@ -552,7 +557,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
     const [loadingModels, setLoadingModels] = useState(false);
     const [pendingChatEngine, setPendingChatEngine] = useState<ChatEngine>(
-      () => defaultChatEngine ?? 'codex'
+      () => defaultChatEngine ?? DEFAULT_CHAT_ENGINE
     );
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
@@ -731,13 +736,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const chatPlanSnapshotsRef = useRef<Record<string, ActivePlanState>>({});
     const [, setChatPlanSnapshotsLoaded] = useState(false);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
-    const persistedDefaultChatEngine = resolveChatEngine(defaultChatEngine ?? 'codex');
+    const persistedDefaultChatEngine = resolveChatEngine(defaultChatEngine ?? DEFAULT_CHAT_ENGINE);
     const availableNewChatEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
       ? bridgeCapabilities.availableEngines
-      : ['codex'];
+      : [DEFAULT_CHAT_ENGINE];
     const fallbackDefaultChatEngine = availableNewChatEngines.includes(persistedDefaultChatEngine)
       ? persistedDefaultChatEngine
-      : availableNewChatEngines[0] ?? 'codex';
+      : availableNewChatEngines[0] ?? DEFAULT_CHAT_ENGINE;
     const preferredNewChatEngine = availableNewChatEngines.includes(pendingChatEngine)
       ? pendingChatEngine
       : fallbackDefaultChatEngine;
@@ -1899,7 +1904,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
-      setPendingChatEngine(availableNewChatEngines[0] ?? 'codex');
+      setPendingChatEngine(availableNewChatEngines[0] ?? DEFAULT_CHAT_ENGINE);
     }, [availableNewChatEngines, pendingChatEngine, selectedChatId]);
 
     useEffect(() => {
@@ -2960,20 +2965,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const enginePickerOptions = useMemo<SelectionSheetOption[]>(
       () =>
-        availableNewChatEngines.map((engine) => ({
-          key: engine,
-          title: getChatEngineLabel(engine),
-          description:
-            engine === 'opencode'
-              ? 'Use the OpenCode backend and its connected provider models.'
-              : 'Use the Codex backend and its model catalog.',
-          icon:
-            engine === 'opencode'
-              ? ('layers-outline' as const)
-              : ('sparkles-outline' as const),
-          selected: activeChatEngine === engine,
-          onPress: () => selectPendingChatEngine(engine),
-        })),
+        availableNewChatEngines.map((engine) => {
+          const metadata = getChatEngineMetadata(engine);
+          return {
+            key: engine,
+            title: metadata.label,
+            description: metadata.pickerDescription,
+            icon: metadata.icon,
+            selected: activeChatEngine === engine,
+            onPress: () => selectPendingChatEngine(engine),
+          };
+        }),
       [activeChatEngine, availableNewChatEngines, selectPendingChatEngine]
     );
 
@@ -7142,7 +7144,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 attachments={composerAttachments}
                 onRemoveAttachment={removeComposerAttachment}
                 isLoading={isLoading}
-                placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
+                placeholder={selectedChat ? 'Reply...' : `Message ${activeChatEngineLabel}...`}
                 voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
                 voiceRecordingDurationMillis={
                   canUseVoiceInput ? voiceRecorder.recordingDurationMillis : 0

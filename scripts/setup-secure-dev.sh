@@ -10,7 +10,97 @@ SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MOBILE_ENV_FILE="$ROOT_DIR/apps/mobile/.env"
 MOBILE_ENV_EXAMPLE="$ROOT_DIR/apps/mobile/.env.example"
 BRIDGE_ACTIVE_ENGINE="${BRIDGE_ACTIVE_ENGINE:-codex}"
+BRIDGE_ENABLED_ENGINES="${BRIDGE_ENABLED_ENGINES:-}"
 OPENCODE_CLI_BIN="${OPENCODE_CLI_BIN:-opencode}"
+T3CODE_CLI_BIN="${T3CODE_CLI_BIN:-t3}"
+DEFAULT_T3CODE_CONNECT_TIMEOUT_MS="${BRIDGE_T3CODE_CONNECT_TIMEOUT_MS:-15000}"
+
+format_host_for_url() {
+  local host="$1"
+  if [[ "$host" == *:* ]] && [[ "$host" != \[*\] ]]; then
+    printf '[%s]' "$host"
+  else
+    printf '%s' "$host"
+  fi
+}
+
+default_t3code_host() {
+  local host="${T3CODE_HOST:-127.0.0.1}"
+  case "$host" in
+    ""|0.0.0.0|::|[::])
+      host="127.0.0.1"
+      ;;
+  esac
+  printf '%s' "$host"
+}
+
+default_t3code_url() {
+  local host=""
+  local port=""
+
+  host="$(default_t3code_host)"
+  port="${T3CODE_PORT:-3773}"
+
+  printf 'http://%s:%s' "$(format_host_for_url "$host")" "$port"
+}
+
+validate_engine_name() {
+  case "$1" in
+    codex|opencode|t3code)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+csv_contains_engine() {
+  local csv="$1"
+  local engine="$2"
+
+  case ",$csv," in
+    *",$engine,"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+normalize_engine_csv() {
+  local raw_csv="$1"
+  local required_engine="${2:-}"
+  local entry=""
+  local normalized=""
+  local -a entries=()
+
+  if [[ -n "$raw_csv" ]]; then
+    IFS=',' read -r -a entries <<<"$raw_csv"
+    for entry in "${entries[@]}"; do
+      entry="$(printf '%s' "$entry" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+      if ! validate_engine_name "$entry"; then
+        continue
+      fi
+      if ! csv_contains_engine "$normalized" "$entry"; then
+        normalized="${normalized:+$normalized,}$entry"
+      fi
+    done
+  fi
+
+  if [[ -n "$required_engine" ]]; then
+    if ! validate_engine_name "$required_engine"; then
+      echo "error: unsupported required engine '$required_engine'." >&2
+      exit 1
+    fi
+    if ! csv_contains_engine "$normalized" "$required_engine"; then
+      normalized="${normalized:+$normalized,}$required_engine"
+    fi
+  fi
+
+  printf '%s' "$normalized"
+}
 
 upsert_env_key() {
   local file="$1"
@@ -35,6 +125,17 @@ upsert_env_key() {
   ' "$file" > "$tmp"
 
   mv "$tmp" "$file"
+}
+
+extract_env_value() {
+  local file="$1"
+  local key="$2"
+
+  if [[ ! -f "$file" ]]; then
+    return 0
+  fi
+
+  awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=")+1); exit }' "$file"
 }
 
 confirm_prompt() {
@@ -229,10 +330,10 @@ case "$BRIDGE_NETWORK_MODE" in
 esac
 
 case "$BRIDGE_ACTIVE_ENGINE" in
-  codex|opencode)
+  codex|opencode|t3code)
     ;;
   *)
-    echo "error: BRIDGE_ACTIVE_ENGINE must be 'codex' or 'opencode'." >&2
+    echo "error: BRIDGE_ACTIVE_ENGINE must be 'codex', 'opencode', or 't3code'." >&2
     exit 1
     ;;
 esac
@@ -253,13 +354,54 @@ fi
 BRIDGE_PORT="${BRIDGE_PORT_OVERRIDE:-8787}"
 
 EXISTING_TOKEN=""
+EXISTING_ENABLED_ENGINES=""
+EXISTING_T3CODE_AUTH_TOKEN=""
+EXISTING_T3CODE_CONNECT_TIMEOUT_MS=""
 if [[ -f "$SECURE_ENV_FILE" ]]; then
   EXISTING_TOKEN="$(awk -F= '/^BRIDGE_AUTH_TOKEN=/{print substr($0, index($0, "=")+1)}' "$SECURE_ENV_FILE" | head -n1)"
+  EXISTING_ENABLED_ENGINES="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
+  EXISTING_T3CODE_AUTH_TOKEN="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_T3CODE_AUTH_TOKEN")"
+  EXISTING_T3CODE_CONNECT_TIMEOUT_MS="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_T3CODE_CONNECT_TIMEOUT_MS")"
 fi
+
+if [[ -z "$BRIDGE_ENABLED_ENGINES" ]]; then
+  BRIDGE_ENABLED_ENGINES="$EXISTING_ENABLED_ENGINES"
+fi
+if [[ -z "$BRIDGE_ENABLED_ENGINES" ]]; then
+  BRIDGE_ENABLED_ENGINES="$BRIDGE_ACTIVE_ENGINE"
+fi
+BRIDGE_ENABLED_ENGINES="$(normalize_engine_csv "$BRIDGE_ENABLED_ENGINES" "$BRIDGE_ACTIVE_ENGINE")"
 
 BRIDGE_TOKEN="${BRIDGE_AUTH_TOKEN:-$EXISTING_TOKEN}"
 if [[ -z "$BRIDGE_TOKEN" ]]; then
   BRIDGE_TOKEN="$(openssl rand -hex 24)"
+fi
+
+BRIDGE_T3CODE_CONNECT_TIMEOUT_MS="${BRIDGE_T3CODE_CONNECT_TIMEOUT_MS:-${EXISTING_T3CODE_CONNECT_TIMEOUT_MS:-$DEFAULT_T3CODE_CONNECT_TIMEOUT_MS}}"
+
+if csv_contains_engine "$BRIDGE_ENABLED_ENGINES" "t3code"; then
+  BRIDGE_T3CODE_URL="${BRIDGE_T3CODE_URL:-}"
+  if [[ -z "$BRIDGE_T3CODE_URL" ]]; then
+    BRIDGE_T3CODE_URL="$(default_t3code_url)"
+  fi
+  BRIDGE_T3CODE_AUTH_TOKEN="${BRIDGE_T3CODE_AUTH_TOKEN:-${EXISTING_T3CODE_AUTH_TOKEN:-${T3CODE_AUTH_TOKEN:-}}}"
+  if [[ -z "$BRIDGE_T3CODE_AUTH_TOKEN" ]]; then
+    BRIDGE_T3CODE_AUTH_TOKEN="$(openssl rand -hex 24)"
+  fi
+else
+  BRIDGE_T3CODE_URL=""
+  BRIDGE_T3CODE_AUTH_TOKEN=""
+fi
+
+if [[ -n "$BRIDGE_T3CODE_URL" ]]; then
+  case "$BRIDGE_T3CODE_URL" in
+    http://*|https://*|ws://*|wss://*)
+      ;;
+    *)
+      echo "error: BRIDGE_T3CODE_URL must start with http://, https://, ws://, or wss://." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 cat > "$SECURE_ENV_FILE" <<EOT
@@ -269,8 +411,13 @@ BRIDGE_PORT=$BRIDGE_PORT
 BRIDGE_AUTH_TOKEN=$BRIDGE_TOKEN
 BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true
 BRIDGE_ACTIVE_ENGINE=$BRIDGE_ACTIVE_ENGINE
+BRIDGE_ENABLED_ENGINES=$BRIDGE_ENABLED_ENGINES
 CODEX_CLI_BIN=codex
 OPENCODE_CLI_BIN=$OPENCODE_CLI_BIN
+T3CODE_CLI_BIN=$T3CODE_CLI_BIN
+BRIDGE_T3CODE_URL=$BRIDGE_T3CODE_URL
+BRIDGE_T3CODE_AUTH_TOKEN=$BRIDGE_T3CODE_AUTH_TOKEN
+BRIDGE_T3CODE_CONNECT_TIMEOUT_MS=$BRIDGE_T3CODE_CONNECT_TIMEOUT_MS
 BRIDGE_WORKDIR=$ROOT_DIR
 EOT
 
@@ -290,6 +437,10 @@ echo "Bridge network mode: $BRIDGE_NETWORK_MODE"
 echo "Bridge host: $BRIDGE_HOST ($HOST_SOURCE)"
 echo "Bridge port: $BRIDGE_PORT"
 echo "Preferred engine: $BRIDGE_ACTIVE_ENGINE"
+echo "Managed runtimes: $BRIDGE_ENABLED_ENGINES"
+if [[ -n "$BRIDGE_T3CODE_URL" ]]; then
+  echo "Managed T3 URL: $BRIDGE_T3CODE_URL"
+fi
 echo "Token source: $SECURE_ENV_FILE"
 if has_local_mobile_workspace; then
   echo "Mobile env updated: $MOBILE_ENV_FILE"

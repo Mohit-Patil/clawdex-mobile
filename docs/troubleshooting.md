@@ -47,6 +47,13 @@ npm run stop:services
 - Ensure `codex` is in `PATH`
 - Or set `CODEX_CLI_BIN` explicitly
 
+## T3 Code will not start
+
+- Confirm `t3code` is included in `BRIDGE_ENABLED_ENGINES` inside `.env.secure`
+- Ensure `t3` is in `PATH`, or set `T3CODE_CLI_BIN`
+- Clawdex-managed T3 uses a local loopback `BRIDGE_T3CODE_URL`; stop any other T3 server already listening on that port
+- After changing `.env.secure`, rerun `clawdex init` or `npm run secure:bridge`
+
 ## Bridge build fails with `linker 'cc' not found`
 
 This only applies when the bridge is building from Rust source instead of using a bundled binary.

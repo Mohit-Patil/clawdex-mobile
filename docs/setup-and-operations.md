@@ -6,6 +6,8 @@ This guide is the detailed companion to the top-level `README.md`.
 
 The bridge defaults to `codex`.
 
+`BRIDGE_ACTIVE_ENGINE` sets the preferred/default engine. `BRIDGE_ENABLED_ENGINES` controls which runtimes Clawdex actually starts and manages for this repo.
+
 Use the setup wizard to make `opencode` the preferred engine:
 
 ```bash
@@ -18,7 +20,21 @@ From a source checkout, the equivalent command is:
 npm run setup:wizard -- --engine opencode
 ```
 
-That writes `BRIDGE_ACTIVE_ENGINE=opencode` into `.env.secure`. To switch back, rerun setup with `--engine codex` or edit `.env.secure` directly.
+Use the setup wizard to make `t3code` the preferred engine:
+
+```bash
+clawdex init --engine t3code
+```
+
+From a source checkout, the equivalent command is:
+
+```bash
+npm run setup:wizard -- --engine t3code
+```
+
+That flow makes `t3code` the preferred engine. The wizard also asks which runtimes Clawdex should manage locally. If `t3code` is selected there, the secure bridge launcher starts its own local `t3` server and the bridge connects to that managed instance only.
+
+To switch later, rerun setup with `--engine codex`, `--engine opencode`, or `--engine t3code`, or edit `.env.secure` directly.
 
 ## Onboarding Output Cues
 
@@ -55,6 +71,14 @@ To generate OpenCode-first config instead:
 BRIDGE_ACTIVE_ENGINE=opencode npm run secure:setup
 ```
 
+To generate T3 Code-first config instead:
+
+```bash
+BRIDGE_ACTIVE_ENGINE=t3code \
+BRIDGE_ENABLED_ENGINES=codex,t3code \
+npm run secure:setup
+```
+
 Creates/updates:
 
 - `.env.secure` (bridge runtime config + token)
@@ -69,10 +93,20 @@ npm run secure:bridge
 If you want a one-off OpenCode launch without rewriting `.env.secure`:
 
 ```bash
-BRIDGE_ACTIVE_ENGINE=opencode npm run secure:bridge
+BRIDGE_ACTIVE_ENGINE=opencode \
+BRIDGE_ENABLED_ENGINES=opencode \
+npm run secure:bridge
 ```
 
-`codex` remains the default. When both CLIs are available, the bridge can start both backends and merge chat lists while still routing each thread by engine.
+If you want a one-off T3-first launch without rewriting `.env.secure`:
+
+```bash
+BRIDGE_ACTIVE_ENGINE=t3code \
+BRIDGE_ENABLED_ENGINES=codex,t3code \
+npm run secure:bridge
+```
+
+`codex` remains the default. When multiple runtimes are explicitly enabled, the bridge can merge chat lists while still routing each thread by engine.
 
 ### 4) Pair from the mobile app
 
@@ -128,14 +162,21 @@ npm run teardown -- --yes
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query-token auth fallback |
 | `CODEX_CLI_BIN` | codex executable |
-| `BRIDGE_ACTIVE_ENGINE` | preferred backend (`codex` default, `opencode` optional) |
-| `OPENCODE_CLI_BIN` | opencode executable for dual-engine startup |
+| `BRIDGE_ACTIVE_ENGINE` | preferred backend (`codex` default) |
+| `BRIDGE_ENABLED_ENGINES` | comma-separated managed runtimes to start (`codex`, `opencode`, `t3code`) |
+| `OPENCODE_CLI_BIN` | opencode executable for managed OpenCode startup |
+| `T3CODE_CLI_BIN` | local `t3` executable for managed T3 startup |
 | `BRIDGE_OPENCODE_HOST` | loopback host for spawned opencode server |
 | `BRIDGE_OPENCODE_PORT` | loopback port for spawned opencode server |
 | `BRIDGE_OPENCODE_SERVER_USERNAME` | basic-auth username passed to opencode server |
 | `BRIDGE_OPENCODE_SERVER_PASSWORD` | basic-auth password passed to opencode server |
+| `BRIDGE_T3CODE_URL` | loopback URL for the managed local T3 server |
+| `BRIDGE_T3CODE_AUTH_TOKEN` | auth token passed to the managed T3 server and websocket client |
+| `BRIDGE_T3CODE_CONNECT_TIMEOUT_MS` | timeout for establishing the T3 websocket connection |
 | `BRIDGE_WORKDIR` | absolute working directory for terminal/git |
 | `BRIDGE_ALLOW_OUTSIDE_ROOT_CWD` | allow terminal/git `cwd` outside `BRIDGE_WORKDIR` |
+
+`t3code` support is managed-only in the secure launcher. If `t3code` is enabled, Clawdex expects to start its own local `t3` process and will refuse to attach to an already-running external T3 server on the same port.
 
 ### Mobile runtime (`apps/mobile/.env`, generated/updated)
 

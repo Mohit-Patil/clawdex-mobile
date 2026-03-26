@@ -26,7 +26,12 @@ import type {
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
-import { getChatEngineLabel } from '../chatEngines';
+import {
+  ALL_CHAT_ENGINES,
+  DEFAULT_CHAT_ENGINE,
+  getChatEngineLabel,
+  getChatEngineMetadata,
+} from '../chatEngines';
 import {
   formatModelOptionDescription,
   formatModelOptionLabel,
@@ -91,10 +96,10 @@ export function SettingsScreen({
 
   const availableEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
     ? bridgeCapabilities.availableEngines
-    : ['codex'];
-  const normalizedDefaultChatEngine = availableEngines.includes(defaultChatEngine ?? 'codex')
-    ? (defaultChatEngine ?? 'codex')
-    : availableEngines[0] ?? 'codex';
+    : [DEFAULT_CHAT_ENGINE];
+  const normalizedDefaultChatEngine = availableEngines.includes(defaultChatEngine ?? DEFAULT_CHAT_ENGINE)
+    ? (defaultChatEngine ?? DEFAULT_CHAT_ENGINE)
+    : availableEngines[0] ?? DEFAULT_CHAT_ENGINE;
   const selectedEngineDefaults = defaultEngineSettings?.[normalizedDefaultChatEngine] ?? null;
   const normalizedDefaultModelId = normalizeModelId(selectedEngineDefaults?.modelId);
   const normalizedDefaultEffort = normalizeReasoningEffort(selectedEngineDefaults?.effort);
@@ -364,17 +369,17 @@ export function SettingsScreen({
 
   const enginePickerOptions = useMemo<SelectionSheetOption[]>(
     () =>
-      availableEngines.map((engine) => ({
-        key: engine,
-        title: getChatEngineLabel(engine),
-        description:
-          engine === 'opencode'
-            ? 'Use OpenCode defaults for new chats.'
-            : 'Use Codex defaults for new chats.',
-        icon: engine === 'opencode' ? ('layers-outline' as const) : ('sparkles-outline' as const),
-        selected: engine === normalizedDefaultChatEngine,
-        onPress: () => selectDefaultEngine(engine),
-      })),
+      availableEngines.map((engine) => {
+        const metadata = getChatEngineMetadata(engine);
+        return {
+          key: engine,
+          title: metadata.label,
+          description: metadata.defaultsDescription,
+          icon: metadata.icon,
+          selected: engine === normalizedDefaultChatEngine,
+          onPress: () => selectDefaultEngine(engine),
+        };
+      }),
     [availableEngines, normalizedDefaultChatEngine, selectDefaultEngine]
   );
 
@@ -619,17 +624,15 @@ export function SettingsScreen({
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Engines</Text>
           <BlurView intensity={50} tint="dark" style={styles.card}>
-            <EngineAvailabilityRow
-              engine="codex"
-              available={availableEngines.includes('codex')}
-              active={activeEngine === 'codex'}
-            />
-            <EngineAvailabilityRow
-              engine="opencode"
-              available={availableEngines.includes('opencode')}
-              active={activeEngine === 'opencode'}
-              isLast
-            />
+            {ALL_CHAT_ENGINES.map((engine, index) => (
+              <EngineAvailabilityRow
+                key={engine}
+                engine={engine}
+                available={availableEngines.includes(engine)}
+                active={activeEngine === engine}
+                isLast={index === ALL_CHAT_ENGINES.length - 1}
+              />
+            ))}
           </BlurView>
           <Text style={styles.subtleHintText}>
             The new chat engine picker only appears when multiple engines are available on
@@ -779,10 +782,11 @@ function EngineAvailabilityRow({
       : 'Available'
     : 'Not installed on bridge';
   const valueColor = available ? colors.statusComplete : colors.textMuted;
+  const metadata = getChatEngineMetadata(engine);
 
   return (
     <Row
-      label={getChatEngineLabel(engine)}
+      label={metadata.label}
       value={value}
       valueColor={valueColor}
       isLast={isLast}

@@ -30,6 +30,11 @@ import type {
 } from './src/api/types';
 import { HostBridgeWsClient } from './src/api/ws';
 import { normalizeBridgeUrlInput } from './src/bridgeUrl';
+import {
+  ALL_CHAT_ENGINES,
+  DEFAULT_CHAT_ENGINE,
+  normalizeChatEngine,
+} from './src/chatEngines';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
 import { GitScreen } from './src/screens/GitScreen';
@@ -95,7 +100,7 @@ export default function App() {
   const [pendingMainChatId, setPendingMainChatId] = useState<string | null>(null);
   const [pendingMainChatSnapshot, setPendingMainChatSnapshot] = useState<Chat | null>(null);
   const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
-  const [defaultChatEngine, setDefaultChatEngine] = useState<ChatEngine>('codex');
+  const [defaultChatEngine, setDefaultChatEngine] = useState<ChatEngine>(DEFAULT_CHAT_ENGINE);
   const [defaultEngineSettings, setDefaultEngineSettings] = useState<EngineDefaultSettingsMap>(
     createEmptyEngineDefaultSettingsMap
   );
@@ -1017,19 +1022,6 @@ function normalizeModelId(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function normalizeChatEngine(value: unknown): ChatEngine | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'opencode') {
-    return normalized;
-  }
-
-  return null;
-}
-
 function inferChatEngineFromModelId(value: string | null | undefined): ChatEngine | null {
   const normalized = typeof value === 'string' ? value.trim() : '';
   if (!normalized) {
@@ -1040,16 +1032,13 @@ function inferChatEngineFromModelId(value: string | null | undefined): ChatEngin
 }
 
 function createEmptyEngineDefaultSettingsMap(): EngineDefaultSettingsMap {
-  return {
-    codex: {
+  return ALL_CHAT_ENGINES.reduce<EngineDefaultSettingsMap>((defaults, engine) => {
+    defaults[engine] = {
       modelId: null,
       effort: null,
-    },
-    opencode: {
-      modelId: null,
-      effort: null,
-    },
-  };
+    };
+    return defaults;
+  }, {});
 }
 
 function normalizeEngineDefaultSettingsMap(
@@ -1060,7 +1049,7 @@ function normalizeEngineDefaultSettingsMap(
   const base = createEmptyEngineDefaultSettingsMap();
   const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 
-  for (const engine of ['codex', 'opencode'] as const) {
+  for (const engine of ALL_CHAT_ENGINES) {
     const entry =
       record && typeof record[engine] === 'object'
         ? (record[engine] as Record<string, unknown>)
@@ -1076,7 +1065,7 @@ function normalizeEngineDefaultSettingsMap(
   }
 
   if (legacyDefaultModelId) {
-    const legacyEngine = inferChatEngineFromModelId(legacyDefaultModelId) ?? 'codex';
+    const legacyEngine = inferChatEngineFromModelId(legacyDefaultModelId) ?? DEFAULT_CHAT_ENGINE;
     base[legacyEngine] = {
       modelId: legacyDefaultModelId,
       effort: legacyDefaultEffort,

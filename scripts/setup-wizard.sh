@@ -30,6 +30,7 @@ BRIDGE_HOST=""
 BRIDGE_PORT=""
 ACTIVE_ENGINE="${BRIDGE_ACTIVE_ENGINE:-codex}"
 ENGINE_PRESET="false"
+ENABLED_ENGINES_CSV="${BRIDGE_ENABLED_ENGINES:-}"
 AUTO_START="true"
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MENU_RESULT=""
@@ -82,7 +83,7 @@ Usage: $(basename "$0") [options]
 
 Options:
   --no-start               Configure everything but do not start bridge
-  --engine <codex|opencode>
+  --engine <codex|opencode|t3code>
                            Set preferred engine before writing .env.secure
   -h, --help               Show this help
 EOF
@@ -90,7 +91,7 @@ EOF
 
 validate_engine_name() {
   case "$1" in
-    codex|opencode)
+    codex|opencode|t3code)
       return 0
       ;;
     *)
@@ -104,10 +105,82 @@ format_engine_name() {
     opencode)
       printf 'OpenCode'
       ;;
+    t3code)
+      printf 'T3 Code'
+      ;;
     *)
       printf 'Codex'
       ;;
   esac
+}
+
+csv_contains_engine() {
+  local csv="$1"
+  local engine="$2"
+
+  case ",$csv," in
+    *",$engine,"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+normalize_engine_csv() {
+  local raw_csv="$1"
+  local required_engine="${2:-}"
+  local entry=""
+  local normalized=""
+  local -a entries=()
+
+  if [[ -n "$raw_csv" ]]; then
+    IFS=',' read -r -a entries <<<"$raw_csv"
+    for entry in "${entries[@]}"; do
+      entry="$(printf '%s' "$entry" | tr '[:upper:]' '[:lower:]')"
+      entry="$(trim_value "$entry")"
+      if ! validate_engine_name "$entry"; then
+        continue
+      fi
+      if ! csv_contains_engine "$normalized" "$entry"; then
+        normalized="${normalized:+$normalized,}$entry"
+      fi
+    done
+  fi
+
+  if [[ -n "$required_engine" ]] && validate_engine_name "$required_engine"; then
+    if ! csv_contains_engine "$normalized" "$required_engine"; then
+      normalized="${normalized:+$normalized,}$required_engine"
+    fi
+  fi
+
+  printf '%s' "$normalized"
+}
+
+format_engine_list_from_csv() {
+  local csv="$1"
+  local entry=""
+  local formatted=""
+  local -a entries=()
+
+  if [[ -z "$csv" ]]; then
+    printf '%s' "$(format_engine_name "$ACTIVE_ENGINE")"
+    return 0
+  fi
+
+  IFS=',' read -r -a entries <<<"$csv"
+  for entry in "${entries[@]}"; do
+    entry="$(trim_value "$entry")"
+    [[ -z "$entry" ]] && continue
+    formatted="${formatted:+$formatted, }$(format_engine_name "$entry")"
+  done
+
+  if [[ -z "$formatted" ]]; then
+    printf '%s' "$(format_engine_name "$ACTIVE_ENGINE")"
+  else
+    printf '%s' "$formatted"
+  fi
 }
 
 parse_args() {
@@ -119,12 +192,12 @@ parse_args() {
         ;;
       --engine)
         if (($# < 2)); then
-          echo "error: --engine requires a value ('codex' or 'opencode')." >&2
+          echo "error: --engine requires a value ('codex', 'opencode', or 't3code')." >&2
           print_usage >&2
           exit 1
         fi
         if ! validate_engine_name "$2"; then
-          echo "error: unsupported engine '$2'. Use 'codex' or 'opencode'." >&2
+          echo "error: unsupported engine '$2'. Use 'codex', 'opencode', or 't3code'." >&2
           print_usage >&2
           exit 1
         fi
@@ -485,6 +558,109 @@ menu_select() {
   printf "\r\033[2K%s %s %s: %s\n" "$rail" "$branch" "$prompt" "$MENU_RESULT"
 }
 
+menu_multiselect_engines() {
+  local prompt="$1"
+  local initial_csv="$2"
+  local -a labels=("Codex" "OpenCode" "T3 Code")
+  local -a values=("codex" "opencode" "t3code")
+  local -a checked=(0 0 0)
+  local cursor=0
+  local lines_to_render=6
+  local i=0
+  local key=""
+  local key_rest=""
+  local rail="$RAIL_GLYPH"
+  local branch="$RAIL_BRANCH"
+  local child="$RAIL_CHILD"
+  local result_csv=""
+
+  initial_csv="$(normalize_engine_csv "$initial_csv")"
+  for ((i = 0; i < ${#values[@]}; i++)); do
+    if csv_contains_engine "$initial_csv" "${values[$i]}"; then
+      checked[$i]=1
+    fi
+  done
+
+  tput civis >/dev/null 2>&1 || true
+
+  while true; do
+    printf "\r\033[2K%s\n" "$rail"
+    printf "\r\033[2K%s %s %s\n" "$rail" "$branch" "$prompt"
+    printf "\r\033[2K%s %s ${DIM}Space toggles, Enter confirms.${RESET}\n" "$rail" "$child"
+    for ((i = 0; i < ${#labels[@]}; i++)); do
+      local mark=""
+      local bullet=""
+      if (( checked[$i] == 1 )); then
+        mark="${GREEN}◼${RESET}"
+      else
+        mark="${DIM}◻${RESET}"
+      fi
+
+      if (( i == cursor )); then
+        bullet="${GREEN}◆${RESET}"
+      else
+        bullet="${DIM}◇${RESET}"
+      fi
+      printf "\r\033[2K%s %s %s %s %s\n" "$rail" "$child" "$bullet" "$mark" "${labels[$i]}"
+    done
+
+    IFS= read -rsn1 key || abort_wizard
+
+    if [[ "$key" == $'\x03' ]]; then
+      abort_wizard
+    fi
+
+    if [[ "$key" == $'\x1b' ]]; then
+      key_rest=""
+      IFS= read -rsn2 key_rest || true
+      key+="$key_rest"
+    fi
+
+    case "$key" in
+      "")
+        result_csv=""
+        for ((i = 0; i < ${#values[@]}; i++)); do
+          if (( checked[$i] == 1 )); then
+            result_csv="${result_csv:+$result_csv,}${values[$i]}"
+          fi
+        done
+        MENU_RESULT="$result_csv"
+        break
+        ;;
+      " ")
+        if (( checked[$cursor] == 1 )); then
+          checked[$cursor]=0
+        else
+          checked[$cursor]=1
+        fi
+        printf "\033[%dA" "$lines_to_render"
+        ;;
+      $'\x1b[A'|k|K)
+        cursor=$(((cursor - 1 + ${#labels[@]}) % ${#labels[@]}))
+        printf "\033[%dA" "$lines_to_render"
+        ;;
+      $'\x1b[B'|j|J)
+        cursor=$(((cursor + 1) % ${#labels[@]}))
+        printf "\033[%dA" "$lines_to_render"
+        ;;
+      q|Q)
+        abort_wizard
+        ;;
+      *)
+        printf "\033[%dA" "$lines_to_render"
+        ;;
+    esac
+  done
+
+  tput cnorm >/dev/null 2>&1 || true
+  printf "\033[%dA" "$lines_to_render"
+  for ((i = 0; i < lines_to_render; i++)); do
+    printf "\r\033[2K\n"
+  done
+  printf "\033[%dA" "$lines_to_render"
+  printf "\r\033[2K%s %s %s: %s\n" "$rail" "$branch" "$prompt" "$(format_engine_list_from_csv "$MENU_RESULT")"
+}
+
 confirm_prompt() {
   local prompt="$1"
   local default="${2:-N}"
@@ -607,6 +783,13 @@ prompt_manual_ipv4() {
   done
 }
 
+trim_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
 extract_env_value() {
   local file="$1"
   local key="$2"
@@ -674,6 +857,8 @@ print_existing_setup_summary() {
   local token=""
   local network_mode=""
   local engine=""
+  local enabled_engines=""
+  local t3_url=""
   local source_path=""
 
   if [[ ! -f "$SECURE_ENV_FILE" ]]; then
@@ -685,9 +870,12 @@ print_existing_setup_summary() {
   token="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
   network_mode="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
   engine="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
+  enabled_engines="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
+  t3_url="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_T3CODE_URL")"
   if ! validate_engine_name "$engine"; then
     engine="codex"
   fi
+  enabled_engines="$(normalize_engine_csv "$enabled_engines" "$engine")"
 
   if [[ -z "$host" ]] && [[ -z "$port" ]] && [[ -z "$token" ]]; then
     return 1
@@ -705,6 +893,12 @@ print_existing_setup_summary() {
   fi
   if [[ -n "$engine" ]]; then
     echo "bridge.engine: $engine"
+  fi
+  if [[ -n "$enabled_engines" ]]; then
+    echo "bridge.enabledEngines: $enabled_engines"
+  fi
+  if csv_contains_engine "$enabled_engines" "t3code" && [[ -n "$t3_url" ]]; then
+    echo "bridge.t3Url: $t3_url"
   fi
   if [[ -n "$token" ]]; then
     echo "bridge.token: present"
@@ -789,7 +983,7 @@ choose_bridge_network_mode() {
 }
 
 choose_runtime_engine() {
-  menu_select "Preferred engine" "Codex" "OpenCode"
+  menu_select "Preferred engine" "Codex" "OpenCode" "T3 Code"
   case "$MENU_RESULT" in
     "Codex")
       ACTIVE_ENGINE="codex"
@@ -799,10 +993,33 @@ choose_runtime_engine() {
       ACTIVE_ENGINE="opencode"
       info "OpenCode selected."
       ;;
+    "T3 Code")
+      ACTIVE_ENGINE="t3code"
+      info "T3 Code selected."
+      ;;
     *)
       abort_wizard "Unexpected preferred engine."
       ;;
   esac
+}
+
+choose_managed_engines() {
+  local default_csv="$1"
+  local normalized_defaults=""
+  local selected_raw=""
+
+  normalized_defaults="$(normalize_engine_csv "$default_csv" "$ACTIVE_ENGINE")"
+  menu_multiselect_engines "Managed runtimes to start" "$normalized_defaults"
+  selected_raw="$MENU_RESULT"
+  ENABLED_ENGINES_CSV="$(normalize_engine_csv "$MENU_RESULT" "$ACTIVE_ENGINE")"
+
+  if ! csv_contains_engine "$selected_raw" "$ACTIVE_ENGINE"; then
+    info "Managed runtimes now include the preferred engine: $(format_engine_name "$ACTIVE_ENGINE")."
+  fi
+  info "Managed runtimes selected: $(format_engine_list_from_csv "$ENABLED_ENGINES_CSV")."
+  if csv_contains_engine "$ENABLED_ENGINES_CSV" "t3code"; then
+    info "T3 Code will run as a managed local server when the bridge starts."
+  fi
 }
 
 infer_network_mode_from_host() {
@@ -916,18 +1133,48 @@ ensure_opencode_cli() {
   fi
 }
 
-ensure_selected_engine_cli() {
-  case "$ACTIVE_ENGINE" in
-    codex)
-      ensure_codex_cli
-      ;;
-    opencode)
-      ensure_opencode_cli
-      ;;
-    *)
-      abort_wizard "Unsupported preferred engine '$ACTIVE_ENGINE'."
-      ;;
-  esac
+ensure_t3code_cli() {
+  local t3_bin="${T3CODE_CLI_BIN:-t3}"
+
+  while ! command -v "$t3_bin" >/dev/null 2>&1; do
+    warn "T3 Code CLI ('$t3_bin') not found in PATH."
+    if confirm_prompt "Open T3 Code docs in browser now?" "Y"; then
+      open_url "https://t3.codes/"
+    fi
+
+    if ! confirm_prompt "Retry T3 Code CLI check?" "Y"; then
+      abort_wizard "Install T3 Code CLI and rerun: clawdex init --engine t3code"
+    fi
+  done
+
+  ok "Found $t3_bin: $(command -v "$t3_bin")"
+  if "$t3_bin" --version >/dev/null 2>&1; then
+    info "$t3_bin version: $("$t3_bin" --version 2>/dev/null | head -n1)"
+  fi
+}
+
+ensure_managed_engine_clis() {
+  local engine=""
+  local -a engines=()
+
+  ENABLED_ENGINES_CSV="$(normalize_engine_csv "$ENABLED_ENGINES_CSV" "$ACTIVE_ENGINE")"
+  IFS=',' read -r -a engines <<<"$ENABLED_ENGINES_CSV"
+  for engine in "${engines[@]}"; do
+    case "$engine" in
+      codex)
+        ensure_codex_cli
+        ;;
+      opencode)
+        ensure_opencode_cli
+        ;;
+      t3code)
+        ensure_t3code_cli
+        ;;
+      *)
+        abort_wizard "Unsupported managed engine '$engine'."
+        ;;
+    esac
+  done
 }
 
 ensure_tailscale_cli() {
@@ -1284,7 +1531,7 @@ fi
 echo "${BOLD}Clawdex onboarding${RESET}"
 rail_echo "Guided setup for secure bridge launch."
 rail_echo "Project root: $ROOT_DIR"
-rail_echo "${DIM}Use Up/Down (or j/k) and Enter to select.${RESET}"
+rail_echo "${DIM}Use Up/Down (or j/k), Space for multi-select, and Enter to confirm.${RESET}"
 
 section "Security checkpoint"
 require_security_ack
@@ -1311,9 +1558,13 @@ fi
 
 section "Preferred engine"
 EXISTING_ACTIVE_ENGINE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
+EXISTING_ENABLED_ENGINES_RAW="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
+EXISTING_T3CODE_URL="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_T3CODE_URL")"
+EXISTING_ENABLED_ENGINES="$EXISTING_ENABLED_ENGINES_RAW"
 if ! validate_engine_name "$EXISTING_ACTIVE_ENGINE"; then
   EXISTING_ACTIVE_ENGINE="codex"
 fi
+EXISTING_ENABLED_ENGINES="$(normalize_engine_csv "$EXISTING_ENABLED_ENGINES" "$EXISTING_ACTIVE_ENGINE")"
 if [[ "$CONFIG_ACTION" == "keep" ]]; then
   if [[ "$ENGINE_PRESET" == "false" ]]; then
     ACTIVE_ENGINE="$EXISTING_ACTIVE_ENGINE"
@@ -1329,8 +1580,20 @@ else
   fi
 fi
 
-section "Runtime dependency"
-ensure_selected_engine_cli
+section "Managed runtimes"
+if [[ "$CONFIG_ACTION" == "keep" ]]; then
+  ENABLED_ENGINES_CSV="$EXISTING_ENABLED_ENGINES"
+  ENABLED_ENGINES_CSV="$(normalize_engine_csv "$ENABLED_ENGINES_CSV" "$ACTIVE_ENGINE")"
+  info "Keeping managed runtimes: $(format_engine_list_from_csv "$ENABLED_ENGINES_CSV")."
+else
+  choose_managed_engines "${ENABLED_ENGINES_CSV:-${EXISTING_ENABLED_ENGINES:-$ACTIVE_ENGINE}}"
+fi
+
+section "Runtime dependencies"
+ensure_managed_engine_clis
+if csv_contains_engine "$ENABLED_ENGINES_CSV" "t3code"; then
+  info "T3 Code will be started locally by Clawdex on bridge launch."
+fi
 
 if [[ "$CONFIG_ACTION" != "keep" ]]; then
   section "Bridge network mode"
@@ -1355,7 +1618,11 @@ if [[ "$CONFIG_ACTION" != "keep" ]]; then
   esac
 
   section "Write secure config"
-  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
+  BRIDGE_NETWORK_MODE="$NETWORK_MODE" \
+    BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" \
+    BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" \
+    BRIDGE_ENABLED_ENGINES="$ENABLED_ENGINES_CSV" \
+    "$SCRIPT_DIR/setup-secure-dev.sh"
 else
   ok "Keeping existing secure config."
   NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
@@ -1380,10 +1647,27 @@ else
     fi
 
     section "Write secure config"
-    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" \
+      BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" \
+      BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" \
+      BRIDGE_ENABLED_ENGINES="$ENABLED_ENGINES_CSV" \
+      "$SCRIPT_DIR/setup-secure-dev.sh"
   elif [[ "$ACTIVE_ENGINE" != "$EXISTING_ACTIVE_ENGINE" ]]; then
     section "Write secure config"
-    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" \
+      BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" \
+      BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" \
+      BRIDGE_ENABLED_ENGINES="$ENABLED_ENGINES_CSV" \
+      "$SCRIPT_DIR/setup-secure-dev.sh"
+  elif [[ "$ENABLED_ENGINES_CSV" != "$EXISTING_ENABLED_ENGINES" ]] \
+    || [[ -z "$EXISTING_ENABLED_ENGINES_RAW" ]] \
+    || csv_contains_engine "$ENABLED_ENGINES_CSV" "t3code"; then
+    section "Write secure config"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" \
+      BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" \
+      BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" \
+      BRIDGE_ENABLED_ENGINES="$ENABLED_ENGINES_CSV" \
+      "$SCRIPT_DIR/setup-secure-dev.sh"
   fi
 fi
 
@@ -1404,16 +1688,23 @@ fi
 BRIDGE_HOST="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
 BRIDGE_PORT="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
 NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
+ENABLED_ENGINES_CSV="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
+T3CODE_URL="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_T3CODE_URL")"
 if [[ -z "$NETWORK_MODE" ]]; then
   NETWORK_MODE="$(infer_network_mode_from_host "$BRIDGE_HOST")"
 fi
 BRIDGE_HOST="${BRIDGE_HOST:-${TAILSCALE_IP:-127.0.0.1}}"
 BRIDGE_PORT="${BRIDGE_PORT:-8787}"
+ENABLED_ENGINES_CSV="$(normalize_engine_csv "$ENABLED_ENGINES_CSV" "$ACTIVE_ENGINE")"
 
 section "Summary"
 rail_echo "Bridge mode: $NETWORK_MODE"
 rail_echo "Bridge endpoint: http://$BRIDGE_HOST:$BRIDGE_PORT"
 rail_echo "Preferred engine: $(format_engine_name "$ACTIVE_ENGINE")"
+rail_echo "Managed runtimes: $(format_engine_list_from_csv "$ENABLED_ENGINES_CSV")"
+if csv_contains_engine "$ENABLED_ENGINES_CSV" "t3code" && [[ -n "$T3CODE_URL" ]]; then
+  rail_echo "Managed T3 endpoint: $T3CODE_URL"
+fi
 rail_echo "Secure env: $SECURE_ENV_FILE"
 if [[ "$FLOW" == "quickstart" ]]; then
   rail_echo "${DIM}Tip: re-run with Manual mode for full control at each step.${RESET}"

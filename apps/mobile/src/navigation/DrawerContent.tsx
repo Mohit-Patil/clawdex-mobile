@@ -14,7 +14,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ChatEngine, ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
-import { getChatEngineBadgeColors, getChatEngineLabel } from '../chatEngines';
+import {
+  ALL_CHAT_ENGINES,
+  getChatEngineBadgeColors,
+  getChatEngineLabel,
+} from '../chatEngines';
 import { BrandMark } from '../components/BrandMark';
 import {
   DEFAULT_DRAWER_CHAT_ENGINES,
@@ -61,16 +65,10 @@ const RUN_HEARTBEAT_EVENT_TYPES = new Set([
 const CHAT_FILTER_OPTIONS: ReadonlyArray<{
   key: ChatEngine;
   label: string;
-}> = [
-  {
-    key: 'codex',
-    label: 'Codex',
-  },
-  {
-    key: 'opencode',
-    label: 'OpenCode',
-  },
-];
+}> = ALL_CHAT_ENGINES.map((engine) => ({
+  key: engine,
+  label: getChatEngineLabel(engine),
+}));
 
 export function DrawerContent({
   api,
@@ -331,9 +329,7 @@ export function DrawerContent({
     ? `No ${getChatEngineLabel(singleSelectedEngine)} chats`
     : 'No chats yet';
   const emptyHint = singleSelectedEngine
-    ? `Turn ${getChatEngineLabel(
-        singleSelectedEngine === 'codex' ? 'opencode' : 'codex'
-      )} back on or start a new ${getChatEngineLabel(singleSelectedEngine)} chat.`
+    ? `Start a new ${getChatEngineLabel(singleSelectedEngine)} chat or expand the engine filters.`
     : 'Start a new chat and it will show up here with live activity.';
 
   useEffect(() => {

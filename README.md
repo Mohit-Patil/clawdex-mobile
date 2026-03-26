@@ -4,13 +4,13 @@
   <img src="https://raw.githubusercontent.com/Mohit-Patil/clawdex-mobile/main/screenshots/social/clawdex-social-poster-1200x675.png" alt="Clawdex social banner" width="100%" />
 </p>
 
-Run Codex or OpenCode from your phone. `clawdex-mobile` ships the bridge CLI plus bundled Rust bridge binaries for supported hosts, and the mobile app pairs to that bridge over Tailscale or local LAN.
+Run Codex, OpenCode, or T3 Code from your phone. `clawdex-mobile` ships the bridge CLI plus bundled Rust bridge binaries for supported hosts, and the mobile app pairs to that bridge over Tailscale or local LAN.
 
 This project is for trusted/private networking only. Do not expose the bridge publicly.
 
 ## What You Get
 
-- Mobile chat for Codex and OpenCode
+- Mobile chat for Codex, OpenCode, and T3 Code
 - Live run updates over WebSocket
 - Approval and clarification flows in-app
 - Voice-to-text, attachments, terminal, and Git actions
@@ -25,6 +25,7 @@ Before you start:
 - `git`
 - `codex` in `PATH` for the default Codex flow
 - `opencode` in `PATH` if you want the OpenCode flow
+- `t3` in `PATH` if you want the T3 Code flow
 
 Install the mobile app:
 
@@ -39,6 +40,12 @@ clawdex init
 ```
 
 Then open the mobile app and scan the pairing QR.
+
+During `clawdex init`, the wizard asks which runtimes Clawdex should manage locally:
+
+- Codex via `codex`
+- OpenCode via `opencode` when selected
+- T3 Code via a managed local `t3` server when selected
 
 The npm package is bridge-only. It does not install Expo or the mobile source tree. On supported macOS, Linux, and Windows hosts it uses bundled bridge binaries, so normal startup does not compile Rust.
 The current interactive setup helpers are still macOS/Linux-oriented.
@@ -66,8 +73,25 @@ That writes `BRIDGE_ACTIVE_ENGINE=opencode` to `.env.secure` and uses OpenCode a
 Notes:
 
 - `clawdex init` without `--engine` still defaults to Codex.
-- If both CLIs are installed, the bridge can surface chats from both engines in the mobile app.
+- `clawdex init` now asks which runtimes Clawdex should manage locally. You can enable one or several.
 - To switch later, rerun `clawdex init --engine codex` or `clawdex init --engine opencode`.
+
+## T3 Code Setup
+
+T3 Code runs as a Clawdex-managed local `t3` server when you enable `t3code` in `clawdex init`.
+
+```bash
+clawdex init --engine t3code
+```
+
+The wizard will only require the T3 CLI if you actually select `t3code` as one of the managed runtimes.
+
+Notes:
+
+- `clawdex init --engine t3code` writes `BRIDGE_ACTIVE_ENGINE=t3code`.
+- Enabling `t3code` also writes `BRIDGE_ENABLED_ENGINES=...` so only the selected runtimes are started.
+- Clawdex does not attach to a separately running T3 desktop/server instance.
+- To switch later, rerun `clawdex init --engine codex`, `clawdex init --engine opencode`, or `clawdex init --engine t3code`.
 
 ## Monorepo Development
 
@@ -85,11 +109,17 @@ For an OpenCode-first repo checkout:
 npm run setup:wizard -- --engine opencode
 ```
 
+For a T3 Code-first repo checkout:
+
+```bash
+npm run setup:wizard -- --engine t3code
+```
+
 Use `npm run setup:wizard -- --no-start` if you only want to write config.
 
 ## Main Commands
 
-- `clawdex init [--engine codex|opencode] [--no-start]`
+- `clawdex init [--engine codex|opencode|t3code] [--no-start]`
 - `clawdex stop`
 - `clawdex upgrade` / `clawdex update`
 - `clawdex version`

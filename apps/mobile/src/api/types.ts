@@ -1,5 +1,5 @@
 export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
-export type ChatEngine = 'codex' | 'opencode';
+export type ChatEngine = 'codex' | 'opencode' | 't3code';
 
 export interface EngineDefaultSettings {
   modelId: string | null;

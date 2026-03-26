@@ -12,6 +12,7 @@ BRIDGE_LOG_FILE="$ROOT_DIR/.bridge.log"
 EXPO_LOG_FILE="$ROOT_DIR/.expo.log"
 BRIDGE_PID_FILE="$ROOT_DIR/.bridge.pid"
 EXPO_PID_FILE="$ROOT_DIR/.expo.pid"
+T3CODE_PID_FILE="$ROOT_DIR/.t3code.pid"
 MOBILE_ENV_FILE="$ROOT_DIR/apps/mobile/.env"
 MOBILE_ENV_EXAMPLE="$ROOT_DIR/apps/mobile/.env.example"
 
@@ -74,6 +75,35 @@ stop_process_group() {
   fi
 }
 
+stop_pid_file_process() {
+  local label="$1"
+  local pid_file="$2"
+  local pid=""
+
+  if [[ ! -f "$pid_file" ]]; then
+    return 0
+  fi
+
+  pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null || true)"
+  if [[ -z "$pid" ]]; then
+    rm -f "$pid_file"
+    return 0
+  fi
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pid_file"
+    return 0
+  fi
+
+  echo "Stopping $label process from pid file: $pid"
+  kill -TERM "$pid" 2>/dev/null || true
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+}
+
 remove_if_exists() {
   local file="$1"
   if [[ -f "$file" ]]; then
@@ -96,6 +126,7 @@ print_step "Stop running services"
 if $auto_yes || confirm_prompt "Stop running bridge and Expo processes for this project?"; then
   stop_process_group "Expo" "$ROOT_DIR/.*/expo start|$ROOT_DIR/node_modules/.bin/expo start"
   stop_process_group "Rust bridge" "$ROOT_DIR/services/rust-bridge|codex-rust-bridge|@codex/rust-bridge"
+  stop_pid_file_process "managed T3" "$T3CODE_PID_FILE"
   stop_process_group "Legacy TS bridge" "$ROOT_DIR/services/mac-bridge|@codex/mac-bridge"
 else
   echo "Skipped process shutdown."
@@ -108,6 +139,7 @@ if $auto_yes || confirm_prompt "Remove generated secure artifacts (.env.secure, 
   remove_if_exists "$EXPO_LOG_FILE"
   remove_if_exists "$BRIDGE_PID_FILE"
   remove_if_exists "$EXPO_PID_FILE"
+  remove_if_exists "$T3CODE_PID_FILE"
 else
   echo "Skipped artifact cleanup."
 fi

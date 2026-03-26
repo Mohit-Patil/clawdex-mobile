@@ -36,9 +36,14 @@ use services::{GitService, TerminalService};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot, Mutex, RwLock},
     time::timeout,
+};
+use tokio_tungstenite::{
+    connect_async, tungstenite::protocol::Message as TungsteniteMessage, MaybeTlsStream,
+    WebSocketStream,
 };
 
 mod services;
@@ -66,6 +71,8 @@ const ROLLOUT_LIVE_SYNC_DEDUP_CAPACITY: usize = 8_192;
 const OPENCODE_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const OPENCODE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OPENCODE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const DEFAULT_T3CODE_CONNECT_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_T3CODE_RPC_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -74,6 +81,10 @@ struct BridgeConfig {
     workdir: PathBuf,
     cli_bin: String,
     opencode_cli_bin: String,
+    enabled_engines: HashSet<BridgeRuntimeEngine>,
+    t3code_url: Option<String>,
+    t3code_auth_token: Option<String>,
+    t3code_connect_timeout_ms: u64,
     active_engine: BridgeRuntimeEngine,
     opencode_host: String,
     opencode_port: u16,
@@ -105,11 +116,25 @@ impl BridgeConfig {
         let cli_bin = env::var("CODEX_CLI_BIN").unwrap_or_else(|_| "codex".to_string());
         let opencode_cli_bin =
             env::var("OPENCODE_CLI_BIN").unwrap_or_else(|_| "opencode".to_string());
+        let t3code_url = read_non_empty_env("BRIDGE_T3CODE_URL");
+        let t3code_auth_token = read_non_empty_env("BRIDGE_T3CODE_AUTH_TOKEN");
+        let t3code_connect_timeout_ms = env::var("BRIDGE_T3CODE_CONNECT_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_T3CODE_CONNECT_TIMEOUT_MS);
         let active_engine = match env::var("BRIDGE_ACTIVE_ENGINE") {
             Ok(raw) => parse_bridge_runtime_engine(raw.trim())
                 .ok_or_else(|| format!("unsupported BRIDGE_ACTIVE_ENGINE value: {raw}"))?,
             Err(_) => BridgeRuntimeEngine::Codex,
         };
+        let mut enabled_engines = HashSet::new();
+        for raw_engine in parse_csv_env("BRIDGE_ENABLED_ENGINES", &[active_engine.as_str()]) {
+            let engine = parse_bridge_runtime_engine(raw_engine.trim())
+                .ok_or_else(|| format!("unsupported BRIDGE_ENABLED_ENGINES value: {raw_engine}"))?;
+            enabled_engines.insert(engine);
+        }
+        enabled_engines.insert(active_engine);
         let opencode_host =
             env::var("BRIDGE_OPENCODE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let opencode_port = env::var("BRIDGE_OPENCODE_PORT")
@@ -158,6 +183,10 @@ impl BridgeConfig {
             workdir,
             cli_bin,
             opencode_cli_bin,
+            enabled_engines,
+            t3code_url,
+            t3code_auth_token,
+            t3code_connect_timeout_ms,
             active_engine,
             opencode_host,
             opencode_port,
@@ -223,11 +252,12 @@ struct AppState {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 enum BridgeRuntimeEngine {
     Codex,
     Opencode,
+    T3Code,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,17 +286,56 @@ impl AppState {
 #[derive(Clone)]
 struct RuntimeBackend {
     preferred_engine: BridgeRuntimeEngine,
-    codex: Option<Arc<AppServerBridge>>,
-    opencode: Option<Arc<OpencodeBackend>>,
+    hub: Arc<ClientHub>,
+    backends: HashMap<BridgeRuntimeEngine, RuntimeBackendHandle>,
+}
+
+#[derive(Clone)]
+enum RuntimeBackendHandle {
+    Codex(Arc<AppServerBridge>),
+    Opencode(Arc<OpencodeBackend>),
+    T3Code(Arc<T3CodeBackend>),
 }
 
 impl RuntimeBackend {
     async fn start(config: &Arc<BridgeConfig>, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
         let preferred_engine = config.active_engine;
-        let mut codex = None;
-        let mut opencode = None;
+        let mut backends = HashMap::new();
+        let mut selected_engines = config.enabled_engines.iter().copied().collect::<Vec<_>>();
+        selected_engines.sort_by_key(|engine| bridge_runtime_engine_sort_key(*engine));
 
-        match preferred_engine {
+        let required_backend =
+            Self::start_engine_handle(config, hub.clone(), preferred_engine).await?;
+        backends.insert(preferred_engine, required_backend);
+
+        for engine in selected_engines {
+            if engine == preferred_engine {
+                continue;
+            }
+            match Self::start_engine_handle(config, hub.clone(), engine).await {
+                Ok(backend) => {
+                    backends.insert(engine, backend);
+                }
+                Err(error) => eprintln!(
+                    "{} backend unavailable; continuing without it: {error}",
+                    engine.as_str()
+                ),
+            }
+        }
+
+        Ok(Arc::new(Self {
+            preferred_engine,
+            hub,
+            backends,
+        }))
+    }
+
+    async fn start_engine_handle(
+        config: &Arc<BridgeConfig>,
+        hub: Arc<ClientHub>,
+        engine: BridgeRuntimeEngine,
+    ) -> Result<RuntimeBackendHandle, String> {
+        match engine {
             BridgeRuntimeEngine::Codex => {
                 let app_server = AppServerBridge::start(
                     &config.cli_bin,
@@ -274,43 +343,18 @@ impl RuntimeBackend {
                     hub.clone(),
                 )
                 .await?;
-                spawn_rollout_live_sync(hub.clone());
-                codex = Some(app_server);
-
-                match OpencodeBackend::start(config, hub).await {
-                    Ok(backend) => opencode = Some(backend),
-                    Err(error) => eprintln!(
-                        "opencode backend unavailable; continuing with codex only: {error}"
-                    ),
-                }
+                spawn_rollout_live_sync(hub);
+                Ok(RuntimeBackendHandle::Codex(app_server))
             }
             BridgeRuntimeEngine::Opencode => {
-                let backend = OpencodeBackend::start(config, hub.clone()).await?;
-                opencode = Some(backend);
-
-                match AppServerBridge::start(
-                    &config.cli_bin,
-                    BridgeRuntimeEngine::Codex,
-                    hub.clone(),
-                )
-                .await
-                {
-                    Ok(app_server) => {
-                        spawn_rollout_live_sync(hub);
-                        codex = Some(app_server);
-                    }
-                    Err(error) => eprintln!(
-                        "codex backend unavailable; continuing with opencode only: {error}"
-                    ),
-                }
+                let backend = OpencodeBackend::start(config, hub).await?;
+                Ok(RuntimeBackendHandle::Opencode(backend))
+            }
+            BridgeRuntimeEngine::T3Code => {
+                let backend = T3CodeBackend::start(config, hub).await?;
+                Ok(RuntimeBackendHandle::T3Code(backend))
             }
         }
-
-        Ok(Arc::new(Self {
-            preferred_engine,
-            codex,
-            opencode,
-        }))
     }
 
     fn engine(&self) -> BridgeRuntimeEngine {
@@ -318,30 +362,14 @@ impl RuntimeBackend {
     }
 
     fn available_engines(&self) -> Vec<BridgeRuntimeEngine> {
-        let mut engines = Vec::new();
-        if self.codex.is_some() {
-            engines.push(BridgeRuntimeEngine::Codex);
-        }
-        if self.opencode.is_some() {
-            engines.push(BridgeRuntimeEngine::Opencode);
-        }
+        let mut engines = self.backends.keys().copied().collect::<Vec<_>>();
+        engines.sort_by_key(|engine| bridge_runtime_engine_sort_key(*engine));
         engines
     }
 
     fn capabilities(&self) -> BridgeCapabilities {
         let active_engine = self.engine();
-        let supports = match active_engine {
-            BridgeRuntimeEngine::Codex => BridgeCapabilitySupport {
-                review_start: true,
-                turn_steer: true,
-                command_output_delta: true,
-            },
-            BridgeRuntimeEngine::Opencode => BridgeCapabilitySupport {
-                review_start: false,
-                turn_steer: false,
-                command_output_delta: false,
-            },
-        };
+        let supports = bridge_capability_support(active_engine);
         let available_engines = self.available_engines();
 
         BridgeCapabilities {
@@ -355,19 +383,11 @@ impl RuntimeBackend {
     fn backend_for_engine(
         &self,
         engine: BridgeRuntimeEngine,
-    ) -> Result<RuntimeBackendRef<'_>, String> {
-        match engine {
-            BridgeRuntimeEngine::Codex => self
-                .codex
-                .as_ref()
-                .map(RuntimeBackendRef::Codex)
-                .ok_or_else(|| "codex backend is unavailable".to_string()),
-            BridgeRuntimeEngine::Opencode => self
-                .opencode
-                .as_ref()
-                .map(RuntimeBackendRef::Opencode)
-                .ok_or_else(|| "opencode backend is unavailable".to_string()),
-        }
+    ) -> Result<RuntimeBackendHandle, String> {
+        self.backends
+            .get(&engine)
+            .cloned()
+            .ok_or_else(|| format!("{} backend is unavailable", engine.as_str()))
     }
 
     fn route_engine_for_method(
@@ -375,7 +395,7 @@ impl RuntimeBackend {
         method: &str,
         raw_params: Option<&Value>,
     ) -> BridgeRuntimeEngine {
-        if is_dual_engine_aggregate_method(method) {
+        if is_multi_engine_aggregate_method(method) {
             return self.preferred_engine;
         }
 
@@ -389,7 +409,7 @@ impl RuntimeBackend {
         method: &str,
         raw_params: Option<Value>,
     ) -> Result<(), String> {
-        if is_dual_engine_aggregate_method(method) {
+        if is_multi_engine_aggregate_method(method) {
             let result = self.request_internal(method, raw_params).await?;
             self.send_client_result(client_id, client_request_id, result)
                 .await;
@@ -398,18 +418,9 @@ impl RuntimeBackend {
 
         let target_engine = self.route_engine_for_method(method, raw_params.as_ref());
         let normalized_params = raw_params.map(normalize_forwarded_params);
-        match self.backend_for_engine(target_engine)? {
-            RuntimeBackendRef::Codex(bridge) => {
-                bridge
-                    .forward_request(client_id, client_request_id, method, normalized_params)
-                    .await
-            }
-            RuntimeBackendRef::Opencode(backend) => {
-                backend
-                    .forward_request(client_id, client_request_id, method, normalized_params)
-                    .await
-            }
-        }
+        self.backend_for_engine(target_engine)?
+            .forward_request(client_id, client_request_id, method, normalized_params)
+            .await
     }
 
     async fn request_internal(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
@@ -423,44 +434,28 @@ impl RuntimeBackend {
             let target_engine =
                 route_engine_from_params(params.as_ref()).unwrap_or(self.preferred_engine);
             let normalized_params = params.map(normalize_forwarded_params);
-            return match self.backend_for_engine(target_engine)? {
-                RuntimeBackendRef::Codex(bridge) => {
-                    bridge.request_internal(method, normalized_params).await
-                }
-                RuntimeBackendRef::Opencode(backend) => {
-                    backend.request_internal(method, normalized_params).await
-                }
-            };
+            return self
+                .backend_for_engine(target_engine)?
+                .request_internal(method, normalized_params)
+                .await;
         }
 
         let target_engine = self.route_engine_for_method(method, params.as_ref());
         let normalized_params = params.map(normalize_forwarded_params);
-        match self.backend_for_engine(target_engine)? {
-            RuntimeBackendRef::Codex(bridge) => {
-                bridge.request_internal(method, normalized_params).await
-            }
-            RuntimeBackendRef::Opencode(backend) => {
-                backend.request_internal(method, normalized_params).await
-            }
-        }
+        self.backend_for_engine(target_engine)?
+            .request_internal(method, normalized_params)
+            .await
     }
 
     async fn aggregate_thread_list(&self, params: Option<Value>) -> Result<Value, String> {
         let mut results = Vec::new();
-
-        if let Some(codex) = &self.codex {
+        for engine in self.available_engines() {
+            let backend = self.backend_for_engine(engine)?;
             results.push((
-                BridgeRuntimeEngine::Codex,
-                codex
+                engine,
+                backend
                     .request_internal("thread/list", params.clone())
                     .await?,
-            ));
-        }
-
-        if let Some(opencode) = &self.opencode {
-            results.push((
-                BridgeRuntimeEngine::Opencode,
-                opencode.request_internal("thread/list", params).await?,
             ));
         }
 
@@ -469,20 +464,11 @@ impl RuntimeBackend {
 
     async fn aggregate_loaded_thread_ids(&self) -> Result<Value, String> {
         let mut results = Vec::new();
-
-        if let Some(codex) = &self.codex {
+        for engine in self.available_engines() {
+            let backend = self.backend_for_engine(engine)?;
             results.push((
-                BridgeRuntimeEngine::Codex,
-                codex.request_internal("thread/loaded/list", None).await?,
-            ));
-        }
-
-        if let Some(opencode) = &self.opencode {
-            results.push((
-                BridgeRuntimeEngine::Opencode,
-                opencode
-                    .request_internal("thread/loaded/list", None)
-                    .await?,
+                engine,
+                backend.request_internal("thread/loaded/list", None).await?,
             ));
         }
 
@@ -491,11 +477,10 @@ impl RuntimeBackend {
 
     async fn list_pending_approvals(&self) -> Vec<PendingApproval> {
         let mut approvals = Vec::new();
-        if let Some(codex) = &self.codex {
-            approvals.extend(codex.list_pending_approvals().await);
-        }
-        if let Some(opencode) = &self.opencode {
-            approvals.extend(opencode.list_pending_approvals().await);
+        for engine in self.available_engines() {
+            if let Ok(backend) = self.backend_for_engine(engine) {
+                approvals.extend(backend.list_pending_approvals().await);
+            }
         }
         approvals.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
         approvals
@@ -506,14 +491,9 @@ impl RuntimeBackend {
         approval_id: &str,
         decision: &Value,
     ) -> Result<Option<PendingApproval>, String> {
-        if let Some(codex) = &self.codex {
-            if let Some(approval) = codex.resolve_approval(approval_id, decision).await? {
-                return Ok(Some(approval));
-            }
-        }
-
-        if let Some(opencode) = &self.opencode {
-            if let Some(approval) = opencode.resolve_approval(approval_id, decision).await? {
+        for engine in self.available_engines() {
+            let backend = self.backend_for_engine(engine)?;
+            if let Some(approval) = backend.resolve_approval(approval_id, decision).await? {
                 return Ok(Some(approval));
             }
         }
@@ -526,14 +506,9 @@ impl RuntimeBackend {
         request_id: &str,
         answers: &HashMap<String, UserInputAnswerPayload>,
     ) -> Result<Option<PendingUserInputRequest>, String> {
-        if let Some(codex) = &self.codex {
-            if let Some(request) = codex.resolve_user_input(request_id, answers).await? {
-                return Ok(Some(request));
-            }
-        }
-
-        if let Some(opencode) = &self.opencode {
-            if let Some(request) = opencode.resolve_user_input(request_id, answers).await? {
+        for engine in self.available_engines() {
+            let backend = self.backend_for_engine(engine)?;
+            if let Some(request) = backend.resolve_user_input(request_id, answers).await? {
                 return Ok(Some(request));
             }
         }
@@ -565,17 +540,76 @@ impl RuntimeBackend {
                 }
             }),
         };
-        if let Some(codex) = &self.codex {
-            codex.hub.send_json(client_id, payload).await;
-        } else if let Some(opencode) = &self.opencode {
-            opencode.hub.send_json(client_id, payload).await;
-        }
+        self.hub.send_json(client_id, payload).await;
     }
 }
 
-enum RuntimeBackendRef<'a> {
-    Codex(&'a Arc<AppServerBridge>),
-    Opencode(&'a Arc<OpencodeBackend>),
+impl RuntimeBackendHandle {
+    async fn forward_request(
+        &self,
+        client_id: u64,
+        client_request_id: Value,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Codex(bridge) => {
+                bridge
+                    .forward_request(client_id, client_request_id, method, params)
+                    .await
+            }
+            Self::Opencode(backend) => {
+                backend
+                    .forward_request(client_id, client_request_id, method, params)
+                    .await
+            }
+            Self::T3Code(backend) => {
+                backend
+                    .forward_request(client_id, client_request_id, method, params)
+                    .await
+            }
+        }
+    }
+
+    async fn request_internal(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        match self {
+            Self::Codex(bridge) => bridge.request_internal(method, params).await,
+            Self::Opencode(backend) => backend.request_internal(method, params).await,
+            Self::T3Code(backend) => backend.request_internal(method, params).await,
+        }
+    }
+
+    async fn list_pending_approvals(&self) -> Vec<PendingApproval> {
+        match self {
+            Self::Codex(bridge) => bridge.list_pending_approvals().await,
+            Self::Opencode(backend) => backend.list_pending_approvals().await,
+            Self::T3Code(backend) => backend.list_pending_approvals().await,
+        }
+    }
+
+    async fn resolve_approval(
+        &self,
+        approval_id: &str,
+        decision: &Value,
+    ) -> Result<Option<PendingApproval>, String> {
+        match self {
+            Self::Codex(bridge) => bridge.resolve_approval(approval_id, decision).await,
+            Self::Opencode(backend) => backend.resolve_approval(approval_id, decision).await,
+            Self::T3Code(backend) => backend.resolve_approval(approval_id, decision).await,
+        }
+    }
+
+    async fn resolve_user_input(
+        &self,
+        request_id: &str,
+        answers: &HashMap<String, UserInputAnswerPayload>,
+    ) -> Result<Option<PendingUserInputRequest>, String> {
+        match self {
+            Self::Codex(bridge) => bridge.resolve_user_input(request_id, answers).await,
+            Self::Opencode(backend) => backend.resolve_user_input(request_id, answers).await,
+            Self::T3Code(backend) => backend.resolve_user_input(request_id, answers).await,
+        }
+    }
 }
 
 struct ClientHub {
@@ -3049,6 +3083,2047 @@ impl OpencodeBackend {
     }
 }
 
+type T3SocketWriter =
+    futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, TungsteniteMessage>;
+type T3SocketReader = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+
+#[derive(Debug, Clone, Default)]
+struct T3SessionState {
+    status: Option<String>,
+    active_turn_id: Option<String>,
+    last_error: Option<String>,
+}
+
+struct T3CodeBackend {
+    hub: Arc<ClientHub>,
+    writer: Mutex<T3SocketWriter>,
+    pending_requests: Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
+    next_request_id: AtomicU64,
+    fallback_directory: String,
+    project_roots: RwLock<HashMap<String, String>>,
+    thread_workdirs: RwLock<HashMap<String, String>>,
+    session_states: RwLock<HashMap<String, T3SessionState>>,
+    assistant_message_texts: RwLock<HashMap<String, String>>,
+}
+
+impl T3CodeBackend {
+    async fn start(config: &Arc<BridgeConfig>, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
+        let ws_url = build_t3code_websocket_url(config)?;
+        let (stream, _) = timeout(
+            Duration::from_millis(config.t3code_connect_timeout_ms),
+            connect_async(ws_url.to_string()),
+        )
+        .await
+        .map_err(|_| format!("timed out connecting to t3code websocket: {ws_url}"))?
+        .map_err(|error| format!("failed connecting to t3code websocket: {error}"))?;
+        let (writer, reader) = stream.split();
+        let backend = Arc::new(Self {
+            hub,
+            writer: Mutex::new(writer),
+            pending_requests: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
+            fallback_directory: config.workdir.to_string_lossy().to_string(),
+            project_roots: RwLock::new(HashMap::new()),
+            thread_workdirs: RwLock::new(HashMap::new()),
+            session_states: RwLock::new(HashMap::new()),
+            assistant_message_texts: RwLock::new(HashMap::new()),
+        });
+
+        backend.spawn_read_loop(reader);
+        backend.get_server_config().await?;
+        let snapshot = backend.get_snapshot().await?;
+        backend.refresh_projection_caches(&snapshot).await;
+
+        Ok(backend)
+    }
+
+    fn spawn_read_loop(self: &Arc<Self>, reader: T3SocketReader) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut reader = reader;
+            while let Some(message) = reader.next().await {
+                match message {
+                    Ok(TungsteniteMessage::Text(text)) => {
+                        this.handle_socket_text(text.as_ref()).await;
+                    }
+                    Ok(TungsteniteMessage::Close(_)) => break,
+                    Ok(TungsteniteMessage::Binary(_))
+                    | Ok(TungsteniteMessage::Ping(_))
+                    | Ok(TungsteniteMessage::Pong(_))
+                    | Ok(TungsteniteMessage::Frame(_)) => {}
+                    Err(error) => {
+                        eprintln!("t3code websocket read error: {error}");
+                        break;
+                    }
+                }
+            }
+
+            this.fail_all_pending("t3code websocket connection closed")
+                .await;
+        });
+    }
+
+    async fn fail_all_pending(&self, message: &str) {
+        let waiters = {
+            let mut pending = self.pending_requests.lock().await;
+            pending.drain().map(|(_, tx)| tx).collect::<Vec<_>>()
+        };
+        for waiter in waiters {
+            let _ = waiter.send(Err(message.to_string()));
+        }
+    }
+
+    async fn handle_socket_text(&self, raw_text: &str) {
+        let Ok(value) = serde_json::from_str::<Value>(raw_text) else {
+            eprintln!("invalid t3code websocket payload: {raw_text}");
+            return;
+        };
+
+        if value.get("type").and_then(Value::as_str) == Some("push") {
+            self.handle_push(&value).await;
+            return;
+        }
+
+        let Some(request_id) = value.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let waiter = self.pending_requests.lock().await.remove(request_id);
+        let Some(waiter) = waiter else {
+            return;
+        };
+
+        if let Some(error_message) = value
+            .get("error")
+            .and_then(Value::as_object)
+            .and_then(|error| read_string(error.get("message")))
+        {
+            let _ = waiter.send(Err(error_message));
+            return;
+        }
+
+        let _ = waiter.send(Ok(value.get("result").cloned().unwrap_or(Value::Null)));
+    }
+
+    async fn handle_push(&self, envelope: &Value) {
+        let Some(channel) = envelope.get("channel").and_then(Value::as_str) else {
+            return;
+        };
+        if channel != "orchestration.domainEvent" {
+            return;
+        }
+
+        let Some(event) = envelope.get("data") else {
+            return;
+        };
+        self.handle_orchestration_event(event).await;
+    }
+
+    async fn handle_orchestration_event(&self, event: &Value) {
+        let Some(event_type) = event.get("type").and_then(Value::as_str) else {
+            return;
+        };
+        let payload = event.get("payload").cloned().unwrap_or(Value::Null);
+
+        match event_type {
+            "thread.created" => {
+                if let Some(thread_id) = read_string(payload.get("threadId")) {
+                    self.hub
+                        .broadcast_notification(
+                            "thread/started",
+                            json!({
+                                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                            }),
+                        )
+                        .await;
+                }
+            }
+            "thread.meta-updated" => {
+                let thread_id = read_string(payload.get("threadId"));
+                let title = read_string(payload.get("title"));
+                if let (Some(thread_id), Some(title)) = (thread_id, title) {
+                    self.hub
+                        .broadcast_notification(
+                            "thread/name/updated",
+                            json!({
+                                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                                "threadName": title,
+                            }),
+                        )
+                        .await;
+                }
+            }
+            "thread.session-set" => {
+                self.handle_session_set_event(&payload).await;
+            }
+            "thread.message-sent" => {
+                self.handle_message_sent_event(&payload).await;
+            }
+            "thread.activity-appended" => {
+                self.handle_activity_appended_event(&payload).await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_session_set_event(&self, payload: &Value) {
+        let Some(thread_id) = read_string(payload.get("threadId")) else {
+            return;
+        };
+        let Some(session) = payload.get("session").and_then(Value::as_object) else {
+            return;
+        };
+        let next_state = T3SessionState {
+            status: read_string(session.get("status")),
+            active_turn_id: read_string(session.get("activeTurnId")),
+            last_error: read_string(session.get("lastError")),
+        };
+        let previous_state = self
+            .session_states
+            .write()
+            .await
+            .insert(thread_id.clone(), next_state.clone());
+        let bridge_thread_id = encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id);
+        let was_active = t3_session_is_active(
+            previous_state
+                .as_ref()
+                .and_then(|state| state.status.as_deref()),
+        );
+        let is_active = t3_session_is_active(next_state.status.as_deref());
+
+        self.hub
+            .broadcast_notification(
+                "thread/status/changed",
+                json!({
+                    "threadId": bridge_thread_id,
+                    "status": t3_bridge_status(
+                        next_state.status.as_deref(),
+                        was_active,
+                        next_state.last_error.as_deref(),
+                    ),
+                    "error": next_state.last_error.as_ref().map(|message| json!({ "message": message })),
+                }),
+            )
+            .await;
+
+        if is_active
+            && (!was_active
+                || previous_state
+                    .as_ref()
+                    .and_then(|state| state.active_turn_id.as_deref())
+                    != next_state.active_turn_id.as_deref())
+        {
+            self.hub
+                .broadcast_notification(
+                    "turn/started",
+                    json!({
+                        "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                        "turnId": next_state.active_turn_id,
+                    }),
+                )
+                .await;
+            return;
+        }
+
+        if !is_active && was_active {
+            self.hub
+                .broadcast_notification(
+                    "turn/completed",
+                    json!({
+                        "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                        "turnId": previous_state.and_then(|state| state.active_turn_id),
+                        "status": t3_completed_turn_status(
+                            next_state.status.as_deref(),
+                            next_state.last_error.as_deref(),
+                        ),
+                        "error": next_state.last_error.as_ref().map(|message| json!({ "message": message })),
+                    }),
+                )
+                .await;
+        }
+    }
+
+    async fn handle_message_sent_event(&self, payload: &Value) {
+        let Some(thread_id) = read_string(payload.get("threadId")) else {
+            return;
+        };
+        if read_string(payload.get("role")).as_deref() != Some("assistant") {
+            return;
+        }
+        let Some(message_id) = read_string(payload.get("messageId")) else {
+            return;
+        };
+        let Some(text) = read_string(payload.get("text")) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+
+        let message_key = format!("{thread_id}:{message_id}");
+        let streaming = read_bool(payload.get("streaming")).unwrap_or(false);
+        let delta = {
+            let mut assistant_messages = self.assistant_message_texts.write().await;
+            let previous = assistant_messages
+                .get(&message_key)
+                .cloned()
+                .unwrap_or_default();
+            let delta = if streaming {
+                assistant_messages.insert(message_key, format!("{previous}{text}"));
+                text
+            } else if previous.is_empty() {
+                assistant_messages.insert(message_key, text.clone());
+                text
+            } else if text.starts_with(&previous) {
+                let next_delta = text[previous.len()..].to_string();
+                assistant_messages.insert(message_key, text.clone());
+                next_delta
+            } else if previous == text {
+                String::new()
+            } else {
+                assistant_messages.insert(message_key, text.clone());
+                text
+            };
+            delta
+        };
+
+        if delta.is_empty() {
+            return;
+        }
+
+        self.hub
+            .broadcast_notification(
+                "item/agentMessage/delta",
+                json!({
+                    "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                    "itemId": message_id,
+                    "delta": delta,
+                }),
+            )
+            .await;
+    }
+
+    async fn handle_activity_appended_event(&self, payload: &Value) {
+        let Some(thread_id) = read_string(payload.get("threadId")) else {
+            return;
+        };
+        let Some(activity) = payload.get("activity").and_then(Value::as_object) else {
+            return;
+        };
+        let Some(kind) = read_string(activity.get("kind")) else {
+            return;
+        };
+        let Some(activity_payload) = activity.get("payload").and_then(Value::as_object) else {
+            return;
+        };
+
+        match kind.as_str() {
+            "approval.requested" => {
+                if let Some(approval) =
+                    t3_pending_approval_from_activity(&thread_id, activity, activity_payload, None)
+                {
+                    self.hub
+                        .broadcast_notification(
+                            "bridge/approval.requested",
+                            serde_json::to_value(approval).unwrap_or(Value::Null),
+                        )
+                        .await;
+                }
+            }
+            "approval.resolved" => {
+                if let Some(request_id) = read_string(activity_payload.get("requestId")) {
+                    self.hub
+                        .broadcast_notification(
+                            "bridge/approval.resolved",
+                            json!({
+                                "id": request_id,
+                                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                                "decision": read_string(activity_payload.get("decision")),
+                                "resolvedAt": read_string(activity.get("createdAt")).unwrap_or_else(now_iso),
+                            }),
+                        )
+                        .await;
+                }
+            }
+            "user-input.requested" => {
+                if let Some(request) =
+                    t3_pending_user_input_from_activity(&thread_id, activity, activity_payload)
+                {
+                    self.hub
+                        .broadcast_notification(
+                            "bridge/userInput.requested",
+                            serde_json::to_value(request).unwrap_or(Value::Null),
+                        )
+                        .await;
+                }
+            }
+            "user-input.resolved" => {
+                if let Some(request_id) = read_string(activity_payload.get("requestId")) {
+                    self.hub
+                        .broadcast_notification(
+                            "bridge/userInput.resolved",
+                            json!({
+                                "id": request_id,
+                                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                                "turnId": read_string(activity.get("turnId")),
+                                "resolvedAt": read_string(activity.get("createdAt")).unwrap_or_else(now_iso),
+                            }),
+                        )
+                        .await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn forward_request(
+        &self,
+        client_id: u64,
+        client_request_id: Value,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<(), String> {
+        match self.dispatch_request(method, params).await {
+            Ok(result) => {
+                let normalized =
+                    normalize_forwarded_result(method, result, BridgeRuntimeEngine::T3Code);
+                self.hub
+                    .send_json(
+                        client_id,
+                        json!({ "id": client_request_id, "result": normalized }),
+                    )
+                    .await;
+                Ok(())
+            }
+            Err(error) => {
+                let code = if error.starts_with("unsupported t3code backend method:") {
+                    -32601
+                } else {
+                    -32000
+                };
+                self.hub
+                    .send_json(
+                        client_id,
+                        json!({
+                            "id": client_request_id,
+                            "error": {
+                                "code": code,
+                                "message": error,
+                            }
+                        }),
+                    )
+                    .await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn request_internal(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        self.dispatch_request(method, params).await
+    }
+
+    async fn list_pending_approvals(&self) -> Vec<PendingApproval> {
+        match self.get_snapshot().await {
+            Ok(snapshot) => t3_pending_approvals_from_snapshot(&snapshot),
+            Err(error) => {
+                eprintln!("failed to list t3code pending approvals: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn resolve_approval(
+        &self,
+        approval_id: &str,
+        decision: &Value,
+    ) -> Result<Option<PendingApproval>, String> {
+        let snapshot = self.get_snapshot().await?;
+        let Some((thread_id, approval)) = t3_find_pending_approval(&snapshot, approval_id) else {
+            return Ok(None);
+        };
+        let decision = t3_approval_decision_value(decision)
+            .ok_or_else(|| "invalid approval decision payload".to_string())?;
+        self.dispatch_command(json!({
+            "type": "thread.approval.respond",
+            "commandId": self.next_entity_id("cmd-approval"),
+            "threadId": thread_id,
+            "requestId": approval_id,
+            "decision": decision,
+            "createdAt": now_iso(),
+        }))
+        .await?;
+        Ok(Some(approval))
+    }
+
+    async fn resolve_user_input(
+        &self,
+        request_id: &str,
+        answers: &HashMap<String, UserInputAnswerPayload>,
+    ) -> Result<Option<PendingUserInputRequest>, String> {
+        let snapshot = self.get_snapshot().await?;
+        let Some((thread_id, request)) = t3_find_pending_user_input(&snapshot, request_id) else {
+            return Ok(None);
+        };
+        self.dispatch_command(json!({
+            "type": "thread.user-input.respond",
+            "commandId": self.next_entity_id("cmd-user-input"),
+            "threadId": thread_id,
+            "requestId": request_id,
+            "answers": t3_provider_user_input_answers(answers),
+            "createdAt": now_iso(),
+        }))
+        .await?;
+        Ok(Some(request))
+    }
+
+    async fn dispatch_request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
+        match method {
+            "account/logout" => Ok(json!({})),
+            "account/rateLimits/read" => Ok(json!({})),
+            "account/read" => Ok(json!({
+                "account": Value::Null,
+                "requiresOpenaiAuth": false,
+            })),
+            "config/read" => Ok(json!({ "config": {} })),
+            "thread/list" => self.list_threads(params).await,
+            "thread/loaded/list" => self.list_loaded_threads().await,
+            "thread/read" => self.read_thread(params).await,
+            "thread/start" => self.start_thread(params).await,
+            "thread/name/set" => self.set_thread_name(params).await,
+            "thread/resume" => self.resume_thread(params).await,
+            "turn/start" => self.start_turn(params).await,
+            "turn/interrupt" => self.interrupt_turn(params).await,
+            "model/list" => self.list_models(params).await,
+            "review/start" => Err("review/start is not supported for t3code threads".to_string()),
+            "thread/fork" => Err("thread/fork is not supported for t3code threads".to_string()),
+            _ => Err(format!("unsupported t3code backend method: {method}")),
+        }
+    }
+
+    async fn list_threads(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params.as_ref().and_then(Value::as_object);
+        let limit = params_object
+            .and_then(|params| params.get("limit"))
+            .and_then(Value::as_u64)
+            .unwrap_or(200)
+            .clamp(1, 1000) as usize;
+        let cwd = read_string(params_object.and_then(|params| params.get("cwd")));
+        let snapshot = self.get_snapshot().await?;
+        let project_roots = t3_project_roots_from_snapshot(&snapshot);
+        let mut threads = snapshot
+            .get("threads")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|thread| t3_thread_is_visible(thread, cwd.as_deref(), &project_roots))
+            .map(|thread| t3_project_thread_record(&thread, &project_roots, false))
+            .collect::<Vec<_>>();
+
+        threads.sort_by(|left, right| {
+            let left_updated = parse_internal_id(left.get("updatedAt")).unwrap_or(0);
+            let right_updated = parse_internal_id(right.get("updatedAt")).unwrap_or(0);
+            right_updated.cmp(&left_updated)
+        });
+        threads.truncate(limit);
+
+        Ok(json!({ "data": threads }))
+    }
+
+    async fn list_loaded_threads(&self) -> Result<Value, String> {
+        let snapshot = self.get_snapshot().await?;
+        let ids = snapshot
+            .get("threads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|thread| {
+                let thread_object = thread.as_object()?;
+                if !t3_thread_not_deleted(thread_object) {
+                    return None;
+                }
+                let session_status = thread_object
+                    .get("session")
+                    .and_then(Value::as_object)
+                    .and_then(|session| read_string(session.get("status")));
+                if t3_session_is_active(session_status.as_deref()) {
+                    read_string(thread_object.get("id"))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "data": ids }))
+    }
+
+    async fn read_thread(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "thread/read requires params".to_string())?;
+        let thread_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "thread/read requires threadId".to_string())?;
+        let include_turns = params_object
+            .get("includeTurns")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let snapshot = self.get_snapshot().await?;
+        let project_roots = t3_project_roots_from_snapshot(&snapshot);
+        let thread = t3_thread_lookup(&snapshot, &thread_id)
+            .ok_or_else(|| format!("thread/read could not find t3code thread {thread_id}"))?;
+
+        Ok(json!({
+            "thread": t3_project_thread_record(thread, &project_roots, include_turns),
+        }))
+    }
+
+    async fn start_thread(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params.as_ref().and_then(Value::as_object);
+        let cwd = read_string(params_object.and_then(|params| params.get("cwd")))
+            .unwrap_or_else(|| self.fallback_directory.clone());
+        let thread_title = read_string(params_object.and_then(|params| params.get("threadName")))
+            .or_else(|| read_string(params_object.and_then(|params| params.get("name"))))
+            .unwrap_or_else(|| t3_default_thread_title(&cwd));
+        let snapshot = self.get_snapshot().await?;
+        let server_config = self.get_server_config().await?;
+        let model_selection =
+            t3_resolve_model_selection(params_object, None, &snapshot, &server_config)?;
+        let project_id = self
+            .ensure_project_for_workspace(&snapshot, &cwd, &thread_title, &model_selection)
+            .await?;
+        let thread_id = self.next_entity_id("thread");
+        let created_at = now_iso();
+        let runtime_mode = t3_runtime_mode_for_approval_policy(
+            params_object.and_then(|params| params.get("approvalPolicy")),
+        );
+        let interaction_mode = t3_interaction_mode_from_value(
+            params_object.and_then(|params| params.get("collaborationMode")),
+        );
+
+        self.dispatch_command(json!({
+            "type": "thread.create",
+            "commandId": self.next_entity_id("cmd-thread-create"),
+            "threadId": thread_id,
+            "projectId": project_id,
+            "title": thread_title,
+            "modelSelection": model_selection,
+            "runtimeMode": runtime_mode,
+            "interactionMode": interaction_mode,
+            "branch": Value::Null,
+            "worktreePath": Value::Null,
+            "createdAt": created_at,
+        }))
+        .await?;
+
+        self.thread_workdirs
+            .write()
+            .await
+            .insert(thread_id.clone(), cwd.clone());
+
+        Ok(json!({
+            "thread": {
+                "id": thread_id,
+                "name": thread_title,
+                "title": thread_title,
+                "preview": "",
+                "modelProvider": read_string(model_selection.get("provider")),
+                "createdAt": iso_datetime_to_unix_seconds(&created_at).unwrap_or(0),
+                "updatedAt": iso_datetime_to_unix_seconds(&created_at).unwrap_or(0),
+                "status": { "type": "idle" },
+                "cwd": cwd,
+                "source": "appServer",
+            }
+        }))
+    }
+
+    async fn list_models(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params.as_ref().and_then(Value::as_object);
+        let thread_id = read_string(params_object.and_then(|params| params.get("threadId")));
+        let snapshot = self.get_snapshot().await?;
+        let server_config = self.get_server_config().await?;
+        let default_model_id = t3_default_model_id_for_request(params_object, &snapshot);
+        Ok(json!({
+            "data": t3_flatten_model_options(&server_config, default_model_id.as_deref(), thread_id.as_deref()),
+        }))
+    }
+
+    async fn set_thread_name(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "thread/name/set requires params".to_string())?;
+        let thread_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "thread/name/set requires threadId".to_string())?;
+        let thread_name = read_string(params_object.get("threadName"))
+            .or_else(|| read_string(params_object.get("name")))
+            .ok_or_else(|| "thread/name/set requires threadName".to_string())?;
+        self.dispatch_command(json!({
+            "type": "thread.meta.update",
+            "commandId": self.next_entity_id("cmd-thread-name"),
+            "threadId": thread_id,
+            "title": thread_name,
+        }))
+        .await?;
+        Ok(json!({}))
+    }
+
+    async fn resume_thread(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "thread/resume requires params".to_string())?;
+        let thread_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "thread/resume requires threadId".to_string())?;
+        let snapshot = self.get_snapshot().await?;
+        let thread = t3_thread_lookup(&snapshot, &thread_id)
+            .ok_or_else(|| format!("thread/resume could not find t3code thread {thread_id}"))?;
+        Ok(json!({
+            "model": t3_model_id_from_thread(thread),
+            "effort": t3_thread_model_effort(thread),
+        }))
+    }
+
+    async fn start_turn(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "turn/start requires params".to_string())?;
+        let thread_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "turn/start requires threadId".to_string())?;
+        let snapshot = self.get_snapshot().await?;
+        let thread = t3_thread_lookup(&snapshot, &thread_id)
+            .ok_or_else(|| format!("turn/start could not find t3code thread {thread_id}"))?;
+        let server_config = self.get_server_config().await?;
+        let previous_turn_id = t3_thread_latest_turn_id(thread);
+        let model_selection = t3_resolve_model_selection(
+            Some(params_object),
+            Some(thread),
+            &snapshot,
+            &server_config,
+        )?;
+        let (text, attachments) = t3_turn_message_from_input(
+            params_object
+                .get("input")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )
+        .await?;
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Err("turn/start requires non-empty input".to_string());
+        }
+
+        let message_id = self.next_entity_id("msg");
+        self.dispatch_command(json!({
+            "type": "thread.turn.start",
+            "commandId": self.next_entity_id("cmd-turn-start"),
+            "threadId": thread_id,
+            "message": {
+                "messageId": message_id,
+                "role": "user",
+                "text": text,
+                "attachments": attachments,
+            },
+            "modelSelection": model_selection,
+            "runtimeMode": t3_runtime_mode_for_approval_policy(params_object.get("approvalPolicy")),
+            "interactionMode": t3_interaction_mode_from_value(params_object.get("collaborationMode")),
+            "createdAt": now_iso(),
+        }))
+        .await?;
+
+        let turn_id = self
+            .wait_for_new_turn_id(&thread_id, previous_turn_id.as_deref())
+            .await?
+            .unwrap_or_else(|| self.next_entity_id("turn"));
+
+        Ok(json!({
+            "turn": {
+                "id": turn_id,
+            }
+        }))
+    }
+
+    async fn interrupt_turn(&self, params: Option<Value>) -> Result<Value, String> {
+        let params_object = params
+            .as_ref()
+            .and_then(Value::as_object)
+            .ok_or_else(|| "turn/interrupt requires params".to_string())?;
+        let thread_id = read_string(params_object.get("threadId"))
+            .ok_or_else(|| "turn/interrupt requires threadId".to_string())?;
+        self.dispatch_command(json!({
+            "type": "thread.turn.interrupt",
+            "commandId": self.next_entity_id("cmd-turn-interrupt"),
+            "threadId": thread_id,
+            "turnId": read_string(params_object.get("turnId")),
+            "createdAt": now_iso(),
+        }))
+        .await?;
+        Ok(json!({}))
+    }
+
+    async fn get_snapshot(&self) -> Result<Value, String> {
+        self.request_rpc("orchestration.getSnapshot", json!({}))
+            .await
+    }
+
+    async fn get_server_config(&self) -> Result<Value, String> {
+        self.request_rpc("server.getConfig", json!({})).await
+    }
+
+    async fn dispatch_command(&self, command: Value) -> Result<Value, String> {
+        self.request_rpc(
+            "orchestration.dispatchCommand",
+            json!({ "command": command }),
+        )
+        .await
+    }
+
+    async fn request_rpc(&self, tag: &str, body: Value) -> Result<Value, String> {
+        let request_id = self.next_entity_id("req");
+        let (tx, rx) = oneshot::channel::<Result<Value, String>>();
+        self.pending_requests
+            .lock()
+            .await
+            .insert(request_id.clone(), tx);
+
+        let mut body_object = body.as_object().cloned().unwrap_or_default();
+        body_object.insert("_tag".to_string(), json!(tag));
+        let payload = json!({
+            "id": request_id,
+            "body": body_object,
+        });
+
+        if let Err(error) = self.write_json(payload).await {
+            self.pending_requests.lock().await.remove(&request_id);
+            return Err(error);
+        }
+
+        match timeout(Duration::from_millis(DEFAULT_T3CODE_RPC_TIMEOUT_MS), rx).await {
+            Ok(Ok(Ok(result))) => Ok(result),
+            Ok(Ok(Err(message))) => Err(message),
+            Ok(Err(_)) => Err(format!("t3code request waiter dropped: {tag}")),
+            Err(_) => {
+                self.pending_requests.lock().await.remove(&request_id);
+                Err(format!("t3code request timed out: {tag}"))
+            }
+        }
+    }
+
+    async fn write_json(&self, value: Value) -> Result<(), String> {
+        let text = serde_json::to_string(&value)
+            .map_err(|error| format!("failed encoding t3code websocket payload: {error}"))?;
+        self.writer
+            .lock()
+            .await
+            .send(TungsteniteMessage::Text(text.into()))
+            .await
+            .map_err(|error| format!("failed writing t3code websocket payload: {error}"))
+    }
+
+    async fn refresh_projection_caches(&self, snapshot: &Value) {
+        let project_roots = t3_project_roots_from_snapshot(snapshot);
+        let mut thread_workdirs = HashMap::new();
+        let mut session_states = HashMap::new();
+        let mut assistant_messages = HashMap::new();
+
+        for thread in snapshot
+            .get("threads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(thread_object) = thread.as_object() else {
+                continue;
+            };
+            if !t3_thread_not_deleted(thread_object) {
+                continue;
+            }
+            let Some(thread_id) = read_string(thread_object.get("id")) else {
+                continue;
+            };
+            if let Some(cwd) = t3_thread_cwd(thread_object, &project_roots) {
+                thread_workdirs.insert(thread_id.clone(), cwd);
+            }
+            if let Some(session) = thread_object.get("session").and_then(Value::as_object) {
+                session_states.insert(
+                    thread_id.clone(),
+                    T3SessionState {
+                        status: read_string(session.get("status")),
+                        active_turn_id: read_string(session.get("activeTurnId")),
+                        last_error: read_string(session.get("lastError")),
+                    },
+                );
+            }
+            if let Some(messages) = thread_object.get("messages").and_then(Value::as_array) {
+                for message in messages {
+                    let Some(message_object) = message.as_object() else {
+                        continue;
+                    };
+                    if read_string(message_object.get("role")).as_deref() != Some("assistant") {
+                        continue;
+                    }
+                    let Some(message_id) = read_string(message_object.get("id")) else {
+                        continue;
+                    };
+                    let text = read_string(message_object.get("text")).unwrap_or_default();
+                    assistant_messages.insert(format!("{thread_id}:{message_id}"), text);
+                }
+            }
+        }
+
+        *self.project_roots.write().await = project_roots;
+        *self.thread_workdirs.write().await = thread_workdirs;
+        *self.session_states.write().await = session_states;
+        *self.assistant_message_texts.write().await = assistant_messages;
+    }
+
+    async fn wait_for_new_turn_id(
+        &self,
+        thread_id: &str,
+        previous_turn_id: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        for _ in 0..20 {
+            let snapshot = self.get_snapshot().await?;
+            self.refresh_projection_caches(&snapshot).await;
+            let latest_turn_id =
+                t3_thread_lookup(&snapshot, thread_id).and_then(t3_thread_latest_turn_id);
+            if let Some(latest_turn_id) = latest_turn_id {
+                if previous_turn_id != Some(latest_turn_id.as_str()) {
+                    return Ok(Some(latest_turn_id));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Ok(None)
+    }
+
+    async fn ensure_project_for_workspace(
+        &self,
+        snapshot: &Value,
+        cwd: &str,
+        thread_title: &str,
+        model_selection: &Value,
+    ) -> Result<String, String> {
+        if let Some(project_id) = t3_project_id_for_workspace(snapshot, cwd) {
+            return Ok(project_id);
+        }
+
+        let project_id = self.next_entity_id("project");
+        self.dispatch_command(json!({
+            "type": "project.create",
+            "commandId": self.next_entity_id("cmd-project-create"),
+            "projectId": project_id,
+            "title": t3_default_project_title(cwd, thread_title),
+            "workspaceRoot": cwd,
+            "defaultModelSelection": model_selection,
+            "createdAt": now_iso(),
+        }))
+        .await?;
+        self.project_roots
+            .write()
+            .await
+            .insert(project_id.clone(), cwd.to_string());
+        Ok(project_id)
+    }
+
+    fn next_entity_id(&self, prefix: &str) -> String {
+        let nonce = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{}-{nonce}", Utc::now().timestamp_millis())
+    }
+}
+
+fn build_t3code_websocket_url(config: &BridgeConfig) -> Result<Url, String> {
+    let raw = config
+        .t3code_url
+        .as_deref()
+        .ok_or_else(|| "BRIDGE_T3CODE_URL is required when enabling t3code".to_string())?;
+    let mut url = Url::parse(raw).map_err(|error| format!("invalid BRIDGE_T3CODE_URL: {error}"))?;
+    match url.scheme() {
+        "ws" | "wss" => {}
+        "http" => {
+            url.set_scheme("ws")
+                .map_err(|_| "failed converting t3code URL from http to ws".to_string())?;
+        }
+        "https" => {
+            url.set_scheme("wss")
+                .map_err(|_| "failed converting t3code URL from https to wss".to_string())?;
+        }
+        other => {
+            return Err(format!(
+                "unsupported BRIDGE_T3CODE_URL scheme: {other}; expected ws, wss, http, or https"
+            ));
+        }
+    }
+
+    if url.path().is_empty() {
+        url.set_path("/");
+    }
+
+    if let Some(token) = config.t3code_auth_token.as_deref() {
+        let has_token = url.query_pairs().any(|(key, _)| key == "token");
+        if !has_token {
+            url.query_pairs_mut().append_pair("token", token);
+        }
+    }
+
+    Ok(url)
+}
+
+fn t3_session_is_active(status: Option<&str>) -> bool {
+    matches!(status, Some("starting" | "running"))
+}
+
+fn t3_bridge_status(
+    status: Option<&str>,
+    was_active: bool,
+    last_error: Option<&str>,
+) -> &'static str {
+    match status {
+        Some("starting" | "running") => "running",
+        Some("interrupted") => "interrupted",
+        Some("error") => "failed",
+        Some("ready" | "stopped") if was_active && last_error.is_some() => "failed",
+        Some("ready" | "stopped") if was_active => "completed",
+        Some("idle" | "ready" | "stopped") => "idle",
+        _ if last_error.is_some() => "failed",
+        _ => "idle",
+    }
+}
+
+fn t3_completed_turn_status(status: Option<&str>, last_error: Option<&str>) -> &'static str {
+    match status {
+        Some("interrupted") => "interrupted",
+        Some("error") => "failed",
+        _ if last_error.is_some() => "failed",
+        _ => "completed",
+    }
+}
+
+fn t3_pending_approval_from_activity(
+    thread_id: &str,
+    activity: &serde_json::Map<String, Value>,
+    payload: &serde_json::Map<String, Value>,
+    cwd: Option<String>,
+) -> Option<PendingApproval> {
+    let request_id = read_string(payload.get("requestId"))?;
+    let request_kind = read_string(payload.get("requestKind")).unwrap_or_default();
+    let kind = if request_kind.contains("file") {
+        "fileChange"
+    } else {
+        "commandExecution"
+    };
+
+    Some(PendingApproval {
+        id: request_id.clone(),
+        kind: kind.to_string(),
+        thread_id: encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, thread_id),
+        turn_id: read_string(activity.get("turnId")).unwrap_or_else(|| request_id.clone()),
+        item_id: request_id.clone(),
+        requested_at: read_string(activity.get("createdAt")).unwrap_or_else(now_iso),
+        reason: read_string(payload.get("requestType"))
+            .or_else(|| read_string(activity.get("summary"))),
+        command: if kind == "commandExecution" {
+            read_string(payload.get("detail"))
+        } else {
+            None
+        },
+        cwd,
+        grant_root: None,
+        proposed_execpolicy_amendment: None,
+    })
+}
+
+fn t3_pending_user_input_from_activity(
+    thread_id: &str,
+    activity: &serde_json::Map<String, Value>,
+    payload: &serde_json::Map<String, Value>,
+) -> Option<PendingUserInputRequest> {
+    let request_id = read_string(payload.get("requestId"))?;
+    let questions = parse_user_input_questions(payload.get("questions"));
+    if questions.is_empty() {
+        return None;
+    }
+
+    Some(PendingUserInputRequest {
+        id: request_id.clone(),
+        thread_id: encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, thread_id),
+        turn_id: read_string(activity.get("turnId")).unwrap_or_else(|| request_id.clone()),
+        item_id: request_id.clone(),
+        requested_at: read_string(activity.get("createdAt")).unwrap_or_else(now_iso),
+        questions,
+    })
+}
+
+fn t3_pending_approvals_from_snapshot(snapshot: &Value) -> Vec<PendingApproval> {
+    let project_roots = t3_project_roots_from_snapshot(snapshot);
+    let mut approvals = Vec::new();
+
+    for thread in snapshot
+        .get("threads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(thread_object) = thread.as_object() else {
+            continue;
+        };
+        if !t3_thread_not_deleted(thread_object) {
+            continue;
+        }
+        let Some(thread_id) = read_string(thread_object.get("id")) else {
+            continue;
+        };
+        let cwd = t3_thread_cwd(thread_object, &project_roots);
+        let mut resolved = HashSet::new();
+        if let Some(activities) = thread_object.get("activities").and_then(Value::as_array) {
+            for activity in activities.iter().filter_map(Value::as_object) {
+                if read_string(activity.get("kind")).as_deref() != Some("approval.resolved") {
+                    continue;
+                }
+                let request_id = activity
+                    .get("payload")
+                    .and_then(Value::as_object)
+                    .and_then(|payload| read_string(payload.get("requestId")));
+                if let Some(request_id) = request_id {
+                    resolved.insert(request_id);
+                }
+            }
+            for activity in activities.iter().filter_map(Value::as_object) {
+                if read_string(activity.get("kind")).as_deref() != Some("approval.requested") {
+                    continue;
+                }
+                let Some(payload) = activity.get("payload").and_then(Value::as_object) else {
+                    continue;
+                };
+                let Some(request_id) = read_string(payload.get("requestId")) else {
+                    continue;
+                };
+                if resolved.contains(&request_id) {
+                    continue;
+                }
+                if let Some(approval) =
+                    t3_pending_approval_from_activity(&thread_id, activity, payload, cwd.clone())
+                {
+                    approvals.push(approval);
+                }
+            }
+        }
+    }
+
+    approvals.sort_by(|left, right| right.requested_at.cmp(&left.requested_at));
+    approvals
+}
+
+fn t3_find_pending_approval(
+    snapshot: &Value,
+    approval_id: &str,
+) -> Option<(String, PendingApproval)> {
+    let project_roots = t3_project_roots_from_snapshot(snapshot);
+    for thread in snapshot
+        .get("threads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let thread_object = thread.as_object()?;
+        if !t3_thread_not_deleted(thread_object) {
+            continue;
+        }
+        let thread_id = read_string(thread_object.get("id"))?;
+        let cwd = t3_thread_cwd(thread_object, &project_roots);
+        let mut resolved = HashSet::new();
+        let activities = thread_object
+            .get("activities")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for activity in activities.iter().filter_map(Value::as_object) {
+            let payload = activity.get("payload").and_then(Value::as_object);
+            let request_id = payload.and_then(|payload| read_string(payload.get("requestId")));
+            match read_string(activity.get("kind")).as_deref() {
+                Some("approval.resolved") => {
+                    if let Some(request_id) = request_id {
+                        resolved.insert(request_id);
+                    }
+                }
+                Some("approval.requested") if request_id.as_deref() == Some(approval_id) => {
+                    if resolved.contains(approval_id) {
+                        continue;
+                    }
+                    let payload = payload?;
+                    let approval = t3_pending_approval_from_activity(
+                        &thread_id,
+                        activity,
+                        payload,
+                        cwd.clone(),
+                    )?;
+                    return Some((thread_id, approval));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+fn t3_approval_decision_value(decision: &Value) -> Option<&'static str> {
+    match parse_approval_decision(decision)? {
+        ApprovalDecisionCanonical::Accept => Some("accept"),
+        ApprovalDecisionCanonical::AcceptForSession => Some("acceptForSession"),
+        ApprovalDecisionCanonical::Decline => Some("decline"),
+        ApprovalDecisionCanonical::Cancel => Some("cancel"),
+        ApprovalDecisionCanonical::AcceptWithExecpolicyAmendment(_) => Some("accept"),
+    }
+}
+
+fn t3_find_pending_user_input(
+    snapshot: &Value,
+    request_id: &str,
+) -> Option<(String, PendingUserInputRequest)> {
+    for thread in snapshot
+        .get("threads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let thread_object = thread.as_object()?;
+        if !t3_thread_not_deleted(thread_object) {
+            continue;
+        }
+        let thread_id = read_string(thread_object.get("id"))?;
+        let mut resolved = HashSet::new();
+        let activities = thread_object
+            .get("activities")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for activity in activities.iter().filter_map(Value::as_object) {
+            let payload = activity.get("payload").and_then(Value::as_object);
+            let activity_request_id =
+                payload.and_then(|payload| read_string(payload.get("requestId")));
+            match read_string(activity.get("kind")).as_deref() {
+                Some("user-input.resolved") => {
+                    if let Some(activity_request_id) = activity_request_id {
+                        resolved.insert(activity_request_id);
+                    }
+                }
+                Some("user-input.requested")
+                    if activity_request_id.as_deref() == Some(request_id) =>
+                {
+                    if resolved.contains(request_id) {
+                        continue;
+                    }
+                    let payload = payload?;
+                    let request =
+                        t3_pending_user_input_from_activity(&thread_id, activity, payload)?;
+                    return Some((thread_id, request));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+fn t3_provider_user_input_answers(answers: &HashMap<String, UserInputAnswerPayload>) -> Value {
+    let mut payload = serde_json::Map::new();
+    for (question_id, answer) in answers {
+        if question_id.trim().is_empty() {
+            continue;
+        }
+        let value = match answer.answers.as_slice() {
+            [] => Value::Array(Vec::new()),
+            [single] => json!(single),
+            many => json!(many),
+        };
+        payload.insert(question_id.clone(), value);
+    }
+    Value::Object(payload)
+}
+
+fn t3_project_roots_from_snapshot(snapshot: &Value) -> HashMap<String, String> {
+    let mut roots = HashMap::new();
+    for project in snapshot
+        .get("projects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(project_object) = project.as_object() else {
+            continue;
+        };
+        if project_object
+            .get("deletedAt")
+            .is_some_and(|value| !value.is_null())
+        {
+            continue;
+        }
+        let Some(project_id) = read_string(project_object.get("id")) else {
+            continue;
+        };
+        let Some(workspace_root) = read_string(project_object.get("workspaceRoot")) else {
+            continue;
+        };
+        roots.insert(project_id, workspace_root);
+    }
+    roots
+}
+
+fn t3_thread_not_deleted(thread: &serde_json::Map<String, Value>) -> bool {
+    !thread
+        .get("deletedAt")
+        .is_some_and(|value| !value.is_null())
+}
+
+fn t3_thread_cwd(
+    thread: &serde_json::Map<String, Value>,
+    project_roots: &HashMap<String, String>,
+) -> Option<String> {
+    read_string(thread.get("worktreePath"))
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            read_string(thread.get("projectId"))
+                .and_then(|project_id| project_roots.get(&project_id).cloned())
+        })
+}
+
+fn t3_thread_is_visible(
+    thread: &Value,
+    cwd: Option<&str>,
+    project_roots: &HashMap<String, String>,
+) -> bool {
+    let Some(thread_object) = thread.as_object() else {
+        return false;
+    };
+    if !t3_thread_not_deleted(thread_object) {
+        return false;
+    }
+    match cwd {
+        Some(cwd) => t3_thread_cwd(thread_object, project_roots).as_deref() == Some(cwd),
+        None => true,
+    }
+}
+
+fn t3_thread_lookup<'a>(snapshot: &'a Value, thread_id: &str) -> Option<&'a Value> {
+    snapshot
+        .get("threads")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|thread| {
+            thread.as_object().is_some_and(|thread_object| {
+                t3_thread_not_deleted(thread_object)
+                    && read_string(thread_object.get("id")).as_deref() == Some(thread_id)
+            })
+        })
+}
+
+fn t3_default_thread_title(cwd: &str) -> String {
+    Path::new(cwd)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "New chat".to_string())
+}
+
+fn t3_default_project_title(cwd: &str, thread_title: &str) -> String {
+    Path::new(cwd)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| thread_title.to_string())
+}
+
+fn iso_datetime_to_unix_seconds(value: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|date| date.timestamp().max(0) as u64)
+}
+
+fn t3_default_model_id_for_request(
+    params: Option<&serde_json::Map<String, Value>>,
+    snapshot: &Value,
+) -> Option<String> {
+    let thread_id = params.and_then(|params| read_string(params.get("threadId")));
+    thread_id
+        .as_deref()
+        .and_then(|thread_id| t3_thread_lookup(snapshot, thread_id))
+        .and_then(t3_model_id_from_thread)
+}
+
+fn t3_flatten_model_options(
+    server_config: &Value,
+    default_model_id: Option<&str>,
+    _thread_id: Option<&str>,
+) -> Vec<Value> {
+    let mut options = Vec::new();
+    for provider in server_config
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(provider_object) = provider.as_object() else {
+            continue;
+        };
+        let Some(provider_id) = read_string(provider_object.get("provider")) else {
+            continue;
+        };
+        let provider_name = t3_provider_display_name(&provider_id);
+        let connected = read_string(provider_object.get("status")).as_deref() == Some("ready");
+        let auth_required =
+            read_string(provider_object.get("authStatus")).as_deref() == Some("unauthenticated");
+        let models = provider_object
+            .get("models")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for model in models {
+            let Some(model_object) = model.as_object() else {
+                continue;
+            };
+            let Some(slug) = read_string(model_object.get("slug")) else {
+                continue;
+            };
+            let model_id = format!("{provider_id}:{slug}");
+            let reasoning_effort = t3_model_reasoning_effort_options(model_object);
+            options.push(json!({
+                "id": model_id,
+                "displayName": read_string(model_object.get("name")).unwrap_or_else(|| slug.clone()),
+                "providerId": provider_id,
+                "providerName": provider_name,
+                "connected": connected,
+                "authRequired": auth_required,
+                "hidden": false,
+                "isDefault": default_model_id == Some(model_id.as_str()),
+                "defaultReasoningEffort": t3_default_reasoning_effort(model_object),
+                "reasoningEffort": reasoning_effort,
+            }));
+        }
+    }
+
+    options.sort_by(|left, right| {
+        let left_default = !read_bool(left.get("isDefault")).unwrap_or(false);
+        let right_default = !read_bool(right.get("isDefault")).unwrap_or(false);
+        let left_name = read_string(left.get("displayName"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let right_name = read_string(right.get("displayName"))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        left_default
+            .cmp(&right_default)
+            .then_with(|| left_name.cmp(&right_name))
+    });
+    options
+}
+
+fn t3_model_id_from_thread(thread: &Value) -> Option<String> {
+    let selection = thread.get("modelSelection")?.as_object()?;
+    t3_model_id_from_selection(selection)
+}
+
+fn t3_model_id_from_selection(selection: &serde_json::Map<String, Value>) -> Option<String> {
+    let provider = read_string(selection.get("provider"))?;
+    let model = read_string(selection.get("model"))?;
+    Some(format!("{provider}:{model}"))
+}
+
+fn t3_thread_model_effort(thread: &Value) -> Option<String> {
+    t3_model_selection_effort(thread.get("modelSelection")?)
+}
+
+fn t3_model_selection_effort(selection: &Value) -> Option<String> {
+    let selection_object = selection.as_object()?;
+    let provider = read_string(selection_object.get("provider"))?;
+    let options = selection_object.get("options").and_then(Value::as_object);
+    match provider.as_str() {
+        "codex" => options
+            .and_then(|options| options.get("codex"))
+            .and_then(Value::as_object)
+            .and_then(|options| read_string(options.get("reasoningEffort"))),
+        "claudeAgent" => options
+            .and_then(|options| options.get("claudeAgent"))
+            .and_then(Value::as_object)
+            .and_then(|options| read_string(options.get("effort")))
+            .and_then(|effort| match effort.as_str() {
+                "low" => Some("low".to_string()),
+                "medium" => Some("medium".to_string()),
+                "high" => Some("high".to_string()),
+                "max" | "ultrathink" => Some("xhigh".to_string()),
+                _ => None,
+            }),
+        _ => None,
+    }
+}
+
+fn t3_thread_latest_turn_id(thread: &Value) -> Option<String> {
+    thread
+        .get("latestTurn")
+        .and_then(Value::as_object)
+        .and_then(|turn| read_string(turn.get("turnId")))
+}
+
+async fn t3_turn_message_from_input(input: &[Value]) -> Result<(String, Vec<Value>), String> {
+    const T3_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+    let mut text_blocks = Vec::new();
+    let mut referenced_paths = Vec::new();
+    let mut attachments = Vec::new();
+
+    for item in input {
+        let Some(item_object) = item.as_object() else {
+            continue;
+        };
+        let Some(item_type) = read_string(item_object.get("type")) else {
+            continue;
+        };
+        match item_type.as_str() {
+            "text" => {
+                if let Some(text) =
+                    read_string(item_object.get("text")).filter(|text| !text.is_empty())
+                {
+                    text_blocks.push(text);
+                }
+            }
+            "mention" => {
+                if let Some(path) =
+                    read_string(item_object.get("path")).filter(|path| !path.is_empty())
+                {
+                    referenced_paths.push(path);
+                }
+            }
+            "localImage" => {
+                let Some(path) =
+                    read_string(item_object.get("path")).filter(|path| !path.is_empty())
+                else {
+                    continue;
+                };
+                let bytes = fs::read(&path)
+                    .await
+                    .map_err(|error| format!("failed reading local image for t3code: {error}"))?;
+                if bytes.len() > T3_MAX_IMAGE_BYTES {
+                    return Err(format!(
+                        "local image exceeds t3code limit of {T3_MAX_IMAGE_BYTES} bytes"
+                    ));
+                }
+                let mime_type =
+                    infer_image_content_type_from_path(Path::new(&path)).unwrap_or("image/png");
+                let file_name = Path::new(&path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("image")
+                    .to_string();
+                let data_url = format!(
+                    "data:{mime_type};base64,{}",
+                    general_purpose::STANDARD.encode(bytes)
+                );
+                attachments.push(json!({
+                    "type": "image",
+                    "name": file_name,
+                    "mimeType": mime_type,
+                    "sizeBytes": data_url
+                        .split_once(',')
+                        .map(|(_, encoded)| encoded.len() * 3 / 4)
+                        .unwrap_or(0),
+                    "dataUrl": data_url,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    if !referenced_paths.is_empty() {
+        text_blocks.push(format!(
+            "Referenced paths:\n{}",
+            referenced_paths
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    Ok((text_blocks.join("\n\n"), attachments))
+}
+
+fn t3_project_id_for_workspace(snapshot: &Value, cwd: &str) -> Option<String> {
+    snapshot
+        .get("projects")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|project| {
+            project.get("deletedAt").is_none_or(Value::is_null)
+                && read_string(project.get("workspaceRoot")).as_deref() == Some(cwd)
+        })
+        .and_then(|project| read_string(project.get("id")))
+}
+
+fn t3_resolve_model_selection(
+    params: Option<&serde_json::Map<String, Value>>,
+    thread: Option<&Value>,
+    snapshot: &Value,
+    server_config: &Value,
+) -> Result<Value, String> {
+    let requested_model = params.and_then(|params| read_string(params.get("model")));
+    let requested_effort = params.and_then(|params| read_string(params.get("effort")));
+    let cwd = params.and_then(|params| read_string(params.get("cwd")));
+
+    let mut selection = if let Some(requested_model) = requested_model.as_deref() {
+        let (provider, model) = parse_t3_model_selector(requested_model)
+            .ok_or_else(|| format!("invalid t3code model selector: {requested_model}"))?;
+        json!({
+            "provider": provider,
+            "model": model,
+        })
+    } else if let Some(thread) = thread {
+        thread.get("modelSelection").cloned().unwrap_or(Value::Null)
+    } else if let Some(cwd) = cwd.as_deref() {
+        t3_project_default_selection_for_cwd(snapshot, cwd).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+
+    if selection.is_null() {
+        selection = t3_first_available_model_selection(server_config)
+            .ok_or_else(|| "t3code server does not advertise any available models".to_string())?;
+    }
+
+    if let Some(requested_effort) = requested_effort.as_deref() {
+        if let Some(selection_object) = selection.as_object_mut() {
+            t3_apply_effort_to_model_selection(selection_object, requested_effort);
+        }
+    }
+
+    Ok(selection)
+}
+
+fn t3_runtime_mode_for_approval_policy(value: Option<&Value>) -> &'static str {
+    match read_string(value).as_deref() {
+        Some("never") => "full-access",
+        _ => "approval-required",
+    }
+}
+
+fn t3_interaction_mode_from_value(value: Option<&Value>) -> &'static str {
+    let normalized = value
+        .and_then(|value| {
+            read_string(Some(value)).or_else(|| {
+                value
+                    .as_object()
+                    .and_then(|value| read_string(value.get("mode")))
+            })
+        })
+        .unwrap_or_else(|| "default".to_string());
+    if normalized.eq_ignore_ascii_case("plan") {
+        "plan"
+    } else {
+        "default"
+    }
+}
+
+fn t3_project_thread_record(
+    thread: &Value,
+    project_roots: &HashMap<String, String>,
+    include_turns: bool,
+) -> Value {
+    let thread_object = match thread.as_object() {
+        Some(thread_object) => thread_object,
+        None => return Value::Null,
+    };
+    let created_at = read_string(thread_object.get("createdAt"))
+        .and_then(|value| iso_datetime_to_unix_seconds(&value))
+        .unwrap_or(0);
+    let updated_at = read_string(thread_object.get("updatedAt"))
+        .and_then(|value| iso_datetime_to_unix_seconds(&value))
+        .unwrap_or(created_at);
+    let mut record = json!({
+        "id": read_string(thread_object.get("id")).unwrap_or_default(),
+        "name": read_string(thread_object.get("title")),
+        "title": read_string(thread_object.get("title")),
+        "preview": t3_thread_preview(thread_object),
+        "modelProvider": thread_object
+            .get("modelSelection")
+            .and_then(Value::as_object)
+            .and_then(|selection| read_string(selection.get("provider"))),
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+        "status": {
+            "type": t3_thread_status_type(thread_object),
+        },
+        "cwd": t3_thread_cwd(thread_object, project_roots),
+        "source": "appServer",
+    });
+    if include_turns {
+        record["turns"] = Value::Array(t3_thread_turns(thread_object));
+    }
+    record
+}
+
+fn t3_thread_preview(thread: &serde_json::Map<String, Value>) -> String {
+    thread
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .filter_map(Value::as_object)
+        .find_map(|message| read_string(message.get("text")).filter(|text| !text.trim().is_empty()))
+        .unwrap_or_default()
+}
+
+fn t3_thread_status_type(thread: &serde_json::Map<String, Value>) -> &'static str {
+    let session_status = thread
+        .get("session")
+        .and_then(Value::as_object)
+        .and_then(|session| read_string(session.get("status")));
+    let latest_turn_state = thread
+        .get("latestTurn")
+        .and_then(Value::as_object)
+        .and_then(|turn| read_string(turn.get("state")));
+    match session_status.as_deref() {
+        Some("starting" | "running") => "running",
+        Some("error") => "error",
+        _ => match latest_turn_state.as_deref() {
+            Some("error" | "interrupted") => "error",
+            _ => "idle",
+        },
+    }
+}
+
+fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
+    let latest_turn = thread.get("latestTurn").and_then(Value::as_object);
+    let latest_turn_id = latest_turn.and_then(|turn| read_string(turn.get("turnId")));
+    let latest_turn_state = latest_turn.and_then(|turn| read_string(turn.get("state")));
+    let latest_turn_requested_at =
+        latest_turn.and_then(|turn| read_string(turn.get("requestedAt")));
+    let last_error = thread
+        .get("session")
+        .and_then(Value::as_object)
+        .and_then(|session| read_string(session.get("lastError")));
+
+    let mut items_by_turn = HashMap::<String, Vec<(String, Value)>>::new();
+    let mut sort_keys = HashMap::<String, String>::new();
+    let mut checkpoint_statuses = HashMap::<String, String>::new();
+
+    if let Some(checkpoints) = thread.get("checkpoints").and_then(Value::as_array) {
+        for checkpoint in checkpoints.iter().filter_map(Value::as_object) {
+            let Some(turn_id) = read_string(checkpoint.get("turnId")) else {
+                continue;
+            };
+            if let Some(status) = read_string(checkpoint.get("status")) {
+                checkpoint_statuses.insert(turn_id, status);
+            }
+        }
+    }
+
+    if let Some(messages) = thread.get("messages").and_then(Value::as_array) {
+        for message in messages.iter().filter_map(Value::as_object) {
+            let turn_id = read_string(message.get("turnId"));
+            let Some(turn_id) = turn_id else {
+                continue;
+            };
+            let role = read_string(message.get("role")).unwrap_or_default();
+            let item = match role.as_str() {
+                "user" => {
+                    let text = read_string(message.get("text")).unwrap_or_default();
+                    let mut content = vec![json!({
+                        "type": "text",
+                        "text": text,
+                    })];
+                    if let Some(attachments) = message.get("attachments").and_then(Value::as_array)
+                    {
+                        for attachment in attachments.iter().filter_map(Value::as_object) {
+                            let attachment_name = read_string(attachment.get("name"))
+                                .unwrap_or_else(|| "image".to_string());
+                            content.push(json!({
+                                "type": "image",
+                                "url": attachment_name,
+                            }));
+                        }
+                    }
+                    json!({
+                        "id": read_string(message.get("id")).unwrap_or_else(|| turn_id.clone()),
+                        "type": "userMessage",
+                        "content": content,
+                    })
+                }
+                "assistant" => json!({
+                    "id": read_string(message.get("id")).unwrap_or_else(|| turn_id.clone()),
+                    "type": "agentMessage",
+                    "text": read_string(message.get("text")).unwrap_or_default(),
+                }),
+                _ => continue,
+            };
+            let sort_key = read_string(message.get("createdAt")).unwrap_or_default();
+            sort_keys
+                .entry(turn_id.clone())
+                .or_insert_with(|| sort_key.clone());
+            items_by_turn
+                .entry(turn_id)
+                .or_default()
+                .push((sort_key, item));
+        }
+    }
+
+    if let Some(plans) = thread.get("proposedPlans").and_then(Value::as_array) {
+        for plan in plans.iter().filter_map(Value::as_object) {
+            let Some(turn_id) = read_string(plan.get("turnId")) else {
+                continue;
+            };
+            let sort_key = read_string(plan.get("createdAt")).unwrap_or_default();
+            sort_keys
+                .entry(turn_id.clone())
+                .or_insert_with(|| sort_key.clone());
+            items_by_turn.entry(turn_id.clone()).or_default().push((
+                sort_key,
+                json!({
+                    "id": read_string(plan.get("id")).unwrap_or_else(|| turn_id.clone()),
+                    "type": "plan",
+                    "text": read_string(plan.get("planMarkdown")).unwrap_or_default(),
+                    "turnId": turn_id,
+                }),
+            ));
+        }
+    }
+
+    if let Some(latest_turn_id) = latest_turn_id.as_ref() {
+        sort_keys
+            .entry(latest_turn_id.clone())
+            .or_insert_with(|| latest_turn_requested_at.clone().unwrap_or_default());
+        items_by_turn.entry(latest_turn_id.clone()).or_default();
+    }
+
+    let mut turns = items_by_turn
+        .into_iter()
+        .map(|(turn_id, mut items)| {
+            items.sort_by(|left, right| left.0.cmp(&right.0));
+            let status = if latest_turn_id.as_deref() == Some(turn_id.as_str()) {
+                match latest_turn_state.as_deref() {
+                    Some("running") => "running",
+                    Some("interrupted") => "interrupted",
+                    Some("error") => "failed",
+                    _ => "completed",
+                }
+            } else if checkpoint_statuses
+                .get(&turn_id)
+                .is_some_and(|status| status == "error")
+            {
+                "failed"
+            } else {
+                "completed"
+            };
+            let mut turn = json!({
+                "id": turn_id,
+                "status": status,
+                "items": items.into_iter().map(|(_, item)| item).collect::<Vec<_>>(),
+            });
+            if latest_turn_id.as_deref() == read_string(turn.get("id")).as_deref()
+                && status == "failed"
+                && last_error.is_some()
+            {
+                turn["error"] = json!({ "message": last_error });
+            }
+            (
+                sort_keys
+                    .get(read_string(turn.get("id")).as_deref().unwrap_or_default())
+                    .cloned()
+                    .unwrap_or_default(),
+                turn,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    turns.sort_by(|left, right| left.0.cmp(&right.0));
+    turns.into_iter().map(|(_, turn)| turn).collect()
+}
+
+fn parse_t3_model_selector(value: &str) -> Option<(String, String)> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (provider, model) = trimmed
+        .split_once(':')
+        .or_else(|| trimmed.split_once('/'))
+        .or_else(|| trimmed.split_once('|'))?;
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((provider.to_string(), model.to_string()))
+}
+
+fn t3_project_default_selection_for_cwd(snapshot: &Value, cwd: &str) -> Option<Value> {
+    snapshot
+        .get("projects")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|project| {
+            project.get("deletedAt").is_none_or(Value::is_null)
+                && read_string(project.get("workspaceRoot")).as_deref() == Some(cwd)
+        })
+        .and_then(|project| project.get("defaultModelSelection").cloned())
+        .filter(|selection| !selection.is_null())
+}
+
+fn t3_first_available_model_selection(server_config: &Value) -> Option<Value> {
+    for provider in server_config
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(provider_object) = provider.as_object() else {
+            continue;
+        };
+        if !read_bool(provider_object.get("enabled")).unwrap_or(true)
+            || !read_bool(provider_object.get("installed")).unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(provider_id) = read_string(provider_object.get("provider")) else {
+            continue;
+        };
+        let Some(model) = provider_object
+            .get("models")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_object)
+            .find_map(|model| read_string(model.get("slug")))
+        else {
+            continue;
+        };
+        return Some(json!({
+            "provider": provider_id,
+            "model": model,
+        }));
+    }
+    None
+}
+
+fn t3_apply_effort_to_model_selection(
+    selection: &mut serde_json::Map<String, Value>,
+    requested_effort: &str,
+) {
+    let Some(provider) = read_string(selection.get("provider")) else {
+        return;
+    };
+    let options = selection
+        .entry("options".to_string())
+        .or_insert_with(|| json!({}));
+    let Some(options_object) = options.as_object_mut() else {
+        return;
+    };
+
+    match provider.as_str() {
+        "codex" => {
+            let Some(effort) = normalize_reasoning_effort_name(requested_effort) else {
+                return;
+            };
+            if !matches!(effort, "low" | "medium" | "high" | "xhigh") {
+                return;
+            }
+            options_object.insert(
+                "codex".to_string(),
+                json!({
+                    "reasoningEffort": effort,
+                }),
+            );
+        }
+        "claudeAgent" => {
+            let effort = match normalize_reasoning_effort_name(requested_effort) {
+                Some("low" | "minimal") => "low",
+                Some("medium") => "medium",
+                Some("high") => "high",
+                Some("xhigh") => "ultrathink",
+                _ => return,
+            };
+            options_object.insert(
+                "claudeAgent".to_string(),
+                json!({
+                    "effort": effort,
+                }),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn t3_provider_display_name(provider: &str) -> &'static str {
+    match provider {
+        "claudeAgent" => "Claude",
+        _ => "Codex",
+    }
+}
+
+fn t3_model_reasoning_effort_options(model: &serde_json::Map<String, Value>) -> Vec<Value> {
+    let mut options = Vec::new();
+    let mut seen = HashSet::new();
+    let Some(levels) = model
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .and_then(|capabilities| capabilities.get("reasoningEffortLevels"))
+        .and_then(Value::as_array)
+    else {
+        return options;
+    };
+
+    for level in levels.iter().filter_map(Value::as_object) {
+        let Some(raw_value) = read_string(level.get("value")) else {
+            continue;
+        };
+        let normalized = match raw_value.as_str() {
+            "low" => "low",
+            "medium" => "medium",
+            "high" => "high",
+            "max" | "ultrathink" | "xhigh" => "xhigh",
+            _ => continue,
+        };
+        if !seen.insert(normalized.to_string()) {
+            continue;
+        }
+        let description = read_string(level.get("label"));
+        options.push(json!({
+            "effort": normalized,
+            "description": description,
+        }));
+    }
+
+    options
+}
+
+fn t3_default_reasoning_effort(model: &serde_json::Map<String, Value>) -> Option<String> {
+    let levels = model
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .and_then(|capabilities| capabilities.get("reasoningEffortLevels"))
+        .and_then(Value::as_array)?;
+    for level in levels.iter().filter_map(Value::as_object) {
+        if !read_bool(level.get("isDefault")).unwrap_or(false) {
+            continue;
+        }
+        let raw_value = read_string(level.get("value"))?;
+        return match raw_value.as_str() {
+            "low" => Some("low".to_string()),
+            "medium" => Some("medium".to_string()),
+            "high" => Some("high".to_string()),
+            "max" | "ultrathink" | "xhigh" => Some("xhigh".to_string()),
+            _ => None,
+        };
+    }
+    None
+}
+
 #[derive(Default)]
 struct RolloutLiveSyncState {
     files: HashMap<PathBuf, RolloutTrackedFile>,
@@ -5326,7 +7401,31 @@ impl BridgeRuntimeEngine {
         match self {
             Self::Codex => "codex",
             Self::Opencode => "opencode",
+            Self::T3Code => "t3code",
         }
+    }
+}
+
+fn bridge_runtime_engine_sort_key(engine: BridgeRuntimeEngine) -> usize {
+    match engine {
+        BridgeRuntimeEngine::Codex => 0,
+        BridgeRuntimeEngine::Opencode => 1,
+        BridgeRuntimeEngine::T3Code => 2,
+    }
+}
+
+fn bridge_capability_support(engine: BridgeRuntimeEngine) -> BridgeCapabilitySupport {
+    match engine {
+        BridgeRuntimeEngine::Codex => BridgeCapabilitySupport {
+            review_start: true,
+            turn_steer: true,
+            command_output_delta: true,
+        },
+        BridgeRuntimeEngine::Opencode | BridgeRuntimeEngine::T3Code => BridgeCapabilitySupport {
+            review_start: false,
+            turn_steer: false,
+            command_output_delta: false,
+        },
     }
 }
 
@@ -5334,18 +7433,21 @@ fn parse_bridge_runtime_engine(value: &str) -> Option<BridgeRuntimeEngine> {
     match value.trim().to_ascii_lowercase().as_str() {
         "codex" => Some(BridgeRuntimeEngine::Codex),
         "opencode" => Some(BridgeRuntimeEngine::Opencode),
+        "t3code" => Some(BridgeRuntimeEngine::T3Code),
         _ => None,
     }
 }
 
 fn is_known_engine(value: &str) -> bool {
-    matches!(value, "codex" | "opencode")
+    matches!(value, "codex" | "opencode" | "t3code")
 }
 
 fn decode_engine_qualified_id(value: &str) -> String {
     let trimmed = value.trim();
     match trimmed.split_once(':') {
-        Some(("codex", raw)) | Some(("opencode", raw)) if !raw.trim().is_empty() => {
+        Some(("codex", raw)) | Some(("opencode", raw)) | Some(("t3code", raw))
+            if !raw.trim().is_empty() =>
+        {
             raw.trim().to_string()
         }
         _ => trimmed.to_string(),
@@ -5515,7 +7617,7 @@ fn normalize_loaded_thread_ids_result(value: Value, engine: BridgeRuntimeEngine)
     Value::Object(object)
 }
 
-fn is_dual_engine_aggregate_method(method: &str) -> bool {
+fn is_multi_engine_aggregate_method(method: &str) -> bool {
     matches!(method, "thread/list" | "thread/loaded/list")
 }
 
@@ -7329,18 +9431,26 @@ mod tests {
     }
 
     fn test_codex_backend(backend: &Arc<RuntimeBackend>) -> &Arc<AppServerBridge> {
-        backend
-            .codex
-            .as_ref()
+        match backend
+            .backends
+            .get(&BridgeRuntimeEngine::Codex)
             .expect("expected codex backend in test")
+        {
+            RuntimeBackendHandle::Codex(bridge) => bridge,
+            RuntimeBackendHandle::Opencode(_) => panic!("expected codex backend in test"),
+            RuntimeBackendHandle::T3Code(_) => panic!("expected codex backend in test"),
+        }
     }
 
     async fn shutdown_test_backend(backend: &Arc<RuntimeBackend>) {
-        if let Some(codex) = &backend.codex {
-            shutdown_test_bridge(codex).await;
-        }
-        if let Some(opencode) = &backend.opencode {
-            shutdown_test_opencode_backend(opencode).await;
+        for backend in backend.backends.values() {
+            match backend {
+                RuntimeBackendHandle::Codex(bridge) => shutdown_test_bridge(bridge).await,
+                RuntimeBackendHandle::Opencode(opencode) => {
+                    shutdown_test_opencode_backend(opencode).await;
+                }
+                RuntimeBackendHandle::T3Code(_) => {}
+            }
         }
     }
 
@@ -7349,17 +9459,22 @@ mod tests {
         preferred_engine: BridgeRuntimeEngine,
         include_opencode: bool,
     ) -> Arc<RuntimeBackend> {
-        let codex = Some(build_test_bridge(hub.clone()).await);
-        let opencode = if include_opencode {
-            Some(build_test_opencode_backend(hub).await)
-        } else {
-            None
-        };
+        let mut backends = HashMap::new();
+        backends.insert(
+            BridgeRuntimeEngine::Codex,
+            RuntimeBackendHandle::Codex(build_test_bridge(hub.clone()).await),
+        );
+        if include_opencode {
+            backends.insert(
+                BridgeRuntimeEngine::Opencode,
+                RuntimeBackendHandle::Opencode(build_test_opencode_backend(hub.clone()).await),
+            );
+        }
 
         Arc::new(RuntimeBackend {
             preferred_engine,
-            codex,
-            opencode,
+            hub,
+            backends,
         })
     }
 
@@ -7371,6 +9486,13 @@ mod tests {
             workdir: workdir.clone(),
             cli_bin: "cat".to_string(),
             opencode_cli_bin: "opencode".to_string(),
+            enabled_engines: HashSet::from([
+                BridgeRuntimeEngine::Codex,
+                BridgeRuntimeEngine::Opencode,
+            ]),
+            t3code_url: None,
+            t3code_auth_token: None,
+            t3code_connect_timeout_ms: DEFAULT_T3CODE_CONNECT_TIMEOUT_MS,
             active_engine: BridgeRuntimeEngine::Codex,
             opencode_host: "127.0.0.1".to_string(),
             opencode_port: 4090,
@@ -7415,6 +9537,7 @@ mod tests {
     fn decode_engine_qualified_id_strips_known_prefixes() {
         assert_eq!(decode_engine_qualified_id("codex:thr_123"), "thr_123");
         assert_eq!(decode_engine_qualified_id("opencode:ses_456"), "ses_456");
+        assert_eq!(decode_engine_qualified_id("t3code:thr_789"), "thr_789");
         assert_eq!(
             decode_engine_qualified_id(" custom-prefix:value "),
             "custom-prefix:value"
@@ -7435,6 +9558,10 @@ mod tests {
         assert_eq!(
             encode_engine_qualified_id(BridgeRuntimeEngine::Codex, " opencode:ses_789 "),
             "opencode:ses_789"
+        );
+        assert_eq!(
+            encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, "thr_999"),
+            "t3code:thr_999"
         );
     }
 
@@ -7580,12 +9707,105 @@ mod tests {
             Some(BridgeRuntimeEngine::Opencode)
         );
         assert_eq!(
+            route_engine_from_params(Some(&json!({ "threadId": "t3code:thr_7" }))),
+            Some(BridgeRuntimeEngine::T3Code)
+        );
+        assert_eq!(
             route_engine_from_params(Some(&json!({
                 "threadId": "codex:thr_1",
                 "engine": "opencode"
             }))),
             Some(BridgeRuntimeEngine::Codex)
         );
+    }
+
+    #[test]
+    fn build_t3code_websocket_url_normalizes_scheme_and_appends_token() {
+        let config = BridgeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8787,
+            workdir: PathBuf::from("/tmp/workdir"),
+            cli_bin: "codex".to_string(),
+            opencode_cli_bin: "opencode".to_string(),
+            enabled_engines: HashSet::from([BridgeRuntimeEngine::T3Code]),
+            t3code_url: Some("http://127.0.0.1:4318".to_string()),
+            t3code_auth_token: Some("secret token".to_string()),
+            t3code_connect_timeout_ms: DEFAULT_T3CODE_CONNECT_TIMEOUT_MS,
+            active_engine: BridgeRuntimeEngine::T3Code,
+            opencode_host: "127.0.0.1".to_string(),
+            opencode_port: 4090,
+            opencode_server_username: "opencode".to_string(),
+            opencode_server_password: Some("secret-token".to_string()),
+            auth_token: Some("secret-token".to_string()),
+            auth_enabled: true,
+            allow_insecure_no_auth: false,
+            allow_query_token_auth: false,
+            allow_outside_root_cwd: false,
+            disable_terminal_exec: false,
+            terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: false,
+        };
+
+        let url = build_t3code_websocket_url(&config).expect("build t3 websocket url");
+
+        assert_eq!(url.scheme(), "ws");
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port_or_known_default(), Some(4318));
+        assert_eq!(url.path(), "/");
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "token")
+                .map(|(_, value)| value.into_owned()),
+            Some("secret token".to_string())
+        );
+    }
+
+    #[test]
+    fn t3_resolve_model_selection_applies_requested_effort() {
+        let params = json!({
+            "model": "claudeAgent:sonnet-4",
+            "effort": "xhigh",
+        });
+
+        let selection =
+            t3_resolve_model_selection(params.as_object(), None, &json!({}), &json!({}))
+                .expect("resolve requested t3 model selection");
+
+        assert_eq!(selection["provider"], "claudeAgent");
+        assert_eq!(selection["model"], "sonnet-4");
+        assert_eq!(selection["options"]["claudeAgent"]["effort"], "ultrathink");
+    }
+
+    #[test]
+    fn t3_pending_approval_from_activity_maps_command_execution_shape() {
+        let activity = json!({
+            "turnId": "turn_1",
+            "createdAt": "2026-03-26T12:00:00Z",
+            "summary": "Need approval",
+        });
+        let payload = json!({
+            "requestId": "req_1",
+            "requestKind": "shell.command",
+            "requestType": "commandExecution",
+            "detail": "npm run lint",
+        });
+
+        let approval = t3_pending_approval_from_activity(
+            "thread_1",
+            activity.as_object().expect("activity object"),
+            payload.as_object().expect("payload object"),
+            Some("/tmp/workdir".to_string()),
+        )
+        .expect("map t3 approval");
+
+        assert_eq!(approval.id, "req_1");
+        assert_eq!(approval.kind, "commandExecution");
+        assert_eq!(approval.thread_id, "t3code:thread_1");
+        assert_eq!(approval.turn_id, "turn_1");
+        assert_eq!(approval.item_id, "req_1");
+        assert_eq!(approval.reason.as_deref(), Some("commandExecution"));
+        assert_eq!(approval.command.as_deref(), Some("npm run lint"));
+        assert_eq!(approval.cwd.as_deref(), Some("/tmp/workdir"));
     }
 
     #[test]
@@ -8766,6 +10986,10 @@ mod tests {
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
+            enabled_engines: HashSet::from([BridgeRuntimeEngine::Codex]),
+            t3code_url: None,
+            t3code_auth_token: None,
+            t3code_connect_timeout_ms: DEFAULT_T3CODE_CONNECT_TIMEOUT_MS,
             active_engine: BridgeRuntimeEngine::Codex,
             opencode_host: "127.0.0.1".to_string(),
             opencode_port: 4090,

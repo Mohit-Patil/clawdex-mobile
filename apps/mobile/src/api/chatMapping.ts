@@ -1,6 +1,5 @@
 import type {
   Chat,
-  ChatEngine,
   ChatMessage,
   ChatMessageSubAgentMeta,
   ChatPlanSnapshot,
@@ -8,6 +7,7 @@ import type {
   ChatSummary,
   TurnPlanStep,
 } from './types';
+import { normalizeChatEngine } from '../chatEngines';
 
 export type RawThreadStatus =
   | { type?: string }
@@ -293,9 +293,9 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
   };
 }
 
-function readChatEngine(value: unknown): ChatEngine {
+function readChatEngine(value: unknown) {
   const normalized = normalizeLifecycleStatus(readString(value));
-  return normalized === 'opencode' ? 'opencode' : 'codex';
+  return normalizeChatEngine(normalized) ?? 'codex';
 }
 
 function readThreadSourceMetadata(source: unknown): ThreadSourceMetadata {

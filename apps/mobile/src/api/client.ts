@@ -8,6 +8,7 @@ import {
 } from './chatMapping';
 import { readAccountSnapshot } from './account';
 import { readAccountRateLimits as readSelectedAccountRateLimits } from './rateLimits';
+import { normalizeChatEngine } from '../chatEngines';
 import type {
   AccountSnapshot,
   AccountRateLimitSnapshot,
@@ -1306,19 +1307,6 @@ function normalizeCollaborationMode(
 
   const normalized = value.trim().toLowerCase();
   if (normalized === 'plan' || normalized === 'default') {
-    return normalized;
-  }
-
-  return null;
-}
-
-function normalizeChatEngine(value: string | null | undefined): ChatEngine | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'opencode') {
     return normalized;
   }
 

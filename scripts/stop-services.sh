@@ -9,6 +9,7 @@ fi
 
 BRIDGE_PID_FILE="$ROOT_DIR/.bridge.pid"
 EXPO_PID_FILE="$ROOT_DIR/.expo.pid"
+T3CODE_PID_FILE="$ROOT_DIR/.t3code.pid"
 
 list_matching_pids() {
   local pattern="$1"
@@ -51,11 +52,41 @@ stop_process_group() {
   fi
 }
 
+stop_pid_file_process() {
+  local label="$1"
+  local pid_file="$2"
+  local pid=""
+
+  if [[ ! -f "$pid_file" ]]; then
+    return 0
+  fi
+
+  pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null || true)"
+  if [[ -z "$pid" ]]; then
+    rm -f "$pid_file"
+    return 0
+  fi
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pid_file"
+    return 0
+  fi
+
+  echo "Stopping $label process from pid file: $pid"
+  kill -TERM "$pid" 2>/dev/null || true
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+}
+
 echo "Stopping Clawdex services for project: $ROOT_DIR"
 
 stop_process_group "Expo" "$ROOT_DIR/.*/expo start|$ROOT_DIR/node_modules/.bin/expo start"
 stop_process_group "Rust bridge" "$ROOT_DIR/services/rust-bridge|codex-rust-bridge|@codex/rust-bridge"
+stop_pid_file_process "managed T3" "$T3CODE_PID_FILE"
 stop_process_group "Legacy TS bridge" "$ROOT_DIR/services/mac-bridge|@codex/mac-bridge"
 
-rm -f "$BRIDGE_PID_FILE" "$EXPO_PID_FILE"
+rm -f "$BRIDGE_PID_FILE" "$EXPO_PID_FILE" "$T3CODE_PID_FILE"
 echo "Done."
