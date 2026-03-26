@@ -66,6 +66,9 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            services/rust-bridge -> target
 
       - name: Rust fmt
         working-directory: services/rust-bridge

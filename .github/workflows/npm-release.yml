@@ -77,6 +77,9 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            services/rust-bridge -> target
 
       - name: Install Linux cross toolchain
         if: matrix.apt_packages != ''
@@ -128,6 +131,9 @@ jobs:
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            services/rust-bridge -> target
 
       - name: Install dependencies
         run: npm ci
