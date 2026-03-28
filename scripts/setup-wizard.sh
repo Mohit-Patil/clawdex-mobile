@@ -84,7 +84,7 @@ Usage: $(basename "$0") [options]
 Options:
   --no-start               Configure everything but do not start bridge
   --engine <codex|opencode|t3code>
-                           Set preferred engine before writing .env.secure
+                           Set the preferred-engine hint before the runtime checklist
   -h, --help               Show this help
 EOF
 }
@@ -181,6 +181,42 @@ format_engine_list_from_csv() {
   else
     printf '%s' "$formatted"
   fi
+}
+
+first_selected_engine_from_csv() {
+  local csv="$1"
+  local engine=""
+
+  for engine in codex opencode t3code; do
+    if csv_contains_engine "$csv" "$engine"; then
+      printf '%s' "$engine"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+resolve_active_engine_from_selection() {
+  local selected_csv="$1"
+  local preferred_hint="${2:-}"
+  local fallback_hint="${3:-}"
+  local candidate=""
+
+  for candidate in "$preferred_hint" "$fallback_hint"; do
+    if validate_engine_name "$candidate" && csv_contains_engine "$selected_csv" "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+
+  candidate="$(first_selected_engine_from_csv "$selected_csv" || true)"
+  if [[ -n "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  return 1
 }
 
 parse_args() {
@@ -982,41 +1018,32 @@ choose_bridge_network_mode() {
   esac
 }
 
-choose_runtime_engine() {
-  menu_select "Preferred engine" "Codex" "OpenCode" "T3 Code"
-  case "$MENU_RESULT" in
-    "Codex")
-      ACTIVE_ENGINE="codex"
-      info "Codex selected."
-      ;;
-    "OpenCode")
-      ACTIVE_ENGINE="opencode"
-      info "OpenCode selected."
-      ;;
-    "T3 Code")
-      ACTIVE_ENGINE="t3code"
-      info "T3 Code selected."
-      ;;
-    *)
-      abort_wizard "Unexpected preferred engine."
-      ;;
-  esac
-}
-
 choose_managed_engines() {
   local default_csv="$1"
+  local preferred_hint="${2:-$ACTIVE_ENGINE}"
+  local fallback_hint="${3:-$ACTIVE_ENGINE}"
   local normalized_defaults=""
-  local selected_raw=""
+  local resolved_active_engine=""
 
-  normalized_defaults="$(normalize_engine_csv "$default_csv" "$ACTIVE_ENGINE")"
-  menu_multiselect_engines "Managed runtimes to start" "$normalized_defaults"
-  selected_raw="$MENU_RESULT"
-  ENABLED_ENGINES_CSV="$(normalize_engine_csv "$MENU_RESULT" "$ACTIVE_ENGINE")"
-
-  if ! csv_contains_engine "$selected_raw" "$ACTIVE_ENGINE"; then
-    info "Managed runtimes now include the preferred engine: $(format_engine_name "$ACTIVE_ENGINE")."
+  normalized_defaults="$(normalize_engine_csv "$default_csv")"
+  if [[ -z "$normalized_defaults" ]]; then
+    resolved_active_engine="$(resolve_active_engine_from_selection "$preferred_hint" "$preferred_hint" "$fallback_hint" || true)"
+    normalized_defaults="${resolved_active_engine:-codex}"
   fi
+  menu_multiselect_engines "Managed runtimes to start" "$normalized_defaults"
+  ENABLED_ENGINES_CSV="$(normalize_engine_csv "$MENU_RESULT")"
+  if [[ -z "$ENABLED_ENGINES_CSV" ]]; then
+    abort_wizard "Select at least one runtime."
+  fi
+
+  resolved_active_engine="$(resolve_active_engine_from_selection "$ENABLED_ENGINES_CSV" "$preferred_hint" "$fallback_hint" || true)"
+  if [[ -z "$resolved_active_engine" ]]; then
+    abort_wizard "Unable to determine a preferred engine from the selected runtimes."
+  fi
+  ACTIVE_ENGINE="$resolved_active_engine"
+
   info "Managed runtimes selected: $(format_engine_list_from_csv "$ENABLED_ENGINES_CSV")."
+  info "Preferred engine: $(format_engine_name "$ACTIVE_ENGINE")."
   if csv_contains_engine "$ENABLED_ENGINES_CSV" "t3code"; then
     info "T3 Code will run as a managed local server when the bridge starts."
   fi
@@ -1564,29 +1591,17 @@ if ! validate_engine_name "$EXISTING_ACTIVE_ENGINE"; then
   EXISTING_ACTIVE_ENGINE="codex"
 fi
 EXISTING_ENABLED_ENGINES="$(normalize_engine_csv "$EXISTING_ENABLED_ENGINES" "$EXISTING_ACTIVE_ENGINE")"
-if [[ "$CONFIG_ACTION" == "keep" ]]; then
-  if [[ "$ENGINE_PRESET" == "false" ]]; then
-    ACTIVE_ENGINE="$EXISTING_ACTIVE_ENGINE"
-    info "Keeping existing preferred engine: $(format_engine_name "$ACTIVE_ENGINE")."
-  else
-    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
-  fi
+if [[ "$ENGINE_PRESET" == "false" ]]; then
+  ACTIVE_ENGINE="$EXISTING_ACTIVE_ENGINE"
 else
-  if [[ "$ENGINE_PRESET" == "false" ]]; then
-    choose_runtime_engine
-  else
-    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
-  fi
+  info "Preferred engine hint preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
 fi
 
 section "Managed runtimes"
-if [[ "$CONFIG_ACTION" == "keep" ]]; then
-  ENABLED_ENGINES_CSV="$EXISTING_ENABLED_ENGINES"
-  ENABLED_ENGINES_CSV="$(normalize_engine_csv "$ENABLED_ENGINES_CSV" "$ACTIVE_ENGINE")"
-  info "Keeping managed runtimes: $(format_engine_list_from_csv "$ENABLED_ENGINES_CSV")."
-else
-  choose_managed_engines "${ENABLED_ENGINES_CSV:-${EXISTING_ENABLED_ENGINES:-$ACTIVE_ENGINE}}"
-fi
+choose_managed_engines \
+  "${ENABLED_ENGINES_CSV:-${EXISTING_ENABLED_ENGINES:-$EXISTING_ACTIVE_ENGINE}}" \
+  "$ACTIVE_ENGINE" \
+  "$EXISTING_ACTIVE_ENGINE"
 
 section "Runtime dependencies"
 ensure_managed_engine_clis

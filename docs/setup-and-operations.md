@@ -8,7 +8,7 @@ The bridge defaults to `codex`.
 
 `BRIDGE_ACTIVE_ENGINE` sets the preferred/default engine. `BRIDGE_ENABLED_ENGINES` controls which runtimes Clawdex actually starts and manages for this repo.
 
-The managed-runtime step uses checkbox-style choices. Only the runtimes you selected there are validated and started.
+The managed-runtime step uses checkbox-style choices. That checklist is the only runtime-selection UI. Only the runtimes you selected there are validated and started, and `BRIDGE_ACTIVE_ENGINE` is derived from the checked runtimes.
 
 Use the setup wizard to make `opencode` the preferred engine:
 

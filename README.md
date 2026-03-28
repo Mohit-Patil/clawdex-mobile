@@ -47,7 +47,7 @@ During `clawdex init`, the wizard asks which runtimes Clawdex should manage loca
 - OpenCode via `opencode` when selected
 - T3 Code via a managed local `t3` server when selected
 
-The managed-runtime step uses checkbox-style choices. Only the runtimes you selected are validated and started.
+The managed-runtime step uses checkbox-style choices. That checklist is the only runtime-selection UI. Only the runtimes you selected are validated and started, and the preferred engine is derived from the checked runtimes.
 
 The npm package is bridge-only. It does not install Expo or the mobile source tree. On supported macOS, Linux, and Windows hosts it uses bundled bridge binaries, so normal startup does not compile Rust.
 The current interactive setup helpers are still macOS/Linux-oriented.
@@ -76,8 +76,9 @@ Notes:
 
 - `clawdex init` without `--engine` still defaults to Codex.
 - `clawdex init` now asks which runtimes Clawdex should manage locally. You can enable one or several.
+- When multiple runtimes are checked, Clawdex keeps the existing preferred engine if it is still selected; otherwise it falls back to the first checked runtime.
 - If both CLIs are installed, the bridge can surface chats from both engines in the mobile app.
-- To switch later, rerun `clawdex init` and change the managed-runtime checkboxes, or rerun `clawdex init --engine codex` / `clawdex init --engine opencode` to change the preferred engine before writing `.env.secure`.
+- To switch later, rerun `clawdex init` and change the managed-runtime checkboxes, or rerun `clawdex init --engine codex` / `clawdex init --engine opencode` / `clawdex init --engine t3code` to bias the preferred engine before writing `.env.secure`.
 
 ## T3 Code Setup
 
