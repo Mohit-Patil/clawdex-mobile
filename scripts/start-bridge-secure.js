@@ -5,6 +5,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const WebSocket = require("ws");
 
 const {
   builtBinaryPath,
@@ -276,6 +277,125 @@ function t3ProbeUrl(url) {
   return probe.toString();
 }
 
+function t3RpcWebSocketUrl(url, authToken) {
+  const wsUrl = new URL(url.toString());
+  if (wsUrl.protocol === "http:") {
+    wsUrl.protocol = "ws:";
+  } else if (wsUrl.protocol === "https:") {
+    wsUrl.protocol = "wss:";
+  }
+  wsUrl.pathname = "/ws";
+  if (authToken && !wsUrl.searchParams.has("token")) {
+    wsUrl.searchParams.set("token", authToken);
+  }
+  return wsUrl.toString();
+}
+
+function isT3ProviderConfigCompatible(serverConfig) {
+  if (!serverConfig || typeof serverConfig !== "object" || Array.isArray(serverConfig)) {
+    return { ok: false, reason: "server.getConfig returned an invalid payload." };
+  }
+
+  const providers = Array.isArray(serverConfig.providers) ? serverConfig.providers : [];
+  if (providers.length === 0) {
+    return { ok: false, reason: "server.getConfig returned no providers." };
+  }
+
+  const missingModels = providers
+    .filter((provider) => provider && typeof provider === "object" && !Array.isArray(provider))
+    .filter((provider) => !Array.isArray(provider.models))
+    .map((provider) => String(provider.provider || "unknown"));
+
+  if (missingModels.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `server.getConfig returned providers without model snapshots: ${missingModels.join(", ")}.`,
+    };
+  }
+
+  return { ok: true };
+}
+
+async function readT3ServerConfig(url, authToken, timeoutMs = 5000) {
+  const wsUrl = t3RpcWebSocketUrl(url, authToken);
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket(wsUrl);
+    const timer = setTimeout(() => {
+      try {
+        ws.close();
+      } catch {}
+      reject(new Error(`timed out waiting for T3 RPC response from ${wsUrl}`));
+    }, timeoutMs);
+
+    const finish = (handler, value) => {
+      clearTimeout(timer);
+      try {
+        ws.close();
+      } catch {}
+      handler(value);
+    };
+
+    ws.once("open", () => {
+      ws.send(
+        JSON.stringify({
+          id: "clawdex-t3-config",
+          body: {
+            _tag: "server.getConfig",
+          },
+        })
+      );
+    });
+
+    ws.on("message", (raw) => {
+      let payload;
+      try {
+        payload = JSON.parse(raw.toString());
+      } catch (error) {
+        finish(reject, new Error(`invalid T3 RPC payload: ${error.message}`));
+        return;
+      }
+
+      if (payload?.id !== "clawdex-t3-config") {
+        return;
+      }
+
+      if (payload?.error) {
+        const message =
+          typeof payload.error.message === "string"
+            ? payload.error.message
+            : "unknown T3 RPC error";
+        finish(reject, new Error(`T3 server.getConfig failed: ${message}`));
+        return;
+      }
+
+      finish(resolve, payload?.result ?? null);
+    });
+
+    ws.once("error", (error) => {
+      finish(reject, new Error(`failed connecting to T3 RPC websocket: ${error.message}`));
+    });
+
+    ws.once("close", () => {
+      clearTimeout(timer);
+    });
+  });
+}
+
+async function ensureManagedT3Compatibility(url, env) {
+  const serverConfig = await readT3ServerConfig(url, env.BRIDGE_T3CODE_AUTH_TOKEN || "");
+  const compatibility = isT3ProviderConfigCompatible(serverConfig);
+  if (compatibility.ok) {
+    return;
+  }
+
+  throw new Error(
+    `incompatible T3 Code server at ${url.toString()}: ${compatibility.reason} ` +
+      "Current Clawdex expects upstream T3 server.getConfig providers to include model snapshots. " +
+      "Upgrade T3 Code and retry."
+  );
+}
+
 async function isHttpUrlReachable(rawUrl, timeoutMs = 1500) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -409,6 +529,14 @@ async function maybeStartManagedT3(rootDir, env, enabledEngines) {
   ]);
 
   if (startupResult && startupResult.reachable) {
+    try {
+      await ensureManagedT3Compatibility(parsedUrl, env);
+    } catch (error) {
+      terminateChild(child);
+      safeUnlink(pidFile);
+      console.error(`error: ${error.message}`);
+      process.exit(1);
+    }
     return { child, pidFile };
   }
 

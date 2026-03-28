@@ -394,7 +394,10 @@ impl RuntimeBackend {
             ensure_required_engine_cli(BridgeRuntimeEngine::Opencode, &config.opencode_cli_bin)?;
         }
 
-        if let Some(index) = selected_engines.iter().position(|engine| *engine == preferred_engine) {
+        if let Some(index) = selected_engines
+            .iter()
+            .position(|engine| *engine == preferred_engine)
+        {
             let engine = selected_engines.remove(index);
             selected_engines.insert(0, engine);
         }
@@ -547,11 +550,12 @@ impl RuntimeBackend {
         let mut results = Vec::new();
         for engine in self.available_engines() {
             let backend = self.backend_for_engine(engine)?;
+            let result = backend
+                .request_internal("thread/list", params.clone())
+                .await?;
             results.push((
                 engine,
-                backend
-                    .request_internal("thread/list", params.clone())
-                    .await?,
+                filter_harness_owned_thread_list_result(engine, result).await?,
             ));
         }
 
@@ -3873,8 +3877,18 @@ impl T3CodeBackend {
         let snapshot = self.get_snapshot().await?;
         let server_config = self.get_server_config().await?;
         let default_model_id = t3_default_model_id_for_request(params_object, &snapshot);
+        let model_options = t3_flatten_model_options(
+            &server_config,
+            default_model_id.as_deref(),
+            thread_id.as_deref(),
+        );
+        if model_options.is_empty() {
+            if let Some(reason) = t3_server_config_incompatibility_reason(&server_config) {
+                return Err(reason);
+            }
+        }
         Ok(json!({
-            "data": t3_flatten_model_options(&server_config, default_model_id.as_deref(), thread_id.as_deref()),
+            "data": model_options,
         }))
     }
 
@@ -4655,6 +4669,34 @@ fn t3_flatten_model_options(
     options
 }
 
+fn t3_server_config_incompatibility_reason(server_config: &Value) -> Option<String> {
+    let providers = server_config.get("providers").and_then(Value::as_array)?;
+    if providers.is_empty() {
+        return Some(
+            "incompatible T3 Code server: server.getConfig returned no providers. Upgrade T3 Code and retry."
+                .to_string(),
+        );
+    }
+
+    let missing_models = providers
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|provider| !provider.get("models").is_some_and(Value::is_array))
+        .map(|provider| {
+            read_string(provider.get("provider")).unwrap_or_else(|| "unknown".to_string())
+        })
+        .collect::<Vec<_>>();
+
+    if missing_models.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "incompatible T3 Code server: server.getConfig.providers[*].models is missing for {}. Upgrade T3 Code and retry.",
+        missing_models.join(", ")
+    ))
+}
+
 fn t3_model_id_from_thread(thread: &Value) -> Option<String> {
     let selection = thread.get("modelSelection")?.as_object()?;
     t3_model_id_from_selection(selection)
@@ -4943,6 +4985,7 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
     let mut items_by_turn = HashMap::<String, Vec<(String, Value)>>::new();
     let mut sort_keys = HashMap::<String, String>::new();
     let mut checkpoint_statuses = HashMap::<String, String>::new();
+    let mut pending_user_messages = Vec::<(String, Value)>::new();
 
     if let Some(checkpoints) = thread.get("checkpoints").and_then(Value::as_array) {
         for checkpoint in checkpoints.iter().filter_map(Value::as_object) {
@@ -4957,10 +5000,6 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
 
     if let Some(messages) = thread.get("messages").and_then(Value::as_array) {
         for message in messages.iter().filter_map(Value::as_object) {
-            let turn_id = read_string(message.get("turnId"));
-            let Some(turn_id) = turn_id else {
-                continue;
-            };
             let role = read_string(message.get("role")).unwrap_or_default();
             let item = match role.as_str() {
                 "user" => {
@@ -4981,26 +5020,52 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
                         }
                     }
                     json!({
-                        "id": read_string(message.get("id")).unwrap_or_else(|| turn_id.clone()),
+                        "id": read_string(message.get("id")).unwrap_or_default(),
                         "type": "userMessage",
                         "content": content,
                     })
                 }
                 "assistant" => json!({
-                    "id": read_string(message.get("id")).unwrap_or_else(|| turn_id.clone()),
+                    "id": read_string(message.get("id")).unwrap_or_default(),
                     "type": "agentMessage",
                     "text": read_string(message.get("text")).unwrap_or_default(),
                 }),
                 _ => continue,
             };
             let sort_key = read_string(message.get("createdAt")).unwrap_or_default();
-            sort_keys
-                .entry(turn_id.clone())
-                .or_insert_with(|| sort_key.clone());
-            items_by_turn
-                .entry(turn_id)
-                .or_default()
-                .push((sort_key, item));
+            let turn_id = read_string(message.get("turnId"));
+
+            match (role.as_str(), turn_id) {
+                ("user", Some(turn_id)) => {
+                    sort_keys
+                        .entry(turn_id.clone())
+                        .or_insert_with(|| sort_key.clone());
+                    items_by_turn
+                        .entry(turn_id)
+                        .or_default()
+                        .push((sort_key, item));
+                }
+                ("user", None) => {
+                    pending_user_messages.push((sort_key, item));
+                }
+                ("assistant", Some(turn_id)) => {
+                    sort_keys
+                        .entry(turn_id.clone())
+                        .or_insert_with(|| sort_key.clone());
+                    if !pending_user_messages.is_empty() {
+                        items_by_turn
+                            .entry(turn_id.clone())
+                            .or_default()
+                            .extend(pending_user_messages.drain(..));
+                    }
+                    items_by_turn
+                        .entry(turn_id)
+                        .or_default()
+                        .push((sort_key, item));
+                }
+                ("assistant", None) => {}
+                _ => {}
+            }
         }
     }
 
@@ -5030,6 +5095,12 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
             .entry(latest_turn_id.clone())
             .or_insert_with(|| latest_turn_requested_at.clone().unwrap_or_default());
         items_by_turn.entry(latest_turn_id.clone()).or_default();
+        if !pending_user_messages.is_empty() {
+            items_by_turn
+                .entry(latest_turn_id.clone())
+                .or_default()
+                .extend(pending_user_messages.drain(..));
+        }
     }
 
     let mut turns = items_by_turn
@@ -5696,10 +5767,17 @@ fn rollout_originator_allowed(originator: Option<&str>) -> bool {
     match originator {
         Some(value) => {
             let normalized = value.to_ascii_lowercase();
-            normalized.contains("codex") || normalized.contains("clawdex")
+            !rollout_originator_is_t3_harness(Some(normalized.as_str()))
+                && (normalized.contains("codex") || normalized.contains("clawdex"))
         }
         None => true,
     }
+}
+
+fn rollout_originator_is_t3_harness(originator: Option<&str>) -> bool {
+    originator
+        .map(|value| value.to_ascii_lowercase().contains("t3code"))
+        .unwrap_or(false)
 }
 
 fn build_rollout_thread_status_notification(method: &str, params: &Value) -> Option<Value> {
@@ -7828,6 +7906,58 @@ fn merge_thread_list_results(results: Vec<(BridgeRuntimeEngine, Value)>) -> Valu
     });
 
     json!({ "data": entries })
+}
+
+async fn filter_harness_owned_thread_list_result(
+    engine: BridgeRuntimeEngine,
+    result: Value,
+) -> Result<Value, String> {
+    if engine != BridgeRuntimeEngine::Codex {
+        return Ok(result);
+    }
+
+    let Value::Object(mut object) = result else {
+        return Ok(result);
+    };
+    let Some(entries) = object.get_mut("data").and_then(Value::as_array_mut) else {
+        return Ok(Value::Object(object));
+    };
+
+    let mut filtered = Vec::with_capacity(entries.len());
+    for entry in entries.drain(..) {
+        let should_hide = if let Some(record) = entry.as_object() {
+            let source = read_string(record.get("source"));
+            let path = read_string(record.get("path"));
+            if source.as_deref() == Some("vscode") {
+                if let Some(path) = path {
+                    match read_rollout_session_meta(Path::new(&path)).await {
+                        Ok(Some((_thread_id, originator))) => {
+                            rollout_originator_is_t3_harness(originator.as_deref())
+                        }
+                        Ok(None) => false,
+                        Err(error) => {
+                            return Err(format!(
+                                "failed reading codex session metadata for '{path}': {error}"
+                            ));
+                        }
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !should_hide {
+            filtered.push(entry);
+        }
+    }
+
+    object.insert("data".to_string(), Value::Array(filtered));
+    Ok(Value::Object(object))
 }
 
 fn merge_loaded_thread_ids_results(results: Vec<(BridgeRuntimeEngine, Value)>) -> Value {
