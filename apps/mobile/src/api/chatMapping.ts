@@ -416,7 +416,7 @@ export function mapChat(raw: RawThread): Chat {
     throw new Error('chat id missing in app-server response');
   }
 
-  const messages = mapMessages(raw, summary.createdAt);
+  const messages = mapMessages(raw, summary.createdAt, summary.engine);
   const plans = extractChatPlans(raw);
 
   const lastPreview =
@@ -492,7 +492,11 @@ function extractChatPlans(raw: RawThread): {
   };
 }
 
-function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
+function mapMessages(
+  raw: RawThread,
+  fallbackCreatedAt: string,
+  engine: ChatSummary['engine']
+): ChatMessage[] {
   const turns = Array.isArray(raw.turns) ? raw.turns : [];
   if (turns.length === 0) {
     return [];
@@ -503,6 +507,7 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
 
   for (const turn of turns) {
     const items = Array.isArray(turn.items) ? turn.items : [];
+    const turnSubAgentIndexByKey = new Map<string, number>();
     for (const item of items) {
       const itemRecord = toRecord(item);
       if (!itemRecord) {
@@ -574,19 +579,40 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
       const toolLikeMessage = toToolLikeMessage(itemRecord);
       if (toolLikeMessage) {
         const systemKind =
-          itemType === 'collabToolCall'
+          itemType === 'collabToolCall' && engine !== 't3code'
             ? 'subAgent'
             : itemType === 'reasoning'
               ? 'reasoning'
               : 'tool';
-        messages.push({
+        const subAgentMeta = systemKind === 'subAgent' ? toSubAgentMeta(itemRecord) : undefined;
+        const nextMessage: ChatMessage = {
           id: readString(itemRecord.id) ?? generateLocalId(),
           role: 'system',
           content: toolLikeMessage,
           systemKind,
-          subAgentMeta: systemKind === 'subAgent' ? toSubAgentMeta(itemRecord) : undefined,
+          subAgentMeta,
           createdAt: new Date(baseTs + messages.length * 1000).toISOString(),
-        });
+        };
+        const subAgentDedupKey =
+          systemKind === 'subAgent'
+            ? buildSubAgentMessageDedupKey(subAgentMeta, toolLikeMessage)
+            : null;
+        if (subAgentDedupKey) {
+          const previousIndex = turnSubAgentIndexByKey.get(subAgentDedupKey);
+          if (previousIndex !== undefined) {
+            const previousMessage = messages[previousIndex];
+            messages[previousIndex] = {
+              ...nextMessage,
+              id: previousMessage?.id ?? nextMessage.id,
+              createdAt: previousMessage?.createdAt ?? nextMessage.createdAt,
+            };
+            continue;
+          }
+        }
+        messages.push(nextMessage);
+        if (subAgentDedupKey) {
+          turnSubAgentIndexByKey.set(subAgentDedupKey, messages.length - 1);
+        }
       }
     }
   }
@@ -758,7 +784,10 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
   }
 
   if (type === 'commandexecution') {
-    const command = normalizeInline(readString(item.command), 240) ?? 'command';
+    const command =
+      normalizeInline(readString(item.command), 240) ??
+      normalizeInline(readString(item.detail), 240) ??
+      'command';
     const status = normalizeType(readString(item.status) ?? '');
     const output =
       normalizeMultiline(readString(item.aggregatedOutput), 2400) ??
@@ -774,15 +803,17 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
   }
 
   if (type === 'mcptoolcall') {
+    const genericTitle = normalizeInline(readString(item.title), 120);
     const server = normalizeInline(readString(item.server), 120);
     const tool = normalizeInline(readString(item.tool), 120);
-    const label = [server, tool].filter(Boolean).join(' / ') || 'MCP tool call';
+    const label = [server, tool].filter(Boolean).join(' / ') || genericTitle || 'MCP tool call';
     const status = normalizeType(readString(item.status) ?? '');
     const errorRecord = toRecord(item.error);
     const errorDetail =
       normalizeInline(readString(errorRecord?.message), 240) ??
-      normalizeInline(readString(item.error), 240);
-    const resultDetail = toStructuredPreview(item.result, 240);
+      normalizeInline(readString(item.error), 240) ??
+      normalizeInline(readString(item.detail), 240);
+    const resultDetail = toStructuredPreview(item.result ?? item.data, 240);
     const detail =
       status === 'failed' || status === 'error'
         ? errorDetail ?? resultDetail
@@ -795,7 +826,6 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
   }
 
   if (type === 'collabtoolcall') {
-    const tool = normalizeType(readString(item.tool) ?? '');
     const status = normalizeType(readString(item.status) ?? '');
     const prompt = normalizeInline(readString(item.prompt), 220);
     const receiverThreadIds = readReceiverThreadIds(item);
@@ -814,54 +844,76 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
       readString(item.agentStatus) ?? readString(item.agent_status),
       120
     );
+    const tool = normalizeType(readString(item.tool) ?? '');
 
-    const title = (() => {
-      if (tool === 'spawnagent') {
-        if (status === 'failed' || status === 'error') {
-          return '• Sub-agent spawn failed';
+    if (tool || prompt || receiverThreadIds.length > 0 || senderThreadId || agentStatus) {
+      const legacyTitle = (() => {
+        if (tool === 'spawnagent') {
+          if (status === 'failed' || status === 'error') {
+            return '• Sub-agent spawn failed';
+          }
+          if (status === 'completed' || status === 'complete' || status === 'succeeded') {
+            return '• Spawned sub-agent';
+          }
+          return '• Spawning sub-agent';
         }
-        if (status === 'completed' || status === 'complete' || status === 'succeeded') {
-          return '• Spawned sub-agent';
+
+        if (tool === 'sendinput') {
+          return status === 'failed' || status === 'error'
+            ? '• Sub-agent update failed'
+            : '• Sent follow-up to sub-agent';
         }
-        return '• Spawning sub-agent';
-      }
 
-      if (tool === 'sendinput') {
+        if (tool === 'wait') {
+          return status === 'failed' || status === 'error'
+            ? '• Waiting on sub-agent failed'
+            : '• Waiting on sub-agent';
+        }
+
+        if (tool === 'closeagent') {
+          return status === 'failed' || status === 'error'
+            ? '• Closing sub-agent failed'
+            : '• Closed sub-agent thread';
+        }
+
         return status === 'failed' || status === 'error'
-          ? '• Sub-agent update failed'
-          : '• Sent follow-up to sub-agent';
-      }
+          ? '• Sub-agent action failed'
+          : '• Updated sub-agent thread';
+      })();
 
-      if (tool === 'wait') {
-        return status === 'failed' || status === 'error'
-          ? '• Waiting on sub-agent failed'
-          : '• Waiting on sub-agent';
-      }
+      const detailParts = [
+        prompt ? `Prompt: ${prompt}` : null,
+        newThreadId ? `Thread: ${newThreadId}` : null,
+        primaryReceiverThreadId ? `Target: ${primaryReceiverThreadId}` : null,
+        senderThreadId ? `From: ${senderThreadId}` : null,
+        agentStatus ? `Status: ${agentStatus}` : null,
+      ].filter(Boolean);
 
-      if (tool === 'closeagent') {
-        return status === 'failed' || status === 'error'
-          ? '• Closing sub-agent failed'
-          : '• Closed sub-agent thread';
-      }
+      return withNestedDetail(legacyTitle, detailParts.join('\n') || null);
+    }
 
-      return status === 'failed' || status === 'error'
-        ? '• Sub-agent action failed'
-        : '• Updated sub-agent thread';
-    })();
+    const title = normalizeInline(readString(item.title), 120) ?? 'Subagent task';
+    const detail = normalizeMultiline(readString(item.detail), 1200);
+    const heading =
+      status === 'failed' || status === 'error' ? `• ${title} failed` : `• ${title}`;
+    return withNestedDetail(heading, detail);
+  }
 
-    const detailParts = [
-      prompt ? `Prompt: ${prompt}` : null,
-      newThreadId ? `Thread: ${newThreadId}` : null,
-      primaryReceiverThreadId ? `Target: ${primaryReceiverThreadId}` : null,
-      senderThreadId ? `From: ${senderThreadId}` : null,
-      agentStatus ? `Status: ${agentStatus}` : null,
-    ].filter(Boolean);
-
-    return withNestedDetail(title, detailParts.join('\n') || null);
+  if (type === 'dynamictoolcall') {
+    const title = normalizeInline(readString(item.title), 120) ?? 'Tool call';
+    const status = normalizeType(readString(item.status) ?? '');
+    const detail =
+      normalizeMultiline(readString(item.detail), 1200) ??
+      toStructuredPreview(item.result ?? item.data, 240);
+    const heading =
+      status === 'failed' || status === 'error' ? `• ${title} failed` : `• ${title}`;
+    return withNestedDetail(heading, detail);
   }
 
   if (type === 'websearch') {
-    const query = normalizeInline(readString(item.query), 180);
+    const query =
+      normalizeInline(readString(item.query), 180) ??
+      normalizeInline(readString(item.detail), 180);
     const actionRecord = toRecord(item.action);
     const actionType = normalizeType(readString(actionRecord?.type) ?? '');
     let detail: string | null = query;
@@ -884,7 +936,7 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
     const detail =
       changeCount > 0
         ? `${String(changeCount)} file${changeCount === 1 ? '' : 's'} changed`
-        : null;
+        : normalizeInline(readString(item.detail), 240);
     const title =
       status === 'failed' || status === 'error'
         ? '• File changes failed'
@@ -893,7 +945,9 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
   }
 
   if (type === 'imageview') {
-    const path = normalizeInline(readString(item.path), 220);
+    const path =
+      normalizeInline(readString(item.path), 220) ??
+      normalizeInline(readString(item.detail), 220);
     if (!path) {
       return null;
     }
@@ -941,6 +995,33 @@ function toSubAgentMeta(item: Record<string, unknown>): ChatMessageSubAgentMeta 
     receiverThreadIds,
     agentStatus,
   };
+}
+
+function buildSubAgentMessageDedupKey(
+  meta: ChatMessageSubAgentMeta | undefined,
+  content: string
+): string | null {
+  const receiverKey = (meta?.receiverThreadIds ?? [])
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0)
+    .join('|');
+  if (receiverKey) {
+    return `receiver:${receiverKey}`;
+  }
+
+  const prompt = meta?.prompt?.trim().toLowerCase();
+  if (prompt) {
+    return `prompt:${prompt}`;
+  }
+
+  const senderThreadId = meta?.senderThreadId?.trim().toLowerCase();
+  const tool = meta?.tool?.trim().toLowerCase();
+  if (tool || senderThreadId) {
+    return `tool:${tool ?? ''}|sender:${senderThreadId ?? ''}`;
+  }
+
+  const normalizedContent = content.trim().toLowerCase();
+  return normalizedContent ? `content:${normalizedContent}` : null;
 }
 
 function readReceiverThreadIds(item: Record<string, unknown>): string[] {

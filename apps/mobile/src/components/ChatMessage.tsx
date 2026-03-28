@@ -1141,6 +1141,9 @@ function summarizeToolGroup(titles: string[]): string {
   if (normalized.every((title) => title.startsWith('called tool'))) {
     return `${String(titles.length)} tool call${titles.length === 1 ? '' : 's'}`;
   }
+  if (normalized.every((title) => title.startsWith('subagent task'))) {
+    return `${String(titles.length)} subagent task${titles.length === 1 ? '' : 's'}`;
+  }
   if (normalized.every((title) => title.startsWith('searched web'))) {
     return `${String(titles.length)} web search${titles.length === 1 ? '' : 'es'}`;
   }
@@ -1186,6 +1189,14 @@ function toTimelineVisual(title: string): {
   if (normalized.startsWith('called tool')) {
     return {
       icon: 'construct-outline',
+      useMonospaceTitle: false,
+      isError: false,
+    };
+  }
+
+  if (normalized.startsWith('subagent task')) {
+    return {
+      icon: 'sparkles-outline',
       useMonospaceTitle: false,
       isError: false,
     };

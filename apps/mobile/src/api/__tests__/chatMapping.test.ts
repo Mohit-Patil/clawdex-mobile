@@ -385,6 +385,40 @@ describe('chatMapping', () => {
     });
   });
 
+  it('maps t3 collaboration items as tool work-log entries instead of sub-agent threads', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 't3code:thr_t3',
+        engine: 't3code',
+        preview: 'worker',
+        createdAt: 1700000000,
+        updatedAt: 1700000004,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'collabToolCall',
+                id: 'collab_t3_1',
+                title: 'Subagent task',
+                detail: 'Inspect the websocket protocol and summarize it',
+                status: 'completed',
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('tool');
+    expect(chat.messages[0].content).toContain('• Subagent task');
+    expect(chat.messages[0].content).toContain('Inspect the websocket protocol');
+    expect(chat.messages[0].subAgentMeta).toBeUndefined();
+  });
+
   it('maps user mention attachments into readable file markers', () => {
     const chat = mapChat(
       toRawThread({

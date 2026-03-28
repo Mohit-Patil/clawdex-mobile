@@ -73,6 +73,8 @@ const OPENCODE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OPENCODE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_T3CODE_CONNECT_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_T3CODE_RPC_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_T3CODE_SNAPSHOT_CACHE_TTL_MS: u64 = 1_500;
+const DEFAULT_T3CODE_SNAPSHOT_STALE_FALLBACK_MS: u64 = 15_000;
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -3230,6 +3232,12 @@ struct T3SessionState {
     last_error: Option<String>,
 }
 
+#[derive(Clone)]
+struct CachedT3Snapshot {
+    value: Value,
+    fetched_at: Instant,
+}
+
 struct T3CodeBackend {
     hub: Arc<ClientHub>,
     writer: Mutex<T3SocketWriter>,
@@ -3240,6 +3248,9 @@ struct T3CodeBackend {
     thread_workdirs: RwLock<HashMap<String, String>>,
     session_states: RwLock<HashMap<String, T3SessionState>>,
     assistant_message_texts: RwLock<HashMap<String, String>>,
+    completed_turn_ids: RwLock<HashMap<String, String>>,
+    snapshot_cache: RwLock<Option<CachedT3Snapshot>>,
+    snapshot_refresh_lock: Mutex<()>,
 }
 
 impl T3CodeBackend {
@@ -3263,11 +3274,14 @@ impl T3CodeBackend {
             thread_workdirs: RwLock::new(HashMap::new()),
             session_states: RwLock::new(HashMap::new()),
             assistant_message_texts: RwLock::new(HashMap::new()),
+            completed_turn_ids: RwLock::new(HashMap::new()),
+            snapshot_cache: RwLock::new(None),
+            snapshot_refresh_lock: Mutex::new(()),
         });
 
         backend.spawn_read_loop(reader);
         backend.get_server_config().await?;
-        let snapshot = backend.get_snapshot().await?;
+        let snapshot = backend.get_fresh_snapshot().await?;
         backend.refresh_projection_caches(&snapshot).await;
 
         Ok(backend)
@@ -3448,6 +3462,7 @@ impl T3CodeBackend {
                     .and_then(|state| state.active_turn_id.as_deref())
                     != next_state.active_turn_id.as_deref())
         {
+            self.completed_turn_ids.write().await.remove(&thread_id);
             self.hub
                 .broadcast_notification(
                     "turn/started",
@@ -3460,21 +3475,8 @@ impl T3CodeBackend {
             return;
         }
 
-        if !is_active && was_active {
-            self.hub
-                .broadcast_notification(
-                    "turn/completed",
-                    json!({
-                        "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
-                        "turnId": previous_state.and_then(|state| state.active_turn_id),
-                        "status": t3_completed_turn_status(
-                            next_state.status.as_deref(),
-                            next_state.last_error.as_deref(),
-                        ),
-                        "error": next_state.last_error.as_ref().map(|message| json!({ "message": message })),
-                    }),
-                )
-                .await;
+        if !is_active {
+            self.maybe_emit_settled_turn_completion(&thread_id).await;
         }
     }
 
@@ -3536,6 +3538,8 @@ impl T3CodeBackend {
                 }),
             )
             .await;
+
+        self.maybe_emit_settled_turn_completion(&thread_id).await;
     }
 
     async fn handle_activity_appended_event(&self, payload: &Value) {
@@ -3553,6 +3557,27 @@ impl T3CodeBackend {
         };
 
         match kind.as_str() {
+            "tool.started" | "tool.updated" | "tool.completed" => {
+                if let Some(item) = t3_tool_activity_item(kind.as_str(), activity_payload, activity)
+                {
+                    let event_method = match kind.as_str() {
+                        "tool.started" => "item/started",
+                        "tool.updated" => "item/updated",
+                        "tool.completed" => "item/completed",
+                        _ => return,
+                    };
+                    self.hub
+                        .broadcast_notification(
+                            event_method,
+                            json!({
+                                "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, &thread_id),
+                                "turnId": read_string(activity.get("turnId")),
+                                "item": item,
+                            }),
+                        )
+                        .await;
+                }
+            }
             "approval.requested" => {
                 if let Some(approval) =
                     t3_pending_approval_from_activity(&thread_id, activity, activity_payload, None)
@@ -3609,6 +3634,63 @@ impl T3CodeBackend {
             }
             _ => {}
         }
+
+        self.maybe_emit_settled_turn_completion(&thread_id).await;
+    }
+
+    async fn maybe_emit_settled_turn_completion(&self, thread_id: &str) {
+        let session_state = self
+            .session_states
+            .read()
+            .await
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default();
+        if t3_session_is_active(session_state.status.as_deref()) {
+            return;
+        }
+
+        let snapshot = match self.get_fresh_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(_) => return,
+        };
+        let Some(thread) = t3_thread_lookup(&snapshot, thread_id) else {
+            return;
+        };
+        let Some(thread_object) = thread.as_object() else {
+            return;
+        };
+        let Some((turn_id, status)) = t3_thread_latest_turn_completion(thread_object) else {
+            return;
+        };
+
+        let already_emitted = self
+            .completed_turn_ids
+            .read()
+            .await
+            .get(thread_id)
+            .map(String::as_str)
+            == Some(turn_id.as_str());
+        if already_emitted {
+            return;
+        }
+
+        self.completed_turn_ids
+            .write()
+            .await
+            .insert(thread_id.to_string(), turn_id.clone());
+
+        self.hub
+            .broadcast_notification(
+                "turn/completed",
+                json!({
+                    "threadId": encode_engine_qualified_id(BridgeRuntimeEngine::T3Code, thread_id),
+                    "turnId": turn_id,
+                    "status": status,
+                    "error": session_state.last_error.as_ref().map(|message| json!({ "message": message })),
+                }),
+            )
+            .await;
     }
 
     async fn forward_request(
@@ -4007,8 +4089,67 @@ impl T3CodeBackend {
     }
 
     async fn get_snapshot(&self) -> Result<Value, String> {
-        self.request_rpc("orchestration.getSnapshot", json!({}))
+        self.get_snapshot_internal(true).await
+    }
+
+    async fn get_fresh_snapshot(&self) -> Result<Value, String> {
+        self.get_snapshot_internal(false).await
+    }
+
+    async fn get_snapshot_internal(&self, allow_cache: bool) -> Result<Value, String> {
+        let fresh_max_age = Duration::from_millis(DEFAULT_T3CODE_SNAPSHOT_CACHE_TTL_MS);
+        if allow_cache {
+            if let Some(snapshot) = self.cached_snapshot_if_fresh(fresh_max_age).await {
+                return Ok(snapshot);
+            }
+        }
+
+        let _refresh_guard = self.snapshot_refresh_lock.lock().await;
+        if allow_cache {
+            if let Some(snapshot) = self.cached_snapshot_if_fresh(fresh_max_age).await {
+                return Ok(snapshot);
+            }
+        }
+
+        match self
+            .request_rpc("orchestration.getSnapshot", json!({}))
             .await
+        {
+            Ok(snapshot) => {
+                self.store_snapshot_cache(&snapshot).await;
+                Ok(snapshot)
+            }
+            Err(error) => {
+                if allow_cache && error == "t3code request timed out: orchestration.getSnapshot" {
+                    if let Some(snapshot) = self
+                        .cached_snapshot_if_fresh(Duration::from_millis(
+                            DEFAULT_T3CODE_SNAPSHOT_STALE_FALLBACK_MS,
+                        ))
+                        .await
+                    {
+                        eprintln!("reusing cached t3code snapshot after timeout");
+                        return Ok(snapshot);
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn cached_snapshot_if_fresh(&self, max_age: Duration) -> Option<Value> {
+        let cached = self.snapshot_cache.read().await.clone()?;
+        if cached.fetched_at.elapsed() <= max_age {
+            Some(cached.value)
+        } else {
+            None
+        }
+    }
+
+    async fn store_snapshot_cache(&self, snapshot: &Value) {
+        *self.snapshot_cache.write().await = Some(CachedT3Snapshot {
+            value: snapshot.clone(),
+            fetched_at: Instant::now(),
+        });
     }
 
     async fn get_server_config(&self) -> Result<Value, String> {
@@ -4121,14 +4262,13 @@ impl T3CodeBackend {
         *self.session_states.write().await = session_states;
         *self.assistant_message_texts.write().await = assistant_messages;
     }
-
     async fn wait_for_new_turn_id(
         &self,
         thread_id: &str,
         previous_turn_id: Option<&str>,
     ) -> Result<Option<String>, String> {
         for _ in 0..20 {
-            let snapshot = self.get_snapshot().await?;
+            let snapshot = self.get_fresh_snapshot().await?;
             self.refresh_projection_caches(&snapshot).await;
             let latest_turn_id =
                 t3_thread_lookup(&snapshot, thread_id).and_then(t3_thread_latest_turn_id);
@@ -4233,15 +4373,6 @@ fn t3_bridge_status(
         Some("idle" | "ready" | "stopped") => "idle",
         _ if last_error.is_some() => "failed",
         _ => "idle",
-    }
-}
-
-fn t3_completed_turn_status(status: Option<&str>, last_error: Option<&str>) -> &'static str {
-    match status {
-        Some("interrupted") => "interrupted",
-        Some("error") => "failed",
-        _ if last_error.is_some() => "failed",
-        _ => "completed",
     }
 }
 
@@ -4982,10 +5113,10 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
         .and_then(Value::as_object)
         .and_then(|session| read_string(session.get("lastError")));
 
-    let mut items_by_turn = HashMap::<String, Vec<(String, Value)>>::new();
+    let mut items_by_turn = HashMap::<String, Vec<T3TurnItemEntry>>::new();
     let mut sort_keys = HashMap::<String, String>::new();
     let mut checkpoint_statuses = HashMap::<String, String>::new();
-    let mut pending_user_messages = Vec::<(String, Value)>::new();
+    let mut pending_user_messages = Vec::<T3TurnItemEntry>::new();
 
     if let Some(checkpoints) = thread.get("checkpoints").and_then(Value::as_array) {
         for checkpoint in checkpoints.iter().filter_map(Value::as_object) {
@@ -5040,13 +5171,22 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
                     sort_keys
                         .entry(turn_id.clone())
                         .or_insert_with(|| sort_key.clone());
-                    items_by_turn
-                        .entry(turn_id)
-                        .or_default()
-                        .push((sort_key, item));
+                    items_by_turn.entry(turn_id).or_default().push(T3TurnItemEntry {
+                        sort_key,
+                        sequence: None,
+                        lifecycle_rank: 1,
+                        item_id: read_string(item.get("id")).unwrap_or_default(),
+                        item,
+                    });
                 }
                 ("user", None) => {
-                    pending_user_messages.push((sort_key, item));
+                    pending_user_messages.push(T3TurnItemEntry {
+                        sort_key,
+                        sequence: None,
+                        lifecycle_rank: 1,
+                        item_id: read_string(item.get("id")).unwrap_or_default(),
+                        item,
+                    });
                 }
                 ("assistant", Some(turn_id)) => {
                     sort_keys
@@ -5058,10 +5198,13 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
                             .or_default()
                             .extend(pending_user_messages.drain(..));
                     }
-                    items_by_turn
-                        .entry(turn_id)
-                        .or_default()
-                        .push((sort_key, item));
+                    items_by_turn.entry(turn_id).or_default().push(T3TurnItemEntry {
+                        sort_key,
+                        sequence: None,
+                        lifecycle_rank: 1,
+                        item_id: read_string(item.get("id")).unwrap_or_default(),
+                        item,
+                    });
                 }
                 ("assistant", None) => {}
                 _ => {}
@@ -5078,15 +5221,27 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
             sort_keys
                 .entry(turn_id.clone())
                 .or_insert_with(|| sort_key.clone());
-            items_by_turn.entry(turn_id.clone()).or_default().push((
+            items_by_turn.entry(turn_id.clone()).or_default().push(T3TurnItemEntry {
                 sort_key,
-                json!({
+                sequence: None,
+                lifecycle_rank: 1,
+                item_id: read_string(plan.get("id")).unwrap_or_else(|| turn_id.clone()),
+                item: json!({
                     "id": read_string(plan.get("id")).unwrap_or_else(|| turn_id.clone()),
                     "type": "plan",
                     "text": read_string(plan.get("planMarkdown")).unwrap_or_default(),
                     "turnId": turn_id,
                 }),
-            ));
+            });
+        }
+    }
+
+    if let Some(activities) = thread.get("activities").and_then(Value::as_array) {
+        for (turn_id, activity_items) in t3_work_log_items_by_turn(activities) {
+            sort_keys
+                .entry(turn_id.clone())
+                .or_insert_with(|| activity_items.first().map(|entry| entry.sort_key.clone()).unwrap_or_default());
+            items_by_turn.entry(turn_id).or_default().extend(activity_items);
         }
     }
 
@@ -5106,7 +5261,7 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
     let mut turns = items_by_turn
         .into_iter()
         .map(|(turn_id, mut items)| {
-            items.sort_by(|left, right| left.0.cmp(&right.0));
+            t3_sort_turn_items(&mut items);
             let status = if latest_turn_id.as_deref() == Some(turn_id.as_str()) {
                 match latest_turn_state.as_deref() {
                     Some("running") => "running",
@@ -5125,7 +5280,7 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
             let mut turn = json!({
                 "id": turn_id,
                 "status": status,
-                "items": items.into_iter().map(|(_, item)| item).collect::<Vec<_>>(),
+                "items": items.into_iter().map(|entry| entry.item).collect::<Vec<_>>(),
             });
             if latest_turn_id.as_deref() == read_string(turn.get("id")).as_deref()
                 && status == "failed"
@@ -5145,6 +5300,333 @@ fn t3_thread_turns(thread: &serde_json::Map<String, Value>) -> Vec<Value> {
 
     turns.sort_by(|left, right| left.0.cmp(&right.0));
     turns.into_iter().map(|(_, turn)| turn).collect()
+}
+
+fn t3_thread_latest_turn_completion(
+    thread: &serde_json::Map<String, Value>,
+) -> Option<(String, String)> {
+    let latest_turn = thread.get("latestTurn").and_then(Value::as_object)?;
+    let turn_id = read_string(latest_turn.get("turnId"))?;
+    let completed_at = read_string(latest_turn.get("completedAt"));
+    if completed_at.is_none() {
+        return None;
+    }
+
+    let status = match read_string(latest_turn.get("state")).as_deref() {
+        Some("interrupted") => "interrupted",
+        Some("error") => "failed",
+        _ => "completed",
+    };
+
+    Some((turn_id, status.to_string()))
+}
+
+#[derive(Clone)]
+struct T3TurnItemEntry {
+    sort_key: String,
+    sequence: Option<u64>,
+    lifecycle_rank: u8,
+    item_id: String,
+    item: Value,
+}
+
+#[derive(Clone)]
+struct T3ProjectedActivityItem {
+    kind: String,
+    collapse_key: Option<String>,
+    entry: T3TurnItemEntry,
+}
+
+fn t3_work_log_items_by_turn(
+    activities: &[Value],
+) -> HashMap<String, Vec<T3TurnItemEntry>> {
+    let mut activities_by_turn = HashMap::<String, Vec<serde_json::Map<String, Value>>>::new();
+    for activity in activities.iter().filter_map(Value::as_object) {
+        let Some(turn_id) = read_string(activity.get("turnId")) else {
+            continue;
+        };
+        activities_by_turn
+            .entry(turn_id)
+            .or_default()
+            .push(activity.clone());
+    }
+
+    activities_by_turn
+        .into_iter()
+        .map(|(turn_id, turn_activities)| {
+            let mut projected = turn_activities
+                .iter()
+                .filter_map(t3_activity_item)
+                .collect::<Vec<_>>();
+            projected.sort_by(|left, right| {
+                t3_compare_turn_items(&left.entry, &right.entry)
+            });
+            let collapsed = t3_collapse_projected_activity_items(projected)
+                .into_iter()
+                .map(|entry| entry.entry)
+                .collect::<Vec<_>>();
+            (turn_id, collapsed)
+        })
+        .collect()
+}
+
+fn t3_activity_item(activity: &serde_json::Map<String, Value>) -> Option<T3ProjectedActivityItem> {
+    let kind = read_string(activity.get("kind"))?;
+    let payload = activity.get("payload").and_then(Value::as_object)?;
+    let created_at = read_string(activity.get("createdAt")).unwrap_or_default();
+    let item = match kind.as_str() {
+        "tool.updated" | "tool.completed" => t3_tool_activity_item(&kind, payload, activity)?,
+        _ => return None,
+    };
+    Some(T3ProjectedActivityItem {
+        kind: kind.clone(),
+        collapse_key: t3_tool_activity_collapse_key(&kind, payload, activity),
+        entry: T3TurnItemEntry {
+            sort_key: created_at,
+            sequence: activity.get("sequence").and_then(Value::as_u64),
+            lifecycle_rank: t3_activity_lifecycle_rank(&kind),
+            item_id: read_string(activity.get("id")).unwrap_or_default(),
+            item,
+        },
+    })
+}
+
+fn t3_collapse_projected_activity_items(
+    entries: Vec<T3ProjectedActivityItem>,
+) -> Vec<T3ProjectedActivityItem> {
+    let mut collapsed = Vec::<T3ProjectedActivityItem>::new();
+    for entry in entries {
+        if let Some(previous) = collapsed.last_mut() {
+            if t3_should_collapse_projected_activity_items(previous, &entry) {
+                previous.kind = entry.kind.clone();
+                previous.collapse_key = entry
+                    .collapse_key
+                    .clone()
+                    .or_else(|| previous.collapse_key.clone());
+                previous.entry = T3TurnItemEntry {
+                    sort_key: entry.entry.sort_key.clone(),
+                    sequence: entry.entry.sequence,
+                    lifecycle_rank: entry.entry.lifecycle_rank,
+                    item_id: entry.entry.item_id.clone(),
+                    item: t3_merge_projected_tool_item(&previous.entry.item, &entry.entry.item),
+                };
+                continue;
+            }
+        }
+        collapsed.push(entry);
+    }
+    collapsed
+}
+
+fn t3_should_collapse_projected_activity_items(
+    previous: &T3ProjectedActivityItem,
+    next: &T3ProjectedActivityItem,
+) -> bool {
+    previous.kind == "tool.updated"
+        && (next.kind == "tool.updated" || next.kind == "tool.completed")
+        && previous.collapse_key.is_some()
+        && previous.collapse_key == next.collapse_key
+}
+
+fn t3_merge_projected_tool_item(previous: &Value, next: &Value) -> Value {
+    let Some(previous_record) = previous.as_object() else {
+        return next.clone();
+    };
+    let Some(next_record) = next.as_object() else {
+        return next.clone();
+    };
+
+    let mut merged = next_record.clone();
+    for field in [
+        "title",
+        "detail",
+        "command",
+        "aggregatedOutput",
+        "query",
+        "path",
+        "server",
+        "tool",
+        "result",
+        "data",
+        "changes",
+    ] {
+        let next_missing = merged
+            .get(field)
+            .is_none_or(|value| value.is_null());
+        if next_missing {
+            if let Some(previous_value) = previous_record.get(field) {
+                merged.insert(field.to_string(), previous_value.clone());
+            }
+        }
+    }
+
+    Value::Object(merged)
+}
+
+fn t3_tool_activity_collapse_key(
+    kind: &str,
+    payload: &serde_json::Map<String, Value>,
+    activity: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    if kind != "tool.updated" && kind != "tool.completed" {
+        return None;
+    }
+
+    let item_type = read_string(payload.get("itemType")).unwrap_or_default();
+    let label = read_string(payload.get("title"))
+        .or_else(|| read_string(activity.get("summary")))
+        .map(|value| t3_normalize_tool_activity_label(&value))
+        .unwrap_or_default();
+    let detail = read_string(payload.get("detail"))
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+
+    if item_type.is_empty() && label.is_empty() && detail.is_empty() {
+        return None;
+    }
+
+    Some(format!("{item_type}\u{001f}{label}\u{001f}{detail}"))
+}
+
+fn t3_normalize_tool_activity_label(value: &str) -> String {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.ends_with(" completed") {
+        return trimmed[..trimmed.len() - " completed".len()]
+            .trim()
+            .to_string();
+    }
+    if lower.ends_with(" complete") {
+        return trimmed[..trimmed.len() - " complete".len()]
+            .trim()
+            .to_string();
+    }
+    trimmed.to_string()
+}
+
+fn t3_activity_lifecycle_rank(kind: &str) -> u8 {
+    if kind.ends_with(".started") || kind == "tool.started" {
+        return 0;
+    }
+    if kind.ends_with(".progress") || kind.ends_with(".updated") {
+        return 1;
+    }
+    if kind.ends_with(".completed") || kind.ends_with(".resolved") {
+        return 2;
+    }
+    1
+}
+
+fn t3_compare_turn_items(left: &T3TurnItemEntry, right: &T3TurnItemEntry) -> std::cmp::Ordering {
+    match (left.sequence, right.sequence) {
+        (Some(left_sequence), Some(right_sequence)) if left_sequence != right_sequence => {
+            return left_sequence.cmp(&right_sequence);
+        }
+        (Some(_), None) => return std::cmp::Ordering::Greater,
+        (None, Some(_)) => return std::cmp::Ordering::Less,
+        _ => {}
+    }
+
+    let created_at_order = left.sort_key.cmp(&right.sort_key);
+    if created_at_order != std::cmp::Ordering::Equal {
+        return created_at_order;
+    }
+
+    let lifecycle_order = left.lifecycle_rank.cmp(&right.lifecycle_rank);
+    if lifecycle_order != std::cmp::Ordering::Equal {
+        return lifecycle_order;
+    }
+
+    left.item_id.cmp(&right.item_id)
+}
+
+fn t3_sort_turn_items(items: &mut [T3TurnItemEntry]) {
+    items.sort_by(t3_compare_turn_items);
+}
+
+fn t3_tool_activity_item(
+    kind: &str,
+    payload: &serde_json::Map<String, Value>,
+    activity: &serde_json::Map<String, Value>,
+) -> Option<Value> {
+    let item_type = read_string(payload.get("itemType"))?;
+    let status = match kind {
+        "tool.started" => "running".to_string(),
+        "tool.updated" => read_string(payload.get("status"))
+            .unwrap_or_else(|| "running".to_string()),
+        "tool.completed" => "completed".to_string(),
+        _ => return None,
+    };
+    let item_id = read_string(activity.get("id")).unwrap_or_default();
+    let detail = read_string(payload.get("detail"));
+    let title = read_string(payload.get("title"));
+    let data = payload.get("data").cloned();
+
+    match item_type.as_str() {
+        "command_execution" => Some(json!({
+            "id": item_id,
+            "type": "commandExecution",
+            "title": title,
+            "detail": detail,
+            "command": detail,
+            "status": status,
+            "data": data,
+        })),
+        "file_change" => Some(json!({
+            "id": item_id,
+            "type": "fileChange",
+            "title": title,
+            "detail": detail,
+            "status": status,
+            "data": data,
+        })),
+        "mcp_tool_call" => Some(json!({
+            "id": item_id,
+            "type": "mcpToolCall",
+            "title": title,
+            "detail": detail,
+            "server": "mcp",
+            "tool": read_string(payload.get("tool")),
+            "status": status,
+            "data": data,
+        })),
+        "dynamic_tool_call" => Some(json!({
+            "id": item_id,
+            "type": "dynamicToolCall",
+            "title": title,
+            "detail": detail,
+            "tool": read_string(payload.get("tool")),
+            "status": status,
+            "data": data,
+        })),
+        "collab_agent_tool_call" => Some(json!({
+            "id": item_id,
+            "type": "collabToolCall",
+            "title": title,
+            "detail": detail,
+            "status": status,
+            "data": data,
+        })),
+        "web_search" => Some(json!({
+            "id": item_id,
+            "type": "webSearch",
+            "title": title,
+            "detail": detail,
+            "query": detail,
+            "status": status,
+            "data": data,
+        })),
+        "image_view" => Some(json!({
+            "id": item_id,
+            "type": "imageView",
+            "title": title,
+            "detail": detail,
+            "path": detail,
+            "status": status,
+            "data": data,
+        })),
+        _ => None,
+    }
 }
 
 fn parse_t3_model_selector(value: &str) -> Option<(String, String)> {
@@ -10126,6 +10608,195 @@ mod tests {
             Some(("openai".to_string(), "gpt-5".to_string()))
         );
         assert_eq!(parse_opencode_model_selector("gpt-5"), None);
+    }
+
+    #[test]
+    fn t3_thread_turns_collapse_tool_lifecycle_entries_for_snapshot() {
+        let thread = json!({
+            "latestTurn": {
+                "turnId": "turn-1",
+                "state": "completed",
+                "requestedAt": "2026-02-23T00:00:00.000Z",
+                "startedAt": "2026-02-23T00:00:00.000Z",
+                "completedAt": "2026-02-23T00:00:03.000Z",
+                "assistantMessageId": null
+            },
+            "messages": [
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "text": "Inspect the websocket protocol",
+                    "turnId": null,
+                    "streaming": false,
+                    "createdAt": "2026-02-23T00:00:00.000Z",
+                    "updatedAt": "2026-02-23T00:00:00.000Z"
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "text": "Done.",
+                    "turnId": "turn-1",
+                    "streaming": false,
+                    "createdAt": "2026-02-23T00:00:03.000Z",
+                    "updatedAt": "2026-02-23T00:00:03.000Z"
+                }
+            ],
+            "activities": [
+                {
+                    "id": "tool-start",
+                    "tone": "tool",
+                    "kind": "tool.started",
+                    "summary": "Subagent task started",
+                    "payload": {
+                        "itemType": "collab_agent_tool_call",
+                        "title": "Subagent task",
+                        "detail": "Inspect the websocket protocol"
+                    },
+                    "turnId": "turn-1",
+                    "sequence": 1,
+                    "createdAt": "2026-02-23T00:00:01.000Z"
+                },
+                {
+                    "id": "tool-update",
+                    "tone": "tool",
+                    "kind": "tool.updated",
+                    "summary": "Subagent task",
+                    "payload": {
+                        "itemType": "collab_agent_tool_call",
+                        "title": "Subagent task",
+                        "detail": "Inspect the websocket protocol",
+                        "status": "in_progress",
+                        "data": { "phase": "running" }
+                    },
+                    "turnId": "turn-1",
+                    "sequence": 2,
+                    "createdAt": "2026-02-23T00:00:01.500Z"
+                },
+                {
+                    "id": "tool-complete",
+                    "tone": "tool",
+                    "kind": "tool.completed",
+                    "summary": "Subagent task",
+                    "payload": {
+                        "itemType": "collab_agent_tool_call",
+                        "title": "Subagent task",
+                        "detail": "Inspect the websocket protocol"
+                    },
+                    "turnId": "turn-1",
+                    "sequence": 3,
+                    "createdAt": "2026-02-23T00:00:02.000Z"
+                }
+            ],
+            "proposedPlans": [],
+            "checkpoints": [],
+            "session": null
+        });
+
+        let turns = t3_thread_turns(thread.as_object().expect("thread object"));
+        assert_eq!(turns.len(), 1);
+        let items = turns[0]["items"].as_array().expect("turn items");
+        assert_eq!(
+            items.iter()
+                .filter(|item| read_string(item.get("type")).as_deref() == Some("collabToolCall"))
+                .count(),
+            1
+        );
+        let collab_item = items
+            .iter()
+            .find(|item| read_string(item.get("type")).as_deref() == Some("collabToolCall"))
+            .expect("collab tool item");
+        assert_eq!(collab_item["title"], "Subagent task");
+        assert_eq!(collab_item["detail"], "Inspect the websocket protocol");
+        assert_eq!(collab_item["status"], "completed");
+    }
+
+    #[test]
+    fn t3_tool_activity_item_maps_additional_tool_lifecycle_types() {
+        let dynamic_activity = json!({
+            "id": "tool-dynamic",
+            "payload": {
+                "itemType": "dynamic_tool_call",
+                "title": "Tool call",
+                "detail": "Read package.json",
+                "status": "in_progress"
+            }
+        });
+        let dynamic_payload = dynamic_activity["payload"]
+            .as_object()
+            .expect("dynamic payload");
+        let dynamic_item = t3_tool_activity_item(
+            "tool.updated",
+            dynamic_payload,
+            dynamic_activity.as_object().expect("dynamic activity"),
+        )
+        .expect("dynamic tool item");
+        assert_eq!(dynamic_item["type"], "dynamicToolCall");
+        assert_eq!(dynamic_item["title"], "Tool call");
+
+        let web_activity = json!({
+            "id": "tool-web",
+            "payload": {
+                "itemType": "web_search",
+                "title": "Web search",
+                "detail": "openai responses api",
+                "status": "completed"
+            }
+        });
+        let web_payload = web_activity["payload"].as_object().expect("web payload");
+        let web_item = t3_tool_activity_item(
+            "tool.completed",
+            web_payload,
+            web_activity.as_object().expect("web activity"),
+        )
+        .expect("web search item");
+        assert_eq!(web_item["type"], "webSearch");
+        assert_eq!(web_item["query"], "openai responses api");
+
+        let image_activity = json!({
+            "id": "tool-image",
+            "payload": {
+                "itemType": "image_view",
+                "title": "Image view",
+                "detail": "/tmp/screenshot.png",
+                "status": "completed"
+            }
+        });
+        let image_payload = image_activity["payload"].as_object().expect("image payload");
+        let image_item = t3_tool_activity_item(
+            "tool.completed",
+            image_payload,
+            image_activity.as_object().expect("image activity"),
+        )
+        .expect("image view item");
+        assert_eq!(image_item["type"], "imageView");
+        assert_eq!(image_item["path"], "/tmp/screenshot.png");
+    }
+
+    #[test]
+    fn t3_thread_latest_turn_completion_requires_completed_at() {
+        let running_thread = json!({
+            "latestTurn": {
+                "turnId": "turn-1",
+                "state": "running",
+                "completedAt": null
+            }
+        });
+        assert_eq!(
+            t3_thread_latest_turn_completion(running_thread.as_object().expect("thread")),
+            None
+        );
+
+        let completed_thread = json!({
+            "latestTurn": {
+                "turnId": "turn-1",
+                "state": "completed",
+                "completedAt": "2026-02-23T00:00:03.000Z"
+            }
+        });
+        assert_eq!(
+            t3_thread_latest_turn_completion(completed_thread.as_object().expect("thread")),
+            Some(("turn-1".to_string(), "completed".to_string()))
+        );
     }
 
     #[test]

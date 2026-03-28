@@ -4109,6 +4109,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           describeAgentThreadSource(chat, agentRootThreadId);
 
         return {
+          id: chat.id,
           chat,
           isRootThread,
           ordinal,
@@ -4116,6 +4117,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           description: runtime.detail ?? fallbackDescription,
           runtime,
           selected: chat.id === selectedChatId,
+          selectable: true,
         };
       });
     }, [
@@ -4141,9 +4143,50 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
       [agentThreadRows]
     );
+    const fallbackLiveAgentRows = useMemo(() => {
+      if (liveAgentRows.length > 0 || !selectedChat || selectedChat.engine !== 't3code') {
+        return [];
+      }
+
+      const activeSubAgentMessages = collectActiveVirtualSubAgentMessages(
+        selectedChat.messages
+      );
+      if (activeSubAgentMessages.length === 0) {
+        return [];
+      }
+
+      const selectedSnapshot = threadRuntimeSnapshotsRef.current[selectedChat.id] ?? null;
+      const rootRuntime = buildAgentThreadDisplayState(
+        selectedChat,
+        selectedSnapshot,
+        runWatchdogNow
+      );
+
+      return [
+        {
+          id: selectedChat.id,
+          chat: selectedChat,
+          title: formatAgentThreadOptionTitle(selectedChat, selectedChat.id, null),
+          description:
+            rootRuntime.detail ||
+            selectedChat.lastMessagePreview.trim() ||
+            'Main thread',
+          runtime: rootRuntime,
+          selected: true,
+          selectable: true,
+        },
+        ...activeSubAgentMessages.map((message, index) =>
+          buildVirtualSubAgentPanelRow(message, index + 1)
+        ),
+      ];
+    }, [liveAgentRows.length, runWatchdogNow, selectedChat]);
+    const visibleLiveAgentRows = liveAgentRows.length > 0 ? liveAgentRows : fallbackLiveAgentRows;
     const liveRunningAgentCount = useMemo(
-      () => agentThreadRows.filter((row) => !row.isRootThread && row.runtime.isActive).length,
-      [agentThreadRows]
+      () =>
+        visibleLiveAgentRows.filter(
+          (row) => row.runtime.isActive && row.id !== selectedChat?.id
+        ).length,
+      [selectedChat?.id, visibleLiveAgentRows]
     );
     const selectorAgentCount = useMemo(
       () => agentThreadRows.filter((row) => !row.isRootThread).length,
@@ -5308,23 +5351,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 startedToolEvent.detail
               );
             }
-            if (itemType === 'commandExecution') {
-              cacheThreadActivity(threadId, {
-                tone: 'running',
-                title: 'Working',
-              });
-              return;
-            }
-
-            if (itemType === 'fileChange') {
-              cacheThreadActivity(threadId, {
-                tone: 'running',
-                title: 'Working',
-              });
-              return;
-            }
-
-            if (itemType === 'mcpToolCall') {
+            if (isWorkingToolItemType(itemType)) {
               cacheThreadActivity(threadId, {
                 tone: 'running',
                 title: 'Working',
@@ -5364,24 +5391,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               startedToolEvent.detail
             );
           }
-
-          if (itemType === 'commandExecution') {
-            setActivity({
-              tone: 'running',
-              title: 'Working',
-            });
-            return;
+          if (isWorkingToolItemType(itemType)) {
+            scheduleExternalStatusFullSync(threadId);
           }
 
-          if (itemType === 'fileChange') {
-            setActivity({
-              tone: 'running',
-              title: 'Working',
-            });
-            return;
-          }
-
-          if (itemType === 'mcpToolCall') {
+          if (isWorkingToolItemType(itemType)) {
             setActivity({
               tone: 'running',
               title: 'Working',
@@ -5408,6 +5422,38 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             return;
           }
+        }
+
+        if (event.method === 'item/updated') {
+          const params = toRecord(event.params);
+          const threadId = readString(params?.threadId) ?? readString(params?.thread_id);
+          if (!threadId) {
+            return;
+          }
+          const item = toRecord(params?.item);
+          const itemType = readString(item?.type);
+          if (!isWorkingToolItemType(itemType)) {
+            return;
+          }
+
+          if (threadId !== currentId) {
+            cacheThreadTurnState(threadId, {
+              runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+            });
+            cacheThreadActivity(threadId, {
+              tone: 'running',
+              title: 'Working',
+            });
+            return;
+          }
+
+          bumpRunWatchdog();
+          scheduleExternalStatusFullSync(threadId);
+          setActivity({
+            tone: 'running',
+            title: 'Working',
+          });
+          return;
         }
 
         if (event.method === 'item/plan/delta') {
@@ -5756,6 +5802,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 title: failed ? 'Turn failed' : 'Working',
               });
             }
+            if (
+              itemType !== 'commandExecution' &&
+              isWorkingToolItemType(itemType)
+            ) {
+              cacheThreadActivity(threadId, {
+                tone: 'running',
+                title: 'Working',
+              });
+            }
             return;
           }
 
@@ -5772,6 +5827,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               completedToolEvent.detail
             );
           }
+          if (isWorkingToolItemType(itemType)) {
+            scheduleExternalStatusFullSync(threadId);
+          }
 
           if (itemType === 'commandExecution') {
             const status = readString(item?.status);
@@ -5780,6 +5838,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             setActivity({
               tone: failed ? 'error' : 'running',
               title: failed ? 'Turn failed' : 'Working',
+            });
+          }
+          if (itemType === 'collabToolCall' || itemType === 'dynamicToolCall' || itemType === 'webSearch' || itemType === 'imageView' || itemType === 'mcpToolCall' || itemType === 'fileChange') {
+            setActivity({
+              tone: 'running',
+              title: 'Working',
             });
           }
           return;
@@ -6596,7 +6660,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         ? '1 agent'
         : `${String(spawnedAgentCount)} agents`;
     const showLiveAgentPanel =
-      !isOpeningChat && Boolean(selectedChat) && liveAgentRows.length > 0;
+      !isOpeningChat && Boolean(selectedChat) && visibleLiveAgentRows.length > 0;
     const agentThreadStatusById = useMemo(
       () => new Map(relatedAgentThreads.map((chat) => [chat.id, chat.status] as const)),
       [relatedAgentThreads]
@@ -6996,7 +7060,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         {showLiveAgentPanel ? (
           <View style={styles.agentPanelWrap}>
             <AgentThreadsPanel
-              rows={liveAgentRows}
+              rows={visibleLiveAgentRows}
               runningCount={liveRunningAgentCount}
               collapsed={agentPanelCollapsed}
               onToggleCollapse={() => {
@@ -7662,11 +7726,13 @@ function ComposeView({
 }
 
 interface AgentThreadPanelRow {
-  chat: ChatSummary;
+  id: string;
+  chat: ChatSummary | null;
   title: string;
   description: string;
   runtime: AgentThreadDisplayState;
   selected: boolean;
+  selectable: boolean;
 }
 
 function AgentThreadsPanel({
@@ -7725,13 +7791,18 @@ function AgentThreadsPanel({
         >
           {rows.map((row) => (
             <Pressable
-              key={row.chat.id}
-              onPress={() => onSelectThread(row.chat.id)}
+              key={row.id}
+              onPress={() => {
+                if (row.selectable && row.chat) {
+                  onSelectThread(row.chat.id);
+                }
+              }}
+              disabled={!row.selectable}
               style={({ pressed }) => [
                 styles.agentPanelRow,
                 { borderColor: row.runtime.statusBorderColor },
                 row.selected && styles.agentPanelRowSelected,
-                pressed && styles.agentPanelRowPressed,
+                row.selectable && pressed && styles.agentPanelRowPressed,
               ]}
             >
               <View
@@ -9593,6 +9664,18 @@ function filterReasoningMessagesForEngine(
   return messages.filter((message) => message.systemKind !== 'reasoning');
 }
 
+function isWorkingToolItemType(itemType: string | null | undefined): boolean {
+  return (
+    itemType === 'commandExecution' ||
+    itemType === 'fileChange' ||
+    itemType === 'mcpToolCall' ||
+    itemType === 'dynamicToolCall' ||
+    itemType === 'collabToolCall' ||
+    itemType === 'webSearch' ||
+    itemType === 'imageView'
+  );
+}
+
 function describeStartedToolEvent(
   item: Record<string, unknown> | null
 ): { eventType: string; detail: string } | null {
@@ -9615,7 +9698,38 @@ function describeStartedToolEvent(
   if (itemType === 'mcpToolCall') {
     const detail = [readString(item?.server), readString(item?.tool)]
       .filter(Boolean)
-      .join(' / ') || 'Tool call';
+      .join(' / ') || readString(item?.title) || 'Tool call';
+    return {
+      eventType: 'tool.running',
+      detail: buildToolEventDetail(detail, 'running'),
+    };
+  }
+
+  if (itemType === 'dynamicToolCall') {
+    const detail = readString(item?.title) ?? readString(item?.tool) ?? 'Tool call';
+    return {
+      eventType: 'tool.running',
+      detail: buildToolEventDetail(detail, 'running'),
+    };
+  }
+
+  if (itemType === 'collabToolCall') {
+    return {
+      eventType: 'tool.running',
+      detail: buildToolEventDetail(readString(item?.title) ?? 'Subagent task', 'running'),
+    };
+  }
+
+  if (itemType === 'webSearch') {
+    const detail = readString(item?.query) ?? readString(item?.title) ?? 'Web search';
+    return {
+      eventType: 'web_search.running',
+      detail: buildToolEventDetail(detail, 'running'),
+    };
+  }
+
+  if (itemType === 'imageView') {
+    const detail = readString(item?.path) ?? readString(item?.title) ?? 'Image view';
     return {
       eventType: 'tool.running',
       detail: buildToolEventDetail(detail, 'running'),
@@ -9651,7 +9765,38 @@ function describeCompletedToolEvent(
   if (itemType === 'mcpToolCall') {
     const detail = [readString(item?.server), readString(item?.tool)]
       .filter(Boolean)
-      .join(' / ') || 'Tool call';
+      .join(' / ') || readString(item?.title) || 'Tool call';
+    return {
+      eventType: 'tool.completed',
+      detail: buildToolEventDetail(detail, status),
+    };
+  }
+
+  if (itemType === 'dynamicToolCall') {
+    const detail = readString(item?.title) ?? readString(item?.tool) ?? 'Tool call';
+    return {
+      eventType: 'tool.completed',
+      detail: buildToolEventDetail(detail, status),
+    };
+  }
+
+  if (itemType === 'collabToolCall') {
+    return {
+      eventType: 'tool.completed',
+      detail: buildToolEventDetail(readString(item?.title) ?? 'Subagent task', status),
+    };
+  }
+
+  if (itemType === 'webSearch') {
+    const detail = readString(item?.query) ?? readString(item?.title) ?? 'Web search';
+    return {
+      eventType: 'web_search.completed',
+      detail: buildToolEventDetail(detail, status),
+    };
+  }
+
+  if (itemType === 'imageView') {
+    const detail = readString(item?.path) ?? readString(item?.title) ?? 'Image view';
     return {
       eventType: 'tool.completed',
       detail: buildToolEventDetail(detail, status),
@@ -9669,6 +9814,161 @@ function describeWebSearchToolEvent(
     eventType: 'web_search.running',
     detail: buildToolEventDetail(query ? `Web search: ${query}` : 'Web search', 'running'),
   };
+}
+
+function normalizeChatToolName(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === 'spawnagent') {
+    return 'Spawn sub-agent';
+  }
+  if (normalized === 'sendinput') {
+    return 'Update sub-agent';
+  }
+  if (normalized === 'closeagent') {
+    return 'Close sub-agent';
+  }
+  if (normalized === 'wait') {
+    return 'Wait on sub-agent';
+  }
+  return value?.trim() ?? null;
+}
+
+function isVirtualSubAgentMessageActive(message: ChatTranscriptMessage): boolean {
+  if (message.systemKind !== 'subAgent') {
+    return false;
+  }
+  const normalized = message.content.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.includes('failed')) {
+    return false;
+  }
+  return (
+    normalized.includes('spawning sub-agent') ||
+    normalized.includes('waiting on sub-agent') ||
+    normalized.includes('updated sub-agent thread') ||
+    normalized.includes('sent follow-up to sub-agent')
+  );
+}
+
+function collectActiveVirtualSubAgentMessages(
+  messages: ChatTranscriptMessage[]
+): ChatTranscriptMessage[] {
+  const recentTurnMessages = collectRecentTurnSubAgentMessages(messages);
+  const seen = new Set<string>();
+  const next: ChatTranscriptMessage[] = [];
+
+  for (let index = recentTurnMessages.length - 1; index >= 0; index -= 1) {
+    const message = recentTurnMessages[index];
+    if (!isVirtualSubAgentMessageActive(message)) {
+      continue;
+    }
+    const key = buildVirtualSubAgentDedupKey(message);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    next.unshift(message);
+  }
+
+  return next;
+}
+
+function collectRecentTurnSubAgentMessages(
+  messages: ChatTranscriptMessage[]
+): ChatTranscriptMessage[] {
+  const next: ChatTranscriptMessage[] = [];
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === 'user') {
+      break;
+    }
+    if (message.systemKind === 'subAgent') {
+      next.unshift(message);
+    }
+  }
+
+  return next;
+}
+
+function buildVirtualSubAgentDedupKey(message: ChatTranscriptMessage): string {
+  const receiverIds = (message.subAgentMeta?.receiverThreadIds ?? [])
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .join('|');
+  if (receiverIds) {
+    return `receiver:${receiverIds}`;
+  }
+
+  const prompt = message.subAgentMeta?.prompt?.trim().toLowerCase();
+  if (prompt) {
+    return `prompt:${prompt}`;
+  }
+
+  return `content:${message.content.trim().toLowerCase()}`;
+}
+
+function buildVirtualSubAgentPanelRow(
+  message: ChatTranscriptMessage,
+  ordinal: number
+): AgentThreadPanelRow {
+  const runtime = buildVirtualSubAgentRuntimeState(message);
+  return {
+    id: `virtual-subagent:${message.id}`,
+    chat: null,
+    title: `Agent ${String(ordinal)}`,
+    description: extractVirtualSubAgentDescription(message),
+    runtime,
+    selected: false,
+    selectable: false,
+  };
+}
+
+function buildVirtualSubAgentRuntimeState(
+  message: ChatTranscriptMessage
+): AgentThreadDisplayState {
+  const normalized = message.content.trim().toLowerCase();
+  const detail = extractVirtualSubAgentDescription(message);
+  if (normalized.includes('failed')) {
+    return {
+      icon: 'alert-circle-outline',
+      label: 'Error',
+      detail,
+      tone: 'error',
+      accentColor: colors.statusError,
+      statusColor: colors.statusError,
+      statusSurfaceColor: 'rgba(239, 68, 68, 0.16)',
+      statusBorderColor: 'rgba(239, 68, 68, 0.42)',
+      isActive: false,
+    };
+  }
+
+  return {
+    icon: 'sync-outline',
+    label: 'Working',
+    detail,
+    tone: 'running',
+    accentColor: '#F5A524',
+    statusColor: '#7EE787',
+    statusSurfaceColor: 'rgba(126, 231, 135, 0.14)',
+    statusBorderColor: 'rgba(126, 231, 135, 0.34)',
+    isActive: true,
+  };
+}
+
+function extractVirtualSubAgentDescription(message: ChatTranscriptMessage): string {
+  const prompt = message.subAgentMeta?.prompt?.trim();
+  if (prompt) {
+    return toTickerSnippet(prompt, 84) ?? prompt;
+  }
+  const tool = normalizeChatToolName(message.subAgentMeta?.tool);
+  const fallback = tool ?? 'Sub-agent activity';
+  return toTickerSnippet(fallback, 84) ?? fallback;
 }
 
 function buildToolEventDetail(
