@@ -188,8 +188,8 @@ parse_args() {
     case "$1" in
       --no-start)
         AUTO_START="false"
-        shift
-        ;;
+      shift
+      ;;
       --engine)
         if (($# < 2)); then
           echo "error: --engine requires a value ('codex', 'opencode', or 't3code')." >&2
@@ -1556,7 +1556,6 @@ if [[ "$CONFIG_ACTION" == "reset" ]]; then
   ok "Previous secure config removed: $SECURE_ENV_FILE"
 fi
 
-section "Preferred engine"
 EXISTING_ACTIVE_ENGINE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
 EXISTING_ENABLED_ENGINES_RAW="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
 EXISTING_T3CODE_URL="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_T3CODE_URL")"
@@ -1616,7 +1615,6 @@ if [[ "$CONFIG_ACTION" != "keep" ]]; then
       abort_wizard "Unknown network mode '$NETWORK_MODE'."
       ;;
   esac
-
   section "Write secure config"
   BRIDGE_NETWORK_MODE="$NETWORK_MODE" \
     BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" \
@@ -1645,7 +1643,6 @@ else
       BRIDGE_HOST="$(resolve_local_ip)"
       ok "Local LAN IPv4 detected: $BRIDGE_HOST"
     fi
-
     section "Write secure config"
     BRIDGE_NETWORK_MODE="$NETWORK_MODE" \
       BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" \

@@ -44,8 +44,17 @@ npm run stop:services
 
 ## `codex` not found
 
-- Ensure `codex` is in `PATH`
-- Or set `CODEX_CLI_BIN` explicitly
+- `npm run secure:bridge` fails before the bridge starts if `codex` is one of the selected managed runtimes and the CLI is missing.
+- If `codex` is not selected in the managed-runtime list, the bridge does not try to start it.
+- Ensure `codex` is in `PATH`.
+- Or set `CODEX_CLI_BIN` explicitly to a valid executable path.
+
+## `opencode` not found
+
+- `npm run secure:bridge` fails before the bridge starts if `opencode` is one of the selected managed runtimes and the CLI is missing.
+- If `opencode` is not selected in the managed-runtime list, the bridge does not try to start it.
+- Ensure `opencode` is in `PATH`.
+- Or set `OPENCODE_CLI_BIN` explicitly to a valid executable path.
 
 ## T3 Code will not start
 

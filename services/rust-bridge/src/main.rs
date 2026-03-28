@@ -260,6 +260,88 @@ enum BridgeRuntimeEngine {
     T3Code,
 }
 
+fn runtime_engine_display_name(engine: BridgeRuntimeEngine) -> &'static str {
+    match engine {
+        BridgeRuntimeEngine::Codex => "Codex",
+        BridgeRuntimeEngine::Opencode => "OpenCode",
+        BridgeRuntimeEngine::T3Code => "T3 Code",
+    }
+}
+
+fn runtime_engine_cli_env_var(engine: BridgeRuntimeEngine) -> &'static str {
+    match engine {
+        BridgeRuntimeEngine::Codex => "CODEX_CLI_BIN",
+        BridgeRuntimeEngine::Opencode => "OPENCODE_CLI_BIN",
+        BridgeRuntimeEngine::T3Code => "T3CODE_CLI_BIN",
+    }
+}
+
+fn runtime_engine_install_hint(engine: BridgeRuntimeEngine) -> &'static str {
+    match engine {
+        BridgeRuntimeEngine::Codex => "Install @openai/codex",
+        BridgeRuntimeEngine::Opencode => "Install opencode-ai",
+        BridgeRuntimeEngine::T3Code => "Install the T3 CLI",
+    }
+}
+
+fn command_is_available(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if Path::new(trimmed).is_absolute() || trimmed.chars().any(std::path::is_separator) {
+        return Path::new(trimmed).is_file();
+    }
+
+    let Some(path_var) = env::var_os("PATH") else {
+        return false;
+    };
+
+    for directory in env::split_paths(&path_var) {
+        let candidate = directory.join(trimmed);
+        if candidate.is_file() {
+            return true;
+        }
+
+        #[cfg(windows)]
+        if Path::new(trimmed).extension().is_none() {
+            if let Some(path_ext) = env::var_os("PATHEXT") {
+                for suffix in path_ext
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|entry| !entry.is_empty())
+                {
+                    let candidate = directory.join(format!("{trimmed}{suffix}"));
+                    if candidate.is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn required_engine_cli_error(engine: BridgeRuntimeEngine, cli_bin: &str) -> String {
+    format!(
+        "{} CLI not found at '{}'. {} or set {} to a valid executable.",
+        runtime_engine_display_name(engine),
+        cli_bin,
+        runtime_engine_install_hint(engine),
+        runtime_engine_cli_env_var(engine)
+    )
+}
+
+fn ensure_required_engine_cli(engine: BridgeRuntimeEngine, cli_bin: &str) -> Result<(), String> {
+    if command_is_available(cli_bin) {
+        return Ok(());
+    }
+
+    Err(required_engine_cli_error(engine, cli_bin))
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeCapabilities {
@@ -303,23 +385,37 @@ impl RuntimeBackend {
         let mut backends = HashMap::new();
         let mut selected_engines = config.enabled_engines.iter().copied().collect::<Vec<_>>();
         selected_engines.sort_by_key(|engine| bridge_runtime_engine_sort_key(*engine));
+        let mut startup_order = Vec::new();
 
-        let required_backend =
-            Self::start_engine_handle(config, hub.clone(), preferred_engine).await?;
-        backends.insert(preferred_engine, required_backend);
+        if selected_engines.contains(&BridgeRuntimeEngine::Codex) {
+            ensure_required_engine_cli(BridgeRuntimeEngine::Codex, &config.cli_bin)?;
+        }
+        if selected_engines.contains(&BridgeRuntimeEngine::Opencode) {
+            ensure_required_engine_cli(BridgeRuntimeEngine::Opencode, &config.opencode_cli_bin)?;
+        }
+
+        if let Some(index) = selected_engines.iter().position(|engine| *engine == preferred_engine) {
+            let engine = selected_engines.remove(index);
+            selected_engines.insert(0, engine);
+        }
 
         for engine in selected_engines {
-            if engine == preferred_engine {
-                continue;
-            }
             match Self::start_engine_handle(config, hub.clone(), engine).await {
                 Ok(backend) => {
+                    startup_order.push(engine);
                     backends.insert(engine, backend);
                 }
-                Err(error) => eprintln!(
-                    "{} backend unavailable; continuing without it: {error}",
-                    engine.as_str()
-                ),
+                Err(error) => {
+                    while let Some(started_engine) = startup_order.pop() {
+                        if let Some(started_backend) = backends.remove(&started_engine) {
+                            started_backend.shutdown().await;
+                        }
+                    }
+                    return Err(format!(
+                        "failed to start required {} backend: {error}",
+                        engine.as_str()
+                    ));
+                }
             }
         }
 
@@ -545,6 +641,14 @@ impl RuntimeBackend {
 }
 
 impl RuntimeBackendHandle {
+    async fn shutdown(&self) {
+        match self {
+            Self::Codex(bridge) => bridge.shutdown().await,
+            Self::Opencode(backend) => backend.shutdown().await,
+            Self::T3Code(_) => {}
+        }
+    }
+
     async fn forward_request(
         &self,
         client_id: u64,
@@ -830,7 +934,9 @@ impl AppServerBridge {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("failed to start app-server: {error}"))?;
+            .map_err(|error| {
+                format!("failed to start codex app-server via '{cli_bin}': {error}")
+            })?;
 
         let stdin = child
             .stdin
@@ -986,6 +1092,13 @@ impl AppServerBridge {
             let mut pending = self.pending_requests.lock().await;
             pending.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
         };
+        let internal_waiters = {
+            let mut waiters = self.internal_waiters.lock().await;
+            waiters
+                .drain()
+                .map(|(_, waiter)| waiter)
+                .collect::<Vec<_>>()
+        };
 
         for pending in pending_entries {
             self.hub
@@ -1001,6 +1114,16 @@ impl AppServerBridge {
                 )
                 .await;
         }
+
+        for waiter in internal_waiters {
+            let _ = waiter.send(Err(message.to_string()));
+        }
+    }
+
+    async fn shutdown(&self) {
+        let mut child = self.child.lock().await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 
     async fn forward_request(
@@ -1560,9 +1683,12 @@ impl OpencodeBackend {
             command.env("OPENCODE_SERVER_USERNAME", &config.opencode_server_username);
         }
 
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("failed to start opencode serve: {error}"))?;
+        let mut child = command.spawn().map_err(|error| {
+            format!(
+                "failed to start opencode serve via '{}': {error}",
+                config.opencode_cli_bin
+            )
+        })?;
 
         let stdout = child
             .stdout
@@ -1605,6 +1731,12 @@ impl OpencodeBackend {
         backend.spawn_global_event_loop();
 
         Ok(backend)
+    }
+
+    async fn shutdown(&self) {
+        let mut child = self.child.lock().await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
 
     fn spawn_stdout_loop(self: &Arc<Self>, stdout: ChildStdout) {
@@ -10979,6 +11111,25 @@ mod tests {
     }
 
     #[test]
+    fn command_is_available_rejects_missing_explicit_path() {
+        assert!(!command_is_available("/definitely-missing-clawdex-binary"));
+    }
+
+    #[test]
+    fn command_is_available_accepts_existing_explicit_path() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("clawdex-command-check-{nonce}"));
+
+        std::fs::write(&path, "#!/bin/sh\n").expect("write temp command");
+        assert!(command_is_available(path.to_string_lossy().as_ref()));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn bridge_config_authorization_validates_header_and_query_token_paths() {
         let base = BridgeConfig {
             host: "127.0.0.1".to_string(),
@@ -11078,6 +11229,24 @@ mod tests {
         assert_eq!(payload_a["error"]["code"], -32000);
         assert_eq!(payload_b["id"], "req-b");
         assert_eq!(payload_b["error"]["code"], -32000);
+
+        shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn app_server_fail_all_pending_notifies_internal_waiters() {
+        let hub = Arc::new(ClientHub::new());
+        let bridge = build_test_bridge(hub).await;
+        let (tx, rx) = oneshot::channel();
+        bridge.internal_waiters.lock().await.insert(7, tx);
+
+        bridge.fail_all_pending("app-server closed").await;
+
+        let result = rx.await.expect("waiter result");
+        assert_eq!(
+            result.expect_err("expected bridge shutdown error"),
+            "app-server closed"
+        );
 
         shutdown_test_bridge(&bridge).await;
     }

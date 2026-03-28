@@ -64,6 +64,19 @@ function commandExists(command) {
   return result.status === 0;
 }
 
+function binaryExists(command) {
+  const trimmed = (command || "").trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (path.isAbsolute(trimmed) || trimmed.includes(path.sep) || trimmed.includes("/")) {
+    return fs.existsSync(trimmed);
+  }
+
+  return commandExists(trimmed);
+}
+
 function parseEnabledEngines(env) {
   const activeEngine = (env.BRIDGE_ACTIVE_ENGINE || "codex").trim().toLowerCase();
   const supported = new Set(["codex", "opencode", "t3code"]);
@@ -81,6 +94,35 @@ function parseEnabledEngines(env) {
     engines.add("codex");
   }
   return engines;
+}
+
+function ensureCliBinary(command, { label, packageName, envVar }) {
+  if (binaryExists(command)) {
+    return;
+  }
+
+  console.error(
+    `error: ${label} CLI not found at ${command}. Install ${packageName} or set ${envVar} to a valid executable.`
+  );
+  process.exit(1);
+}
+
+function ensureRequiredEnabledEngineClis(env, enabledEngines) {
+  if (enabledEngines.has("codex")) {
+    ensureCliBinary((env.CODEX_CLI_BIN || "codex").trim(), {
+      label: "Codex",
+      packageName: "@openai/codex",
+      envVar: "CODEX_CLI_BIN",
+    });
+  }
+
+  if (enabledEngines.has("opencode")) {
+    ensureCliBinary((env.OPENCODE_CLI_BIN || "opencode").trim(), {
+      label: "OpenCode",
+      packageName: "opencode-ai",
+      envVar: "OPENCODE_CLI_BIN",
+    });
+  }
 }
 
 function walkFiles(directory) {
@@ -523,6 +565,7 @@ async function start() {
   const devMode = process.argv.includes("--dev") || env.BRIDGE_RUN_MODE === "dev";
   const forceSourceBuild = env.CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD === "true";
   const enabledEngines = parseEnabledEngines(env);
+  ensureRequiredEnabledEngineClis(env, enabledEngines);
   if (!enabledEngines.has("t3code")) {
     delete env.BRIDGE_T3CODE_URL;
     delete env.BRIDGE_T3CODE_AUTH_TOKEN;
