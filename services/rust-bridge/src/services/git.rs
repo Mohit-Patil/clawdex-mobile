@@ -711,7 +711,9 @@ mod tests {
 
     #[test]
     fn detects_when_branch_has_upstream_tracking() {
-        assert!(parse_status_has_upstream("## main...origin/main [ahead 1]\n"));
+        assert!(parse_status_has_upstream(
+            "## main...origin/main [ahead 1]\n"
+        ));
         assert!(!parse_status_has_upstream("## feature/local-only\n"));
     }
 

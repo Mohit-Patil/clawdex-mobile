@@ -14,6 +14,8 @@ import type {
   ApprovalPolicy,
   ApprovalDecision,
   BridgeCapabilities,
+  BridgeRuntimeInfo,
+  BridgeUpdateStartResponse,
   ChatEngine,
   CollaborationMode,
   CreateChatRequest,
@@ -187,6 +189,16 @@ export class HostBridgeApiClient {
 
   readBridgeCapabilities(): Promise<BridgeCapabilities> {
     return this.ws.request<BridgeCapabilities>('bridge/capabilities/read');
+  }
+
+  readBridgeRuntime(): Promise<BridgeRuntimeInfo> {
+    return this.ws.request<BridgeRuntimeInfo>('bridge/runtime/read');
+  }
+
+  startBridgeUpdate(version = 'latest'): Promise<BridgeUpdateStartResponse> {
+    return this.ws.request<BridgeUpdateStartResponse>('bridge/update/start', {
+      version,
+    });
   }
 
   async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {

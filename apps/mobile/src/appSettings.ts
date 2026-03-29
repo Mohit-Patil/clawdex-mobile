@@ -7,7 +7,7 @@ import type {
 import { normalizeBridgeUrlInput } from './bridgeUrl';
 import type { AppearancePreference } from './theme';
 
-export const APP_SETTINGS_VERSION = 5;
+export const APP_SETTINGS_VERSION = 6;
 
 export function parseAppSettings(raw: string): {
   bridgeUrl: string | null;
@@ -42,6 +42,7 @@ export function parseAppSettings(raw: string): {
         parsedVersion !== 2 &&
         parsedVersion !== 3 &&
         parsedVersion !== 4 &&
+        parsedVersion !== 5 &&
         parsedVersion !== APP_SETTINGS_VERSION)
     ) {
       return {

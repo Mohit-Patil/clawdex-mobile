@@ -32,7 +32,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client as HttpClient, Method as HttpMethod, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use services::{GitService, TerminalService};
+use services::{GitService, TerminalService, UpdateService};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
@@ -220,6 +220,7 @@ struct AppState {
     backend: Arc<RuntimeBackend>,
     terminal: Arc<TerminalService>,
     git: Arc<GitService>,
+    updater: Arc<UpdateService>,
 }
 
 #[allow(dead_code)]
@@ -245,11 +246,14 @@ struct BridgeCapabilitySupport {
     review_start: bool,
     turn_steer: bool,
     command_output_delta: bool,
+    self_update: bool,
 }
 
 impl AppState {
     fn bridge_capabilities(&self) -> BridgeCapabilities {
-        self.backend.capabilities()
+        let mut capabilities = self.backend.capabilities();
+        capabilities.supports.self_update = self.updater.is_self_update_supported();
+        capabilities
     }
 }
 
@@ -335,11 +339,13 @@ impl RuntimeBackend {
                 review_start: true,
                 turn_steer: true,
                 command_output_delta: true,
+                self_update: false,
             },
             BridgeRuntimeEngine::Opencode => BridgeCapabilitySupport {
                 review_start: false,
                 turn_steer: false,
                 command_output_delta: false,
+                self_update: false,
             },
         };
         let available_engines = self.available_engines();
@@ -3762,6 +3768,12 @@ struct TerminalExecResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeUpdateStartRequest {
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitStatusResponse {
     branch: String,
     clean: bool,
@@ -4077,6 +4089,7 @@ async fn main() {
         config.workdir.clone(),
         config.allow_outside_root_cwd,
     ));
+    let updater = Arc::new(UpdateService::discover());
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -4085,6 +4098,7 @@ async fn main() {
         backend,
         terminal,
         git,
+        updater,
     });
 
     let app = Router::new()
@@ -4444,6 +4458,19 @@ async fn handle_bridge_method(
         })),
         "bridge/capabilities/read" => serde_json::to_value(state.bridge_capabilities())
             .map_err(|error| BridgeError::server(&error.to_string())),
+        "bridge/runtime/read" => serde_json::to_value(state.updater.runtime_info())
+            .map_err(|error| BridgeError::server(&error.to_string())),
+        "bridge/update/start" => {
+            let request: BridgeUpdateStartRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let target_version = request.version.as_deref().unwrap_or("latest");
+            let result = state
+                .updater
+                .start_update(target_version, std::process::id(), &now_iso())
+                .map_err(|error| BridgeError::server(&error))?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
         "bridge/events/replay" => {
             let request: EventReplayRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
@@ -7400,6 +7427,7 @@ mod tests {
             config.workdir.clone(),
             config.allow_outside_root_cwd,
         ));
+        let updater = Arc::new(UpdateService::discover());
 
         Arc::new(AppState {
             config,
@@ -7408,6 +7436,7 @@ mod tests {
             backend,
             terminal,
             git,
+            updater,
         })
     }
 

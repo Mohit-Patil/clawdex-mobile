@@ -78,6 +78,17 @@ BRIDGE_ACTIVE_ENGINE=opencode npm run secure:bridge
 
 Open the installed mobile app on your phone, then scan the bridge QR. If needed, enter the bridge URL manually (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). The chosen bridge URL is stored on-device and can be changed later in Settings.
 
+### In-app Bridge Update
+
+For published `clawdex-mobile` CLI installs, the mobile Settings screen can start a bridge update safely.
+
+- Open `Settings > Bridge Maintenance`
+- Tap `Update bridge`
+- The app will disconnect briefly while a detached helper job stops the current bridge, runs `npm install -g clawdex-mobile@latest`, and starts the bridge again
+- If the upgrade step fails, the helper attempts to restart the previous bridge automatically
+
+Source checkouts do not expose this button because they need repo-specific update logic that is not safe to automate generically from mobile.
+
 ## Local Mobile Development Only
 
 If you are developing the mobile app from this repo, start Expo separately:

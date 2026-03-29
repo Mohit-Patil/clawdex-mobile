@@ -450,7 +450,36 @@ export interface BridgeCapabilities {
     reviewStart: boolean;
     turnSteer: boolean;
     commandOutputDelta: boolean;
+    selfUpdate: boolean;
   };
+}
+
+export type BridgeInstallKind = 'publishedCli' | 'sourceCheckout' | 'unknown';
+
+export interface BridgeUpdaterStatus {
+  state: string;
+  jobId: string;
+  targetVersion: string;
+  message: string;
+  updatedAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  logPath?: string | null;
+}
+
+export interface BridgeRuntimeInfo {
+  version: string;
+  installKind: BridgeInstallKind;
+  selfUpdateSupported: boolean;
+  updaterStatus?: BridgeUpdaterStatus | null;
+}
+
+export interface BridgeUpdateStartResponse {
+  ok: boolean;
+  jobId: string;
+  targetVersion: string;
+  message: string;
+  logPath?: string | null;
 }
 
 export interface RpcNotification {

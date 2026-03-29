@@ -27,7 +27,12 @@ import { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
 import { useAppTheme, type AppTheme } from '../theme';
 
-type OnboardingMode = 'initial' | 'edit';
+export type OnboardingMode = 'initial' | 'edit' | 'add';
+
+export interface OnboardingBridgeProfileDraft {
+  bridgeUrl: string;
+  bridgeToken: string | null;
+}
 
 interface OnboardingScreenProps {
   mode?: OnboardingMode;
@@ -35,7 +40,7 @@ interface OnboardingScreenProps {
   initialBridgeToken?: string | null;
   allowInsecureRemoteBridge?: boolean;
   allowQueryTokenAuth?: boolean;
-  onSave: (bridgeUrl: string, bridgeToken: string | null) => void;
+  onSave: (draft: OnboardingBridgeProfileDraft) => void | Promise<void>;
   onCancel?: () => void;
 }
 
@@ -166,11 +171,18 @@ export function OnboardingScreen({
       : null;
   }, [allowInsecureRemoteBridge, normalizedBridgeUrl]);
 
-  const modeTitle = mode === 'edit' ? 'Update Bridge URL' : 'Pair Your Bridge';
+  const modeTitle =
+    mode === 'edit'
+      ? 'Update Bridge Profile'
+      : mode === 'add'
+        ? 'Add Bridge Profile'
+        : 'Pair Your Bridge';
   const modeDescription =
     mode === 'edit'
-      ? 'Switch this phone to another bridge without rebuilding the app.'
-      : 'Connect this phone to your private bridge and verify that it responds.';
+      ? 'Update the saved server details for the current profile.'
+      : mode === 'add'
+        ? 'Save another bridge so you can switch servers from Settings later.'
+        : 'Connect this phone to your private bridge and verify that it responds.';
   const normalizedTokenPreview = tokenInput.trim();
   const showOnboardingDock = mode === 'initial';
   const currentSetupStage = useMemo(() => {
@@ -277,7 +289,17 @@ export function OnboardingScreen({
       return;
     }
 
-    onSave(validated.bridgeUrl, normalizedToken);
+    try {
+      await onSave({
+        bridgeUrl: validated.bridgeUrl,
+        bridgeToken: normalizedToken,
+      });
+    } catch (error) {
+      setConnectionCheck({
+        kind: 'error',
+        message: (error as Error).message || 'Saving the bridge profile failed.',
+      });
+    }
   }, [normalizeTokenInput, onSave, runConnectionCheck, validateInput]);
 
   const handleConnectionCheck = useCallback(async () => {
@@ -464,7 +486,7 @@ export function OnboardingScreen({
                     <View style={styles.heroIconWrap}>
                       <Ionicons name="hardware-chip-outline" size={20} color={theme.colors.textPrimary} />
                     </View>
-                    {mode === 'edit' && onCancel ? (
+                    {(mode === 'edit' || mode === 'add') && onCancel ? (
                       <Pressable
                         onPress={onCancel}
                         hitSlop={8}

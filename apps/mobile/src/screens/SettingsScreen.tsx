@@ -19,6 +19,7 @@ import type {
   AccountRateLimitSnapshot,
   ApprovalMode,
   BridgeCapabilities,
+  BridgeRuntimeInfo,
   ChatEngine,
   EngineDefaultSettingsMap,
   ModelOption,
@@ -26,6 +27,7 @@ import type {
   ReasoningEffort,
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
+import type { BridgeProfile } from '../bridgeProfiles';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import {
   buildComposerUsageLimitBadges,
@@ -46,6 +48,9 @@ interface SettingsScreenProps {
   api: HostBridgeApiClient;
   ws: HostBridgeWsClient;
   bridgeUrl: string;
+  activeBridgeProfileId?: string | null;
+  bridgeProfileName: string;
+  bridgeProfiles: BridgeProfile[];
   defaultChatEngine?: ChatEngine | null;
   defaultEngineSettings?: EngineDefaultSettingsMap | null;
   approvalMode?: ApprovalMode;
@@ -60,8 +65,10 @@ interface SettingsScreenProps {
   onApprovalModeChange?: (mode: ApprovalMode) => void;
   onShowToolCallsChange?: (value: boolean) => void;
   onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
-  onEditBridgeUrl?: () => void;
-  onResetOnboarding?: () => void;
+  onEditBridgeProfile?: () => void;
+  onAddBridgeProfile?: () => void;
+  onSwitchBridgeProfile?: (profileId: string) => void | Promise<void>;
+  onClearSavedBridges?: () => void | Promise<void>;
   onOpenDrawer: () => void;
   onOpenPrivacy: () => void;
   onOpenTerms: () => void;
@@ -71,6 +78,9 @@ export function SettingsScreen({
   api,
   ws,
   bridgeUrl,
+  activeBridgeProfileId = null,
+  bridgeProfileName,
+  bridgeProfiles,
   defaultChatEngine,
   defaultEngineSettings,
   approvalMode,
@@ -81,8 +91,10 @@ export function SettingsScreen({
   onApprovalModeChange,
   onShowToolCallsChange,
   onAppearancePreferenceChange,
-  onEditBridgeUrl,
-  onResetOnboarding,
+  onEditBridgeProfile,
+  onAddBridgeProfile,
+  onSwitchBridgeProfile,
+  onClearSavedBridges,
   onOpenDrawer,
   onOpenPrivacy,
   onOpenTerms,
@@ -104,6 +116,7 @@ export function SettingsScreen({
   const [effortModalVisible, setEffortModalVisible] = useState(false);
   const [approvalModeModalVisible, setApprovalModeModalVisible] = useState(false);
   const [appearanceModalVisible, setAppearanceModalVisible] = useState(false);
+  const [bridgeProfileModalVisible, setBridgeProfileModalVisible] = useState(false);
   const [account, setAccount] = useState<AccountSnapshot | null>(null);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
@@ -111,6 +124,12 @@ export function SettingsScreen({
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState<string | null>(null);
   const [bridgeCapabilities, setBridgeCapabilities] = useState<BridgeCapabilities | null>(null);
+  const [bridgeRuntime, setBridgeRuntime] = useState<BridgeRuntimeInfo | null>(null);
+  const [bridgeRuntimeLoading, setBridgeRuntimeLoading] = useState(false);
+  const [bridgeRuntimeError, setBridgeRuntimeError] = useState<string | null>(null);
+  const [bridgeUpdateModalVisible, setBridgeUpdateModalVisible] = useState(false);
+  const [bridgeUpdateActionError, setBridgeUpdateActionError] = useState<string | null>(null);
+  const [bridgeUpdateStarting, setBridgeUpdateStarting] = useState(false);
 
   const availableEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
     ? bridgeCapabilities.availableEngines
@@ -164,6 +183,10 @@ export function SettingsScreen({
     [accountRateLimits]
   );
   const showCodexUsageLimits = availableEngines.includes('codex');
+  const canSelfUpdateBridge =
+    bridgeCapabilities?.supports.selfUpdate === true &&
+    bridgeRuntime?.selfUpdateSupported === true;
+  const bridgeUpdateStatus = bridgeRuntime?.updaterStatus ?? null;
 
   const checkHealth = useCallback(async () => {
     try {
@@ -184,6 +207,19 @@ export function SettingsScreen({
     } catch (err) {
       setBridgeCapabilities(null);
       setError((err as Error).message);
+    }
+  }, [api]);
+
+  const loadBridgeRuntime = useCallback(async () => {
+    setBridgeRuntimeLoading(true);
+    try {
+      const runtime = await api.readBridgeRuntime();
+      setBridgeRuntime(runtime);
+      setBridgeRuntimeError(null);
+    } catch (err) {
+      setBridgeRuntimeError((err as Error).message);
+    } finally {
+      setBridgeRuntimeLoading(false);
     }
   }, [api]);
 
@@ -232,12 +268,13 @@ export function SettingsScreen({
     const t = setTimeout(() => {
       void checkHealth();
       void loadBridgeCapabilities();
+      void loadBridgeRuntime();
       void refreshModelOptions();
       void loadAccount();
       void loadRateLimits();
     }, 0);
     return () => clearTimeout(t);
-  }, [checkHealth, loadAccount, loadBridgeCapabilities, loadRateLimits, refreshModelOptions]);
+  }, [checkHealth, loadAccount, loadBridgeCapabilities, loadBridgeRuntime, loadRateLimits, refreshModelOptions]);
 
   useEffect(
     () =>
@@ -245,11 +282,12 @@ export function SettingsScreen({
         setWsConnected(connected);
         if (connected) {
           void loadBridgeCapabilities();
+          void loadBridgeRuntime();
           void loadAccount();
           void loadRateLimits();
         }
       }),
-    [loadAccount, loadBridgeCapabilities, loadRateLimits, ws]
+    [loadAccount, loadBridgeCapabilities, loadBridgeRuntime, loadRateLimits, ws]
   );
 
   useEffect(
@@ -456,6 +494,67 @@ export function SettingsScreen({
       },
     ],
     [normalizedAppearancePreference, onAppearancePreferenceChange]
+  );
+
+  const bridgeProfileOptions = useMemo<SelectionSheetOption[]>(
+    () =>
+      bridgeProfiles.map((profile) => ({
+        key: profile.id,
+        title: profile.name,
+        description: profile.bridgeUrl,
+        icon: 'server-outline' as const,
+        badge: profile.id === activeBridgeProfileId ? 'Active' : undefined,
+        selected: profile.id === activeBridgeProfileId,
+        onPress: () => {
+          setBridgeProfileModalVisible(false);
+          void onSwitchBridgeProfile?.(profile.id);
+        },
+      })),
+    [activeBridgeProfileId, bridgeProfiles, onSwitchBridgeProfile]
+  );
+
+  const startBridgeUpdate = useCallback(async () => {
+    setBridgeUpdateStarting(true);
+    setBridgeUpdateActionError(null);
+    try {
+      const response = await api.startBridgeUpdate('latest');
+      setBridgeUpdateModalVisible(false);
+      setBridgeRuntime((previous) => ({
+        version: previous?.version ?? 'unknown',
+        installKind: previous?.installKind ?? 'unknown',
+        selfUpdateSupported: previous?.selfUpdateSupported ?? true,
+        updaterStatus: {
+          state: 'scheduled',
+          jobId: response.jobId,
+          targetVersion: response.targetVersion,
+          message: response.message,
+          updatedAt: new Date().toISOString(),
+          startedAt: new Date().toISOString(),
+          logPath: response.logPath ?? null,
+        },
+      }));
+    } catch (err) {
+      setBridgeUpdateActionError((err as Error).message);
+    } finally {
+      setBridgeUpdateStarting(false);
+    }
+  }, [api]);
+
+  const bridgeUpdateOptions = useMemo<SelectionSheetOption[]>(
+    () => [
+      {
+        key: 'update-latest',
+        title: bridgeUpdateStarting ? 'Starting update…' : 'Update bridge to latest',
+        description:
+          'This launches a detached update job. The bridge will disconnect briefly, update in the background, and restart automatically.',
+        icon: 'cloud-download-outline',
+        disabled: bridgeUpdateStarting,
+        onPress: () => {
+          void startBridgeUpdate();
+        },
+      },
+    ],
+    [bridgeUpdateStarting, startBridgeUpdate]
   );
 
   const enginePickerOptions = useMemo<SelectionSheetOption[]>(
@@ -757,32 +856,119 @@ export function SettingsScreen({
             </>
           ) : null}
 
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge</Text>
+          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge Profiles</Text>
           <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+            <Row label="Active profile" value={bridgeProfileName} />
+            <Row label="Saved profiles" value={String(bridgeProfiles.length)} />
+            <Row label="Storage" value="Secure device keychain" isLast />
             <Text selectable style={styles.valueText}>
               {bridgeUrl}
             </Text>
             <Pressable
-              onPress={onEditBridgeUrl}
+              onPress={() => setBridgeProfileModalVisible(true)}
               style={({ pressed }) => [
                 styles.bridgeEditBtn,
                 pressed && styles.bridgeEditBtnPressed,
               ]}
             >
               <Ionicons name="swap-horizontal-outline" size={15} color={colors.textPrimary} />
-              <Text style={styles.bridgeEditBtnText}>Change bridge URL</Text>
+              <Text style={styles.bridgeEditBtnText}>Switch profile</Text>
             </Pressable>
             <Pressable
-              onPress={onResetOnboarding}
+              onPress={onAddBridgeProfile}
+              style={({ pressed }) => [
+                styles.bridgeEditBtn,
+                pressed && styles.bridgeEditBtnPressed,
+              ]}
+            >
+              <Ionicons name="add-circle-outline" size={15} color={colors.textPrimary} />
+              <Text style={styles.bridgeEditBtnText}>Add profile</Text>
+            </Pressable>
+            <Pressable
+              onPress={onEditBridgeProfile}
+              style={({ pressed }) => [
+                styles.bridgeEditBtn,
+                pressed && styles.bridgeEditBtnPressed,
+              ]}
+            >
+              <Ionicons name="create-outline" size={15} color={colors.textPrimary} />
+              <Text style={styles.bridgeEditBtnText}>Edit active profile</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                void onClearSavedBridges?.();
+              }}
               style={({ pressed }) => [
                 styles.bridgeResetBtn,
                 pressed && styles.bridgeResetBtnPressed,
               ]}
             >
               <Ionicons name="refresh-circle-outline" size={15} color={colors.error} />
-              <Text style={styles.bridgeResetBtnText}>Reset onboarding</Text>
+              <Text style={styles.bridgeResetBtnText}>Clear saved bridges</Text>
             </Pressable>
           </BlurView>
+          <Text style={styles.subtleHintText}>
+            Bridge URLs and tokens are stored in the secure device keychain so you can switch
+            servers without retyping secrets.
+          </Text>
+          {bridgeRuntimeError ? <Text style={styles.errorText}>{bridgeRuntimeError}</Text> : null}
+
+          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge Maintenance</Text>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+            {bridgeRuntimeLoading ? (
+              <View style={styles.accountLoadingState}>
+                <ActivityIndicator color={colors.textPrimary} />
+                <Text style={styles.settingValue}>Loading bridge runtime…</Text>
+              </View>
+            ) : (
+              <>
+                <Row label="Bridge version" value={bridgeRuntime?.version ?? 'Unknown'} />
+                <Row
+                  label="Install type"
+                  value={formatInstallKind(bridgeRuntime?.installKind ?? 'unknown')}
+                />
+                {bridgeUpdateStatus ? (
+                  <Row
+                    label="Last updater state"
+                    value={formatBridgeUpdaterState(bridgeUpdateStatus.state)}
+                  />
+                ) : null}
+                {bridgeUpdateStatus ? (
+                  <Row
+                    label="Updater message"
+                    value={bridgeUpdateStatus.message}
+                    isLast={!canSelfUpdateBridge}
+                  />
+                ) : null}
+                {!bridgeUpdateStatus ? (
+                  <Row
+                    label="Updater status"
+                    value={
+                      canSelfUpdateBridge
+                        ? 'Ready'
+                        : 'Unavailable'
+                    }
+                    isLast
+                  />
+                ) : null}
+              </>
+            )}
+            <Pressable
+              disabled={!canSelfUpdateBridge || bridgeUpdateStarting}
+              onPress={() => setBridgeUpdateModalVisible(true)}
+              style={({ pressed }) => [
+                styles.bridgeEditBtn,
+                (!canSelfUpdateBridge || bridgeUpdateStarting) && styles.settingRowDisabled,
+                pressed && canSelfUpdateBridge && !bridgeUpdateStarting && styles.bridgeEditBtnPressed,
+              ]}
+            >
+              <Ionicons name="cloud-download-outline" size={15} color={colors.textPrimary} />
+              <Text style={styles.bridgeEditBtnText}>
+                {bridgeUpdateStarting ? 'Starting bridge update…' : 'Update bridge'}
+              </Text>
+            </Pressable>
+          </BlurView>
+          {bridgeUpdateActionError ? <Text style={styles.errorText}>{bridgeUpdateActionError}</Text> : null}
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Engines</Text>
           <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
@@ -824,6 +1010,7 @@ export function SettingsScreen({
             onPress={() => {
               void checkHealth();
               void loadBridgeCapabilities();
+              void loadBridgeRuntime();
               void refreshModelOptions();
               void loadAccount();
               void loadRateLimits();
@@ -878,6 +1065,26 @@ export function SettingsScreen({
         subtitle="Choose whether the mobile app follows the system appearance or uses an explicit mode."
         options={appearanceOptions}
         onClose={() => setAppearanceModalVisible(false)}
+      />
+
+      <SelectionSheet
+        visible={bridgeProfileModalVisible}
+        eyebrow="Bridge Profiles"
+        title="Switch active bridge"
+        subtitle="Pick which saved server this phone should connect to right now."
+        options={bridgeProfileOptions}
+        onClose={() => setBridgeProfileModalVisible(false)}
+      />
+
+      <SelectionSheet
+        visible={bridgeUpdateModalVisible}
+        eyebrow="Bridge Maintenance"
+        title="Update bridge"
+        subtitle="This will briefly disconnect the app while the bridge updates and restarts in the background."
+        options={bridgeUpdateOptions}
+        loading={bridgeUpdateStarting}
+        loadingLabel="Starting bridge update…"
+        onClose={() => setBridgeUpdateModalVisible(false)}
       />
 
       <SelectionSheet
@@ -968,6 +1175,40 @@ function EngineAvailabilityRow({
       isLast={isLast}
     />
   );
+}
+
+function formatInstallKind(kind: BridgeRuntimeInfo['installKind']): string {
+  switch (kind) {
+    case 'publishedCli':
+      return 'Published CLI';
+    case 'sourceCheckout':
+      return 'Source checkout';
+    default:
+      return 'Unknown';
+  }
+}
+
+function formatBridgeUpdaterState(state: string): string {
+  switch (state) {
+    case 'scheduled':
+      return 'Scheduled';
+    case 'stopping':
+      return 'Stopping bridge';
+    case 'upgrading':
+      return 'Installing update';
+    case 'starting':
+      return 'Starting bridge';
+    case 'waitingForHealth':
+      return 'Waiting for health';
+    case 'completed':
+      return 'Completed';
+    case 'recovered':
+      return 'Recovered previous bridge';
+    case 'failed':
+      return 'Failed';
+    default:
+      return state;
+  }
 }
 
 const createStyles = (theme: AppTheme) => {

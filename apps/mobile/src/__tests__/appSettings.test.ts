@@ -47,4 +47,19 @@ describe('parseAppSettings', () => {
 
     expect(parsed.appearancePreference).toBe('light');
   });
+
+  it('accepts version 6 settings without bridge credentials', () => {
+    const parsed = parseAppSettings(
+      JSON.stringify({
+        version: 6,
+        defaultChatEngine: 'opencode',
+        appearancePreference: 'system',
+      })
+    );
+
+    expect(parsed.bridgeUrl).toBeNull();
+    expect(parsed.bridgeToken).toBeNull();
+    expect(parsed.defaultChatEngine).toBe('opencode');
+    expect(parsed.appearancePreference).toBe('system');
+  });
 });

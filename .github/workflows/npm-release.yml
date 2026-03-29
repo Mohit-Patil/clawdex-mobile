@@ -7,6 +7,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      npm_tag:
+        description: "Override npm dist-tag (use 'auto' to infer from version)"
+        required: false
+        default: "auto"
+        type: string
 
 concurrency:
   group: npm-release-${{ github.ref }}
@@ -210,17 +216,34 @@ jobs:
 
       - name: Resolve publish target
         id: publish_target
+        env:
+          WORKFLOW_NPM_TAG: ${{ github.event.inputs.npm_tag || '' }}
         run: |
           PACKAGE_NAME="$(node -p "require('./package.json').name")"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          PRERELEASE_TAG="$(node -e "const version=require('./package.json').version; const match=version.match(/-([0-9A-Za-z-]+)(?:\\.|$)/); process.stdout.write(match ? match[1] : '')")"
+          if [ -n "${WORKFLOW_NPM_TAG}" ] && [ "${WORKFLOW_NPM_TAG}" != "auto" ]; then
+            PUBLISH_TAG="${WORKFLOW_NPM_TAG}"
+          elif [ -n "${PRERELEASE_TAG}" ]; then
+            PUBLISH_TAG="${PRERELEASE_TAG}"
+          else
+            PUBLISH_TAG="latest"
+          fi
           echo "package_name=${PACKAGE_NAME}" >> "$GITHUB_OUTPUT"
           echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "publish_tag=${PUBLISH_TAG}" >> "$GITHUB_OUTPUT"
+          if [ -n "${PRERELEASE_TAG}" ]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
           if npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" version >/dev/null 2>&1; then
             echo "publish_needed=false" >> "$GITHUB_OUTPUT"
             echo "Package ${PACKAGE_NAME}@${PACKAGE_VERSION} is already published; skipping npm publish."
           else
             echo "publish_needed=true" >> "$GITHUB_OUTPUT"
           fi
+          echo "Resolved npm dist-tag: ${PUBLISH_TAG}"
 
       - name: Verify NPM token secret
         if: steps.publish_target.outputs.publish_needed == 'true'
@@ -236,15 +259,23 @@ jobs:
         if: steps.publish_target.outputs.publish_needed == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: npm publish --access public --tag "${{ steps.publish_target.outputs.publish_tag }}"
 
       - name: Create or update GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release edit "${GITHUB_REF_NAME}" --latest
+          if [ "${{ steps.publish_target.outputs.is_prerelease }}" = "true" ]; then
+            if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+              gh release edit "${GITHUB_REF_NAME}" --prerelease
+            else
+              gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes --prerelease
+            fi
           else
-            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes --latest
+            if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+              gh release edit "${GITHUB_REF_NAME}" --latest
+            else
+              gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes --latest
+            fi
           fi
