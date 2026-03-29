@@ -75,6 +75,7 @@ struct BridgeConfig {
     cli_bin: String,
     opencode_cli_bin: String,
     active_engine: BridgeRuntimeEngine,
+    enabled_engines: Vec<BridgeRuntimeEngine>,
     opencode_host: String,
     opencode_port: u16,
     opencode_server_username: String,
@@ -105,10 +106,17 @@ impl BridgeConfig {
         let cli_bin = env::var("CODEX_CLI_BIN").unwrap_or_else(|_| "codex".to_string());
         let opencode_cli_bin =
             env::var("OPENCODE_CLI_BIN").unwrap_or_else(|_| "opencode".to_string());
-        let active_engine = match env::var("BRIDGE_ACTIVE_ENGINE") {
+        let requested_active_engine = match env::var("BRIDGE_ACTIVE_ENGINE") {
             Ok(raw) => parse_bridge_runtime_engine(raw.trim())
                 .ok_or_else(|| format!("unsupported BRIDGE_ACTIVE_ENGINE value: {raw}"))?,
             Err(_) => BridgeRuntimeEngine::Codex,
+        };
+        let enabled_engines = parse_enabled_bridge_engines_env()?
+            .unwrap_or_else(|| legacy_default_enabled_engines(requested_active_engine));
+        let active_engine = if enabled_engines.contains(&requested_active_engine) {
+            requested_active_engine
+        } else {
+            enabled_engines[0]
         };
         let opencode_host =
             env::var("BRIDGE_OPENCODE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -159,6 +167,7 @@ impl BridgeConfig {
             cli_bin,
             opencode_cli_bin,
             active_engine,
+            enabled_engines,
             opencode_host,
             opencode_port,
             opencode_server_username,
@@ -224,7 +233,7 @@ struct AppState {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 enum BridgeRuntimeEngine {
     Codex,
@@ -267,45 +276,55 @@ struct RuntimeBackend {
 impl RuntimeBackend {
     async fn start(config: &Arc<BridgeConfig>, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
         let preferred_engine = config.active_engine;
+        let codex_enabled = config.enabled_engines.contains(&BridgeRuntimeEngine::Codex);
+        let opencode_enabled = config.enabled_engines.contains(&BridgeRuntimeEngine::Opencode);
         let mut codex = None;
         let mut opencode = None;
 
         match preferred_engine {
             BridgeRuntimeEngine::Codex => {
-                let app_server = AppServerBridge::start(
-                    &config.cli_bin,
-                    BridgeRuntimeEngine::Codex,
-                    hub.clone(),
-                )
-                .await?;
-                spawn_rollout_live_sync(hub.clone());
-                codex = Some(app_server);
+                if codex_enabled {
+                    let app_server = AppServerBridge::start(
+                        &config.cli_bin,
+                        BridgeRuntimeEngine::Codex,
+                        hub.clone(),
+                    )
+                    .await?;
+                    spawn_rollout_live_sync(hub.clone());
+                    codex = Some(app_server);
+                }
 
-                match OpencodeBackend::start(config, hub).await {
-                    Ok(backend) => opencode = Some(backend),
-                    Err(error) => eprintln!(
-                        "opencode backend unavailable; continuing with codex only: {error}"
-                    ),
+                if opencode_enabled {
+                    match OpencodeBackend::start(config, hub).await {
+                        Ok(backend) => opencode = Some(backend),
+                        Err(error) => eprintln!(
+                            "opencode backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
+                    }
                 }
             }
             BridgeRuntimeEngine::Opencode => {
-                let backend = OpencodeBackend::start(config, hub.clone()).await?;
-                opencode = Some(backend);
+                if opencode_enabled {
+                    let backend = OpencodeBackend::start(config, hub.clone()).await?;
+                    opencode = Some(backend);
+                }
 
-                match AppServerBridge::start(
-                    &config.cli_bin,
-                    BridgeRuntimeEngine::Codex,
-                    hub.clone(),
-                )
-                .await
-                {
-                    Ok(app_server) => {
-                        spawn_rollout_live_sync(hub);
-                        codex = Some(app_server);
+                if codex_enabled {
+                    match AppServerBridge::start(
+                        &config.cli_bin,
+                        BridgeRuntimeEngine::Codex,
+                        hub.clone(),
+                    )
+                    .await
+                    {
+                        Ok(app_server) => {
+                            spawn_rollout_live_sync(hub);
+                            codex = Some(app_server);
+                        }
+                        Err(error) => eprintln!(
+                            "codex backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
                     }
-                    Err(error) => eprintln!(
-                        "codex backend unavailable; continuing with opencode only: {error}"
-                    ),
                 }
             }
         }
@@ -5348,6 +5367,52 @@ fn parse_csv_env(name: &str, fallback: &[&str]) -> HashSet<String> {
     }
 }
 
+fn parse_enabled_bridge_engines_csv(raw: &str) -> Result<Vec<BridgeRuntimeEngine>, String> {
+    let mut parsed = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in raw.split(',') {
+        let normalized = entry.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        let engine = parse_bridge_runtime_engine(&normalized)
+            .ok_or_else(|| format!("unsupported BRIDGE_ENABLED_ENGINES entry: {normalized}"))?;
+        if seen.insert(engine) {
+            parsed.push(engine);
+        }
+    }
+
+    if parsed.is_empty() {
+        return Err(
+            "BRIDGE_ENABLED_ENGINES must include one or more of: codex, opencode".to_string(),
+        );
+    }
+
+    Ok(parsed)
+}
+
+fn parse_enabled_bridge_engines_env() -> Result<Option<Vec<BridgeRuntimeEngine>>, String> {
+    let raw = match env::var("BRIDGE_ENABLED_ENGINES") {
+        Ok(raw) => raw,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(Some(parse_enabled_bridge_engines_csv(&raw)?))
+}
+
+fn legacy_default_enabled_engines(
+    requested_active_engine: BridgeRuntimeEngine,
+) -> Vec<BridgeRuntimeEngine> {
+    match requested_active_engine {
+        BridgeRuntimeEngine::Codex => {
+            vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode]
+        }
+        BridgeRuntimeEngine::Opencode => {
+            vec![BridgeRuntimeEngine::Opencode, BridgeRuntimeEngine::Codex]
+        }
+    }
+}
+
 impl BridgeRuntimeEngine {
     fn as_str(self) -> &'static str {
         match self {
@@ -7399,6 +7464,7 @@ mod tests {
             cli_bin: "cat".to_string(),
             opencode_cli_bin: "opencode".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
+            enabled_engines: vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode],
             opencode_host: "127.0.0.1".to_string(),
             opencode_port: 4090,
             opencode_server_username: "opencode".to_string(),
@@ -7967,6 +8033,16 @@ mod tests {
         assert!(capabilities.supports.review_start);
 
         shutdown_test_backend(&state.backend).await;
+    }
+
+    #[test]
+    fn parse_enabled_bridge_engines_csv_preserves_order_and_removes_duplicates() {
+        let parsed =
+            parse_enabled_bridge_engines_csv("opencode,codex,opencode").expect("engine csv");
+        assert_eq!(
+            parsed,
+            vec![BridgeRuntimeEngine::Opencode, BridgeRuntimeEngine::Codex]
+        );
     }
 
     #[tokio::test]
@@ -8796,6 +8872,7 @@ mod tests {
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
+            enabled_engines: vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode],
             opencode_host: "127.0.0.1".to_string(),
             opencode_port: 4090,
             opencode_server_username: "opencode".to_string(),

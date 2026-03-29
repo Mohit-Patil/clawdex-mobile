@@ -2,23 +2,25 @@
 
 This guide is the detailed companion to the top-level `README.md`.
 
-## Choosing a Runtime
+## Choosing Harnesses
 
-The bridge defaults to `codex`.
+The setup wizard now lets you choose which harnesses the phone should control.
 
-Use the setup wizard to make `opencode` the preferred engine:
+If you want both Codex and OpenCode:
 
 ```bash
-clawdex init --engine opencode
+clawdex init --engines codex,opencode
 ```
 
 From a source checkout, the equivalent command is:
 
 ```bash
-npm run setup:wizard -- --engine opencode
+npm run setup:wizard -- --engines codex,opencode
 ```
 
-That writes `BRIDGE_ACTIVE_ENGINE=opencode` into `.env.secure`. This is the default engine preference, not an exclusive mode. When both CLIs are installed, the bridge will expose both Codex and OpenCode in the mobile app. To switch the default back, rerun setup with `--engine codex` or edit `.env.secure` directly.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode` into `.env.secure`, so the bridge starts both backends and the mobile app can control both from one UI.
+
+If you want only one harness, use `--engine codex` or `--engine opencode`.
 
 ## Onboarding Output Cues
 
@@ -52,7 +54,7 @@ npm run secure:setup
 To generate OpenCode-first config instead:
 
 ```bash
-BRIDGE_ACTIVE_ENGINE=opencode npm run secure:setup
+BRIDGE_ENABLED_ENGINES=codex,opencode npm run secure:setup
 ```
 
 Creates/updates:
@@ -69,10 +71,10 @@ npm run secure:bridge
 If you want a one-off OpenCode launch without rewriting `.env.secure`:
 
 ```bash
-BRIDGE_ACTIVE_ENGINE=opencode npm run secure:bridge
+BRIDGE_ENABLED_ENGINES=codex,opencode npm run secure:bridge
 ```
 
-`codex` remains the default. When both CLIs are available, the bridge can start both backends and merge chat lists while still routing each thread by engine.
+When both CLIs are selected, the bridge starts both backends and merges chat lists while still routing each thread by engine.
 
 ### 4) Pair from the mobile app
 
@@ -139,7 +141,8 @@ npm run teardown -- --yes
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query-token auth fallback |
 | `CODEX_CLI_BIN` | codex executable |
-| `BRIDGE_ACTIVE_ENGINE` | preferred backend (`codex` default, `opencode` optional) |
+| `BRIDGE_ACTIVE_ENGINE` | internal preferred routing backend used when multiple harnesses are enabled |
+| `BRIDGE_ENABLED_ENGINES` | selected harnesses to expose (`codex`, `opencode`, or both) |
 | `OPENCODE_CLI_BIN` | opencode executable for dual-engine startup |
 | `BRIDGE_OPENCODE_HOST` | loopback host for spawned opencode server |
 | `BRIDGE_OPENCODE_PORT` | loopback port for spawned opencode server |

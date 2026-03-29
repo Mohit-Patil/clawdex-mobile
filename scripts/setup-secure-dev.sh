@@ -10,6 +10,7 @@ SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MOBILE_ENV_FILE="$ROOT_DIR/apps/mobile/.env"
 MOBILE_ENV_EXAMPLE="$ROOT_DIR/apps/mobile/.env.example"
 BRIDGE_ACTIVE_ENGINE="${BRIDGE_ACTIVE_ENGINE:-codex}"
+BRIDGE_ENABLED_ENGINES="${BRIDGE_ENABLED_ENGINES:-$BRIDGE_ACTIVE_ENGINE}"
 OPENCODE_CLI_BIN="${OPENCODE_CLI_BIN:-opencode}"
 
 upsert_env_key() {
@@ -237,6 +238,55 @@ case "$BRIDGE_ACTIVE_ENGINE" in
     ;;
 esac
 
+validate_enabled_engines() {
+  local raw="$1"
+  local normalized=""
+  local part=""
+  local seen=","
+  local -a parts=()
+  local -a parsed=()
+
+  IFS=',' read -r -a parts <<<"$raw"
+  for part in "${parts[@]}"; do
+    normalized="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [[ -z "$normalized" ]]; then
+      continue
+    fi
+    case "$normalized" in
+      codex|opencode)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    if [[ "$seen" == *",$normalized,"* ]]; then
+      continue
+    fi
+    parsed+=("$normalized")
+    seen="${seen}${normalized},"
+  done
+
+  if (( ${#parsed[@]} == 0 )); then
+    return 1
+  fi
+
+  BRIDGE_ENABLED_ENGINES="$(IFS=,; printf '%s' "${parsed[*]}")"
+  return 0
+}
+
+if ! validate_enabled_engines "$BRIDGE_ENABLED_ENGINES"; then
+  echo "error: BRIDGE_ENABLED_ENGINES must contain one or more of 'codex' and 'opencode'." >&2
+  exit 1
+fi
+
+case ",$BRIDGE_ENABLED_ENGINES," in
+  *,"$BRIDGE_ACTIVE_ENGINE",*)
+    ;;
+  *)
+    BRIDGE_ACTIVE_ENGINE="${BRIDGE_ENABLED_ENGINES%%,*}"
+    ;;
+esac
+
 if [[ -n "$BRIDGE_HOST" ]]; then
   HOST_SOURCE="override"
 else
@@ -269,6 +319,7 @@ BRIDGE_PORT=$BRIDGE_PORT
 BRIDGE_AUTH_TOKEN=$BRIDGE_TOKEN
 BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true
 BRIDGE_ACTIVE_ENGINE=$BRIDGE_ACTIVE_ENGINE
+BRIDGE_ENABLED_ENGINES=$BRIDGE_ENABLED_ENGINES
 CODEX_CLI_BIN=codex
 OPENCODE_CLI_BIN=$OPENCODE_CLI_BIN
 BRIDGE_WORKDIR=$ROOT_DIR
@@ -289,8 +340,7 @@ echo ""
 echo "Bridge network mode: $BRIDGE_NETWORK_MODE"
 echo "Bridge host: $BRIDGE_HOST ($HOST_SOURCE)"
 echo "Bridge port: $BRIDGE_PORT"
-echo "Default engine: $BRIDGE_ACTIVE_ENGINE"
-echo "Both engines will be exposed in the app when both CLIs are installed."
+echo "Harnesses: $BRIDGE_ENABLED_ENGINES"
 echo "Token source: $SECURE_ENV_FILE"
 if has_local_mobile_workspace; then
   echo "Mobile env updated: $MOBILE_ENV_FILE"
