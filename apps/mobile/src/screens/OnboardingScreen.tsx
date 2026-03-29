@@ -25,7 +25,7 @@ import {
 } from '../bridgeUrl';
 import { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 type OnboardingMode = 'initial' | 'edit';
 
@@ -108,6 +108,7 @@ export function OnboardingScreen({
   onSave,
   onCancel,
 }: OnboardingScreenProps) {
+  const theme = useAppTheme();
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(
     mode === 'initial' ? 'intro' : 'connect'
   );
@@ -121,6 +122,22 @@ export function OnboardingScreen({
   const [scannerVisible, setScannerVisible] = useState(false);
   const [scannerError, setScannerError] = useState<string | null>(null);
   const [scannerLocked, setScannerLocked] = useState(false);
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const onboardingBackgroundGradient = theme.isDark
+    ? (['#020304', '#05070C', '#0A0E16'] as const)
+    : (['#EEF3F8', '#E3EBF3', '#D8E2EC'] as const);
+  const ambientPrimaryGradient = theme.isDark
+    ? (['rgba(181, 189, 204, 0.20)', 'rgba(181, 189, 204, 0.04)', 'transparent'] as const)
+    : (['rgba(56, 79, 106, 0.16)', 'rgba(56, 79, 106, 0.04)', 'transparent'] as const);
+  const ambientSecondaryGradient = theme.isDark
+    ? (['rgba(255, 255, 255, 0.10)', 'rgba(255, 255, 255, 0.02)', 'transparent'] as const)
+    : (['rgba(255, 255, 255, 0.42)', 'rgba(255, 255, 255, 0.10)', 'transparent'] as const);
+  const introHeroGradient = theme.isDark
+    ? (['rgba(181, 189, 204, 0.22)', 'rgba(34, 39, 48, 0.75)', 'rgba(7, 9, 12, 0.96)'] as const)
+    : (['rgba(56, 79, 106, 0.16)', 'rgba(246, 249, 252, 0.96)', 'rgba(221, 231, 240, 0.98)'] as const);
+  const connectHeroGradient = theme.isDark
+    ? (['rgba(181, 189, 204, 0.18)', 'rgba(22, 25, 31, 0.82)', 'rgba(7, 9, 12, 0.98)'] as const)
+    : (['rgba(56, 79, 106, 0.14)', 'rgba(243, 247, 251, 0.96)', 'rgba(221, 231, 240, 0.99)'] as const);
 
   useEffect(() => {
     setOnboardingStep(mode === 'initial' ? 'intro' : 'connect');
@@ -337,16 +354,16 @@ export function OnboardingScreen({
   return (
     <View style={styles.container}>
       <LinearGradient
-        colors={['#020304', '#05070C', '#0A0E16']}
+        colors={onboardingBackgroundGradient}
         style={StyleSheet.absoluteFill}
       />
       <View pointerEvents="none" style={styles.ambientCanvas}>
         <LinearGradient
-          colors={['rgba(181, 189, 204, 0.20)', 'rgba(181, 189, 204, 0.04)', 'transparent']}
+          colors={ambientPrimaryGradient}
           style={styles.ambientOrbPrimary}
         />
         <LinearGradient
-          colors={['rgba(255, 255, 255, 0.10)', 'rgba(255, 255, 255, 0.02)', 'transparent']}
+          colors={ambientSecondaryGradient}
           style={styles.ambientOrbSecondary}
         />
       </View>
@@ -371,11 +388,7 @@ export function OnboardingScreen({
                 showsVerticalScrollIndicator={false}
               >
                 <LinearGradient
-                  colors={[
-                    'rgba(181, 189, 204, 0.22)',
-                    'rgba(34, 39, 48, 0.75)',
-                    'rgba(7, 9, 12, 0.96)',
-                  ]}
+                  colors={introHeroGradient}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 1 }}
                   style={styles.introHero}
@@ -406,7 +419,7 @@ export function OnboardingScreen({
                   ))}
                 </View>
 
-                <BlurView intensity={40} tint="dark" style={styles.introContextCard}>
+                <BlurView intensity={40} tint={theme.blurTint} style={styles.introContextCard}>
                   <Text style={styles.introContextTitle}>Best on trusted networks</Text>
                   <Text style={styles.introContextText}>
                     Built for your own machine and private network paths. Pair over LAN nearby, or
@@ -429,7 +442,7 @@ export function OnboardingScreen({
                   ]}
                 >
                   <Text style={styles.introNextButtonText}>Pair your bridge</Text>
-                  <Ionicons name="arrow-forward" size={19} color={colors.black} />
+                  <Ionicons name="arrow-forward" size={19} color={theme.colors.black} />
                 </Pressable>
               </View>
             </View>
@@ -442,18 +455,14 @@ export function OnboardingScreen({
                 showsVerticalScrollIndicator={false}
               >
                 <LinearGradient
-                  colors={[
-                    'rgba(181, 189, 204, 0.18)',
-                    'rgba(22, 25, 31, 0.82)',
-                    'rgba(7, 9, 12, 0.98)',
-                  ]}
+                  colors={connectHeroGradient}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 1 }}
                   style={styles.connectHero}
                 >
                   <View style={styles.heroTopRow}>
                     <View style={styles.heroIconWrap}>
-                      <Ionicons name="hardware-chip-outline" size={20} color={colors.textPrimary} />
+                      <Ionicons name="hardware-chip-outline" size={20} color={theme.colors.textPrimary} />
                     </View>
                     {mode === 'edit' && onCancel ? (
                       <Pressable
@@ -461,7 +470,7 @@ export function OnboardingScreen({
                         hitSlop={8}
                         style={({ pressed }) => [styles.cancelBtn, pressed && styles.cancelBtnPressed]}
                       >
-                        <Ionicons name="close" size={16} color={colors.textPrimary} />
+                        <Ionicons name="close" size={16} color={theme.colors.textPrimary} />
                       </Pressable>
                     ) : null}
                   </View>
@@ -470,7 +479,7 @@ export function OnboardingScreen({
                   <Text style={styles.heroDescription}>{modeDescription}</Text>
                 </LinearGradient>
 
-                <BlurView intensity={55} tint="dark" style={styles.formCard}>
+                <BlurView intensity={55} tint={theme.blurTint} style={styles.formCard}>
                   <View style={styles.commandPanel}>
                     <View style={styles.formSectionHeader}>
                       <Text style={styles.formSectionEyebrow}>1. Start the bridge</Text>
@@ -503,7 +512,7 @@ export function OnboardingScreen({
                       pressed && styles.scanButtonPressed,
                     ]}
                   >
-                    <Ionicons name="qr-code-outline" size={16} color={colors.textPrimary} />
+                    <Ionicons name="qr-code-outline" size={16} color={theme.colors.textPrimary} />
                     <Text style={styles.scanButtonText}>Scan bridge QR</Text>
                   </Pressable>
                   <Text style={styles.helperText}>
@@ -514,7 +523,7 @@ export function OnboardingScreen({
                     <Text style={styles.label}>Bridge URL</Text>
                     <View style={styles.inputRow}>
                       <View style={styles.inputIconWrap}>
-                        <Ionicons name="globe-outline" size={16} color={colors.textSecondary} />
+                        <Ionicons name="globe-outline" size={16} color={theme.colors.textSecondary} />
                       </View>
                       <TextInput
                         value={urlInput}
@@ -523,12 +532,12 @@ export function OnboardingScreen({
                           setFormError(null);
                           setConnectionCheck({ kind: 'idle' });
                         }}
-                        keyboardAppearance="dark"
+                        keyboardAppearance={theme.keyboardAppearance}
                         autoCapitalize="none"
                         autoCorrect={false}
                         keyboardType="url"
                         placeholder="http://100.101.102.103:8787"
-                        placeholderTextColor={colors.textMuted}
+                        placeholderTextColor={theme.colors.textMuted}
                         style={styles.inputText}
                         returnKeyType="done"
                         onSubmitEditing={() => {
@@ -546,7 +555,7 @@ export function OnboardingScreen({
                     <View style={styles.tokenInputWrap}>
                       <View style={styles.inputRow}>
                         <View style={styles.inputIconWrap}>
-                          <Ionicons name="key-outline" size={16} color={colors.textSecondary} />
+                          <Ionicons name="key-outline" size={16} color={theme.colors.textSecondary} />
                         </View>
                         <TextInput
                           value={tokenInput}
@@ -554,12 +563,12 @@ export function OnboardingScreen({
                             setTokenInput(value);
                             setConnectionCheck({ kind: 'idle' });
                           }}
-                          keyboardAppearance="dark"
+                          keyboardAppearance={theme.keyboardAppearance}
                           autoCapitalize="none"
                           autoCorrect={false}
                           keyboardType="default"
                           placeholder="Paste bridge token"
-                          placeholderTextColor={colors.textMuted}
+                          placeholderTextColor={theme.colors.textMuted}
                           style={styles.inputText}
                           secureTextEntry={tokenHidden}
                           returnKeyType="done"
@@ -578,7 +587,7 @@ export function OnboardingScreen({
                         <Ionicons
                           name={tokenHidden ? 'eye-outline' : 'eye-off-outline'}
                           size={16}
-                          color={colors.textSecondary}
+                          color={theme.colors.textSecondary}
                         />
                         <Text style={styles.tokenRevealBtnText}>
                           {tokenHidden ? 'Show' : 'Hide'}
@@ -646,9 +655,9 @@ export function OnboardingScreen({
                       ]}
                     >
                       {checkingConnection ? (
-                        <ActivityIndicator size="small" color={colors.textPrimary} />
+                        <ActivityIndicator size="small" color={theme.colors.textPrimary} />
                       ) : (
-                        <Ionicons name="pulse-outline" size={16} color={colors.textPrimary} />
+                        <Ionicons name="pulse-outline" size={16} color={theme.colors.textPrimary} />
                       )}
                       <Text style={styles.secondaryButtonText}>Test Connection</Text>
                     </Pressable>
@@ -664,9 +673,9 @@ export function OnboardingScreen({
                       ]}
                     >
                       {checkingConnection ? (
-                        <ActivityIndicator size="small" color={colors.black} />
+                        <ActivityIndicator size="small" color={theme.colors.black} />
                       ) : (
-                        <Ionicons name="arrow-forward" size={16} color={colors.black} />
+                        <Ionicons name="arrow-forward" size={16} color={theme.colors.black} />
                       )}
                       <Text style={styles.primaryButtonText}>
                         {mode === 'edit' ? 'Save URL' : 'Continue'}
@@ -700,7 +709,7 @@ export function OnboardingScreen({
                       pressed && styles.scannerCloseBtnPressed,
                     ]}
                   >
-                    <Ionicons name="close" size={18} color={colors.textPrimary} />
+                    <Ionicons name="close" size={18} color={theme.colors.textPrimary} />
                   </Pressable>
                 </View>
                 <View style={styles.scannerCameraFrame}>
@@ -740,10 +749,12 @@ function IntroFeatureCard({
   title: string;
   description: string;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   return (
     <View style={styles.introFeatureCard}>
       <View style={styles.introFeatureIconWrap}>
-        <Ionicons name={icon} size={16} color={colors.textPrimary} />
+        <Ionicons name={icon} size={16} color={theme.colors.textPrimary} />
       </View>
       <View style={styles.introFeatureTextWrap}>
         <Text style={styles.introFeatureTitle}>{title}</Text>
@@ -760,17 +771,21 @@ function AmbientBadge({
   icon: keyof typeof Ionicons.glyphMap;
   label: string;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   return (
     <View style={styles.ambientBadge}>
-      <Ionicons name={icon} size={13} color={colors.textSecondary} />
+      <Ionicons name={icon} size={13} color={theme.colors.textSecondary} />
       <Text style={styles.ambientBadgeText}>{label}</Text>
     </View>
   );
 }
 
 function OnboardingStepDock({ currentStage }: { currentStage: number }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   return (
-    <BlurView intensity={45} tint="dark" style={styles.stepperDock}>
+    <BlurView intensity={45} tint={theme.blurTint} style={styles.stepperDock}>
       <View style={styles.stepperDockRow}>
         {SETUP_STAGES.map((stage, index) => {
           const stepNumber = index + 1;
@@ -828,6 +843,8 @@ function CommandSnippet({
   command: string;
   hint: string;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
@@ -842,7 +859,7 @@ function CommandSnippet({
     <View style={styles.commandCard}>
       <View style={styles.commandCardHeader}>
         <View style={styles.commandCardHeaderLeft}>
-          <Ionicons name="terminal-outline" size={14} color={colors.textSecondary} />
+          <Ionicons name="terminal-outline" size={14} color={theme.colors.textSecondary} />
           <Text style={styles.commandCardLabel}>{label}</Text>
         </View>
         <Pressable
@@ -858,7 +875,7 @@ function CommandSnippet({
           <Ionicons
             name={copied ? 'checkmark-outline' : 'copy-outline'}
             size={14}
-            color={copied ? colors.black : colors.textPrimary}
+            color={copied ? theme.colors.black : theme.colors.textPrimary}
           />
           <Text
             style={[
@@ -889,8 +906,10 @@ function StatusBanner({
   icon: keyof typeof Ionicons.glyphMap;
   message: string;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const iconColor =
-    tone === 'warning' ? '#F7D27E' : tone === 'success' ? colors.statusComplete : colors.error;
+    tone === 'warning' ? '#F7D27E' : tone === 'success' ? theme.colors.statusComplete : theme.colors.error;
 
   return (
     <View
@@ -990,10 +1009,20 @@ function parsePairingPayload(rawValue: string): PairingPayload | null {
   }
 }
 
-const styles = StyleSheet.create({
+const createStyles = (theme: AppTheme) => {
+  const glassBadgeBackground = theme.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.72)';
+  const glassDockBackground = theme.isDark ? 'rgba(12, 14, 18, 0.76)' : 'rgba(246, 249, 252, 0.90)';
+  const glassSubtleBackground = theme.isDark ? 'rgba(255,255,255,0.03)' : theme.colors.bgInput;
+  const glassFeatureBackground = theme.isDark ? 'rgba(7, 9, 12, 0.72)' : 'rgba(243, 247, 251, 0.88)';
+  const glassFeatureIcon = theme.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.84)';
+  const glassSelectedBackground = theme.isDark ? 'rgba(181, 189, 204, 0.10)' : 'rgba(56, 79, 106, 0.12)';
+  const glassSelectedStrong = theme.isDark ? 'rgba(181, 189, 204, 0.16)' : 'rgba(56, 79, 106, 0.18)';
+  const scannerSheetBackground = theme.isDark ? '#07090C' : theme.colors.bgElevated;
+
+  return StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgMain,
   },
   safeArea: {
     flex: 1,
@@ -1023,25 +1052,25 @@ const styles = StyleSheet.create({
   },
   introRoot: {
     flex: 1,
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xxl,
-    gap: spacing.md,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.md,
+    paddingBottom: theme.spacing.xxl,
+    gap: theme.spacing.md,
   },
   introHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.md,
+    gap: theme.spacing.md,
   },
   introBrandRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   introBrandName: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
     fontSize: 18,
     letterSpacing: -0.2,
   },
@@ -1049,32 +1078,32 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   introScrollContent: {
-    paddingBottom: spacing.lg,
-    gap: spacing.md,
+    paddingBottom: theme.spacing.lg,
+    gap: theme.spacing.md,
   },
   introHero: {
     borderRadius: 24,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    padding: spacing.lg,
-    gap: spacing.sm,
+    borderColor: theme.colors.borderHighlight,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.sm,
     overflow: 'hidden',
   },
   introHeroEyebrow: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 0.8,
   },
   introHeroTitle: {
-    ...typography.largeTitle,
+    ...theme.typography.largeTitle,
     fontSize: 22,
     lineHeight: 26,
     letterSpacing: -0.4,
   },
   introHeroDescription: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     fontSize: 14,
     lineHeight: 19,
   },
@@ -1083,51 +1112,51 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     minHeight: 30,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.full,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.radius.full,
+    backgroundColor: glassBadgeBackground,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
   },
   ambientBadgeText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
   },
   stepperDock: {
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(12, 14, 18, 0.76)',
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: glassDockBackground,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
     overflow: 'hidden',
   },
   stepperDockRow: {
     flexDirection: 'row',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   stepperPill: {
     flex: 1,
     minHeight: 36,
-    borderRadius: radius.full,
+    borderRadius: theme.radius.full,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 6,
     gap: 6,
-    backgroundColor: 'rgba(255,255,255,0.03)',
+    backgroundColor: glassSubtleBackground,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
   },
   stepperPillActive: {
-    backgroundColor: 'rgba(181, 189, 204, 0.10)',
-    borderColor: colors.borderHighlight,
+    backgroundColor: glassSelectedBackground,
+    borderColor: theme.colors.borderHighlight,
   },
   stepperPillComplete: {
-    backgroundColor: 'rgba(198, 205, 217, 0.08)',
-    borderColor: 'rgba(198, 205, 217, 0.22)',
+    backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(14, 159, 110, 0.10)',
+    borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.22)' : 'rgba(14, 159, 110, 0.22)',
   },
   stepperPillIndex: {
     width: 18,
@@ -1135,67 +1164,67 @@ const styles = StyleSheet.create({
     borderRadius: 9,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
+    borderColor: theme.colors.border,
   },
   stepperPillIndexActive: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent,
+    backgroundColor: theme.colors.accent,
+    borderColor: theme.colors.accent,
   },
   stepperPillIndexComplete: {
-    backgroundColor: colors.statusComplete,
-    borderColor: colors.statusComplete,
+    backgroundColor: theme.colors.statusComplete,
+    borderColor: theme.colors.statusComplete,
   },
   stepperPillIndexText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
     fontSize: 10,
     lineHeight: 12,
   },
   stepperPillIndexTextActive: {
-    color: colors.black,
+    color: theme.colors.black,
   },
   stepperPillTitle: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
     fontSize: 10,
     lineHeight: 12,
   },
   stepperPillTitleActive: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   stepperPillTitleComplete: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   introSectionHeader: {
-    gap: spacing.xs,
-    paddingHorizontal: spacing.xs,
+    gap: theme.spacing.xs,
+    paddingHorizontal: theme.spacing.xs,
   },
   introSectionTitle: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     textTransform: 'uppercase',
     letterSpacing: 0.9,
   },
   introSectionSubtitle: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
   },
   introFeatureGrid: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   introFeatureCard: {
     flexDirection: 'row',
-    gap: spacing.md,
+    gap: theme.spacing.md,
     borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: 'rgba(7, 9, 12, 0.72)',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: glassFeatureBackground,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.md,
   },
   introFeatureIconWrap: {
     width: 36,
@@ -1203,63 +1232,63 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.07)',
+    backgroundColor: glassFeatureIcon,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
   },
   introFeatureTextWrap: {
     flex: 1,
     gap: 2,
   },
   introFeatureTitle: {
-    ...typography.headline,
+    ...theme.typography.headline,
     fontSize: 14,
   },
   introFeatureDescription: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     lineHeight: 18,
   },
   introContextCard: {
     borderRadius: 20,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(12, 14, 18, 0.76)',
-    padding: spacing.lg,
-    gap: spacing.sm,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: glassDockBackground,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.sm,
     overflow: 'hidden',
   },
   introContextTitle: {
-    ...typography.headline,
+    ...theme.typography.headline,
   },
   introContextText: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
   },
   introContextPillRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.xs,
+    gap: theme.spacing.sm,
+    marginTop: theme.spacing.xs,
   },
   introFooter: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   introNextButton: {
     borderRadius: 18,
-    backgroundColor: colors.accent,
+    backgroundColor: theme.colors.accent,
     minHeight: 58,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   introNextButtonPressed: {
-    backgroundColor: colors.accentPressed,
+    backgroundColor: theme.colors.accentPressed,
   },
   introNextButtonText: {
-    ...typography.headline,
-    color: colors.black,
+    ...theme.typography.headline,
+    color: theme.colors.black,
     fontSize: 17,
     fontWeight: '700',
   },
@@ -1267,25 +1296,25 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
-    paddingBottom: spacing.xxl,
-    gap: spacing.md,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.md,
+    paddingBottom: theme.spacing.xxl,
+    gap: theme.spacing.md,
   },
   connectRoot: {
     flex: 1,
   },
   connectFooter: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.md,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.sm,
+    paddingBottom: theme.spacing.md,
   },
   connectHero: {
     borderRadius: 22,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    padding: spacing.lg,
-    gap: spacing.xs,
+    borderColor: theme.colors.borderHighlight,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.xs,
     overflow: 'hidden',
   },
   heroTopRow: {
@@ -1306,8 +1335,8 @@ const styles = StyleSheet.create({
     height: 30,
     borderRadius: 15,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgMain,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgMain,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1315,64 +1344,64 @@ const styles = StyleSheet.create({
     opacity: 0.75,
   },
   connectEyebrow: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     textTransform: 'uppercase',
     letterSpacing: 0.8,
   },
   heroTitle: {
-    ...typography.largeTitle,
+    ...theme.typography.largeTitle,
     fontSize: 24,
     lineHeight: 28,
     letterSpacing: -0.45,
   },
   heroDescription: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     fontSize: 14,
     lineHeight: 19,
   },
   formCard: {
     borderRadius: 20,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(12, 14, 18, 0.76)',
-    padding: spacing.lg,
-    gap: spacing.md,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: glassDockBackground,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.md,
     overflow: 'hidden',
   },
   formSectionHeader: {
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   formSectionEyebrow: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     textTransform: 'uppercase',
     letterSpacing: 0.85,
   },
   formSectionTitle: {
-    ...typography.headline,
+    ...theme.typography.headline,
     fontSize: 15,
     lineHeight: 21,
   },
   modeCardGrid: {
     flexDirection: 'row',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   modePresetCard: {
     flex: 1,
     minHeight: 146,
     borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    padding: spacing.md,
-    gap: spacing.sm,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: glassSubtleBackground,
+    padding: theme.spacing.md,
+    gap: theme.spacing.sm,
     justifyContent: 'space-between',
   },
   modePresetCardSelected: {
-    backgroundColor: 'rgba(181, 189, 204, 0.10)',
-    borderColor: colors.borderHighlight,
+    backgroundColor: glassSelectedBackground,
+    borderColor: theme.colors.borderHighlight,
   },
   modePresetCardPressed: {
     opacity: 0.84,
@@ -1383,45 +1412,45 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
   },
   modePresetIconWrapSelected: {
-    backgroundColor: 'rgba(181, 189, 204, 0.16)',
-    borderColor: colors.borderHighlight,
+    backgroundColor: glassSelectedStrong,
+    borderColor: theme.colors.borderHighlight,
   },
   modePresetTitle: {
-    ...typography.headline,
+    ...theme.typography.headline,
     fontSize: 15,
   },
   modePresetDescription: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     lineHeight: 18,
   },
   helperText: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     lineHeight: 18,
   },
   commandPanel: {
-    gap: spacing.sm,
-    paddingTop: spacing.xs,
+    gap: theme.spacing.sm,
+    paddingTop: theme.spacing.xs,
   },
   commandCard: {
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    padding: spacing.md,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: glassSubtleBackground,
+    padding: theme.spacing.md,
   },
   commandCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   commandCardHeaderLeft: {
     flexDirection: 'row',
@@ -1431,18 +1460,18 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   commandCardLabel: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
     letterSpacing: 0.2,
   },
   commandCopyButton: {
     minHeight: 30,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.full,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.radius.full,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgInput,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgInput,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1450,57 +1479,57 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   commandCopyButtonCopied: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent,
+    backgroundColor: theme.colors.accent,
+    borderColor: theme.colors.accent,
   },
   commandCopyButtonPressed: {
     opacity: 0.84,
   },
   commandCopyButtonText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   commandCopyButtonTextCopied: {
-    color: colors.black,
+    color: theme.colors.black,
   },
   commandCodeWrap: {
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgInput,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgInput,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
   },
   commandCodeText: {
-    ...typography.mono,
-    color: colors.textPrimary,
+    ...theme.typography.mono,
+    color: theme.colors.textPrimary,
     fontSize: 12,
     lineHeight: 18,
   },
   commandCardHint: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     lineHeight: 16,
   },
   fieldGroup: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   label: {
-    ...typography.caption,
+    ...theme.typography.caption,
     textTransform: 'uppercase',
     letterSpacing: 0.85,
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   tokenHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   optionalLabel: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontSize: 11,
   },
   inputRow: {
@@ -1509,12 +1538,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: theme.colors.border,
     borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.03)',
+    backgroundColor: glassSubtleBackground,
     minHeight: 54,
-    paddingHorizontal: spacing.md,
-    gap: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    gap: theme.spacing.sm,
   },
   inputIconWrap: {
     width: 24,
@@ -1524,14 +1553,14 @@ const styles = StyleSheet.create({
   inputText: {
     flex: 1,
     minWidth: 0,
-    ...typography.body,
-    color: colors.textPrimary,
-    paddingVertical: spacing.md,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
+    paddingVertical: theme.spacing.md,
   },
   tokenInputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     minWidth: 0,
   },
   tokenRevealBtn: {
@@ -1540,9 +1569,9 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgInput,
-    paddingHorizontal: spacing.sm,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgInput,
+    paddingHorizontal: theme.spacing.sm,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1552,99 +1581,99 @@ const styles = StyleSheet.create({
     opacity: 0.8,
   },
   tokenRevealBtnText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
   },
   scanButton: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgInput,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgInput,
     minHeight: 50,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: theme.spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   scanButtonPressed: {
     opacity: 0.82,
   },
   scanButtonText: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   previewWrap: {
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    gap: spacing.xs,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: glassSubtleBackground,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    gap: theme.spacing.xs,
   },
   previewLabel: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   previewValue: {
-    ...typography.mono,
-    color: colors.textPrimary,
+    ...theme.typography.mono,
+    color: theme.colors.textPrimary,
     fontSize: 13,
   },
   statusBanner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
   },
   statusBannerWarning: {
-    backgroundColor: 'rgba(247, 210, 126, 0.08)',
+    backgroundColor: theme.isDark ? 'rgba(247, 210, 126, 0.08)' : 'rgba(197, 106, 18, 0.12)',
     borderColor: 'rgba(247, 210, 126, 0.22)',
   },
   statusBannerSuccess: {
-    backgroundColor: 'rgba(198, 205, 217, 0.10)',
-    borderColor: 'rgba(198, 205, 217, 0.22)',
+    backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.10)' : 'rgba(14, 159, 110, 0.10)',
+    borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.22)' : 'rgba(14, 159, 110, 0.24)',
   },
   statusBannerError: {
-    backgroundColor: colors.errorBg,
+    backgroundColor: theme.colors.errorBg,
     borderColor: 'rgba(239, 68, 68, 0.28)',
   },
   statusBannerText: {
     flex: 1,
-    ...typography.caption,
+    ...theme.typography.caption,
     lineHeight: 18,
   },
   warningText: {
-    ...typography.caption,
-    color: '#F7D27E',
+    ...theme.typography.caption,
+    color: theme.colors.warning,
   },
   errorText: {
-    ...typography.caption,
-    color: colors.error,
+    ...theme.typography.caption,
+    color: theme.colors.error,
   },
   successText: {
-    ...typography.caption,
-    color: colors.statusComplete,
+    ...theme.typography.caption,
+    color: theme.colors.statusComplete,
   },
   actionRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   secondaryButton: {
     flex: 1,
     flexDirection: 'row',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgInput,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgInput,
     borderRadius: 16,
     minHeight: 54,
   },
@@ -1655,44 +1684,44 @@ const styles = StyleSheet.create({
     opacity: 0.65,
   },
   secondaryButtonText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   primaryButton: {
     flex: 1,
     flexDirection: 'row',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.accent,
+    backgroundColor: theme.colors.accent,
     borderRadius: 16,
     minHeight: 54,
   },
   primaryButtonPressed: {
-    backgroundColor: colors.accentPressed,
+    backgroundColor: theme.colors.accentPressed,
   },
   primaryButtonDisabled: {
     opacity: 0.72,
   },
   primaryButtonText: {
-    ...typography.headline,
-    color: colors.black,
+    ...theme.typography.headline,
+    color: theme.colors.black,
     fontWeight: '700',
   },
   scannerModalRoot: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.94)',
     justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
   },
   scannerSheet: {
     borderRadius: 22,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: '#07090C',
-    padding: spacing.lg,
-    gap: spacing.md,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: scannerSheetBackground,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.md,
   },
   scannerHeader: {
     flexDirection: 'row',
@@ -1700,16 +1729,16 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   scannerTitle: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
   },
   scannerCloseBtn: {
     width: 30,
     height: 30,
     borderRadius: 15,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgMain,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgMain,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1722,8 +1751,8 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
   },
   scannerCamera: {
     flex: 1,
@@ -1732,15 +1761,16 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
   },
   scannerPermissionText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     textAlign: 'center',
   },
   scannerHintText: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
-});
+  });
+};

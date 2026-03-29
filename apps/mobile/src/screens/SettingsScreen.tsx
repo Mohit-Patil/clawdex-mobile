@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -16,6 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type {
   AccountSnapshot,
+  AccountRateLimitSnapshot,
   ApprovalMode,
   BridgeCapabilities,
   ChatEngine,
@@ -26,12 +27,20 @@ import type {
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
+import {
+  buildComposerUsageLimitBadges,
+  formatComposerUsageLimitResetAt,
+} from '../components/usageLimitBadges';
 import { getChatEngineLabel } from '../chatEngines';
 import {
   formatModelOptionDescription,
   formatModelOptionLabel,
 } from '../modelOptions';
-import { colors, radius, spacing, typography } from '../theme';
+import {
+  useAppTheme,
+  type AppearancePreference,
+  type AppTheme,
+} from '../theme';
 
 interface SettingsScreenProps {
   api: HostBridgeApiClient;
@@ -41,6 +50,7 @@ interface SettingsScreenProps {
   defaultEngineSettings?: EngineDefaultSettingsMap | null;
   approvalMode?: ApprovalMode;
   showToolCalls?: boolean;
+  appearancePreference?: AppearancePreference;
   onDefaultChatEngineChange?: (engine: ChatEngine) => void;
   onDefaultModelSettingsChange?: (
     engine: ChatEngine,
@@ -49,6 +59,7 @@ interface SettingsScreenProps {
   ) => void;
   onApprovalModeChange?: (mode: ApprovalMode) => void;
   onShowToolCallsChange?: (value: boolean) => void;
+  onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
   onEditBridgeUrl?: () => void;
   onResetOnboarding?: () => void;
   onOpenDrawer: () => void;
@@ -64,16 +75,24 @@ export function SettingsScreen({
   defaultEngineSettings,
   approvalMode,
   showToolCalls = false,
+  appearancePreference = 'system',
   onDefaultChatEngineChange,
   onDefaultModelSettingsChange,
   onApprovalModeChange,
   onShowToolCallsChange,
+  onAppearancePreferenceChange,
   onEditBridgeUrl,
   onResetOnboarding,
   onOpenDrawer,
   onOpenPrivacy,
   onOpenTerms,
 }: SettingsScreenProps) {
+  const theme = useAppTheme();
+  const { colors } = theme;
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const transcriptSwitchTrackColor = theme.isDark ? colors.borderLight : 'rgba(95, 105, 118, 0.32)';
+  const transcriptSwitchActiveColor = theme.isDark ? colors.accent : '#4F5D6D';
+  const transcriptSwitchThumbColor = showToolCalls ? colors.white : '#FFFFFF';
   const [healthyAt, setHealthyAt] = useState<string | null>(null);
   const [uptimeSec, setUptimeSec] = useState<number | null>(null);
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
@@ -84,9 +103,13 @@ export function SettingsScreen({
   const [modelModalVisible, setModelModalVisible] = useState(false);
   const [effortModalVisible, setEffortModalVisible] = useState(false);
   const [approvalModeModalVisible, setApprovalModeModalVisible] = useState(false);
+  const [appearanceModalVisible, setAppearanceModalVisible] = useState(false);
   const [account, setAccount] = useState<AccountSnapshot | null>(null);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [accountRateLimits, setAccountRateLimits] = useState<AccountRateLimitSnapshot | null>(null);
+  const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
+  const [rateLimitsError, setRateLimitsError] = useState<string | null>(null);
   const [bridgeCapabilities, setBridgeCapabilities] = useState<BridgeCapabilities | null>(null);
 
   const availableEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
@@ -121,11 +144,26 @@ export function SettingsScreen({
         : 'Model default'
     : 'Server default';
   const normalizedApprovalMode = approvalMode === 'yolo' ? 'yolo' : 'normal';
+  const normalizedAppearancePreference =
+    appearancePreference === 'light' || appearancePreference === 'dark'
+      ? appearancePreference
+      : 'system';
   const approvalModeLabel =
     normalizedApprovalMode === 'yolo'
       ? 'YOLO (no approval prompts)'
       : 'Normal (ask for approvals)';
+  const appearancePreferenceLabel =
+    normalizedAppearancePreference === 'light'
+      ? 'Light'
+      : normalizedAppearancePreference === 'dark'
+        ? 'Dark'
+        : 'System';
   const activeEngine = bridgeCapabilities?.activeEngine ?? null;
+  const usageLimitBadges = useMemo(
+    () => buildComposerUsageLimitBadges(accountRateLimits),
+    [accountRateLimits]
+  );
+  const showCodexUsageLimits = availableEngines.includes('codex');
 
   const checkHealth = useCallback(async () => {
     try {
@@ -177,15 +215,29 @@ export function SettingsScreen({
     }
   }, [api]);
 
+  const loadRateLimits = useCallback(async () => {
+    setRateLimitsLoading(true);
+    try {
+      const snapshot = await api.readAccountRateLimits();
+      setAccountRateLimits(snapshot);
+      setRateLimitsError(null);
+    } catch (err) {
+      setRateLimitsError((err as Error).message);
+    } finally {
+      setRateLimitsLoading(false);
+    }
+  }, [api]);
+
   useEffect(() => {
     const t = setTimeout(() => {
       void checkHealth();
       void loadBridgeCapabilities();
       void refreshModelOptions();
       void loadAccount();
+      void loadRateLimits();
     }, 0);
     return () => clearTimeout(t);
-  }, [checkHealth, loadAccount, loadBridgeCapabilities, refreshModelOptions]);
+  }, [checkHealth, loadAccount, loadBridgeCapabilities, loadRateLimits, refreshModelOptions]);
 
   useEffect(
     () =>
@@ -194,19 +246,24 @@ export function SettingsScreen({
         if (connected) {
           void loadBridgeCapabilities();
           void loadAccount();
+          void loadRateLimits();
         }
       }),
-    [loadAccount, loadBridgeCapabilities, ws]
+    [loadAccount, loadBridgeCapabilities, loadRateLimits, ws]
   );
 
   useEffect(
     () =>
       ws.onEvent((event) => {
+        if (event.method === 'account/rateLimits/updated') {
+          void loadRateLimits();
+        }
+
         if (event.method === 'account/updated') {
           void loadAccount();
         }
       }),
-    [loadAccount, ws]
+    [loadAccount, loadRateLimits, ws]
   );
 
   const openEngineModal = useCallback(() => {
@@ -362,6 +419,45 @@ export function SettingsScreen({
     [normalizedApprovalMode, selectApprovalMode]
   );
 
+  const appearanceOptions = useMemo<SelectionSheetOption[]>(
+    () => [
+      {
+        key: 'system',
+        title: 'System',
+        description: 'Follow the current device appearance setting.',
+        icon: 'phone-portrait-outline',
+        selected: normalizedAppearancePreference === 'system',
+        onPress: () => {
+          onAppearancePreferenceChange?.('system');
+          setAppearanceModalVisible(false);
+        },
+      },
+      {
+        key: 'light',
+        title: 'Light',
+        description: 'Use the bright palette throughout the app.',
+        icon: 'sunny-outline',
+        selected: normalizedAppearancePreference === 'light',
+        onPress: () => {
+          onAppearancePreferenceChange?.('light');
+          setAppearanceModalVisible(false);
+        },
+      },
+      {
+        key: 'dark',
+        title: 'Dark',
+        description: 'Keep the current dark interface regardless of device theme.',
+        icon: 'moon-outline',
+        selected: normalizedAppearancePreference === 'dark',
+        onPress: () => {
+          onAppearancePreferenceChange?.('dark');
+          setAppearanceModalVisible(false);
+        },
+      },
+    ],
+    [normalizedAppearancePreference, onAppearancePreferenceChange]
+  );
+
   const enginePickerOptions = useMemo<SelectionSheetOption[]>(
     () =>
       availableEngines.map((engine) => ({
@@ -454,7 +550,7 @@ export function SettingsScreen({
 
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <Text style={styles.sectionLabel}>Chat Defaults</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <Pressable
               onPress={openEngineModal}
               disabled={availableEngines.length <= 1}
@@ -507,8 +603,31 @@ export function SettingsScreen({
             </Pressable>
           </BlurView>
 
+          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Appearance</Text>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+            <Pressable
+              onPress={() => setAppearanceModalVisible(true)}
+              style={({ pressed }) => [
+                styles.settingRow,
+                styles.settingRowLast,
+                pressed && styles.linkRowPressed,
+              ]}
+            >
+              <View style={styles.settingRowLeft}>
+                <Text style={styles.rowLabel}>Theme</Text>
+                <Text style={styles.settingValue} numberOfLines={2}>
+                  {appearancePreferenceLabel}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            </Pressable>
+          </BlurView>
+          <Text style={styles.subtleHintText}>
+            System follows your phone appearance. Existing installs stay dark until changed.
+          </Text>
+
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Approvals & Permissions</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <Pressable
               onPress={() => setApprovalModeModalVisible(true)}
               style={({ pressed }) => [
@@ -533,7 +652,7 @@ export function SettingsScreen({
           </Text>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Transcript</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <View style={[styles.settingRow, styles.settingRowLast]}>
               <View style={styles.settingRowLeft}>
                 <Text style={styles.rowLabel}>Show tool calls</Text>
@@ -544,9 +663,9 @@ export function SettingsScreen({
               <Switch
                 value={showToolCalls}
                 onValueChange={(value) => onShowToolCallsChange?.(value)}
-                trackColor={{ false: colors.borderLight, true: colors.accent }}
-                thumbColor={colors.textPrimary}
-                ios_backgroundColor={colors.borderLight}
+                trackColor={{ false: transcriptSwitchTrackColor, true: transcriptSwitchActiveColor }}
+                thumbColor={transcriptSwitchThumbColor}
+                ios_backgroundColor={transcriptSwitchTrackColor}
               />
             </View>
           </BlurView>
@@ -556,7 +675,7 @@ export function SettingsScreen({
           </Text>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Account & Auth</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             {accountLoading ? (
               <View style={styles.accountLoadingState}>
                 <ActivityIndicator color={colors.textPrimary} />
@@ -590,8 +709,56 @@ export function SettingsScreen({
           ) : null}
           {accountError ? <Text style={styles.errorText}>{accountError}</Text> : null}
 
+          {showCodexUsageLimits ? (
+            <>
+              <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Codex Usage Limits</Text>
+              <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+                {rateLimitsLoading ? (
+                  <View style={styles.accountLoadingState}>
+                    <ActivityIndicator color={colors.textPrimary} />
+                    <Text style={styles.settingValue}>Loading usage limits…</Text>
+                  </View>
+                ) : usageLimitBadges.length > 0 ? (
+                  usageLimitBadges.map((limit, index) => {
+                    const toneColor =
+                      limit.tone === 'critical'
+                        ? colors.statusError
+                        : limit.tone === 'warning'
+                          ? colors.warning
+                          : colors.statusComplete;
+                    const label = limit.label === 'weekly' ? 'Weekly' : limit.label;
+                    const isLastLimit = index === usageLimitBadges.length - 1;
+
+                    return (
+                      <Fragment key={limit.id}>
+                        <Row
+                          label={`${label} remaining`}
+                          value={`${String(limit.remainingPercent)}%`}
+                          valueColor={toneColor}
+                        />
+                        <Row
+                          label={`${label} resets`}
+                          value={formatComposerUsageLimitResetAt(limit.resetsAt)}
+                          isLast={isLastLimit}
+                        />
+                      </Fragment>
+                    );
+                  })
+                ) : (
+                  <View style={styles.accountLoadingState}>
+                    <Text style={styles.settingValue}>No usage limit data yet</Text>
+                  </View>
+                )}
+              </BlurView>
+              <Text style={styles.subtleHintText}>
+                Reset times are shown in your local device timezone.
+              </Text>
+              {rateLimitsError ? <Text style={styles.errorText}>{rateLimitsError}</Text> : null}
+            </>
+          ) : null}
+
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <Text selectable style={styles.valueText}>
               {bridgeUrl}
             </Text>
@@ -618,7 +785,7 @@ export function SettingsScreen({
           </BlurView>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Engines</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <EngineAvailabilityRow
               engine="codex"
               available={availableEngines.includes('codex')}
@@ -637,7 +804,7 @@ export function SettingsScreen({
           </Text>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Health</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <Row
               label="Status"
               value={healthyAt ? 'OK' : 'Unknown'}
@@ -659,6 +826,7 @@ export function SettingsScreen({
               void loadBridgeCapabilities();
               void refreshModelOptions();
               void loadAccount();
+              void loadRateLimits();
             }}
             style={({ pressed }) => [styles.refreshBtn, pressed && styles.refreshBtnPressed]}
           >
@@ -667,7 +835,7 @@ export function SettingsScreen({
           </Pressable>
 
           <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Legal</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <Pressable
               onPress={onOpenPrivacy}
               style={({ pressed }) => [styles.linkRow, pressed && styles.linkRowPressed]}
@@ -701,6 +869,15 @@ export function SettingsScreen({
         subtitle="Pick which backend new chats should start with."
         options={enginePickerOptions}
         onClose={closeEngineModal}
+      />
+
+      <SelectionSheet
+        visible={appearanceModalVisible}
+        eyebrow="Appearance"
+        title="Theme"
+        subtitle="Choose whether the mobile app follows the system appearance or uses an explicit mode."
+        options={appearanceOptions}
+        onClose={() => setAppearanceModalVisible(false)}
       />
 
       <SelectionSheet
@@ -752,6 +929,8 @@ function Row({
   valueColor?: string;
   isLast?: boolean;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   return (
     <View style={[styles.row, isLast && styles.rowLast]}>
       <Text style={styles.rowLabel}>{label}</Text>
@@ -773,12 +952,13 @@ function EngineAvailabilityRow({
   active: boolean;
   isLast?: boolean;
 }) {
+  const theme = useAppTheme();
   const value = available
     ? active
       ? 'Available · active'
       : 'Available'
     : 'Not installed on bridge';
-  const valueColor = available ? colors.statusComplete : colors.textMuted;
+  const valueColor = available ? theme.colors.statusComplete : theme.colors.textMuted;
 
   return (
     <Row
@@ -790,174 +970,206 @@ function EngineAvailabilityRow({
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bgMain },
-  safeArea: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.bgMain,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderHighlight,
-  },
-  menuBtn: { padding: spacing.xs },
-  headerTitle: { ...typography.headline, color: colors.textPrimary },
-  body: { flex: 1 },
-  bodyContent: { padding: spacing.lg },
-  card: {
-    borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    paddingHorizontal: spacing.lg,
-    marginBottom: spacing.xs,
-    overflow: 'hidden',
-  },
-  sectionLabel: {
-    ...typography.caption,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginTop: spacing.sm,
-    marginBottom: spacing.sm,
-    color: colors.textMuted,
-    marginLeft: spacing.xs,
-  },
-  sectionLabelGap: { marginTop: spacing.xl },
-  valueText: {
-    ...typography.mono,
-    color: colors.textPrimary,
-    paddingVertical: spacing.md,
-    fontSize: 14,
-  },
-  bridgeEditBtn: {
-    marginBottom: spacing.md,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    paddingVertical: spacing.sm,
-  },
-  bridgeEditBtnPressed: {
-    opacity: 0.82,
-  },
-  bridgeEditBtnText: {
-    ...typography.caption,
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  bridgeResetBtn: {
-    marginBottom: spacing.md,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.error,
-    backgroundColor: 'rgba(239, 68, 68, 0.08)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    paddingVertical: spacing.sm,
-  },
-  bridgeResetBtnPressed: {
-    opacity: 0.82,
-  },
-  bridgeResetBtnText: {
-    ...typography.caption,
-    color: colors.error,
-    fontWeight: '700',
-  },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
-  },
-  rowLast: {
-    borderBottomWidth: 0,
-  },
-  rowLabel: { ...typography.body, color: colors.textMuted },
-  rowValue: { ...typography.body, fontWeight: '600', color: colors.textPrimary },
-  settingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-    paddingVertical: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
-  },
-  settingRowLast: {
-    borderBottomWidth: 0,
-  },
-  settingRowLeft: {
-    flex: 1,
-    gap: 3,
-  },
-  settingValue: {
-    ...typography.caption,
-    color: colors.textSecondary,
-  },
-  settingRowDisabled: {
-    opacity: 0.45,
-  },
-  subtleHintText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginTop: spacing.xs,
-    marginHorizontal: spacing.xs,
-  },
-  accountLoadingState: {
-    minHeight: 88,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-  },
-  refreshBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    marginTop: spacing.xl,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.md,
-    backgroundColor: colors.accent,
-    borderRadius: radius.md,
-    boxShadow: `0px 4px 8px ${colors.accent}4D`,
-  },
-  refreshBtnPressed: { backgroundColor: colors.accentPressed },
-  refreshBtnText: { ...typography.headline, color: colors.white, fontSize: 15 },
-  linkRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-  },
-  linkRowPressed: {
-    opacity: 0.75,
-  },
-  linkRowLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  linkRowLabel: {
-    ...typography.body,
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  errorText: {
-    ...typography.caption,
-    color: colors.error,
-    marginTop: spacing.md,
-    textAlign: 'center',
-  },
-});
+const createStyles = (theme: AppTheme) => {
+  const settingsCardBackground = theme.isDark ? theme.colors.bgCanvasAccent : '#F3F7FB';
+  const settingsCardBorder = theme.isDark
+    ? theme.colors.borderHighlight
+    : 'rgba(71, 85, 105, 0.22)';
+  const settingsDivider = theme.isDark
+    ? theme.colors.borderLight
+    : 'rgba(71, 85, 105, 0.16)';
+  const settingsCardShadow = theme.isDark
+    ? undefined
+    : '0px 14px 30px rgba(15, 31, 54, 0.10)';
+  const neutralControlBackground = theme.isDark ? theme.colors.bgMain : '#D9E2EB';
+  const neutralControlPressed = theme.isDark ? theme.colors.bgItem : '#CCD6E0';
+  const settingsLabelColor = theme.isDark ? theme.colors.textMuted : '#536172';
+  const settingsValueColor = theme.isDark ? theme.colors.textSecondary : '#3F4C5A';
+  const settingsPrimaryText = theme.isDark ? theme.colors.textPrimary : '#263341';
+  const hintTextColor = theme.isDark ? theme.colors.textMuted : '#556270';
+
+  return StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.colors.bgMain },
+    safeArea: { flex: 1 },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+      paddingHorizontal: theme.spacing.lg,
+      paddingVertical: theme.spacing.md,
+      backgroundColor: theme.colors.bgMain,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.colors.borderHighlight,
+    },
+    menuBtn: { padding: theme.spacing.xs },
+    headerTitle: { ...theme.typography.headline, color: theme.colors.textPrimary },
+    body: { flex: 1 },
+    bodyContent: { padding: theme.spacing.lg },
+    card: {
+      borderRadius: theme.radius.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: settingsCardBorder,
+      paddingHorizontal: theme.spacing.lg,
+      marginBottom: theme.spacing.xs,
+      overflow: 'hidden',
+      backgroundColor: settingsCardBackground,
+      boxShadow: settingsCardShadow,
+    },
+    sectionLabel: {
+      ...theme.typography.caption,
+      textTransform: 'uppercase',
+      letterSpacing: 0.8,
+      marginTop: theme.spacing.sm,
+      marginBottom: theme.spacing.sm,
+      color: settingsLabelColor,
+      marginLeft: theme.spacing.xs,
+    },
+    sectionLabelGap: { marginTop: theme.spacing.xl },
+    valueText: {
+      ...theme.typography.mono,
+      color: settingsPrimaryText,
+      paddingVertical: theme.spacing.md,
+      fontSize: 14,
+    },
+    bridgeEditBtn: {
+      marginBottom: theme.spacing.md,
+      borderRadius: theme.radius.md,
+      borderWidth: 1,
+      borderColor: settingsCardBorder,
+      backgroundColor: neutralControlBackground,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.xs,
+      paddingVertical: theme.spacing.sm,
+    },
+    bridgeEditBtnPressed: {
+      backgroundColor: neutralControlPressed,
+    },
+    bridgeEditBtnText: {
+      ...theme.typography.caption,
+      color: settingsPrimaryText,
+      fontWeight: '600',
+    },
+    bridgeResetBtn: {
+      marginBottom: theme.spacing.md,
+      borderRadius: theme.radius.md,
+      borderWidth: 1,
+      borderColor: theme.colors.error,
+      backgroundColor: theme.colors.errorBg,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.xs,
+      paddingVertical: theme.spacing.sm,
+    },
+    bridgeResetBtnPressed: {
+      opacity: 0.82,
+    },
+    bridgeResetBtnText: {
+      ...theme.typography.caption,
+      color: theme.colors.error,
+      fontWeight: '700',
+    },
+    row: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      paddingVertical: theme.spacing.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: settingsDivider,
+    },
+    rowLast: {
+      borderBottomWidth: 0,
+    },
+    rowLabel: { ...theme.typography.body, color: settingsLabelColor },
+    rowValue: {
+      ...theme.typography.body,
+      fontWeight: '600',
+      color: settingsPrimaryText,
+      paddingLeft: theme.spacing.sm,
+      flexShrink: 1,
+      textAlign: 'right',
+    },
+    settingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: theme.spacing.sm,
+      paddingVertical: theme.spacing.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: settingsDivider,
+    },
+    settingRowLast: {
+      borderBottomWidth: 0,
+    },
+    settingRowLeft: {
+      flex: 1,
+      gap: 3,
+    },
+    settingValue: {
+      ...theme.typography.caption,
+      color: settingsValueColor,
+    },
+    settingRowDisabled: {
+      opacity: 0.45,
+    },
+    subtleHintText: {
+      ...theme.typography.caption,
+      color: hintTextColor,
+      marginTop: theme.spacing.xs,
+      marginHorizontal: theme.spacing.xs,
+    },
+    accountLoadingState: {
+      minHeight: 88,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.sm,
+    },
+    refreshBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.sm,
+      marginTop: theme.spacing.xl,
+      paddingVertical: theme.spacing.md,
+      paddingHorizontal: theme.spacing.md,
+      backgroundColor: theme.colors.accent,
+      borderRadius: theme.radius.md,
+      boxShadow: `0px 4px 8px ${theme.colors.accent}4D`,
+    },
+    refreshBtnPressed: { backgroundColor: theme.colors.accentPressed },
+    refreshBtnText: {
+      ...theme.typography.headline,
+      color: theme.colors.accentText,
+      fontSize: 15,
+    },
+    linkRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: theme.spacing.md,
+    },
+    linkRowPressed: {
+      backgroundColor: neutralControlPressed,
+    },
+    linkRowLeft: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+    },
+    linkRowLabel: {
+      ...theme.typography.body,
+      color: settingsPrimaryText,
+      fontWeight: '600',
+    },
+    errorText: {
+      ...theme.typography.caption,
+      color: theme.colors.error,
+      marginTop: theme.spacing.md,
+      textAlign: 'center',
+    },
+  });
+};
 
 function normalizeModelId(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {

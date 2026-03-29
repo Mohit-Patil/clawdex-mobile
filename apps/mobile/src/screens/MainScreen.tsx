@@ -101,7 +101,7 @@ import {
   syncVisibleSubAgentStatuses,
   type TranscriptDisplayItem,
 } from './transcriptMessages';
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 export interface MainScreenHandle {
   openChat: (id: string, optimisticChat?: Chat | null) => void;
@@ -485,7 +485,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     },
     ref
   ) {
+    const theme = useAppTheme();
     const { height: windowHeight } = useWindowDimensions();
+    const styles = useMemo(() => createStyles(theme), [theme]);
     const initialPendingSnapshot =
       pendingOpenChatId && pendingOpenChatSnapshot?.id === pendingOpenChatId
         ? pendingOpenChatSnapshot
@@ -6558,7 +6560,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             );
           })()
         : null;
-    const composerUsageLimitBadges = buildComposerUsageLimitBadges(accountRateLimits);
+    const composerUsageLimitBadges =
+      activeChatEngine === 'codex'
+        ? buildComposerUsageLimitBadges(accountRateLimits)
+        : [];
     const contextChipLabel =
       contextUsedLabel && contextWindowLabel
         ? `${contextUsedLabel} / ${contextWindowLabel}${
@@ -6570,13 +6575,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const contextIndicatorColor =
       contextRemainingPercent === null
         ? contextWindowLabel
-          ? colors.borderHighlight
-          : colors.textMuted
+          ? theme.colors.borderHighlight
+          : theme.colors.textMuted
         : contextRemainingPercent <= 10
-          ? colors.error
+          ? theme.colors.error
           : contextRemainingPercent <= 25
-            ? colors.accent
-            : colors.borderHighlight;
+            ? theme.colors.accent
+            : theme.colors.borderHighlight;
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
@@ -6683,8 +6688,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const showFloatingActivity =
       showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
     const chatBottomInset = shouldShowComposer
-      ? spacing.lg
-      : Math.max(spacing.xxl, safeAreaInsets.bottom + spacing.lg);
+      ? theme.spacing.lg
+      : Math.max(theme.spacing.xxl, safeAreaInsets.bottom + theme.spacing.lg);
 
     useEffect(() => {
       if (!selectedChat || isOpeningChat || !shouldAutoEnablePlanModeFromChat(selectedChat)) {
@@ -6904,7 +6909,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 ]}
                 onPress={openModelReasoningMenu}
               >
-                <Ionicons name="sparkles-outline" size={13} color={colors.textMuted} />
+                <Ionicons name="sparkles-outline" size={13} color={theme.colors.textMuted} />
                 <Text style={styles.modelChipText} numberOfLines={1}>
                   {modelReasoningLabel}
                 </Text>
@@ -6916,7 +6921,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 ]}
                 onPress={openCollaborationModeMenu}
               >
-                <Ionicons name="map-outline" size={13} color={colors.textMuted} />
+                <Ionicons name="map-outline" size={13} color={theme.colors.textMuted} />
                 <Text style={styles.modelChipText} numberOfLines={1}>
                   {collaborationModeLabel}
                 </Text>
@@ -6931,7 +6936,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     void openAgentThreadSelector();
                   }}
                 >
-                  <Ionicons name="people-outline" size={13} color={colors.textMuted} />
+                  <Ionicons name="people-outline" size={13} color={theme.colors.textMuted} />
                   <Text style={styles.modelChipText} numberOfLines={1}>
                     {agentThreadChipLabel}
                   </Text>
@@ -6952,7 +6957,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 <Ionicons
                   name={fastModeEnabled ? 'flash' : 'flash-outline'}
                   size={13}
-                  color={fastModeEnabled ? colors.textPrimary : colors.textMuted}
+                  color={fastModeEnabled ? theme.colors.textPrimary : theme.colors.textMuted}
                 />
                 <Text
                   style={[
@@ -7033,7 +7038,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             />
           ) : isOpeningChat ? (
             <View style={styles.chatLoadingContainer}>
-              <ActivityIndicator size="small" color={colors.textMuted} />
+              <ActivityIndicator size="small" color={theme.colors.textMuted} />
               <Text style={styles.chatLoadingText}>Opening chat...</Text>
             </View>
           ) : (
@@ -7273,9 +7278,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               <TextInput
                 value={renameDraft}
                 onChangeText={setRenameDraft}
-                keyboardAppearance="dark"
+                keyboardAppearance={theme.keyboardAppearance}
                 placeholder="Chat name"
-                placeholderTextColor={colors.textMuted}
+                placeholderTextColor={theme.colors.textMuted}
                 style={styles.renameModalInput}
                 autoFocus
                 editable={!renaming}
@@ -7327,9 +7332,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               <TextInput
                 value={attachmentPathDraft}
                 onChangeText={setAttachmentPathDraft}
-                keyboardAppearance="dark"
+                keyboardAppearance={theme.keyboardAppearance}
                 placeholder="apps/mobile/src/screens/MainScreen.tsx"
-                placeholderTextColor={colors.textMuted}
+                placeholderTextColor={theme.colors.textMuted}
                 style={styles.renameModalInput}
                 autoFocus
                 editable={!isLoading}
@@ -7382,7 +7387,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                           pressed && styles.attachmentRemoveButtonPressed,
                         ]}
                       >
-                        <Ionicons name="close" size={14} color={colors.textMuted} />
+                        <Ionicons name="close" size={14} color={theme.colors.textMuted} />
                       </Pressable>
                     </View>
                   ))}
@@ -7478,13 +7483,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                         <TextInput
                           value={answer}
                           onChangeText={(value) => setUserInputDraft(question.id, value)}
-                          keyboardAppearance="dark"
+                          keyboardAppearance={theme.keyboardAppearance}
                           placeholder={
                             question.isOther
                               ? 'Or enter a custom answer…'
                               : 'Type your answer…'
                           }
-                          placeholderTextColor={colors.textMuted}
+                          placeholderTextColor={theme.colors.textMuted}
                           secureTextEntry={question.isSecret}
                           editable={!resolvingUserInput}
                           multiline={!question.isSecret}
@@ -7553,6 +7558,9 @@ function ComposeView({
   onOpenCollaborationModePicker: () => void;
   onToggleFastMode: () => void;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
   return (
     <ScrollView
       style={styles.composeScroll}
@@ -7577,11 +7585,11 @@ function ComposeView({
         ]}
         onPress={onOpenWorkspacePicker}
       >
-        <Ionicons name="folder-open-outline" size={16} color={colors.textMuted} />
+        <Ionicons name="folder-open-outline" size={16} color={theme.colors.textMuted} />
         <Text style={[styles.workspaceSelectLabel, styles.workspacePathSelectLabel]}>
           {startWorkspaceLabel}
         </Text>
-        <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+        <Ionicons name="chevron-forward" size={14} color={theme.colors.textMuted} />
       </Pressable>
       {showEnginePicker ? (
         <Pressable
@@ -7591,11 +7599,11 @@ function ComposeView({
           ]}
           onPress={onOpenEnginePicker}
         >
-          <Ionicons name="layers-outline" size={16} color={colors.textMuted} />
+          <Ionicons name="layers-outline" size={16} color={theme.colors.textMuted} />
           <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
             {engineLabel}
           </Text>
-          <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+          <Ionicons name="chevron-forward" size={14} color={theme.colors.textMuted} />
         </Pressable>
       ) : null}
       <Pressable
@@ -7605,11 +7613,11 @@ function ComposeView({
         ]}
         onPress={onOpenModelReasoningPicker}
       >
-        <Ionicons name="sparkles-outline" size={16} color={colors.textMuted} />
+        <Ionicons name="sparkles-outline" size={16} color={theme.colors.textMuted} />
         <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
           {modelReasoningLabel}
         </Text>
-        <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+        <Ionicons name="chevron-forward" size={14} color={theme.colors.textMuted} />
       </Pressable>
       <Pressable
         style={({ pressed }) => [
@@ -7618,11 +7626,11 @@ function ComposeView({
         ]}
         onPress={onOpenCollaborationModePicker}
       >
-        <Ionicons name="map-outline" size={16} color={colors.textMuted} />
+        <Ionicons name="map-outline" size={16} color={theme.colors.textMuted} />
         <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
           {collaborationModeLabel}
         </Text>
-        <Ionicons name="chevron-forward" size={14} color={colors.textMuted} />
+        <Ionicons name="chevron-forward" size={14} color={theme.colors.textMuted} />
       </Pressable>
       <Pressable
         style={({ pressed }) => [
@@ -7631,14 +7639,14 @@ function ComposeView({
         ]}
         onPress={onToggleFastMode}
       >
-        <Ionicons name="flash-outline" size={16} color={colors.textMuted} />
+        <Ionicons name="flash-outline" size={16} color={theme.colors.textMuted} />
         <Text style={styles.workspaceSelectLabel} numberOfLines={1}>
           {fastModeLabel}
         </Text>
         <Ionicons
           name={fastModeEnabled ? 'checkmark-circle' : 'ellipse-outline'}
           size={14}
-          color={colors.textMuted}
+          color={theme.colors.textMuted}
         />
       </Pressable>
       <View style={styles.suggestions}>
@@ -7680,7 +7688,9 @@ function AgentThreadsPanel({
   onToggleCollapse: () => void;
   onSelectThread: (threadId: string) => void;
 }) {
+  const theme = useAppTheme();
   const { height: windowHeight } = useWindowDimensions();
+  const styles = useMemo(() => createStyles(theme), [theme]);
 
   if (rows.length === 0) {
     return null;
@@ -7707,7 +7717,7 @@ function AgentThreadsPanel({
         <Ionicons
           name={collapsed ? 'chevron-down' : 'chevron-up'}
           size={16}
-          color={colors.textMuted}
+          color={theme.colors.textMuted}
         />
       </Pressable>
 
@@ -7820,6 +7830,9 @@ function ChatView({
   autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
   bottomInset: number;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
   const transcriptView = useMemo(() => {
     const childVisibleMessages = getVisibleTranscriptMessages(
       filterReasoningMessagesForEngine(chat.messages, chat.engine),
@@ -7884,9 +7897,9 @@ function ChatView({
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset } = event.nativeEvent;
       const distanceFromBottom = contentOffset.y;
-      autoScrollStateRef.current.shouldStickToBottom = distanceFromBottom <= spacing.xl * 2;
+      autoScrollStateRef.current.shouldStickToBottom = distanceFromBottom <= theme.spacing.xl * 2;
     },
-    [autoScrollStateRef]
+    [autoScrollStateRef, theme.spacing.xl]
   );
 
   useEffect(() => {
@@ -7896,7 +7909,7 @@ function ChatView({
   }, [autoScrollStateRef, chat.id]);
   const messageListContentStyle = useMemo(
     () => [styles.messageListContent, { paddingBottom: bottomInset }],
-    [bottomInset]
+    [bottomInset, styles.messageListContent]
   );
   const isLargeChat = displayItems.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
   const keyExtractor = useCallback(
@@ -7968,7 +7981,7 @@ function ChatView({
           <Ionicons
             name="chevron-up-circle-outline"
             size={16}
-            color={colors.textPrimary}
+            color={theme.colors.textPrimary}
           />
           <Text style={styles.messagePaginationButtonText}>
             {`Load ${String(olderBatchCount)} earlier message${
@@ -8058,6 +8071,9 @@ function WorkflowCard({
   onImplement: () => void;
   onStayInPlanMode: () => void;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const workflowMarkdownStyles = useMemo(() => createWorkflowMarkdownStyles(theme), [theme]);
   const hasStructuredPlan = hasStructuredPlanCardContent(plan);
   const hasSteps = (plan?.steps.length ?? 0) > 0;
   const totalStepCount = plan?.steps.length ?? 0;
@@ -8182,7 +8198,7 @@ function WorkflowCard({
       ]}
       onPress={onToggleCollapse}
     >
-      <Ionicons name={iconName} size={14} color={colors.textPrimary} />
+      <Ionicons name={iconName} size={14} color={theme.colors.textPrimary} />
       <View style={styles.planCardHeaderText}>
         <Text style={styles.planCardTitle}>{title}</Text>
         {collapsed ? (
@@ -8194,12 +8210,12 @@ function WorkflowCard({
       <Ionicons
         name={collapsed ? 'chevron-down-outline' : 'chevron-up-outline'}
         size={16}
-        color={colors.textMuted}
+        color={theme.colors.textMuted}
       />
     </Pressable>
   ) : (
     <View style={styles.planCardHeader}>
-      <Ionicons name={iconName} size={14} color={colors.textPrimary} />
+      <Ionicons name={iconName} size={14} color={theme.colors.textPrimary} />
       <View style={styles.planCardHeaderText}>
         <Text style={styles.planCardTitle}>{title}</Text>
         <Text style={styles.planCardSummary} numberOfLines={2}>
@@ -8306,6 +8322,9 @@ function QueuedMessageDock({
   onCancelQueuedMessage: (messageId: string) => void;
   onSteerQueuedMessage: () => void;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
   return (
     <View style={styles.queuedMessageDock}>
       <View style={[styles.planCard, styles.planOverlayCard, styles.queuedMessageCard]}>
@@ -10009,130 +10028,135 @@ function toPendingApproval(value: unknown): PendingApproval | null {
 
 // ── Styles ─────────────────────────────────────────────────────────
 
-const workflowMarkdownStyles = StyleSheet.create({
+const createWorkflowMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
   body: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
   },
   paragraph: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     marginTop: 0,
-    marginBottom: spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   heading1: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
     fontSize: 18,
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   heading2: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
     fontSize: 16,
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   heading3: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs / 2,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs / 2,
     textTransform: 'uppercase',
     letterSpacing: 0.4,
   },
   heading4: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs / 2,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs / 2,
   },
   heading5: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs / 2,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs / 2,
   },
   heading6: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs / 2,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs / 2,
   },
   bullet_list: {
     marginTop: 0,
-    marginBottom: spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   ordered_list: {
     marginTop: 0,
-    marginBottom: spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   list_item: {
     marginTop: 0,
-    marginBottom: spacing.xs / 2,
+    marginBottom: theme.spacing.xs / 2,
   },
   strong: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   em: {
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
     fontStyle: 'italic',
   },
   code_inline: {
-    ...typography.mono,
-    backgroundColor: colors.inlineCodeBg,
-    color: colors.inlineCodeText,
+    ...theme.typography.mono,
+    backgroundColor: theme.colors.inlineCodeBg,
+    color: theme.colors.inlineCodeText,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.inlineCodeBorder,
-    borderRadius: radius.sm,
+    borderColor: theme.colors.inlineCodeBorder,
+    borderRadius: theme.radius.sm,
     paddingHorizontal: 5,
     paddingVertical: 2,
   },
   code_block: {
-    ...typography.mono,
-    backgroundColor: colors.bgInput,
-    color: colors.textPrimary,
+    ...theme.typography.mono,
+    backgroundColor: theme.colors.bgInput,
+    color: theme.colors.textPrimary,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    borderRadius: radius.sm,
-    padding: spacing.md,
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
+    borderColor: theme.colors.borderHighlight,
+    borderRadius: theme.radius.sm,
+    padding: theme.spacing.md,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   fence: {
-    ...typography.mono,
-    backgroundColor: colors.bgInput,
-    color: colors.textPrimary,
+    ...theme.typography.mono,
+    backgroundColor: theme.colors.bgInput,
+    color: theme.colors.textPrimary,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    borderRadius: radius.sm,
-    padding: spacing.md,
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
+    borderColor: theme.colors.borderHighlight,
+    borderRadius: theme.radius.sm,
+    padding: theme.spacing.md,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   blockquote: {
     borderLeftWidth: 2,
-    borderLeftColor: colors.borderHighlight,
-    paddingLeft: spacing.sm,
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
+    borderLeftColor: theme.colors.borderHighlight,
+    paddingLeft: theme.spacing.sm,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   link: {
-    color: colors.accent,
+    color: theme.colors.accent,
     textDecorationLine: 'underline',
   },
 });
 
-const styles = StyleSheet.create({
+const createStyles = (theme: AppTheme) => {
+  const agentPanelShadow = theme.isDark
+    ? '0 12px 30px rgba(0, 0, 0, 0.22)'
+    : '0 12px 24px rgba(15, 23, 42, 0.12)';
+
+  return StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgMain,
   },
 
   bodyContainer: {
@@ -10142,64 +10166,64 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   composerContainer: {
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgMain,
   },
   composerContainerResting: {
     marginBottom: 0,
   },
   queuedMessageDock: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xs,
-    paddingBottom: spacing.xs / 2,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.xs,
+    paddingBottom: theme.spacing.xs / 2,
   },
   activityDock: {
-    backgroundColor: colors.bgMain,
-    paddingTop: spacing.xs,
-    paddingBottom: spacing.xs / 2,
+    backgroundColor: theme.colors.bgMain,
+    paddingTop: theme.spacing.xs,
+    paddingBottom: theme.spacing.xs / 2,
     zIndex: 3,
   },
   sessionMetaRow: {
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgMain,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
-    paddingVertical: spacing.sm,
+    borderBottomColor: theme.colors.borderLight,
+    paddingVertical: theme.spacing.sm,
   },
   sessionMetaRowContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.lg,
   },
   topCardsRow: {
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.sm,
-    gap: spacing.sm,
+    backgroundColor: theme.colors.bgMain,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.sm,
+    gap: theme.spacing.sm,
     zIndex: 2,
   },
   agentPanelWrap: {
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.sm,
+    backgroundColor: theme.colors.bgMain,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.sm,
   },
   agentPanelCard: {
     borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: '#0E1116',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    gap: spacing.sm,
-    boxShadow: '0 12px 30px rgba(0, 0, 0, 0.22)',
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgElevated,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.md,
+    gap: theme.spacing.sm,
+    boxShadow: agentPanelShadow,
   },
   agentPanelHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   agentPanelHeaderPressable: {
-    borderRadius: radius.md,
+    borderRadius: theme.radius.md,
   },
   agentPanelHeaderPressed: {
     opacity: 0.84,
@@ -10209,18 +10233,18 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   agentPanelEyebrow: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.8,
   },
   agentPanelSummary: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   agentPanelList: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   agentPanelScroll: {
     flexGrow: 0,
@@ -10228,15 +10252,17 @@ const styles = StyleSheet.create({
   agentPanelRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    borderRadius: radius.md,
+    gap: theme.spacing.sm,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.sm + 2,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm + 2,
+    paddingVertical: theme.spacing.sm + 2,
   },
   agentPanelRowSelected: {
-    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgInput,
   },
   agentPanelRowPressed: {
     opacity: 0.84,
@@ -10255,39 +10281,39 @@ const styles = StyleSheet.create({
   agentPanelTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   agentPanelTitle: {
-    ...typography.body,
+    ...theme.typography.body,
     fontSize: 13,
     lineHeight: 18,
     fontWeight: '700',
     flex: 1,
   },
   agentPanelSelectedLabel: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontWeight: '600',
   },
   agentPanelDescription: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontSize: 11,
     lineHeight: 15,
   },
   agentPanelStatusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 5,
     maxWidth: '42%',
     flexShrink: 0,
   },
   agentPanelStatusText: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 11,
     lineHeight: 14,
     fontWeight: '700',
@@ -10295,12 +10321,12 @@ const styles = StyleSheet.create({
   contextChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.sm,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 5,
     flexShrink: 0,
   },
@@ -10311,49 +10337,49 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   contextChipText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   modelChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.sm,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 5,
     flexShrink: 0,
   },
   modeChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.sm,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 5,
     flexShrink: 0,
   },
   fastChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.sm,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 5,
     flexShrink: 0,
   },
   fastChipEnabled: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.inlineCodeBg,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.inlineCodeBg,
   },
   modelChipPressed: {
     opacity: 0.86,
@@ -10362,19 +10388,19 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   modelChipText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   fastChipTextEnabled: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   planCard: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     borderRadius: 12,
-    backgroundColor: colors.bgItem,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
+    backgroundColor: theme.colors.bgItem,
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.sm,
   },
   planOverlayCard: {
     marginBottom: 0,
@@ -10382,16 +10408,16 @@ const styles = StyleSheet.create({
   },
   queuedMessageCard: {
     marginBottom: 0,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     borderRadius: 10,
   },
   queuedMessageHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.sm,
-    marginBottom: spacing.xs / 2,
+    gap: theme.spacing.sm,
+    marginBottom: theme.spacing.xs / 2,
   },
   queuedMessageHeaderText: {
     flex: 1,
@@ -10400,83 +10426,83 @@ const styles = StyleSheet.create({
   queuedMessageActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   queuedMessageSummary: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   queuedMessageBody: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     lineHeight: 18,
   },
   queuedMessageHint: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginTop: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    marginTop: theme.spacing.xs,
   },
   workflowSection: {
-    marginTop: spacing.md,
-    gap: spacing.xs,
+    marginTop: theme.spacing.md,
+    gap: theme.spacing.xs,
   },
   workflowSectionEyebrow: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     textTransform: 'uppercase',
     letterSpacing: 0.4,
   },
   workflowScrollViewport: {
-    marginTop: spacing.xs,
+    marginTop: theme.spacing.xs,
   },
   workflowScrollContent: {
-    paddingBottom: spacing.xs,
+    paddingBottom: theme.spacing.xs,
   },
   workflowSummaryText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     lineHeight: 18,
   },
   workflowMetaText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   queuedMessageActionButton: {
     flexShrink: 0,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.inlineCodeBg,
-    paddingHorizontal: spacing.sm,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.inlineCodeBg,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 5,
   },
   queuedMessageActionButtonDestructive: {
-    borderColor: colors.error,
-    backgroundColor: colors.errorBg,
+    borderColor: theme.colors.error,
+    backgroundColor: theme.colors.errorBg,
   },
   queuedMessageActionButtonDisabled: {
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgMain,
   },
   queuedMessageActionButtonPressed: {
     opacity: 0.88,
   },
   queuedMessageActionLabel: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   queuedMessageActionLabelDestructive: {
-    color: colors.error,
+    color: theme.colors.error,
   },
   queuedMessageActionLabelDisabled: {
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   planCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
-    marginBottom: spacing.xs,
+    gap: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   planCardHeaderPressable: {
     marginBottom: 0,
@@ -10486,183 +10512,183 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   planCardTitle: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   planCardSummary: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   planExplanationText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontStyle: 'italic',
-    marginTop: spacing.sm,
-    marginBottom: spacing.sm,
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.sm,
   },
   planStepsList: {
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   planStepRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   planStepMarkdownWrap: {
     flex: 1,
     minWidth: 0,
   },
   planStepStatus: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     marginTop: 1,
   },
   planStepStatusCompleted: {
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   planStepStatusInProgress: {
-    color: colors.accent,
+    color: theme.colors.accent,
     fontWeight: '700',
   },
   planStepStatusPending: {
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   planStepText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     flex: 1,
   },
   planStepTextCompleted: {
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
     textDecorationLine: 'line-through',
   },
   planStepTextInProgress: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   planStepTextPending: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   planDeltaText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginTop: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    marginTop: theme.spacing.xs,
   },
   renameModalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    backgroundColor: theme.colors.overlayBackdrop,
     justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
   },
   workspaceModalLoading: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   slashSuggestions: {
-    marginHorizontal: spacing.lg,
-    marginBottom: spacing.xs,
+    marginHorizontal: theme.spacing.lg,
+    marginBottom: theme.spacing.xs,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
     overflow: 'hidden',
   },
   slashSuggestionsContent: {
     paddingVertical: 0,
   },
   slashSuggestionItem: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   slashSuggestionItemLast: {
     borderBottomWidth: 0,
   },
   slashSuggestionItemPressed: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
   },
   slashSuggestionTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   slashSuggestionSummary: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     marginTop: 2,
   },
   renameModalCard: {
-    backgroundColor: colors.bgItem,
+    backgroundColor: theme.colors.bgItem,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.lg,
-    gap: spacing.md,
+    borderColor: theme.colors.border,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.md,
   },
   renameModalTitle: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
   },
   attachmentModalHint: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   attachmentSuggestionsList: {
     maxHeight: 170,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     borderRadius: 10,
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgMain,
   },
   attachmentSuggestionsListContent: {
     paddingVertical: 0,
   },
   attachmentSuggestionItem: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   attachmentSuggestionItemLast: {
     borderBottomWidth: 0,
   },
   attachmentSuggestionItemPressed: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
   },
   attachmentSuggestionText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
   },
   renameModalInput: {
-    color: colors.textPrimary,
-    backgroundColor: colors.bgInput,
+    color: theme.colors.textPrimary,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: theme.colors.border,
     borderRadius: 10,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     fontSize: 15,
   },
   attachmentListColumn: {
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     maxHeight: 180,
   },
   attachmentListRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     borderRadius: 8,
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
+    backgroundColor: theme.colors.bgMain,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
   },
   attachmentListPath: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     flex: 1,
   },
   attachmentRemoveButton: {
@@ -10672,8 +10698,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
   },
   attachmentRemoveButtonPressed: {
     opacity: 0.8,
@@ -10681,29 +10707,29 @@ const styles = StyleSheet.create({
   renameModalActions: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   renameModalButton: {
     borderRadius: 10,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.sm,
     borderWidth: 1,
   },
   renameModalButtonSecondary: {
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgMain,
   },
   renameModalButtonSecondaryText: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
   },
   renameModalButtonPrimary: {
-    borderColor: colors.accent,
-    backgroundColor: colors.accent,
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accent,
   },
   renameModalButtonPrimaryPressed: {
-    backgroundColor: colors.accentPressed,
-    borderColor: colors.accentPressed,
+    backgroundColor: theme.colors.accentPressed,
+    borderColor: theme.colors.accentPressed,
   },
   renameModalButtonDisabled: {
     opacity: 0.45,
@@ -10712,48 +10738,48 @@ const styles = StyleSheet.create({
     opacity: 0.8,
   },
   renameModalButtonPrimaryText: {
-    ...typography.body,
-    color: colors.black,
+    ...theme.typography.body,
+    color: theme.colors.accentText,
     fontWeight: '600',
   },
   userInputModalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    backgroundColor: theme.colors.overlayBackdrop,
     justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
   },
   userInputModalCard: {
-    backgroundColor: colors.bgItem,
+    backgroundColor: theme.colors.bgItem,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: colors.borderHighlight,
-    padding: spacing.lg,
-    gap: spacing.md,
+    borderColor: theme.colors.borderHighlight,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.md,
     maxHeight: '80%',
   },
   planPromptModalCard: {
-    backgroundColor: colors.bgItem,
+    backgroundColor: theme.colors.bgItem,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: colors.borderHighlight,
-    padding: spacing.lg,
-    gap: spacing.md,
+    borderColor: theme.colors.borderHighlight,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.md,
   },
   userInputModalTitle: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
   },
   planPromptOptionsColumn: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   planPromptOptionButton: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgMain,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgMain,
     borderRadius: 10,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    gap: spacing.xs,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.md,
+    gap: theme.spacing.xs,
   },
   planPromptOptionButtonPressed: {
     opacity: 0.88,
@@ -10762,59 +10788,59 @@ const styles = StyleSheet.create({
     opacity: 0.45,
   },
   planPromptOptionTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   planPromptOptionTitleDisabled: {
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   planPromptOptionDescription: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   planPromptOptionDescriptionDisabled: {
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   userInputQuestionsList: {
     maxHeight: 380,
   },
   userInputQuestionsListContent: {
-    gap: spacing.md,
+    gap: theme.spacing.md,
   },
   userInputQuestionCard: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     borderRadius: 10,
-    backgroundColor: colors.bgMain,
-    padding: spacing.sm,
-    gap: spacing.xs,
+    backgroundColor: theme.colors.bgMain,
+    padding: theme.spacing.sm,
+    gap: theme.spacing.xs,
   },
   userInputQuestionHeader: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   userInputQuestionText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   userInputOptionsColumn: {
-    gap: spacing.xs,
-    marginTop: spacing.xs,
+    gap: theme.spacing.xs,
+    marginTop: theme.spacing.xs,
   },
   userInputOptionButton: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
     borderRadius: 10,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
     gap: 2,
   },
   userInputOptionButtonSelected: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.bgInput,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgInput,
   },
   userInputOptionButtonPressed: {
     opacity: 0.85,
@@ -10822,32 +10848,32 @@ const styles = StyleSheet.create({
   userInputOptionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   userInputOptionIndex: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontWeight: '700',
     minWidth: 18,
   },
   userInputOptionLabel: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     flex: 1,
     fontWeight: '600',
   },
   userInputOptionDescription: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   userInputAnswerInput: {
-    color: colors.textPrimary,
-    backgroundColor: colors.bgInput,
+    color: theme.colors.textPrimary,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: theme.colors.border,
     borderRadius: 8,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
     minHeight: 42,
     textAlignVertical: 'top',
   },
@@ -10855,15 +10881,15 @@ const styles = StyleSheet.create({
     textAlignVertical: 'center',
   },
   userInputErrorText: {
-    ...typography.caption,
-    color: colors.error,
+    ...theme.typography.caption,
+    color: theme.colors.error,
   },
   userInputSubmitButton: {
     borderWidth: 1,
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.bgInput,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgInput,
     borderRadius: 10,
-    paddingVertical: spacing.sm,
+    paddingVertical: theme.spacing.sm,
     alignItems: 'center',
   },
   userInputSubmitButtonPressed: {
@@ -10873,8 +10899,8 @@ const styles = StyleSheet.create({
     opacity: 0.45,
   },
   userInputSubmitButtonText: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
 
@@ -10886,47 +10912,47 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.xl,
-    paddingBottom: spacing.xxl * 2,
+    paddingHorizontal: theme.spacing.xl,
+    paddingBottom: theme.spacing.xxl * 2,
   },
   composeIcon: {
-    marginBottom: spacing.lg,
+    marginBottom: theme.spacing.lg,
   },
   composeTitle: {
     fontSize: 28,
     fontWeight: '700',
-    color: colors.textPrimary,
-    marginBottom: spacing.xs,
+    color: theme.colors.textPrimary,
+    marginBottom: theme.spacing.xs,
   },
   composeSubtitle: {
-    ...typography.body,
-    color: colors.textMuted,
-    marginBottom: spacing.lg,
+    ...theme.typography.body,
+    color: theme.colors.textMuted,
+    marginBottom: theme.spacing.lg,
   },
   workspaceSelectBtn: {
     width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    marginBottom: spacing.xl * 2,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    marginBottom: theme.spacing.xl * 2,
   },
   workspacePathSelectBtn: {
     alignItems: 'flex-start',
-    paddingTop: spacing.md,
-    paddingBottom: spacing.md,
+    paddingTop: theme.spacing.md,
+    paddingBottom: theme.spacing.md,
   },
   workspaceSelectBtnPressed: {
     opacity: 0.85,
   },
   workspaceSelectLabel: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     flex: 1,
   },
   workspacePathSelectLabel: {
@@ -10935,23 +10961,23 @@ const styles = StyleSheet.create({
   },
   suggestions: {
     flexDirection: 'row',
-    gap: spacing.md,
+    gap: theme.spacing.md,
     width: '100%',
   },
   suggestionCard: {
     flex: 1,
-    backgroundColor: colors.bgItem,
+    backgroundColor: theme.colors.bgItem,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: theme.colors.border,
     borderRadius: 12,
-    padding: spacing.md,
+    padding: theme.spacing.md,
   },
   suggestionCardPressed: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
   },
   suggestionText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     lineHeight: 18,
   },
 
@@ -10964,111 +10990,112 @@ const styles = StyleSheet.create({
   },
   messageListContent: {
     flexGrow: 1,
-    padding: spacing.lg,
-    paddingTop: spacing.lg,
-    paddingBottom: spacing.xl,
-    gap: spacing.xl,
+    padding: theme.spacing.lg,
+    paddingTop: theme.spacing.lg,
+    paddingBottom: theme.spacing.xl,
+    gap: theme.spacing.xl,
   },
   chatMessageBlock: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   messagePaginationWrap: {
     alignItems: 'flex-start',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   messagePaginationButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgItem,
     borderRadius: 999,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
   },
   messagePaginationButtonPressed: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
   },
   messagePaginationButtonText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   messagePaginationMeta: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginLeft: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    marginLeft: theme.spacing.xs,
   },
   inlineChoiceOptions: {
-    marginLeft: spacing.sm,
-    gap: spacing.xs,
+    marginLeft: theme.spacing.sm,
+    gap: theme.spacing.xs,
   },
   inlineChoiceOptionButton: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
     borderRadius: 10,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
     gap: 2,
   },
   inlineChoiceOptionButtonPressed: {
-    backgroundColor: colors.bgInput,
-    borderColor: colors.borderHighlight,
+    backgroundColor: theme.colors.bgInput,
+    borderColor: theme.colors.borderHighlight,
   },
   inlineChoiceOptionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   inlineChoiceOptionIndex: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontWeight: '700',
     minWidth: 18,
   },
   inlineChoiceOptionLabel: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
     flex: 1,
   },
   inlineChoiceOptionDescription: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   inlineChoiceHint: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     marginTop: 2,
-    marginLeft: spacing.xs,
+    marginLeft: theme.spacing.xs,
   },
   chatLoadingContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.xl,
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.xl,
   },
   chatLoadingText: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
 
   // Streaming thinking text
   streamingText: {
-    ...typography.body,
+    ...theme.typography.body,
     fontStyle: 'italic',
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
     lineHeight: 20,
   },
 
   // Error
   errorText: {
-    ...typography.caption,
-    color: colors.error,
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.error,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.xs,
   },
 });
+};

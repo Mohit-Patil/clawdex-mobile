@@ -1,9 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useMemo } from 'react';
 import { StyleSheet, Text } from 'react-native';
 import Animated, { FadeInUp } from 'react-native-reanimated';
 
 import type { RunEvent } from '../api/types';
-import { colors, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 interface StatusLineProps {
   event: RunEvent;
@@ -15,15 +16,19 @@ const labels: Record<string, string> = {
   'run.failed': 'Run failed',
 };
 
-const icons: Record<string, { name: keyof typeof Ionicons.glyphMap; color: string }> = {
-  'run.started': { name: 'play-circle-outline', color: colors.statusRunning },
-  'run.completed': { name: 'checkmark-circle-outline', color: colors.statusComplete },
-  'run.failed': { name: 'close-circle-outline', color: colors.statusError },
-};
-
 export function StatusLine({ event }: StatusLineProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const icons: Record<string, { name: keyof typeof Ionicons.glyphMap; color: string }> = {
+    'run.started': { name: 'play-circle-outline', color: theme.colors.statusRunning },
+    'run.completed': { name: 'checkmark-circle-outline', color: theme.colors.statusComplete },
+    'run.failed': { name: 'close-circle-outline', color: theme.colors.statusError },
+  };
   const label = labels[event.eventType] ?? event.eventType;
-  const icon = icons[event.eventType] ?? { name: 'ellipse-outline', color: colors.textMuted };
+  const icon = icons[event.eventType] ?? {
+    name: 'ellipse-outline',
+    color: theme.colors.textMuted,
+  };
   const detail = event.detail;
 
   return (
@@ -37,16 +42,17 @@ export function StatusLine({ event }: StatusLineProps) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.xs,
-  },
-  text: {
-    ...typography.caption,
-    fontStyle: 'italic',
-    color: colors.textMuted,
-  },
-});
+const createStyles = (theme: AppTheme) =>
+  StyleSheet.create({
+    container: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+      paddingVertical: theme.spacing.xs,
+    },
+    text: {
+      ...theme.typography.caption,
+      fontStyle: 'italic',
+      color: theme.colors.textMuted,
+    },
+  });

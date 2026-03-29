@@ -1,6 +1,7 @@
 import {
   buildComposerUsageLimitBadges,
   formatComposerUsageLimitLabel,
+  formatComposerUsageLimitResetAt,
 } from '../usageLimitBadges';
 
 describe('composerUsageLimits', () => {
@@ -27,12 +28,14 @@ describe('composerUsageLimits', () => {
         id: 'primary',
         label: '5h',
         remainingPercent: 66,
+        resetsAt: 1_700_000_000,
         tone: 'neutral',
       },
       {
         id: 'secondary',
         label: 'weekly',
         remainingPercent: 21,
+        resetsAt: 1_700_000_100,
         tone: 'warning',
       },
     ]);
@@ -61,12 +64,14 @@ describe('composerUsageLimits', () => {
         id: 'primary',
         label: '1h',
         remainingPercent: 0,
+        resetsAt: null,
         tone: 'critical',
       },
       {
         id: 'secondary',
         label: '1d',
         remainingPercent: 10,
+        resetsAt: null,
         tone: 'critical',
       },
     ]);
@@ -91,6 +96,7 @@ describe('composerUsageLimits', () => {
         id: 'secondary',
         label: '2h',
         remainingPercent: 55,
+        resetsAt: null,
         tone: 'neutral',
       },
     ]);
@@ -125,14 +131,26 @@ describe('composerUsageLimits', () => {
         id: 'primary',
         label: '5h',
         remainingPercent: 69,
+        resetsAt: 1_700_000_000,
         tone: 'neutral',
       },
       {
         id: 'secondary',
         label: 'weekly',
         remainingPercent: 18,
+        resetsAt: 1_700_000_100,
         tone: 'warning',
       },
     ]);
+  });
+
+  it('formats reset timestamps in local-friendly text', () => {
+    expect(
+      formatComposerUsageLimitResetAt(1_700_000_000, {
+        locale: 'en-US',
+        timeZone: 'UTC',
+      })
+    ).toBe('Tue, Nov 14, 10:13 PM');
+    expect(formatComposerUsageLimitResetAt(null)).toBe('Unknown');
   });
 });

@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   type NativeSyntheticEvent,
@@ -17,7 +17,7 @@ import {
 import type { VoiceState } from '../hooks/useVoiceRecorder';
 import { resolveComposerBottomSpacing } from './chat-input-layout';
 import { VoiceRecordingWaveform } from './VoiceRecordingWaveform';
-import { colors, radius, spacing } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 interface ChatInputProps {
   value: string;
@@ -64,6 +64,9 @@ export function ChatInput({
   keyboardVisible = false,
   footer = null,
 }: ChatInputProps) {
+  const theme = useAppTheme();
+  const { colors } = theme;
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const INPUT_TEXT_LINE_HEIGHT = 20;
   const INPUT_TEXT_VERTICAL_PADDING = Platform.OS === 'ios' ? 2 : 0;
   const INPUT_TEXT_MIN_HEIGHT = 20;
@@ -214,7 +217,7 @@ export function ChatInput({
                   style={[styles.input, { height: inputHeight }]}
                   value={value}
                   onChangeText={onChangeText}
-                  keyboardAppearance="dark"
+                  keyboardAppearance={theme.keyboardAppearance}
                   onLayout={(event) => {
                     const nextWidth = Math.floor(event.nativeEvent.layout.width);
                     setInputWidth((previousWidth) =>
@@ -304,154 +307,155 @@ export function ChatInput({
   );
 }
 
-const styles = StyleSheet.create({
-  shell: {
-    overflow: 'hidden',
-  },
-  container: {
-    gap: spacing.xs,
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-  },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  footer: {
-    alignItems: 'flex-start',
-    marginTop: 2,
-  },
-  attachmentList: {
-    maxHeight: 34,
-  },
-  attachmentListContent: {
-    gap: spacing.xs,
-    paddingRight: spacing.sm,
-  },
-  attachmentChip: {
-    height: 28,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.bgInput,
-    paddingHorizontal: spacing.sm,
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.xs,
-    maxWidth: 260,
-  },
-  attachmentChipPressed: {
-    backgroundColor: colors.bgItem,
-  },
-  attachmentChipText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    flexShrink: 1,
-  },
-  plusBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  plusBtnPressed: {
-    backgroundColor: colors.bgItem,
-  },
-  plusBtnDisabled: {
-    opacity: 0.45,
-  },
-  inputWrapper: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.bgInput,
-    borderWidth: 1,
-    borderColor: colors.borderHighlight,
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-    minHeight: 40,
-    maxHeight: 120,
-  },
-  inputWrapperVoiceActive: {
-    minHeight: 58,
-    paddingVertical: spacing.sm,
-  },
-  input: {
-    flex: 1,
-    color: colors.textPrimary,
-    fontSize: 14,
-    lineHeight: 20,
-    paddingVertical: Platform.OS === 'ios' ? 2 : 0,
-    textAlignVertical: 'top',
-  },
-  inputMeasure: {
-    position: 'absolute',
-    opacity: 0,
-    color: colors.textPrimary,
-    fontSize: 14,
-    left: spacing.md,
-    top: spacing.xs,
-  },
-  voiceStatusContent: {
-    flex: 1,
-    gap: 2,
-    justifyContent: 'center',
-    minHeight: 40,
-  },
-  voiceStatusLabelRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.xs,
-  },
-  voiceStatusDot: {
-    backgroundColor: colors.error,
-    borderRadius: 4,
-    height: 8,
-    width: 8,
-  },
-  voiceStatusDotBusy: {
-    opacity: 0.82,
-  },
-  voiceStatusTitle: {
-    color: colors.textPrimary,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  voiceStatusHint: {
-    color: colors.textMuted,
-    fontSize: 12,
-    lineHeight: 16,
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginLeft: spacing.xs,
-    gap: spacing.xs,
-  },
-  sendBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.bgItem,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  micBtnRecording: {
-    borderWidth: 1.5,
-    borderColor: colors.error,
-  },
-  stopButtonContent: {
-    width: 20,
-    height: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stopButtonSpinner: {
-    position: 'absolute',
-  },
-});
+const createStyles = (theme: AppTheme) =>
+  StyleSheet.create({
+    shell: {
+      overflow: 'hidden',
+    },
+    container: {
+      gap: theme.spacing.xs,
+      paddingHorizontal: theme.spacing.lg,
+      paddingTop: theme.spacing.sm,
+    },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+    },
+    footer: {
+      alignItems: 'flex-start',
+      marginTop: 2,
+    },
+    attachmentList: {
+      maxHeight: 34,
+    },
+    attachmentListContent: {
+      gap: theme.spacing.xs,
+      paddingRight: theme.spacing.sm,
+    },
+    attachmentChip: {
+      height: 28,
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.colors.borderHighlight,
+      backgroundColor: theme.colors.bgInput,
+      paddingHorizontal: theme.spacing.sm,
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: theme.spacing.xs,
+      maxWidth: 260,
+    },
+    attachmentChipPressed: {
+      backgroundColor: theme.colors.bgItem,
+    },
+    attachmentChipText: {
+      color: theme.colors.textSecondary,
+      fontSize: 12,
+      flexShrink: 1,
+    },
+    plusBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    plusBtnPressed: {
+      backgroundColor: theme.colors.bgItem,
+    },
+    plusBtnDisabled: {
+      opacity: 0.45,
+    },
+    inputWrapper: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: theme.colors.bgInput,
+      borderWidth: 1,
+      borderColor: theme.colors.borderHighlight,
+      borderRadius: theme.radius.lg,
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.xs,
+      minHeight: 40,
+      maxHeight: 120,
+    },
+    inputWrapperVoiceActive: {
+      minHeight: 58,
+      paddingVertical: theme.spacing.sm,
+    },
+    input: {
+      flex: 1,
+      color: theme.colors.textPrimary,
+      fontSize: 14,
+      lineHeight: 20,
+      paddingVertical: Platform.OS === 'ios' ? 2 : 0,
+      textAlignVertical: 'top',
+    },
+    inputMeasure: {
+      position: 'absolute',
+      opacity: 0,
+      color: theme.colors.textPrimary,
+      fontSize: 14,
+      left: theme.spacing.md,
+      top: theme.spacing.xs,
+    },
+    voiceStatusContent: {
+      flex: 1,
+      gap: 2,
+      justifyContent: 'center',
+      minHeight: 40,
+    },
+    voiceStatusLabelRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: theme.spacing.xs,
+    },
+    voiceStatusDot: {
+      backgroundColor: theme.colors.error,
+      borderRadius: 4,
+      height: 8,
+      width: 8,
+    },
+    voiceStatusDotBusy: {
+      opacity: 0.82,
+    },
+    voiceStatusTitle: {
+      color: theme.colors.textPrimary,
+      fontSize: 13,
+      fontWeight: '600',
+    },
+    voiceStatusHint: {
+      color: theme.colors.textMuted,
+      fontSize: 12,
+      lineHeight: 16,
+    },
+    actionButtons: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginLeft: theme.spacing.xs,
+      gap: theme.spacing.xs,
+    },
+    sendBtn: {
+      width: 28,
+      height: 28,
+      borderRadius: 14,
+      backgroundColor: theme.colors.bgItem,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    micBtnRecording: {
+      borderWidth: 1.5,
+      borderColor: theme.colors.error,
+    },
+    stopButtonContent: {
+      width: 20,
+      height: 20,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stopButtonSpinner: {
+      position: 'absolute',
+    },
+  });

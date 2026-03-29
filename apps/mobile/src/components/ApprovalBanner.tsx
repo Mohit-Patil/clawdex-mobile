@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type { ApprovalDecision, PendingApproval } from '../api/types';
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 interface ApprovalBannerProps {
   approval: PendingApproval;
@@ -12,6 +12,9 @@ interface ApprovalBannerProps {
 }
 
 export function ApprovalBanner({ approval, onResolve }: ApprovalBannerProps) {
+  const theme = useAppTheme();
+  const { colors } = theme;
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [resolving, setResolving] = useState<string | null>(null);
 
   const handleResolve = (decision: ApprovalDecision) => {
@@ -134,74 +137,75 @@ function decisionKey(decision: ApprovalDecision): string {
   return 'unknown';
 }
 
-const styles = StyleSheet.create({
-  container: {
-    marginHorizontal: spacing.lg,
-    marginBottom: spacing.sm,
-    backgroundColor: colors.bgItem,
-    borderWidth: 1,
-    borderColor: colors.borderHighlight,
-    borderRadius: radius.md,
-    padding: spacing.md,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    marginBottom: spacing.sm,
-  },
-  title: {
-    ...typography.headline,
-    color: colors.accent,
-    fontSize: 13,
-  },
-  command: {
-    fontSize: 12,
-    color: colors.textPrimary,
-    lineHeight: 18,
-    backgroundColor: colors.bgItem,
-    borderRadius: radius.sm,
-    padding: spacing.sm,
-    marginBottom: spacing.sm,
-    overflow: 'hidden',
-  },
-  reason: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    marginBottom: spacing.sm,
-  },
-  actions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  btn: {
-    flexGrow: 1,
-    minWidth: 112,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-  },
-  btnPressed: {
-    opacity: 0.7,
-  },
-  denyBtn: {
-    borderColor: 'rgba(239, 68, 68, 0.3)',
-    backgroundColor: 'rgba(239, 68, 68, 0.08)',
-  },
-  acceptBtn: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.bgInput,
-  },
-  allowSimilarBtn: {
-    flexBasis: '100%',
-  },
-  btnText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-});
+const createStyles = (theme: AppTheme) =>
+  StyleSheet.create({
+    container: {
+      marginHorizontal: theme.spacing.lg,
+      marginBottom: theme.spacing.sm,
+      backgroundColor: theme.colors.bgItem,
+      borderWidth: 1,
+      borderColor: theme.colors.borderHighlight,
+      borderRadius: theme.radius.md,
+      padding: theme.spacing.md,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+      marginBottom: theme.spacing.sm,
+    },
+    title: {
+      ...theme.typography.headline,
+      color: theme.colors.accent,
+      fontSize: 13,
+    },
+    command: {
+      fontSize: 12,
+      color: theme.colors.textPrimary,
+      lineHeight: 18,
+      backgroundColor: theme.colors.bgItem,
+      borderRadius: theme.radius.sm,
+      padding: theme.spacing.sm,
+      marginBottom: theme.spacing.sm,
+      overflow: 'hidden',
+    },
+    reason: {
+      ...theme.typography.caption,
+      color: theme.colors.textSecondary,
+      marginBottom: theme.spacing.sm,
+    },
+    actions: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: theme.spacing.sm,
+    },
+    btn: {
+      flexGrow: 1,
+      minWidth: 112,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.xs,
+      paddingVertical: theme.spacing.sm,
+      borderRadius: theme.radius.sm,
+      borderWidth: 1,
+    },
+    btnPressed: {
+      opacity: 0.7,
+    },
+    denyBtn: {
+      borderColor: 'rgba(239, 68, 68, 0.3)',
+      backgroundColor: theme.colors.errorBg,
+    },
+    acceptBtn: {
+      borderColor: theme.colors.borderHighlight,
+      backgroundColor: theme.colors.bgInput,
+    },
+    allowSimilarBtn: {
+      flexBasis: '100%',
+    },
+    btnText: {
+      fontSize: 13,
+      fontWeight: '600',
+    },
+  });

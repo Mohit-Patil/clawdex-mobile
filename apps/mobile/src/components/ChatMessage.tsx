@@ -14,7 +14,7 @@ import {
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 import { toMarkdownImageSource } from './chatImageSource';
 
 interface ChatMessageProps {
@@ -38,6 +38,9 @@ type UserMessageBlock =
   | { kind: 'image'; source: ImageSourcePropType; accessibilityLabel?: string };
 
 function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }: ChatMessageProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const markdownStyles = useMemo(() => createMarkdownStyles(theme), [theme]);
   const isUser = message.role === 'user';
   const markdownRules = useMemo(
     () => createMarkdownRules(bridgeUrl, bridgeToken),
@@ -73,7 +76,7 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
             if (block.kind === 'file') {
               return (
                 <View key={`${message.id}-file-${String(index)}`} style={styles.userFileChip}>
-                  <Ionicons name="document-text-outline" size={12} color={colors.textMuted} />
+                  <Ionicons name="document-text-outline" size={12} color={theme.colors.textMuted} />
                   <Text style={styles.userFileChipText} numberOfLines={1}>
                     {block.value}
                   </Text>
@@ -139,14 +142,14 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
                   <Ionicons
                     name="sparkles-outline"
                     size={13}
-                    color={colors.textMuted}
+                    color={theme.colors.textMuted}
                   />
                   <Text style={styles.reasoningTitle}>{entry.title}</Text>
                   {hasDetails ? (
                     <Ionicons
                       name={expanded ? 'chevron-up' : 'chevron-down'}
                       size={14}
-                      color={colors.textMuted}
+                      color={theme.colors.textMuted}
                     />
                   ) : null}
                 </View>
@@ -205,7 +208,7 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
                   <Ionicons
                     name={visual.icon}
                     size={14}
-                    color={visual.isError ? colors.statusError : '#F5A524'}
+                    color={visual.isError ? theme.colors.statusError : theme.colors.warning}
                   />
                   <Text style={styles.subAgentTitle}>{entry.title}</Text>
                 </View>
@@ -266,7 +269,7 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
                   <Ionicons
                     name={visual.icon}
                     size={14}
-                    color={visual.isError ? colors.statusError : colors.statusRunning}
+                    color={visual.isError ? theme.colors.statusError : theme.colors.statusRunning}
                   />
                   <Text
                     style={[
@@ -281,7 +284,7 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
                     <Ionicons
                       name={expanded ? 'chevron-up' : 'chevron-down'}
                       size={14}
-                      color={colors.textMuted}
+                      color={theme.colors.textMuted}
                     />
                   ) : null}
                 </View>
@@ -345,6 +348,8 @@ ChatMessage.displayName = 'ChatMessage';
 export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
   messages,
 }: ToolActivityGroupProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [expanded, setExpanded] = useState(false);
   const entries = useMemo(() => {
     const flattened: Array<{ id: string; title: string }> = [];
@@ -387,12 +392,12 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
         ]}
       >
         <View style={styles.toolGroupHeader}>
-          <Ionicons name="construct-outline" size={14} color={colors.textMuted} />
+          <Ionicons name="construct-outline" size={14} color={theme.colors.textMuted} />
           <Text style={styles.toolGroupTitle}>{summary}</Text>
           <Ionicons
             name={expanded ? 'chevron-up' : 'chevron-down'}
             size={14}
-            color={colors.textMuted}
+            color={theme.colors.textMuted}
           />
         </View>
 
@@ -417,18 +422,18 @@ ToolActivityGroup.displayName = 'ToolActivityGroup';
 
 const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
-const markdownStyles = StyleSheet.create({
+const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
   body: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
   },
   code_inline: {
     fontFamily: monoFont,
     fontSize: 12,
-    backgroundColor: colors.inlineCodeBg,
-    color: colors.inlineCodeText,
+    backgroundColor: theme.colors.inlineCodeBg,
+    color: theme.colors.inlineCodeText,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.inlineCodeBorder,
+    borderColor: theme.colors.inlineCodeBorder,
     borderRadius: 4,
     paddingHorizontal: 5,
     paddingVertical: 2,
@@ -436,45 +441,45 @@ const markdownStyles = StyleSheet.create({
   code_block: {
     fontFamily: monoFont,
     fontSize: 12,
-    backgroundColor: colors.bgInput,
-    color: colors.textPrimary,
+    backgroundColor: theme.colors.bgInput,
+    color: theme.colors.textPrimary,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    borderRadius: radius.sm,
-    padding: spacing.md,
-    marginVertical: spacing.sm,
+    borderColor: theme.colors.borderHighlight,
+    borderRadius: theme.radius.sm,
+    padding: theme.spacing.md,
+    marginVertical: theme.spacing.sm,
   },
   fence: {
     fontFamily: monoFont,
     fontSize: 12,
-    backgroundColor: colors.bgInput,
-    color: colors.textPrimary,
+    backgroundColor: theme.colors.bgInput,
+    color: theme.colors.textPrimary,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    borderRadius: radius.sm,
-    padding: spacing.md,
-    marginVertical: spacing.sm,
+    borderColor: theme.colors.borderHighlight,
+    borderRadius: theme.radius.sm,
+    padding: theme.spacing.md,
+    marginVertical: theme.spacing.sm,
   },
   link: {
-    color: colors.accent,
+    color: theme.colors.accent,
     textDecorationLine: 'underline',
   },
   paragraph: {
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   bullet_list: {
-    marginVertical: spacing.xs,
+    marginVertical: theme.spacing.xs,
   },
   ordered_list: {
-    marginVertical: spacing.xs,
+    marginVertical: theme.spacing.xs,
   },
   list_item: {
     marginVertical: 2,
   },
   strong: {
     fontWeight: '700',
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   em: {
     fontStyle: 'italic',
@@ -609,7 +614,15 @@ function createMarkdownRules(
   };
 }
 
-const styles = StyleSheet.create({
+const createStyles = (theme: AppTheme) => {
+  const subAgentBorder = theme.isDark
+    ? 'rgba(245, 165, 36, 0.35)'
+    : 'rgba(217, 119, 6, 0.24)';
+  const subAgentBackground = theme.isDark
+    ? 'rgba(245, 165, 36, 0.08)'
+    : 'rgba(217, 119, 6, 0.08)';
+
+  return StyleSheet.create({
   messageWrapper: {
     maxWidth: '92%',
   },
@@ -621,71 +634,71 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   userBubble: {
-    backgroundColor: colors.userBubble,
+    backgroundColor: theme.colors.userBubble,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.userBubbleBorder,
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    borderColor: theme.colors.userBubbleBorder,
+    borderRadius: theme.radius.lg,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
   },
   userBubbleWithAttachments: {
     minWidth: 196,
   },
   userBubbleContent: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   userMessageText: {
     fontFamily: monoFont,
     fontSize: 14,
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
     lineHeight: 20,
   },
   userFileChip: {
     flexDirection: 'row',
     alignItems: 'center',
     alignSelf: 'flex-start',
-    gap: spacing.xs,
-    borderRadius: radius.sm,
+    gap: theme.spacing.xs,
+    borderRadius: theme.radius.sm,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.userBubbleBorder,
-    backgroundColor: colors.bgMain,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
+    borderColor: theme.colors.userBubbleBorder,
+    backgroundColor: theme.colors.bgMain,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
     maxWidth: '100%',
   },
   userFileChipText: {
     fontFamily: monoFont,
     fontSize: 12,
     lineHeight: 16,
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
     flexShrink: 1,
   },
   markdownImage: {
     width: '100%',
-    borderRadius: radius.sm,
-    marginVertical: spacing.sm,
-    backgroundColor: colors.bgInput,
+    borderRadius: theme.radius.sm,
+    marginVertical: theme.spacing.sm,
+    backgroundColor: theme.colors.bgInput,
   },
   markdownImageFallback: {
     minHeight: 120,
     maxHeight: 260,
   },
   timelineCardStack: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   subAgentCardStack: {
-    gap: spacing.xs + 2,
+    gap: theme.spacing.xs + 2,
   },
   reasoningStack: {
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   reasoningCard: {
-    borderRadius: radius.md,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(208, 213, 223, 0.18)',
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 1,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgCanvasAccent,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm + 1,
   },
   reasoningCardInteractive: {
     overflow: 'hidden',
@@ -696,43 +709,43 @@ const styles = StyleSheet.create({
   reasoningHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   reasoningTitle: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontSize: 12,
     letterSpacing: 0.2,
     textTransform: 'none',
     flex: 1,
   },
   reasoningPreview: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     lineHeight: 17,
-    marginTop: spacing.xs,
+    marginTop: theme.spacing.xs,
   },
   reasoningDetailWrap: {
-    marginTop: spacing.xs,
-    gap: spacing.xs,
+    marginTop: theme.spacing.xs,
+    gap: theme.spacing.xs,
   },
   reasoningDetailLine: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     lineHeight: 17,
   },
   reasoningToggleText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginTop: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    marginTop: theme.spacing.xs,
   },
   toolGroupCard: {
-    borderRadius: radius.md,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm + 2,
   },
   toolGroupCardInteractive: {
     overflow: 'hidden',
@@ -743,88 +756,88 @@ const styles = StyleSheet.create({
   toolGroupHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   toolGroupTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     flex: 1,
     fontSize: 13,
     lineHeight: 18,
   },
   toolGroupList: {
-    marginTop: spacing.xs,
+    marginTop: theme.spacing.xs,
     gap: 4,
   },
   toolGroupRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   toolGroupBullet: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     lineHeight: 16,
     width: 8,
   },
   toolGroupRowText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     lineHeight: 16,
     flex: 1,
     fontFamily: monoFont,
   },
   toolGroupMoreText: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     marginTop: 2,
-    paddingLeft: spacing.lg,
+    paddingLeft: theme.spacing.lg,
   },
   subAgentCard: {
-    borderRadius: radius.md,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(245, 165, 36, 0.35)',
-    backgroundColor: 'rgba(245, 165, 36, 0.08)',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 1,
+    borderColor: subAgentBorder,
+    backgroundColor: subAgentBackground,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm + 1,
   },
   subAgentCardError: {
-    borderColor: colors.statusError,
-    backgroundColor: colors.errorBg,
+    borderColor: theme.colors.statusError,
+    backgroundColor: theme.colors.errorBg,
   },
   subAgentHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   subAgentTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     flex: 1,
     fontSize: 13,
     lineHeight: 18,
   },
   subAgentDetailWrap: {
-    marginTop: spacing.xs,
-    paddingLeft: spacing.lg + 2,
+    marginTop: theme.spacing.xs,
+    paddingLeft: theme.spacing.lg + 2,
     gap: 2,
   },
   subAgentDetailLine: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     lineHeight: 16,
   },
   timelineCard: {
-    borderRadius: radius.md,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm + 2,
   },
   timelineCardError: {
-    borderColor: colors.statusError,
-    backgroundColor: colors.errorBg,
+    borderColor: theme.colors.statusError,
+    backgroundColor: theme.colors.errorBg,
   },
   timelineCardInteractive: {
     overflow: 'hidden',
@@ -835,11 +848,11 @@ const styles = StyleSheet.create({
   timelineHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   timelineTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     flex: 1,
     fontSize: 13,
     lineHeight: 18,
@@ -850,24 +863,25 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   timelineDetailWrap: {
-    marginTop: spacing.xs,
+    marginTop: theme.spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
-    paddingTop: spacing.xs,
+    borderTopColor: theme.colors.borderLight,
+    paddingTop: theme.spacing.xs,
     gap: 2,
   },
   timelineToggleText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    marginTop: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    marginTop: theme.spacing.xs,
   },
   timelineDetailLine: {
     fontFamily: monoFont,
     fontSize: 11,
     lineHeight: 16,
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
   },
 });
+};
 
 function readMarkdownAttr(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
@@ -888,6 +902,8 @@ function MarkdownImage({
   source: ImageSourcePropType;
   accessibilityLabel?: string;
 }): ReactElement {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
 
   return (

@@ -4,7 +4,7 @@
     "slug": "clawdex-mobile",
     "scheme": "clawdex",
     "version": "5.0.4",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
     "orientation": "portrait",
     "icon": "./assets/brand/app-icon.png",
     "splash": {

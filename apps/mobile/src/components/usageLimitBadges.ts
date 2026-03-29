@@ -6,6 +6,7 @@ export interface ComposerUsageLimitBadgeModel {
   id: 'primary' | 'secondary';
   label: string;
   remainingPercent: number;
+  resetsAt: number | null;
   tone: ComposerUsageLimitTone;
 }
 
@@ -54,6 +55,32 @@ export function formatComposerUsageLimitLabel(windowDurationMins: number | null)
   return `${String(Math.round(windowDurationMins / 1_440))}d`;
 }
 
+export function formatComposerUsageLimitResetAt(
+  resetsAt: number | null,
+  options?: {
+    locale?: string;
+    timeZone?: string;
+  }
+): string {
+  if (resetsAt === null || !Number.isFinite(resetsAt)) {
+    return 'Unknown';
+  }
+
+  const resetDate = new Date(resetsAt * 1000);
+  if (Number.isNaN(resetDate.getTime())) {
+    return 'Unknown';
+  }
+
+  return new Intl.DateTimeFormat(options?.locale, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    ...(options?.timeZone ? { timeZone: options.timeZone } : {}),
+  }).format(resetDate);
+}
+
 function toComposerUsageLimitBadge(
   id: ComposerUsageLimitBadgeModel['id'],
   window: AccountRateLimitWindow | null,
@@ -68,6 +95,7 @@ function toComposerUsageLimitBadge(
     id,
     label: resolveComposerUsageLimitLabel(id, window.windowDurationMins, snapshot),
     remainingPercent,
+    resetsAt: window.resetsAt,
     tone:
       remainingPercent <= 10
         ? 'critical'

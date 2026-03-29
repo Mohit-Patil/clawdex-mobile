@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -15,7 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import type { HostBridgeWsClient } from '../api/ws';
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 interface TerminalScreenProps {
   api: HostBridgeApiClient;
@@ -24,6 +24,8 @@ interface TerminalScreenProps {
 }
 
 export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [command, setCommand] = useState('pwd');
   const [output, setOutput] = useState('');
   const [running, setRunning] = useState(false);
@@ -90,9 +92,9 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
-          <Ionicons name="menu" size={22} color={colors.textMuted} />
+          <Ionicons name="menu" size={22} color={theme.colors.textMuted} />
         </Pressable>
-        <Ionicons name="terminal" size={16} color={colors.textMuted} />
+        <Ionicons name="terminal" size={16} color={theme.colors.textMuted} />
         <Text style={styles.headerTitle}>Terminal</Text>
       </View>
 
@@ -127,13 +129,13 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
             style={styles.input}
             value={command}
             onChangeText={setCommand}
-            keyboardAppearance="dark"
+            keyboardAppearance={theme.keyboardAppearance}
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="send"
             onSubmitEditing={runCommand}
             placeholder="command"
-            placeholderTextColor={colors.textMuted}
+            placeholderTextColor={theme.colors.textMuted}
           />
           <Pressable
             onPress={runCommand}
@@ -144,7 +146,7 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
               running && styles.runBtnDisabled,
             ]}
           >
-            <Ionicons name={running ? 'pause' : 'play'} size={14} color={colors.white} />
+            <Ionicons name={running ? 'pause' : 'play'} size={14} color={theme.colors.accentText} />
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -152,37 +154,39 @@ export function TerminalScreen({ api, ws, onOpenDrawer }: TerminalScreenProps) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000000' }, // Pure black context for terminal
+const createStyles = (theme: AppTheme) => StyleSheet.create({
+  container: { flex: 1, backgroundColor: theme.isDark ? '#000000' : theme.colors.bgMain },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    backgroundColor: colors.bgMain,
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
+    backgroundColor: theme.colors.bgMain,
   },
-  menuBtn: { padding: spacing.xs },
-  headerTitle: { ...typography.headline, color: colors.textPrimary },
-  body: { flex: 1, padding: spacing.md },
+  menuBtn: { padding: theme.spacing.xs },
+  headerTitle: { ...theme.typography.headline, color: theme.colors.textPrimary },
+  body: { flex: 1, padding: theme.spacing.md },
   terminalWindow: {
     flex: 1,
-    backgroundColor: '#1E1E1E', // standard dark term bg
-    borderRadius: radius.md,
+    backgroundColor: theme.isDark ? '#1E1E1E' : theme.colors.bgElevated,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.1)',
+    borderColor: theme.isDark ? 'rgba(255,255,255,0.1)' : theme.colors.border,
     overflow: 'hidden',
-    boxShadow: '0px 10px 20px rgba(0, 0, 0, 0.5)',
+    boxShadow: theme.isDark
+      ? '0px 10px 20px rgba(0, 0, 0, 0.5)'
+      : '0px 10px 20px rgba(15, 23, 42, 0.08)',
   },
   windowHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    backgroundColor: '#323233',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    backgroundColor: theme.isDark ? '#323233' : theme.colors.bgCanvasAccent,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#111',
+    borderBottomColor: theme.isDark ? '#111' : theme.colors.border,
   },
   trafficLights: {
     flexDirection: 'row',
@@ -198,51 +202,51 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   windowTitle: {
-    ...typography.caption,
-    color: '#9E9E9E',
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontWeight: '600',
   },
   output: { flex: 1 },
-  outputContent: { padding: spacing.md },
+  outputContent: { padding: theme.spacing.md },
   outputText: {
-    ...typography.mono,
-    color: '#D4D7DF',
+    ...theme.typography.mono,
+    color: theme.colors.textPrimary,
     fontSize: 13,
     lineHeight: 20,
   },
   errorText: {
-    ...typography.caption,
-    color: colors.error,
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.error,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.xs,
   },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    paddingTop: spacing.md,
-    paddingBottom: Platform.OS === 'ios' ? spacing.xl : spacing.md,
+    gap: theme.spacing.sm,
+    paddingTop: theme.spacing.md,
+    paddingBottom: Platform.OS === 'ios' ? theme.spacing.xl : theme.spacing.md,
   },
-  prompt: { ...typography.mono, color: colors.textSecondary, fontWeight: '700' },
+  prompt: { ...theme.typography.mono, color: theme.colors.textSecondary, fontWeight: '700' },
   input: {
     flex: 1,
-    ...typography.mono,
-    color: colors.textPrimary,
-    backgroundColor: '#1E1E1E',
+    ...theme.typography.mono,
+    color: theme.colors.textPrimary,
+    backgroundColor: theme.isDark ? '#1E1E1E' : theme.colors.bgInput,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.1)',
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
+    borderColor: theme.isDark ? 'rgba(255,255,255,0.1)' : theme.colors.border,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.md,
     paddingVertical: 10,
   },
   runBtn: {
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: colors.accent,
+    backgroundColor: theme.colors.accent,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  runBtnPressed: { backgroundColor: colors.accentPressed },
-  runBtnDisabled: { backgroundColor: colors.bgItem },
+  runBtnPressed: { backgroundColor: theme.colors.accentPressed },
+  runBtnDisabled: { backgroundColor: theme.colors.bgItem },
 });

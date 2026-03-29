@@ -26,7 +26,7 @@ import {
   buildChatWorkspaceSections,
   type ChatWorkspaceSection,
 } from './chatThreadTree';
-import { colors, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 type Screen = 'Main' | 'Settings' | 'Privacy' | 'Terms';
 
@@ -80,6 +80,8 @@ export function DrawerContent({
   onNewChat,
   onNavigate,
 }: DrawerContentProps) {
+  const theme = useAppTheme();
+  const subAgentColor = theme.colors.warning;
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -92,6 +94,7 @@ export function DrawerContent({
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const hasAppliedInitialCollapseRef = useRef(false);
   const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const allChatSections = useMemo(() => buildChatWorkspaceSections(chats), [chats]);
   const filteredChats = useMemo(
     () => filterDrawerChatsByEngines(chats, selectedChatEngines),
@@ -473,7 +476,7 @@ export function DrawerContent({
                 ]}
                 onPress={handleNewChat}
               >
-                <Ionicons name="add" size={18} color={colors.black} />
+                <Ionicons name="add" size={18} color={theme.colors.accentText} />
                 <Text style={styles.primaryActionText}>New chat</Text>
               </Pressable>
             </View>
@@ -498,7 +501,7 @@ export function DrawerContent({
                   <Ionicons
                     name="funnel-outline"
                     size={14}
-                    color={hasFilteredEngines || filterMenuVisible ? colors.textPrimary : colors.textMuted}
+                    color={hasFilteredEngines || filterMenuVisible ? theme.colors.textPrimary : theme.colors.textMuted}
                   />
                 </Pressable>
                 {filterMenuVisible ? (
@@ -530,7 +533,7 @@ export function DrawerContent({
                             <Ionicons
                               name="checkmark"
                               size={14}
-                              color={colors.textPrimary}
+                              color={theme.colors.textPrimary}
                             />
                           ) : null}
                         </Pressable>
@@ -549,7 +552,7 @@ export function DrawerContent({
 
           {loading ? (
             <View style={styles.emptyStateCard}>
-              <ActivityIndicator color={colors.textMuted} style={styles.loader} />
+              <ActivityIndicator color={theme.colors.textMuted} style={styles.loader} />
               <Text style={styles.emptyTitle}>Loading chats</Text>
               <Text style={styles.emptyHint}>Syncing recent threads from your bridge.</Text>
             </View>
@@ -559,7 +562,7 @@ export function DrawerContent({
                 <Ionicons
                   name="chatbubbles-outline"
                   size={18}
-                  color={colors.textPrimary}
+                  color={theme.colors.textPrimary}
                 />
               </View>
               <Text style={styles.emptyTitle}>{emptyTitle}</Text>
@@ -579,7 +582,7 @@ export function DrawerContent({
                   onRefresh={() => {
                     void loadChats(true);
                   }}
-                  tintColor={colors.textMuted}
+                  tintColor={theme.colors.textMuted}
                 />
               }
               renderSectionHeader={({ section }) => {
@@ -615,7 +618,7 @@ export function DrawerContent({
                         <Ionicons
                           name={collapsed ? 'chevron-forward' : 'chevron-down'}
                           size={14}
-                          color={colors.textMuted}
+                          color={theme.colors.textMuted}
                         />
                       </View>
                     </View>
@@ -633,7 +636,7 @@ export function DrawerContent({
                 const previewText = isSubAgent
                   ? `${describeAgentThreadSource(chat, item.rootThreadId)} • ${formatChatPreview(chat)}`
                   : formatChatPreview(chat);
-                const engineBadgeColors = getChatEngineBadgeColors(chat.engine);
+                const engineBadgeColors = getChatEngineBadgeColors(chat.engine, theme.mode);
                 return (
                   <Pressable
                     style={({ pressed }) => [
@@ -661,7 +664,7 @@ export function DrawerContent({
                           <Ionicons
                             name="git-branch-outline"
                             size={12}
-                            color="#F5A524"
+                            color={subAgentColor}
                             style={styles.chatSubAgentIcon}
                           />
                         ) : null}
@@ -754,7 +757,7 @@ export function DrawerContent({
             ]}
             onPress={() => handleNavigate('Settings')}
           >
-            <Ionicons name="settings-outline" size={16} color={colors.textPrimary} />
+            <Ionicons name="settings-outline" size={16} color={theme.colors.textPrimary} />
             <Text style={styles.footerSettingsText}>Settings</Text>
           </Pressable>
         </View>
@@ -853,10 +856,53 @@ function extractThreadId(event: RpcNotification): string | null {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (theme: AppTheme) => {
+  const connectionBadgeConnectedBg = theme.isDark
+    ? 'rgba(52, 199, 89, 0.12)'
+    : 'rgba(14, 159, 110, 0.16)';
+  const connectionBadgeConnectedBorder = theme.isDark
+    ? 'rgba(52, 199, 89, 0.32)'
+    : 'rgba(14, 159, 110, 0.32)';
+  const connectionBadgeDisconnectedBg = theme.isDark
+    ? 'rgba(245, 158, 11, 0.12)'
+    : 'rgba(197, 106, 18, 0.14)';
+  const connectionBadgeDisconnectedBorder = theme.isDark
+    ? 'rgba(245, 158, 11, 0.28)'
+    : 'rgba(197, 106, 18, 0.28)';
+  const connectionDotConnected = theme.isDark ? '#34C759' : theme.colors.statusComplete;
+  const connectionDotDisconnected = theme.isDark ? '#F59E0B' : theme.colors.warning;
+  const connectionTextConnected = theme.isDark ? '#8EE6AD' : '#0B7A55';
+  const connectionTextDisconnected = theme.isDark ? '#F6C875' : '#9A4A0C';
+  const subAgentAccent = theme.isDark
+    ? 'rgba(245, 165, 36, 0.35)'
+    : 'rgba(217, 119, 6, 0.22)';
+  const subAgentPreview = theme.isDark
+    ? 'rgba(245, 192, 106, 0.9)'
+    : 'rgba(180, 83, 9, 0.82)';
+  const runningPillBg = theme.isDark
+    ? 'rgba(52, 199, 89, 0.12)'
+    : 'rgba(14, 159, 110, 0.14)';
+  const errorPillBg = theme.isDark
+    ? 'rgba(239, 68, 68, 0.14)'
+    : 'rgba(220, 38, 38, 0.10)';
+  const runningPillText = theme.isDark ? '#8EE6AD' : '#0B7A55';
+  const errorPillText = theme.isDark ? '#FFB4B4' : '#B91C1C';
+  const cardShadow = theme.isDark
+    ? '0 12px 28px rgba(0, 0, 0, 0.24)'
+    : '0 12px 24px rgba(15, 23, 42, 0.10)';
+  const drawerPrimaryActionBg = theme.isDark ? theme.colors.accent : '#3F4854';
+  const drawerPrimaryActionPressed = theme.isDark ? theme.colors.accentPressed : '#2F3945';
+  const drawerPrimaryActionBorder = theme.isDark
+    ? theme.colors.accent
+    : 'rgba(63, 72, 84, 0.18)';
+  const drawerPrimaryActionShadow = theme.isDark
+    ? undefined
+    : '0 10px 20px rgba(47, 57, 69, 0.12)';
+
+  return StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgSidebar,
   },
   safeArea: {
     flex: 1,
@@ -867,23 +913,24 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   topDeck: {
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.md,
-    gap: spacing.xs + 2,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.sm,
+    paddingBottom: theme.spacing.md,
+    gap: theme.spacing.xs + 2,
   },
   heroCard: {
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.09)',
-    backgroundColor: '#090C10',
-    padding: spacing.sm + 2,
-    gap: spacing.sm,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgElevated,
+    padding: theme.spacing.sm + 2,
+    gap: theme.spacing.sm,
+    boxShadow: cardShadow,
   },
   heroHeaderRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: spacing.xs + 2,
+    gap: theme.spacing.xs + 2,
   },
   brandBadge: {
     width: 34,
@@ -891,23 +938,23 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#14181D',
+    backgroundColor: theme.colors.bgItem,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: theme.colors.borderLight,
   },
   heroCopy: {
     flex: 1,
     gap: 2,
   },
   heroTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     fontSize: 16,
     fontWeight: '700',
   },
   heroSubtitle: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontSize: 11,
     lineHeight: 14,
   },
@@ -916,17 +963,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     borderRadius: 999,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
     borderWidth: 1,
   },
   connectionBadgeConnected: {
-    backgroundColor: 'rgba(52, 199, 89, 0.12)',
-    borderColor: 'rgba(52, 199, 89, 0.32)',
+    backgroundColor: connectionBadgeConnectedBg,
+    borderColor: connectionBadgeConnectedBorder,
   },
   connectionBadgeDisconnected: {
-    backgroundColor: 'rgba(245, 158, 11, 0.12)',
-    borderColor: 'rgba(245, 158, 11, 0.28)',
+    backgroundColor: connectionBadgeDisconnectedBg,
+    borderColor: connectionBadgeDisconnectedBorder,
   },
   connectionDot: {
     width: 6,
@@ -934,13 +981,13 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   connectionDotConnected: {
-    backgroundColor: '#34C759',
+    backgroundColor: connectionDotConnected,
   },
   connectionDotDisconnected: {
-    backgroundColor: '#F59E0B',
+    backgroundColor: connectionDotDisconnected,
   },
   connectionText: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 10,
     lineHeight: 12,
     fontWeight: '700',
@@ -948,36 +995,36 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   connectionTextConnected: {
-    color: '#8EE6AD',
+    color: connectionTextConnected,
   },
   connectionTextDisconnected: {
-    color: '#F6C875',
+    color: connectionTextDisconnected,
   },
   heroStatsRow: {
     flexDirection: 'row',
     alignItems: 'stretch',
     borderRadius: 14,
-    backgroundColor: '#050608',
+    backgroundColor: theme.colors.bgMain,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
+    borderColor: theme.colors.borderLight,
     overflow: 'hidden',
   },
   heroStat: {
     flex: 1,
     alignItems: 'center',
     gap: 2,
-    paddingVertical: spacing.sm,
+    paddingVertical: theme.spacing.sm,
   },
   heroStatValue: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     fontSize: 15,
     fontWeight: '700',
     fontVariant: ['tabular-nums'],
   },
   heroStatLabel: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontSize: 10,
     lineHeight: 12,
     textTransform: 'uppercase',
@@ -985,28 +1032,31 @@ const styles = StyleSheet.create({
   },
   heroStatsDivider: {
     width: StyleSheet.hairlineWidth,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: theme.colors.borderLight,
   },
   actionRow: {
     flexDirection: 'row',
-    gap: spacing.xs + 2,
+    gap: theme.spacing.xs + 2,
   },
   primaryActionButton: {
     flex: 1,
     height: 42,
     borderRadius: 14,
-    backgroundColor: '#F2F4F8',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: drawerPrimaryActionBorder,
+    backgroundColor: drawerPrimaryActionBg,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
+    boxShadow: drawerPrimaryActionShadow,
   },
   primaryActionButtonPressed: {
-    opacity: 0.9,
+    backgroundColor: drawerPrimaryActionPressed,
   },
   primaryActionText: {
-    ...typography.body,
-    color: colors.black,
+    ...theme.typography.body,
+    color: theme.colors.accentText,
     fontWeight: '700',
     fontSize: 14,
   },
@@ -1014,18 +1064,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.sm,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.sm,
   },
   sectionHeaderRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     zIndex: 2,
   },
   sectionTitle: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     textTransform: 'uppercase',
     fontSize: 10,
     lineHeight: 12,
@@ -1036,16 +1086,16 @@ const styles = StyleSheet.create({
     minWidth: 24,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    backgroundColor: '#101317',
-    paddingHorizontal: spacing.sm,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 3,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sectionCountText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontSize: 10,
     lineHeight: 12,
     fontWeight: '700',
@@ -1059,17 +1109,17 @@ const styles = StyleSheet.create({
     height: 30,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    backgroundColor: '#101317',
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
     alignItems: 'center',
     justifyContent: 'center',
   },
   filterTriggerButtonOpen: {
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-    backgroundColor: '#151A20',
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgInput,
   },
   filterTriggerButtonActive: {
-    borderColor: 'rgba(255, 255, 255, 0.18)',
+    borderColor: theme.colors.borderHighlight,
   },
   filterTriggerButtonPressed: {
     opacity: 0.9,
@@ -1081,11 +1131,11 @@ const styles = StyleSheet.create({
     width: 156,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    backgroundColor: '#0F1318',
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgElevated,
     padding: 6,
     gap: 4,
-    shadowColor: colors.black,
+    shadowColor: theme.colors.shadow,
     shadowOpacity: 0.22,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 10 },
@@ -1099,42 +1149,42 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   filterPopoverOptionSelected: {
-    backgroundColor: '#171C22',
+    backgroundColor: theme.colors.bgInput,
   },
   filterPopoverOptionPressed: {
     opacity: 0.9,
   },
   filterPopoverOptionText: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     fontSize: 13,
     fontWeight: '600',
   },
   filterPopoverOptionTextSelected: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   list: {
     flex: 1,
   },
   listContent: {
-    paddingBottom: spacing.lg,
+    paddingBottom: theme.spacing.lg,
   },
   loader: {
-    marginBottom: spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   emptyStateCard: {
-    marginHorizontal: spacing.lg,
-    marginTop: spacing.sm,
+    marginHorizontal: theme.spacing.lg,
+    marginTop: theme.spacing.sm,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    backgroundColor: '#0B0D10',
-    padding: spacing.md,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    padding: theme.spacing.md,
     alignItems: 'center',
-    gap: spacing.xs + 2,
+    gap: theme.spacing.xs + 2,
   },
   emptyStateIconWrap: {
     width: 34,
@@ -1142,58 +1192,58 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#11151A',
+    backgroundColor: theme.colors.bgInput,
   },
   emptyTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     fontSize: 14,
     fontWeight: '600',
   },
   emptyHint: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontSize: 11,
     textAlign: 'center',
     lineHeight: 15,
   },
   workspaceGroupHeader: {
-    marginHorizontal: spacing.lg,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.sm,
+    marginHorizontal: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.sm + 2,
+    paddingVertical: theme.spacing.sm,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    backgroundColor: '#0C0F13',
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
   },
   workspaceGroupHeaderExpanded: {
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.xs,
   },
   workspaceGroupHeaderCollapsed: {
-    marginTop: spacing.xs,
-    marginBottom: spacing.md,
+    marginTop: theme.spacing.xs,
+    marginBottom: theme.spacing.md,
   },
   workspaceGroupHeaderPressed: {
-    backgroundColor: '#14181D',
+    backgroundColor: theme.colors.bgInput,
   },
   workspaceGroupHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   workspaceGroupTitleBlock: {
     flex: 1,
   },
   workspaceGroupTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     fontSize: 14,
     fontWeight: '600',
   },
   workspaceGroupSubtitle: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontSize: 11,
     lineHeight: 14,
     marginTop: 2,
@@ -1201,15 +1251,15 @@ const styles = StyleSheet.create({
   workspaceGroupCountBadge: {
     minWidth: 24,
     borderRadius: 999,
-    backgroundColor: '#161B20',
-    paddingHorizontal: spacing.sm,
+    backgroundColor: theme.colors.bgInput,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 3,
     alignItems: 'center',
     justifyContent: 'center',
   },
   workspaceGroupCountText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontSize: 10,
     lineHeight: 12,
     fontWeight: '700',
@@ -1221,46 +1271,46 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   chatItem: {
-    marginHorizontal: spacing.lg,
-    marginBottom: spacing.xs,
+    marginHorizontal: theme.spacing.lg,
+    marginBottom: theme.spacing.xs,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
-    backgroundColor: '#080A0D',
-    padding: spacing.sm,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    padding: theme.spacing.sm,
     flexDirection: 'row',
-    gap: spacing.xs + 2,
+    gap: theme.spacing.xs + 2,
     alignItems: 'stretch',
   },
   chatItemSubAgent: {
-    backgroundColor: 'rgba(255, 255, 255, 0.025)',
+    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.025)' : 'rgba(180, 83, 9, 0.04)',
   },
   chatItemLast: {
-    marginBottom: spacing.md,
+    marginBottom: theme.spacing.md,
   },
   chatItemSelected: {
-    backgroundColor: '#11151A',
-    borderColor: 'rgba(255, 255, 255, 0.18)',
+    backgroundColor: theme.colors.bgInput,
+    borderColor: theme.colors.borderHighlight,
   },
   chatItemPressed: {
-    backgroundColor: '#0E1216',
+    backgroundColor: theme.colors.bgInput,
   },
   chatItemAccent: {
     width: 4,
     borderRadius: 999,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: theme.colors.bgCanvasAccent,
   },
   chatItemAccentSubAgent: {
-    backgroundColor: 'rgba(245, 165, 36, 0.35)',
+    backgroundColor: subAgentAccent,
   },
   chatItemAccentSelected: {
-    backgroundColor: colors.textPrimary,
+    backgroundColor: theme.colors.textPrimary,
   },
   chatItemAccentRunning: {
-    backgroundColor: colors.statusRunning,
+    backgroundColor: theme.colors.statusRunning,
   },
   chatItemAccentError: {
-    backgroundColor: colors.statusError,
+    backgroundColor: theme.colors.statusError,
   },
   chatItemContent: {
     flex: 1,
@@ -1269,71 +1319,71 @@ const styles = StyleSheet.create({
   chatItemTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs + 2,
+    gap: theme.spacing.xs + 2,
   },
   chatSubAgentIcon: {
     marginRight: -2,
   },
   chatTitle: {
-    ...typography.body,
+    ...theme.typography.body,
     flex: 1,
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
     fontSize: 14,
     fontWeight: '600',
   },
   chatTitleSubAgent: {
-    color: '#F5C06A',
+    color: theme.colors.warning,
   },
   chatTitleSelected: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   engineBadge: {
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
     flexShrink: 0,
   },
   engineBadgeText: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 9,
     fontWeight: '700',
     letterSpacing: 0.3,
     textTransform: 'uppercase',
   },
   chatAge: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
     fontSize: 10,
     lineHeight: 12,
     fontVariant: ['tabular-nums'],
     flexShrink: 0,
   },
   chatAgeSelected: {
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
   },
   chatItemBottomRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs + 2,
+    gap: theme.spacing.xs + 2,
   },
   chatPreview: {
-    ...typography.caption,
+    ...theme.typography.caption,
     flex: 1,
     fontSize: 11,
     lineHeight: 14,
-    color: 'rgba(232, 236, 244, 0.56)',
+    color: theme.colors.textMuted,
   },
   chatPreviewSubAgent: {
-    color: 'rgba(245, 192, 106, 0.9)',
+    color: subAgentPreview,
   },
   chatPreviewSelected: {
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   chatMeta: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
     flexShrink: 0,
   },
   statusPill: {
@@ -1341,26 +1391,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     borderRadius: 999,
-    paddingHorizontal: spacing.xs + 6,
+    paddingHorizontal: theme.spacing.xs + 6,
     paddingVertical: 3,
   },
   statusPillRunning: {
-    backgroundColor: 'rgba(52, 199, 89, 0.12)',
+    backgroundColor: runningPillBg,
   },
   statusPillError: {
-    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+    backgroundColor: errorPillBg,
   },
   statusPillText: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 10,
     lineHeight: 12,
     fontWeight: '700',
   },
   statusPillTextRunning: {
-    color: '#8EE6AD',
+    color: runningPillText,
   },
   statusPillTextError: {
-    color: '#FFB4B4',
+    color: errorPillText,
   },
   statusPillDot: {
     width: 6,
@@ -1368,31 +1418,31 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   statusPillDotRunning: {
-    backgroundColor: '#34C759',
+    backgroundColor: connectionDotConnected,
   },
   footer: {
     marginTop: 'auto',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xs,
-    paddingBottom: spacing.sm,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.xs,
+    paddingBottom: theme.spacing.sm,
   },
   footerSettingsButton: {
     height: 42,
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    backgroundColor: '#101317',
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   footerSettingsButtonPressed: {
-    backgroundColor: '#171B20',
+    backgroundColor: theme.colors.bgInput,
   },
   footerSettingsText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontSize: 11,
     lineHeight: 13,
     fontWeight: '700',
@@ -1400,3 +1450,4 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
   },
 });
+};

@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { type ComponentProps } from 'react';
+import { useMemo, type ComponentProps } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -11,7 +11,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -64,6 +64,9 @@ export function SelectionSheet({
   emptyLabel = 'No options available.',
   presentation = 'expanded',
 }: SelectionSheetProps) {
+  const theme = useAppTheme();
+  const { colors, spacing } = theme;
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const expanded = presentation === 'expanded';
@@ -250,217 +253,220 @@ export function SelectionSheet({
   );
 }
 
-const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0, 0, 0, 0.52)',
-  },
-  sheetOuter: {
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.xl,
-  },
-  sheetOuterExpanded: {
-    paddingHorizontal: spacing.md,
-  },
-  sheetCard: {
-    maxHeight: '82%',
-    borderRadius: 24,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.09)',
-    backgroundColor: '#07090C',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.lg,
-    gap: spacing.md,
-    boxShadow: '0 -10px 34px rgba(0, 0, 0, 0.42)',
-  },
-  sheetCardExpanded: {
-    maxHeight: undefined,
-    minHeight: undefined,
-    borderRadius: 28,
-  },
-  handle: {
-    alignSelf: 'center',
-    width: 38,
-    height: 4,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255, 255, 255, 0.18)',
-  },
-  header: {
-    gap: 4,
-  },
-  eyebrow: {
-    ...typography.caption,
-    color: 'rgba(232, 236, 244, 0.58)',
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  title: {
-    ...typography.headline,
-    color: colors.textPrimary,
-    fontSize: 18,
-    lineHeight: 22,
-    fontWeight: '700',
-  },
-  subtitle: {
-    ...typography.caption,
-    color: colors.textMuted,
-    fontSize: 12,
-    lineHeight: 16,
-  },
-  list: {
-    maxHeight: 420,
-  },
-  listExpanded: {
-    flex: 1,
-    maxHeight: undefined,
-  },
-  listContent: {
-    gap: spacing.sm,
-  },
-  listContentExpanded: {
-    paddingBottom: spacing.xs,
-  },
-  loadingState: {
-    minHeight: 120,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-  },
-  loadingLabel: {
-    ...typography.caption,
-    color: colors.textMuted,
-    textAlign: 'center',
-  },
-  option: {
-    minHeight: 64,
-    borderRadius: 18,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    backgroundColor: '#0D1014',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.md,
-  },
-  optionSelected: {
-    borderColor: 'rgba(255, 255, 255, 0.22)',
-    backgroundColor: '#141920',
-  },
-  optionDisabled: {
-    opacity: 0.56,
-  },
-  optionPressed: {
-    opacity: 0.88,
-  },
-  optionMain: {
-    flex: 1,
-    minWidth: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  iconWrap: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#171C22',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  iconWrapSelected: {
-    backgroundColor: '#1C232C',
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-  },
-  iconWrapDanger: {
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
-    borderColor: 'rgba(239, 68, 68, 0.24)',
-  },
-  copy: {
-    flex: 1,
-    minWidth: 0,
-    gap: 3,
-  },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs + 2,
-  },
-  optionTitle: {
-    ...typography.body,
-    flex: 1,
-    color: colors.textSecondary,
-    fontWeight: '600',
-    lineHeight: 18,
-  },
-  optionTitleSelected: {
-    color: colors.textPrimary,
-  },
-  optionDescription: {
-    ...typography.caption,
-    color: 'rgba(232, 236, 244, 0.62)',
-    lineHeight: 15,
-  },
-  badge: {
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-    backgroundColor: '#11151A',
-    paddingHorizontal: spacing.xs + 4,
-    paddingVertical: 2,
-  },
-  badgeText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
-  },
-  accessory: {
-    flexShrink: 0,
-    alignItems: 'flex-end',
-    gap: 6,
-  },
-  meta: {
-    ...typography.caption,
-    color: colors.textMuted,
-    fontSize: 11,
-    lineHeight: 14,
-    fontWeight: '600',
-  },
-  footer: {
-    alignItems: 'flex-end',
-  },
-  closeButton: {
-    minWidth: 88,
-    borderRadius: 14,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-    backgroundColor: '#101318',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm + 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeButtonPressed: {
-    opacity: 0.86,
-  },
-  closeText: {
-    ...typography.body,
-    color: colors.textPrimary,
-    fontWeight: '600',
-  },
-});
+const createStyles = (theme: AppTheme) =>
+  StyleSheet.create({
+    backdrop: {
+      flex: 1,
+      justifyContent: 'flex-end',
+      backgroundColor: theme.colors.overlayBackdrop,
+    },
+    sheetOuter: {
+      paddingHorizontal: theme.spacing.md,
+      paddingTop: theme.spacing.xl,
+    },
+    sheetOuterExpanded: {
+      paddingHorizontal: theme.spacing.md,
+    },
+    sheetCard: {
+      maxHeight: '82%',
+      borderRadius: 24,
+      borderCurve: 'continuous',
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgElevated,
+      paddingHorizontal: theme.spacing.lg,
+      paddingTop: theme.spacing.sm,
+      paddingBottom: theme.spacing.lg,
+      gap: theme.spacing.md,
+      boxShadow: theme.isDark
+        ? '0 -10px 34px rgba(0, 0, 0, 0.42)'
+        : '0 -10px 34px rgba(15, 23, 42, 0.12)',
+    },
+    sheetCardExpanded: {
+      maxHeight: undefined,
+      minHeight: undefined,
+      borderRadius: 28,
+    },
+    handle: {
+      alignSelf: 'center',
+      width: 38,
+      height: 4,
+      borderRadius: 999,
+      backgroundColor: theme.colors.border,
+    },
+    header: {
+      gap: 4,
+    },
+    eyebrow: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      fontSize: 10,
+      lineHeight: 12,
+      fontWeight: '700',
+      textTransform: 'uppercase',
+      letterSpacing: 1,
+    },
+    title: {
+      ...theme.typography.headline,
+      color: theme.colors.textPrimary,
+      fontSize: 18,
+      lineHeight: 22,
+      fontWeight: '700',
+    },
+    subtitle: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      fontSize: 12,
+      lineHeight: 16,
+    },
+    list: {
+      maxHeight: 420,
+    },
+    listExpanded: {
+      flex: 1,
+      maxHeight: undefined,
+    },
+    listContent: {
+      gap: theme.spacing.sm,
+    },
+    listContentExpanded: {
+      paddingBottom: theme.spacing.xs,
+    },
+    loadingState: {
+      minHeight: 120,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.sm,
+    },
+    loadingLabel: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      textAlign: 'center',
+    },
+    option: {
+      minHeight: 64,
+      borderRadius: 18,
+      borderCurve: 'continuous',
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgInput,
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.sm + 2,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: theme.spacing.md,
+    },
+    optionSelected: {
+      borderColor: theme.colors.borderHighlight,
+      backgroundColor: theme.colors.bgCanvasAccent,
+    },
+    optionDisabled: {
+      opacity: 0.56,
+    },
+    optionPressed: {
+      opacity: 0.88,
+    },
+    optionMain: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+    },
+    iconWrap: {
+      width: 30,
+      height: 30,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.colors.bgItem,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+    },
+    iconWrapSelected: {
+      backgroundColor: theme.colors.bgCanvasAccent,
+      borderColor: theme.colors.border,
+    },
+    iconWrapDanger: {
+      backgroundColor: theme.colors.errorBg,
+      borderColor: theme.colors.error,
+    },
+    copy: {
+      flex: 1,
+      minWidth: 0,
+      gap: 3,
+    },
+    titleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.xs + 2,
+    },
+    optionTitle: {
+      ...theme.typography.body,
+      flex: 1,
+      color: theme.colors.textSecondary,
+      fontWeight: '600',
+      lineHeight: 18,
+    },
+    optionTitleSelected: {
+      color: theme.colors.textPrimary,
+    },
+    optionDescription: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      lineHeight: 15,
+    },
+    badge: {
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgItem,
+      paddingHorizontal: theme.spacing.xs + 4,
+      paddingVertical: 2,
+    },
+    badgeText: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      fontSize: 10,
+      lineHeight: 12,
+      fontWeight: '700',
+      textTransform: 'uppercase',
+      letterSpacing: 0.6,
+    },
+    accessory: {
+      flexShrink: 0,
+      alignItems: 'flex-end',
+      gap: 6,
+    },
+    meta: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      fontSize: 11,
+      lineHeight: 14,
+      fontWeight: '600',
+    },
+    footer: {
+      alignItems: 'flex-end',
+    },
+    closeButton: {
+      minWidth: 88,
+      borderRadius: 14,
+      borderCurve: 'continuous',
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgInput,
+      paddingHorizontal: theme.spacing.lg,
+      paddingVertical: theme.spacing.sm + 2,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    closeButtonPressed: {
+      opacity: 0.86,
+    },
+    closeText: {
+      ...theme.typography.body,
+      color: theme.colors.textPrimary,
+      fontWeight: '600',
+    },
+  });
