@@ -341,11 +341,34 @@ impl GitService {
 
     pub(crate) async fn push(&self, raw_cwd: Option<&str>) -> Result<GitPushResponse, BridgeError> {
         let repo_path = self.resolve_repo_path(raw_cwd)?;
-        let args = vec![
+        let status_output = self
+            .run_git_stdout(
+                &repo_path,
+                &["status", "--short", "--branch", "--untracked-files=no"],
+                "git status failed",
+            )
+            .await?;
+        let has_upstream = parse_status_has_upstream(&status_output);
+
+        let mut args = vec![
             "-C".to_string(),
             repo_path.to_string_lossy().to_string(),
             "push".to_string(),
         ];
+        if !has_upstream {
+            let Some(remote_name) = self.resolve_default_remote_name(&repo_path).await? else {
+                return Ok(GitPushResponse {
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: "No git remote configured for publishing this branch.".to_string(),
+                    pushed: false,
+                    cwd: repo_path.to_string_lossy().to_string(),
+                });
+            };
+            args.push("-u".to_string());
+            args.push(remote_name);
+            args.push("HEAD".to_string());
+        }
 
         let result = self
             .terminal
@@ -426,6 +449,45 @@ impl GitService {
 
         Ok(result.stdout)
     }
+
+    async fn run_git_stdout(
+        &self,
+        repo_path: &Path,
+        command: &[&str],
+        fallback_message: &str,
+    ) -> Result<String, BridgeError> {
+        let mut args = vec!["-C".to_string(), repo_path.to_string_lossy().to_string()];
+        args.extend(command.iter().map(|segment| (*segment).to_string()));
+
+        let result = self
+            .terminal
+            .execute_binary("git", &args, repo_path.to_path_buf(), None)
+            .await?;
+
+        if result.code != Some(0) {
+            return Err(BridgeError::server(
+                &(if !result.stderr.is_empty() {
+                    result.stderr
+                } else if !result.stdout.is_empty() {
+                    result.stdout
+                } else {
+                    fallback_message.to_string()
+                }),
+            ));
+        }
+
+        Ok(result.stdout)
+    }
+
+    async fn resolve_default_remote_name(
+        &self,
+        repo_path: &Path,
+    ) -> Result<Option<String>, BridgeError> {
+        let output = self
+            .run_git_stdout(repo_path, &["remote"], "git remote failed")
+            .await?;
+        Ok(select_default_remote_name(&output))
+    }
 }
 
 fn parse_porcelain_status_entries(raw: &str) -> Result<Vec<GitStatusEntry>, BridgeError> {
@@ -477,6 +539,32 @@ fn parse_porcelain_status_entries(raw: &str) -> Result<Vec<GitStatusEntry>, Brid
     }
 
     Ok(entries)
+}
+
+fn parse_status_has_upstream(raw: &str) -> bool {
+    raw.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("## "))
+        .map(|line| line.contains("..."))
+        .unwrap_or(false)
+}
+
+fn select_default_remote_name(raw: &str) -> Option<String> {
+    let remotes = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if remotes.is_empty() {
+        return None;
+    }
+
+    remotes
+        .iter()
+        .find(|remote| remote.eq_ignore_ascii_case("origin"))
+        .copied()
+        .or_else(|| remotes.first().copied())
+        .map(str::to_string)
 }
 
 fn resolve_git_cwd(
@@ -540,7 +628,10 @@ fn resolve_repo_relative_path(raw_path: &str, repo_path: &Path) -> Result<String
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_porcelain_status_entries, resolve_git_cwd, resolve_repo_relative_path};
+    use super::{
+        parse_porcelain_status_entries, parse_status_has_upstream, resolve_git_cwd,
+        resolve_repo_relative_path, select_default_remote_name,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -616,5 +707,24 @@ mod tests {
         assert!(!untracked.staged);
         assert!(untracked.unstaged);
         assert!(untracked.untracked);
+    }
+
+    #[test]
+    fn detects_when_branch_has_upstream_tracking() {
+        assert!(parse_status_has_upstream("## main...origin/main [ahead 1]\n"));
+        assert!(!parse_status_has_upstream("## feature/local-only\n"));
+    }
+
+    #[test]
+    fn prefers_origin_as_default_remote() {
+        assert_eq!(
+            select_default_remote_name("upstream\norigin\n"),
+            Some("origin".to_string())
+        );
+        assert_eq!(
+            select_default_remote_name("backup\n"),
+            Some("backup".to_string())
+        );
+        assert_eq!(select_default_remote_name(""), None);
     }
 }

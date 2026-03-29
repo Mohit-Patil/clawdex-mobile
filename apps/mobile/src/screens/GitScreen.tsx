@@ -303,7 +303,20 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     () => parseAheadCount(status?.raw ?? ''),
     [status?.raw]
   );
+  const hasUpstream = useMemo(
+    () => parseHasUpstream(status?.raw ?? ''),
+    [status?.raw]
+  );
   const canPush = aheadCount > 0;
+  const canPublishBranch = !hasUpstream && isPublishableBranch(status?.branch);
+  const showPushAction = canPush || canPublishBranch;
+  const pushButtonLabel = pushing
+    ? canPublishBranch
+      ? 'Publishing...'
+      : 'Pushing...'
+    : canPublishBranch
+      ? 'Publish branch'
+      : `Push (${aheadCount})`;
   const selectedDiffFile = useMemo(() => {
     if (parsedDiff.files.length === 0) {
       return null;
@@ -502,6 +515,15 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
                   {status?.clean ? 'clean' : 'changes'}
                 </Text>
               </View>
+              {isPublishableBranch(status?.branch) ? (
+                <>
+                  <View style={styles.separator} />
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Published</Text>
+                    <Text style={styles.infoValue}>{hasUpstream ? 'Yes' : 'No'}</Text>
+                  </View>
+                </>
+              ) : null}
               {canPush ? (
                 <>
                   <View style={styles.separator} />
@@ -538,7 +560,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
               </Text>
             </Pressable>
 
-            {canPush ? (
+            {showPushAction ? (
               <Pressable
                 onPress={() => void push()}
                 disabled={pushing || committing || loading}
@@ -550,7 +572,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
                 ]}
               >
                 <Text style={styles.actionBtnText}>
-                  {pushing ? 'Pushing...' : `Push (${aheadCount})`}
+                  {pushButtonLabel}
                 </Text>
               </Pressable>
             ) : null}
@@ -1437,6 +1459,19 @@ function parseAheadCount(rawStatus: string): number {
 
   const value = Number.parseInt(match[1], 10);
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function parseHasUpstream(rawStatus: string): boolean {
+  const header = rawStatus
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('## '));
+  return header?.includes('...') ?? false;
+}
+
+function isPublishableBranch(branch: string | null | undefined): boolean {
+  const normalized = branch?.trim();
+  return Boolean(normalized && normalized !== 'unknown' && !normalized.startsWith('HEAD'));
 }
 
 function formatDiffLineNumber(value: number | null): string {
