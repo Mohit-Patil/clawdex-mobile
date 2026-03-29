@@ -42,6 +42,7 @@ interface DrawerContentProps {
 const RUN_HEARTBEAT_STALE_MS = 20_000;
 const DRAWER_REFRESH_CONNECTED_MS = 10_000;
 const DRAWER_REFRESH_DISCONNECTED_MS = 5_000;
+const DRAWER_EVENT_REFRESH_DEBOUNCE_MS = 250;
 const RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'task_started',
   'agent_reasoning_delta',
@@ -94,6 +95,9 @@ export function DrawerContent({
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const hasAppliedInitialCollapseRef = useRef(false);
   const chatSectionsRef = useRef<ChatWorkspaceSection[]>([]);
+  const loadChatsInFlightRef = useRef<Promise<void> | null>(null);
+  const queuedLoadChatsRef = useRef<{ showRefresh: boolean } | null>(null);
+  const scheduledLoadChatsRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const styles = useMemo(() => createStyles(theme), [theme]);
   const allChatSections = useMemo(() => buildChatWorkspaceSections(chats), [chats]);
   const filteredChats = useMemo(
@@ -122,7 +126,7 @@ export function DrawerContent({
     }, 0);
   }, [chats, runHeartbeatAtByThread]);
 
-  const loadChats = useCallback(async (showRefresh = false) => {
+  const loadChatsNow = useCallback(async (showRefresh = false) => {
     if (showRefresh) {
       setRefreshing(true);
     }
@@ -152,17 +156,20 @@ export function DrawerContent({
       const activeChatIds = new Set(dedupedChats.map((chat) => chat.id));
       setRunHeartbeatAtByThread((prev) => {
         const now = Date.now();
+        let changed = false;
         const next: Record<string, number> = {};
         for (const [threadId, ts] of Object.entries(prev)) {
           if (!activeChatIds.has(threadId)) {
+            changed = true;
             continue;
           }
           if (now - ts >= RUN_HEARTBEAT_STALE_MS) {
+            changed = true;
             continue;
           }
           next[threadId] = ts;
         }
-        return next;
+        return changed ? next : prev;
       });
     } catch {
       // silently fail
@@ -173,6 +180,49 @@ export function DrawerContent({
       setLoading(false);
     }
   }, [api]);
+
+  const loadChats = useCallback(
+    (showRefresh = false) => {
+      if (showRefresh && scheduledLoadChatsRef.current) {
+        clearTimeout(scheduledLoadChatsRef.current);
+        scheduledLoadChatsRef.current = null;
+      }
+
+      if (loadChatsInFlightRef.current) {
+        queuedLoadChatsRef.current = {
+          showRefresh: showRefresh || queuedLoadChatsRef.current?.showRefresh === true,
+        };
+        return loadChatsInFlightRef.current;
+      }
+
+      const promise = loadChatsNow(showRefresh).finally(() => {
+        loadChatsInFlightRef.current = null;
+        const queuedRequest = queuedLoadChatsRef.current;
+        queuedLoadChatsRef.current = null;
+        if (queuedRequest) {
+          void loadChats(queuedRequest.showRefresh);
+        }
+      });
+
+      loadChatsInFlightRef.current = promise;
+      return promise;
+    },
+    [loadChatsNow]
+  );
+
+  const scheduleLoadChats = useCallback(
+    (delay = DRAWER_EVENT_REFRESH_DEBOUNCE_MS) => {
+      if (scheduledLoadChatsRef.current) {
+        return;
+      }
+
+      scheduledLoadChatsRef.current = setTimeout(() => {
+        scheduledLoadChatsRef.current = null;
+        void loadChats();
+      }, delay);
+    },
+    [loadChats]
+  );
 
   useEffect(() => {
     void loadChats();
@@ -245,31 +295,34 @@ export function DrawerContent({
         event.method === 'turn/completed' ||
         event.method === 'thread/status/changed'
       ) {
-        void loadChats();
+        scheduleLoadChats();
       }
     });
-  }, [ws, loadChats]);
+  }, [scheduleLoadChats, ws]);
 
   useEffect(() => {
     return ws.onStatus((connected) => {
       setWsConnected(connected);
       if (connected) {
-        void loadChats();
+        scheduleLoadChats();
       }
     });
-  }, [ws, loadChats]);
+  }, [scheduleLoadChats, ws]);
 
   useEffect(() => {
     const timer = setInterval(() => {
       setRunHeartbeatAtByThread((prev) => {
         const now = Date.now();
+        let changed = false;
         const next: Record<string, number> = {};
         for (const [threadId, ts] of Object.entries(prev)) {
           if (now - ts < RUN_HEARTBEAT_STALE_MS) {
             next[threadId] = ts;
+          } else {
+            changed = true;
           }
         }
-        return next;
+        return changed ? next : prev;
       });
     }, 5000);
 
@@ -278,11 +331,20 @@ export function DrawerContent({
 
   useEffect(() => {
     const timer = setInterval(() => {
-      void loadChats();
+      scheduleLoadChats();
     }, wsConnected ? DRAWER_REFRESH_CONNECTED_MS : DRAWER_REFRESH_DISCONNECTED_MS);
 
     return () => clearInterval(timer);
-  }, [loadChats, wsConnected]);
+  }, [scheduleLoadChats, wsConnected]);
+
+  useEffect(() => {
+    return () => {
+      if (scheduledLoadChatsRef.current) {
+        clearTimeout(scheduledLoadChatsRef.current);
+        scheduledLoadChatsRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     chatSectionsRef.current = chatSections;
@@ -344,14 +406,14 @@ export function DrawerContent({
       if (state === 'active') {
         setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(chatSectionsRef.current));
         hasAppliedInitialCollapseRef.current = true;
-        void loadChats();
+        scheduleLoadChats();
       }
     });
 
     return () => {
       subscription.remove();
     };
-  }, [loadChats]);
+  }, [scheduleLoadChats]);
 
   const toggleWorkspaceSection = useCallback((sectionKey: string) => {
     setCollapsedWorkspaceKeys((prev) => {

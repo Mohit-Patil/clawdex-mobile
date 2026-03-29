@@ -5,6 +5,7 @@ import * as ImagePicker from 'expo-image-picker';
 import {
   type ComponentProps,
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -223,6 +224,7 @@ const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
 const CHAT_PLAN_SNAPSHOTS_FILE = 'chat-plan-snapshots.json';
 const CHAT_PLAN_SNAPSHOTS_VERSION = 1;
+const STREAMING_SCROLL_THROTTLE_MS = 48;
 const PLAN_IMPLEMENTATION_TITLE = 'Implement this plan?';
 const PLAN_IMPLEMENTATION_YES = 'Yes, implement this plan';
 const PLAN_IMPLEMENTATION_NO = 'No, stay in Plan mode';
@@ -514,7 +516,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [userInputError, setUserInputError] = useState<string | null>(null);
     const [resolvingUserInput, setResolvingUserInput] = useState(false);
     const [activePlan, setActivePlan] = useState<ActivePlanState | null>(null);
-    const [, setStreamingText] = useState<string | null>(null);
+    const streamingTextRef = useRef<string | null>(null);
+    const setStreamingText = useCallback(
+      (
+        next:
+          | string
+          | null
+          | ((previous: string | null) => string | null)
+      ) => {
+        streamingTextRef.current =
+          typeof next === 'function'
+            ? (
+                next as (previous: string | null) => string | null
+              )(streamingTextRef.current)
+            : next;
+      },
+      []
+    );
     const [renameModalVisible, setRenameModalVisible] = useState(false);
     const [renameDraft, setRenameDraft] = useState('');
     const [renaming, setRenaming] = useState(false);
@@ -597,6 +615,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const safeAreaInsets = useSafeAreaInsets();
     const scrollRef = useRef<FlatList<TranscriptDisplayItem>>(null);
     const scrollRetryTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+    const scheduledPinnedScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastPinnedScrollAtRef = useRef(0);
     const autoScrollStateRef = useRef<AutoScrollState>({
       shouldStickToBottom: true,
       isUserInteracting: false,
@@ -626,6 +646,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         clearTimeout(timeoutId);
       }
       scrollRetryTimeoutsRef.current = [];
+      if (scheduledPinnedScrollTimeoutRef.current) {
+        clearTimeout(scheduledPinnedScrollTimeoutRef.current);
+        scheduledPinnedScrollTimeoutRef.current = null;
+      }
     }, []);
 
     const scrollToBottomReliable = useCallback(
@@ -657,6 +681,38 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return;
         }
         scrollToBottomReliable(animated);
+      },
+      [scrollToBottomReliable]
+    );
+
+    const schedulePinnedScrollToBottom = useCallback(
+      (animated = true) => {
+        const autoScrollState = autoScrollStateRef.current;
+        if (
+          autoScrollState.isUserInteracting ||
+          autoScrollState.isMomentumScrolling ||
+          !autoScrollState.shouldStickToBottom
+        ) {
+          return;
+        }
+
+        const now = Date.now();
+        const elapsed = now - lastPinnedScrollAtRef.current;
+        if (elapsed >= STREAMING_SCROLL_THROTTLE_MS) {
+          lastPinnedScrollAtRef.current = now;
+          scrollToBottomReliable(animated);
+          return;
+        }
+
+        if (scheduledPinnedScrollTimeoutRef.current) {
+          return;
+        }
+
+        scheduledPinnedScrollTimeoutRef.current = setTimeout(() => {
+          scheduledPinnedScrollTimeoutRef.current = null;
+          lastPinnedScrollAtRef.current = Date.now();
+          scrollToBottomReliable(animated);
+        }, STREAMING_SCROLL_THROTTLE_MS - elapsed);
       },
       [scrollToBottomReliable]
     );
@@ -3224,9 +3280,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           };
         });
 
-        scrollToBottomIfPinned(true);
+        schedulePinnedScrollToBottom(true);
       },
-      [scrollToBottomIfPinned]
+      [schedulePinnedScrollToBottom]
     );
 
     const clearLiveReasoningMessage = useCallback((threadId: string | null | undefined) => {
@@ -4960,7 +5016,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     title: 'Thinking',
                   }
             );
-            scrollToBottomIfPinned(true);
+            schedulePinnedScrollToBottom(true);
             return;
           }
 
@@ -5202,7 +5258,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   title: 'Thinking',
                 }
           );
-          scrollToBottomIfPinned(true);
+          schedulePinnedScrollToBottom(true);
           return;
         }
 
@@ -7675,6 +7731,22 @@ interface AgentThreadPanelRow {
   selected: boolean;
 }
 
+interface ChatViewProps {
+  chat: Chat;
+  parentChat: Chat | null;
+  bridgeUrl: string;
+  bridgeToken: string | null;
+  showToolCalls: boolean;
+  agentThreadStatusById: ReadonlyMap<string, Chat['status']>;
+  scrollRef: React.RefObject<FlatList<TranscriptDisplayItem> | null>;
+  inlineChoicesEnabled: boolean;
+  onInlineOptionSelect: (value: string) => void;
+  onPinnedAutoScroll: (animated?: boolean) => void;
+  onScrollInteractionStart: () => void;
+  autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
+  bottomInset: number;
+}
+
 function AgentThreadsPanel({
   rows,
   runningCount,
@@ -7801,7 +7873,7 @@ function AgentThreadsPanel({
 
 // ── Chat View ──────────────────────────────────────────────────────
 
-function ChatView({
+const ChatView = memo(function ChatView({
   chat,
   parentChat,
   bridgeUrl,
@@ -7815,21 +7887,7 @@ function ChatView({
   onScrollInteractionStart,
   autoScrollStateRef,
   bottomInset,
-}: {
-  chat: Chat;
-  parentChat: Chat | null;
-  bridgeUrl: string;
-  bridgeToken: string | null;
-  showToolCalls: boolean;
-  agentThreadStatusById: ReadonlyMap<string, Chat['status']>;
-  scrollRef: React.RefObject<FlatList<TranscriptDisplayItem> | null>;
-  inlineChoicesEnabled: boolean;
-  onInlineOptionSelect: (value: string) => void;
-  onPinnedAutoScroll: (animated?: boolean) => void;
-  onScrollInteractionStart: () => void;
-  autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
-  bottomInset: number;
-}) {
+}: ChatViewProps) {
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -8049,6 +8107,24 @@ function ChatView({
         removeClippedSubviews={Platform.OS === 'android'}
       />
     </View>
+  );
+}, areChatViewPropsEqual);
+
+function areChatViewPropsEqual(previous: ChatViewProps, next: ChatViewProps): boolean {
+  return (
+    previous.chat === next.chat &&
+    previous.parentChat === next.parentChat &&
+    previous.bridgeUrl === next.bridgeUrl &&
+    previous.bridgeToken === next.bridgeToken &&
+    previous.showToolCalls === next.showToolCalls &&
+    previous.agentThreadStatusById === next.agentThreadStatusById &&
+    previous.scrollRef === next.scrollRef &&
+    previous.inlineChoicesEnabled === next.inlineChoicesEnabled &&
+    previous.onInlineOptionSelect === next.onInlineOptionSelect &&
+    previous.onPinnedAutoScroll === next.onPinnedAutoScroll &&
+    previous.onScrollInteractionStart === next.onScrollInteractionStart &&
+    previous.autoScrollStateRef === next.autoScrollStateRef &&
+    previous.bottomInset === next.bottomInset
   );
 }
 

@@ -2,15 +2,25 @@ use std::{
     collections::HashSet,
     path::PathBuf,
     process::Stdio,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    sync::Semaphore,
+    time::timeout,
+};
 
 use crate::{
     contains_disallowed_control_chars, normalize_path, BridgeError, TerminalExecRequest,
     TerminalExecResponse,
 };
+
+const DEFAULT_TERMINAL_MAX_CONCURRENT: usize = 4;
+const DEFAULT_TERMINAL_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+const OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct TerminalService {
@@ -18,6 +28,7 @@ pub(crate) struct TerminalService {
     allowed_commands: HashSet<String>,
     disabled: bool,
     allow_outside_root: bool,
+    concurrency_limiter: Arc<Semaphore>,
 }
 
 impl TerminalService {
@@ -32,6 +43,7 @@ impl TerminalService {
             allowed_commands,
             disabled,
             allow_outside_root,
+            concurrency_limiter: Arc::new(Semaphore::new(DEFAULT_TERMINAL_MAX_CONCURRENT)),
         }
     }
 
@@ -120,6 +132,12 @@ impl TerminalService {
         cwd: PathBuf,
         timeout_ms: Option<u64>,
     ) -> Result<TerminalExecResponse, BridgeError> {
+        let _permit = self
+            .concurrency_limiter
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| BridgeError::server("terminal concurrency limiter is closed"))?;
         let timeout_ms = timeout_ms.unwrap_or(30_000).clamp(100, 120_000);
         let started_at = Instant::now();
 
@@ -132,25 +150,21 @@ impl TerminalService {
             .spawn()
             .map_err(|error| BridgeError::server(&format!("failed to spawn command: {error}")))?;
 
-        let mut stdout = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| BridgeError::server("failed to capture stdout"))?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| BridgeError::server("failed to capture stderr"))?;
 
         let stdout_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let _ = stdout.read_to_end(&mut bytes).await;
-            bytes
+            read_stream_limited(stdout, DEFAULT_TERMINAL_MAX_OUTPUT_BYTES).await
         });
 
         let stderr_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let _ = stderr.read_to_end(&mut bytes).await;
-            bytes
+            read_stream_limited(stderr, DEFAULT_TERMINAL_MAX_OUTPUT_BYTES).await
         });
 
         let mut timed_out = false;
@@ -172,15 +186,11 @@ impl TerminalService {
             }
         }
 
-        let stdout_bytes = stdout_task.await.unwrap_or_default();
-        let stderr_bytes = stderr_task.await.unwrap_or_default();
+        let (stdout_bytes, stdout_truncated) = stdout_task.await.unwrap_or_default();
+        let (stderr_bytes, stderr_truncated) = stderr_task.await.unwrap_or_default();
 
-        let stdout_text = String::from_utf8_lossy(&stdout_bytes)
-            .trim_end()
-            .to_string();
-        let mut stderr_text = String::from_utf8_lossy(&stderr_bytes)
-            .trim_end()
-            .to_string();
+        let stdout_text = finalize_output(stdout_bytes, stdout_truncated);
+        let mut stderr_text = finalize_output(stderr_bytes, stderr_truncated);
         if let Some(wait_error) = wait_error {
             if !stderr_text.is_empty() {
                 stderr_text.push('\n');
@@ -228,9 +238,50 @@ fn resolve_exec_cwd(
     Ok(normalized)
 }
 
+async fn read_stream_limited<R>(mut reader: R, max_bytes: usize) -> (Vec<u8>, bool)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; OUTPUT_READ_CHUNK_SIZE];
+    let mut truncated = false;
+
+    loop {
+        let read = match reader.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+
+        if bytes.len() < max_bytes {
+            let remaining = max_bytes - bytes.len();
+            let to_take = remaining.min(read);
+            bytes.extend_from_slice(&buffer[..to_take]);
+            if to_take < read {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+
+    (bytes, truncated)
+}
+
+fn finalize_output(bytes: Vec<u8>, truncated: bool) -> String {
+    let mut output = String::from_utf8_lossy(&bytes).trim_end().to_string();
+    if truncated {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str("[output truncated]");
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_exec_cwd;
+    use super::{finalize_output, resolve_exec_cwd};
     use std::path::PathBuf;
 
     #[test]
@@ -263,5 +314,13 @@ mod tests {
         let resolved =
             resolve_exec_cwd(Some("/external/repo"), &root, true).expect("allow outside root");
         assert_eq!(resolved, PathBuf::from("/external/repo"));
+    }
+
+    #[test]
+    fn finalize_output_marks_truncated_streams() {
+        assert_eq!(
+            finalize_output(b"hello\n".to_vec(), true),
+            "hello\n[output truncated]"
+        );
     }
 }
