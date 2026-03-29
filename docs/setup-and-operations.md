@@ -18,7 +18,7 @@ From a source checkout, the equivalent command is:
 npm run setup:wizard -- --engine opencode
 ```
 
-That writes `BRIDGE_ACTIVE_ENGINE=opencode` into `.env.secure`. To switch back, rerun setup with `--engine codex` or edit `.env.secure` directly.
+That writes `BRIDGE_ACTIVE_ENGINE=opencode` into `.env.secure`. This is the default engine preference, not an exclusive mode. When both CLIs are installed, the bridge will expose both Codex and OpenCode in the mobile app. To switch the default back, rerun setup with `--engine codex` or edit `.env.secure` directly.
 
 ## Onboarding Output Cues
 

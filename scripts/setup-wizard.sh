@@ -83,7 +83,7 @@ Usage: $(basename "$0") [options]
 Options:
   --no-start               Configure everything but do not start bridge
   --engine <codex|opencode>
-                           Set preferred engine before writing .env.secure
+                           Set default engine before writing .env.secure
   -h, --help               Show this help
 EOF
 }
@@ -106,6 +106,20 @@ format_engine_name() {
       ;;
     *)
       printf 'Codex'
+      ;;
+  esac
+}
+
+secondary_engine_name() {
+  case "$1" in
+    codex)
+      printf 'opencode'
+      ;;
+    opencode)
+      printf 'codex'
+      ;;
+    *)
+      return 1
       ;;
   esac
 }
@@ -789,18 +803,20 @@ choose_bridge_network_mode() {
 }
 
 choose_runtime_engine() {
-  menu_select "Preferred engine" "Codex" "OpenCode"
+  info "This selects the default engine."
+  info "If both CLIs are installed, the bridge will expose both Codex and OpenCode in the app."
+  menu_select "Default engine" "Codex" "OpenCode"
   case "$MENU_RESULT" in
     "Codex")
       ACTIVE_ENGINE="codex"
-      info "Codex selected."
+      info "Codex will be preferred by default."
       ;;
     "OpenCode")
       ACTIVE_ENGINE="opencode"
-      info "OpenCode selected."
+      info "OpenCode will be preferred by default."
       ;;
     *)
-      abort_wizard "Unexpected preferred engine."
+      abort_wizard "Unexpected default engine."
       ;;
   esac
 }
@@ -926,6 +942,43 @@ ensure_selected_engine_cli() {
       ;;
     *)
       abort_wizard "Unsupported preferred engine '$ACTIVE_ENGINE'."
+      ;;
+  esac
+}
+
+ensure_optional_secondary_engine_cli() {
+  local secondary_engine=""
+
+  secondary_engine="$(secondary_engine_name "$ACTIVE_ENGINE")" || return 0
+
+  case "$secondary_engine" in
+    codex)
+      if command -v codex >/dev/null 2>&1; then
+        info "Codex is also installed. The bridge will expose both engines."
+        return 0
+      fi
+
+      if confirm_prompt "Install Codex too so both engines are available in the app?" "N"; then
+        ensure_codex_cli
+        ok "Codex added. The bridge will expose both engines."
+      else
+        info "Continuing without Codex. Install it later if you want both engines."
+      fi
+      ;;
+    opencode)
+      if command -v opencode >/dev/null 2>&1; then
+        info "OpenCode is also installed. The bridge will expose both engines."
+        return 0
+      fi
+
+      if confirm_prompt "Install OpenCode too so both engines are available in the app?" "N"; then
+        ensure_opencode_cli
+        ok "OpenCode added. The bridge will expose both engines."
+      else
+        info "Continuing without OpenCode. Install it later if you want both engines."
+      fi
+      ;;
+    *)
       ;;
   esac
 }
@@ -1309,7 +1362,7 @@ if [[ "$CONFIG_ACTION" == "reset" ]]; then
   ok "Previous secure config removed: $SECURE_ENV_FILE"
 fi
 
-section "Preferred engine"
+section "Default engine"
 EXISTING_ACTIVE_ENGINE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
 if ! validate_engine_name "$EXISTING_ACTIVE_ENGINE"; then
   EXISTING_ACTIVE_ENGINE="codex"
@@ -1317,20 +1370,21 @@ fi
 if [[ "$CONFIG_ACTION" == "keep" ]]; then
   if [[ "$ENGINE_PRESET" == "false" ]]; then
     ACTIVE_ENGINE="$EXISTING_ACTIVE_ENGINE"
-    info "Keeping existing preferred engine: $(format_engine_name "$ACTIVE_ENGINE")."
+    info "Keeping existing default engine: $(format_engine_name "$ACTIVE_ENGINE")."
   else
-    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
+    info "Default engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
   fi
 else
   if [[ "$ENGINE_PRESET" == "false" ]]; then
     choose_runtime_engine
   else
-    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
+    info "Default engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
   fi
 fi
 
 section "Runtime dependency"
 ensure_selected_engine_cli
+ensure_optional_secondary_engine_cli
 
 if [[ "$CONFIG_ACTION" != "keep" ]]; then
   section "Bridge network mode"
@@ -1413,7 +1467,8 @@ BRIDGE_PORT="${BRIDGE_PORT:-8787}"
 section "Summary"
 rail_echo "Bridge mode: $NETWORK_MODE"
 rail_echo "Bridge endpoint: http://$BRIDGE_HOST:$BRIDGE_PORT"
-rail_echo "Preferred engine: $(format_engine_name "$ACTIVE_ENGINE")"
+rail_echo "Default engine: $(format_engine_name "$ACTIVE_ENGINE")"
+rail_echo "${DIM}Both engines appear in the app when both CLIs are installed.${RESET}"
 rail_echo "Secure env: $SECURE_ENV_FILE"
 if [[ "$FLOW" == "quickstart" ]]; then
   rail_echo "${DIM}Tip: re-run with Manual mode for full control at each step.${RESET}"
