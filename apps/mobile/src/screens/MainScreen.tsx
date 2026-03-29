@@ -6141,14 +6141,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     codexReasoningBufferRef.current = '';
                     hadCommandRef.current = false;
                     setActivity(() => {
-                      if (statusHint && EXTERNAL_ERROR_STATUS_HINTS.has(statusHint)) {
-                        return {
-                          tone: 'error',
-                          title: 'Turn failed',
-                          detail: summary.lastError ?? undefined,
-                        };
-                      }
-
                       if (statusHint && EXTERNAL_COMPLETE_STATUS_HINTS.has(statusHint)) {
                         return {
                           tone: 'complete',
@@ -6327,14 +6319,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             codexReasoningBufferRef.current = '';
             hadCommandRef.current = false;
             setActivity((prev) => {
-              if (resolvedLatest.status === 'error') {
-                return {
-                  tone: 'error',
-                  title: 'Turn failed',
-                  detail: resolvedLatest.lastError ?? undefined,
-                };
-              }
-
               if (resolvedLatest.status === 'complete') {
                 return prev.tone === 'running'
                   ? {
@@ -6501,14 +6485,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return prev;
         }
 
-        if (selectedChat?.status === 'error') {
-          return {
-            tone: 'error',
-            title: 'Turn failed',
-            detail: selectedChat.lastError ?? undefined,
-          };
-        }
-
         if (selectedChat?.status === 'complete') {
           return {
             tone: 'complete',
@@ -6557,14 +6533,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         } satisfies ActivityState;
       }
 
-      if (!isLoading && !isTurnLikelyRunning && selectedChat?.status === 'error') {
-        return {
-          tone: 'error',
-          title: 'Turn failed',
-          detail: selectedChat.lastError ?? activity.detail,
-        } satisfies ActivityState;
-      }
-
       if (!isLoading && !isTurnLikelyRunning && selectedChat?.status === 'complete') {
         return {
           tone: 'complete',
@@ -6583,6 +6551,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           tone: 'running',
           title: runningTitle,
           detail: activity.detail,
+        } satisfies ActivityState;
+      }
+
+      if (activity.tone === 'error' && activity.title === 'Turn failed') {
+        return {
+          tone: 'idle',
+          title: 'Ready',
         } satisfies ActivityState;
       }
 
