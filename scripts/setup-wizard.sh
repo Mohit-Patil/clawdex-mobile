@@ -233,6 +233,11 @@ load_existing_engine_selection() {
   local raw=""
   local engine=""
 
+  if [[ "$ENGINE_SELECTION_PRESET" == "true" ]]; then
+    sync_active_engine_from_selection
+    return 0
+  fi
+
   raw="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
   if [[ -n "$raw" ]] && parse_existing_engine_list_csv "$raw"; then
     engine="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
@@ -951,6 +956,8 @@ print_existing_setup_summary() {
   local network_mode=""
   local harnesses=""
   local source_path=""
+  local saved_active_engine="$ACTIVE_ENGINE"
+  local -a saved_selected_engines=("${SELECTED_ENGINES[@]}")
 
   if [[ ! -f "$SECURE_ENV_FILE" ]]; then
     return 1
@@ -991,6 +998,9 @@ print_existing_setup_summary() {
     echo "bridge.token: present"
   fi
   echo "source: $source_path"
+
+  SELECTED_ENGINES=("${saved_selected_engines[@]}")
+  ACTIVE_ENGINE="$saved_active_engine"
 }
 
 require_security_ack() {
