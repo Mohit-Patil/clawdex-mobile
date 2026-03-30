@@ -3,6 +3,7 @@
 
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const https = require("node:https");
@@ -91,6 +92,39 @@ function writeStatus(statusPath, payload) {
   };
   fs.mkdirSync(path.dirname(statusPath), { recursive: true });
   fs.writeFileSync(statusPath, `${JSON.stringify(nextPayload, null, 2)}\n`);
+}
+
+function backupSecureEnv(packageRoot, jobId) {
+  const secureEnvPath = path.join(packageRoot, ".env.secure");
+  if (!fs.existsSync(secureEnvPath)) {
+    return null;
+  }
+
+  const backupPath = path.join(os.tmpdir(), `${jobId}.env.secure.backup`);
+  fs.copyFileSync(secureEnvPath, backupPath);
+  return {
+    originalPath: secureEnvPath,
+    backupPath,
+  };
+}
+
+function restoreSecureEnv(backup) {
+  if (!backup || !fs.existsSync(backup.backupPath)) {
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(backup.originalPath), { recursive: true });
+  fs.copyFileSync(backup.backupPath, backup.originalPath);
+}
+
+function cleanupSecureEnvBackup(backup) {
+  if (!backup) {
+    return;
+  }
+
+  try {
+    fs.unlinkSync(backup.backupPath);
+  } catch {}
 }
 
 function sleep(ms) {
@@ -225,6 +259,7 @@ async function restartBridge(packageRoot, statusPath, payload, message) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const packageRoot = path.resolve(__dirname, "..");
+  const secureEnvBackup = backupSecureEnv(packageRoot, args.jobId);
   const baseStatus = {
     jobId: args.jobId,
     targetVersion: args.version,
@@ -258,6 +293,7 @@ async function main() {
       cwd: packageRoot,
       env: process.env,
     });
+    restoreSecureEnv(secureEnvBackup);
     upgraded = true;
     await restartBridge(
       packageRoot,
@@ -274,6 +310,7 @@ async function main() {
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     try {
+      restoreSecureEnv(secureEnvBackup);
       await restartBridge(
         packageRoot,
         args.statusPath,
@@ -302,6 +339,8 @@ async function main() {
       });
       process.exitCode = 1;
     }
+  } finally {
+    cleanupSecureEnvBackup(secureEnvBackup);
   }
 }
 
