@@ -27,9 +27,9 @@ If you want only one harness, use `--engine codex` or `--engine opencode`.
 After `clawdex init`, expected sequence:
 
 1. Secure config is written or reused
-2. The bridge starts in the foreground
-3. A pairing QR is printed for the mobile app
-4. Bridge logs stay attached until you stop the process
+2. The bridge starts in the background
+3. The wizard prints the bridge URL/token for manual mobile pairing
+4. Bridge logs are written to `.bridge.log`
 
 Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `linux-armv7l`, and `win32-x64`. On those hosts, normal bridge startup does not require a Rust compile.
 

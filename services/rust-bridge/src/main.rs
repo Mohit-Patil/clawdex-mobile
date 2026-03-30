@@ -338,6 +338,15 @@ impl RuntimeBackend {
         }))
     }
 
+    async fn shutdown(&self) {
+        if let Some(codex) = &self.codex {
+            codex.request_shutdown().await;
+        }
+        if let Some(opencode) = &self.opencode {
+            opencode.request_shutdown().await;
+        }
+    }
+
     fn engine(&self) -> BridgeRuntimeEngine {
         self.preferred_engine
     }
@@ -600,6 +609,95 @@ impl RuntimeBackend {
     }
 }
 
+fn configure_managed_child_command(command: &mut Command) {
+    command.kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+}
+
+async fn terminate_managed_child(pid: u32, label: &str) {
+    #[cfg(unix)]
+    {
+        terminate_process_group_unix(pid, label).await;
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        terminate_process_tree_windows(pid, label).await;
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    let _ = (pid, label);
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> &'static str {
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "Ctrl+C"
+}
+
+#[cfg(unix)]
+async fn terminate_process_group_unix(pid: u32, label: &str) {
+    let process_group = pid as i32;
+    if process_group <= 0 {
+        return;
+    }
+
+    let terminate_result = unsafe { libc::killpg(process_group, libc::SIGTERM) };
+    if terminate_result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            eprintln!("failed to terminate {label} process group {process_group}: {error}");
+        }
+        return;
+    }
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let kill_result = unsafe { libc::killpg(process_group, 0) };
+    if kill_result == 0 {
+        let force_result = unsafe { libc::killpg(process_group, libc::SIGKILL) };
+        if force_result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!("failed to force-kill {label} process group {process_group}: {error}");
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn terminate_process_tree_windows(pid: u32, label: &str) {
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F")
+        .status()
+        .await;
+
+    match status {
+        Ok(result) if result.success() => {}
+        Ok(result) => eprintln!("failed to terminate {label} process tree {pid}: {result}"),
+        Err(error) => eprintln!("failed to terminate {label} process tree {pid}: {error}"),
+    }
+}
+
 enum RuntimeBackendRef<'a> {
     Codex(&'a Arc<AppServerBridge>),
     Opencode(&'a Arc<OpencodeBackend>),
@@ -773,6 +871,7 @@ impl ClientHub {
 struct AppServerBridge {
     engine: BridgeRuntimeEngine,
     child: Mutex<Child>,
+    child_pid: u32,
     writer: Mutex<ChildStdin>,
     pending_requests: Mutex<HashMap<u64, PendingRequest>>,
     internal_waiters: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
@@ -815,15 +914,22 @@ impl AppServerBridge {
         engine: BridgeRuntimeEngine,
         hub: Arc<ClientHub>,
     ) -> Result<Arc<Self>, String> {
-        let mut child = Command::new(cli_bin)
+        let mut command = Command::new(cli_bin);
+        command
             .arg("app-server")
             .arg("--listen")
             .arg("stdio://")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_managed_child_command(&mut command);
+
+        let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start app-server: {error}"))?;
+        let child_pid = child
+            .id()
+            .ok_or_else(|| "app-server pid unavailable".to_string())?;
 
         let stdin = child
             .stdin
@@ -841,6 +947,7 @@ impl AppServerBridge {
         let bridge = Arc::new(Self {
             engine,
             child: Mutex::new(child),
+            child_pid,
             writer: Mutex::new(stdin),
             pending_requests: Mutex::new(HashMap::new()),
             internal_waiters: Mutex::new(HashMap::new()),
@@ -859,6 +966,10 @@ impl AppServerBridge {
         bridge.initialize().await?;
 
         Ok(bridge)
+    }
+
+    async fn request_shutdown(&self) {
+        terminate_managed_child(self.child_pid, "app-server").await;
     }
 
     async fn initialize(&self) -> Result<(), String> {
@@ -1519,6 +1630,7 @@ struct OpencodePendingUserInputEntry {
 
 struct OpencodeBackend {
     child: Mutex<Child>,
+    child_pid: u32,
     hub: Arc<ClientHub>,
     http: HttpClient,
     base_url: Url,
@@ -1547,6 +1659,7 @@ impl OpencodeBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_managed_child_command(&mut command);
 
         if let Some(password) = config.opencode_server_password.as_deref() {
             command.env("OPENCODE_SERVER_PASSWORD", password);
@@ -1556,6 +1669,9 @@ impl OpencodeBackend {
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start opencode serve: {error}"))?;
+        let child_pid = child
+            .id()
+            .ok_or_else(|| "opencode pid unavailable".to_string())?;
 
         let stdout = child
             .stdout
@@ -1574,6 +1690,7 @@ impl OpencodeBackend {
 
         let backend = Arc::new(Self {
             child: Mutex::new(child),
+            child_pid,
             hub,
             http: HttpClient::builder()
                 .build()
@@ -1598,6 +1715,10 @@ impl OpencodeBackend {
         backend.spawn_global_event_loop();
 
         Ok(backend)
+    }
+
+    async fn request_shutdown(&self) {
+        terminate_managed_child(self.child_pid, "opencode").await;
     }
 
     fn spawn_stdout_loop(self: &Arc<Self>, stdout: ChildStdout) {
@@ -4126,7 +4247,7 @@ async fn main() {
         .route("/rpc", get(ws_handler))
         .route("/health", get(health_handler))
         .route("/local-image", get(local_image_handler))
-        .with_state(state);
+        .with_state(state.clone());
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
@@ -4140,7 +4261,18 @@ async fn main() {
     println!("rust-bridge listening on {bind_addr}");
     maybe_print_pairing_qr(&config);
 
-    if let Err(error) = axum::serve(listener, app).await {
+    let shutdown_backend = state.backend.clone();
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let signal = wait_for_shutdown_signal().await;
+            eprintln!("shutdown signal received ({signal}), terminating managed backends");
+            shutdown_backend.shutdown().await;
+        })
+        .await;
+
+    state.backend.shutdown().await;
+
+    if let Err(error) = serve_result {
         eprintln!("server error: {error}");
         std::process::exit(1);
     }
@@ -7373,6 +7505,7 @@ mod tests {
         Arc::new(AppServerBridge {
             engine: BridgeRuntimeEngine::Codex,
             child: Mutex::new(child),
+            child_pid: 0,
             writer: Mutex::new(writer),
             pending_requests: Mutex::new(HashMap::new()),
             internal_waiters: Mutex::new(HashMap::new()),
@@ -7401,6 +7534,7 @@ mod tests {
 
         Arc::new(OpencodeBackend {
             child: Mutex::new(child),
+            child_pid: 0,
             hub,
             http: HttpClient::builder().build().expect("build reqwest client"),
             base_url: Url::parse("http://127.0.0.1:4090/").expect("valid opencode base url"),
@@ -8999,6 +9133,7 @@ mod tests {
         let bridge = Arc::new(AppServerBridge {
             engine: BridgeRuntimeEngine::Codex,
             child: Mutex::new(child),
+            child_pid: 0,
             writer: Mutex::new(writer),
             pending_requests: Mutex::new(HashMap::new()),
             internal_waiters: Mutex::new(HashMap::new()),

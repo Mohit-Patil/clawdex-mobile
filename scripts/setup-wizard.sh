@@ -1566,13 +1566,12 @@ confirm_phone_network_ready() {
   esac
 }
 
-start_bridge_foreground() {
-  rail_echo "Starting bridge in foreground."
-  rail_echo "Press Ctrl+C to stop the bridge."
+start_bridge_background() {
+  rail_echo "Starting bridge in background."
   echo ""
   (
     cd "$ROOT_DIR"
-    npm run secure:bridge
+    node "$SCRIPT_DIR/start-bridge-secure.js" --background
   )
 }
 
@@ -1701,6 +1700,7 @@ fi
 
 BRIDGE_HOST="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
 BRIDGE_PORT="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
+BRIDGE_TOKEN="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
 NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
 if [[ -z "$NETWORK_MODE" ]]; then
   NETWORK_MODE="$(infer_network_mode_from_host "$BRIDGE_HOST")"
@@ -1720,16 +1720,25 @@ fi
 section "Hatch"
 if [[ "$AUTO_START" == "true" ]]; then
   rail_echo "Auto-start enabled."
-  rail_echo "Launching bridge in foreground..."
-  start_bridge_foreground
-  exit $?
+  rail_echo "Launching bridge in background..."
+  start_bridge_background || exit $?
 else
   rail_echo "Auto-start disabled by --no-start."
   rail_echo "Skipping bridge launch."
 fi
 
 section "Next steps"
-rail_echo "1) cd $ROOT_DIR && npm run secure:bridge"
-rail_echo "2) Open the mobile app and use onboarding to connect (URL + token QR)."
+if [[ "$AUTO_START" == "true" ]]; then
+  rail_echo "1) Open the mobile app and use onboarding to connect."
+  rail_echo "Bridge URL: http://$BRIDGE_HOST:$BRIDGE_PORT"
+  if [[ -n "$BRIDGE_TOKEN" ]]; then
+    rail_echo "Bridge token: $BRIDGE_TOKEN"
+  fi
+  rail_echo "Bridge logs: $ROOT_DIR/.bridge.log"
+  rail_echo "2) Stop the bridge later with: clawdex stop"
+else
+  rail_echo "1) cd $ROOT_DIR && npm run secure:bridge"
+  rail_echo "2) Open the mobile app and use onboarding to connect (URL + token QR)."
+fi
 rail_blank
 rail_echo "${DIM}You can rerun this anytime: npm run setup:wizard${RESET}"

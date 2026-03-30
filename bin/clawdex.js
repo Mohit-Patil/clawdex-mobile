@@ -12,7 +12,7 @@ function printUsage() {
 Commands:
   init [--no-start] [--engine codex|opencode]
       Run interactive bridge onboarding and secure setup.
-      By default, this also starts the secure bridge in the foreground.
+      By default, this also starts the secure bridge in the background.
       Use --no-start to configure only.
       Use --engine to set the preferred backend written to .env.secure.
 

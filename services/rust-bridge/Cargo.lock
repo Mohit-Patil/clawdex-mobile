@@ -155,6 +155,7 @@ dependencies = [
  "base64",
  "chrono",
  "futures-util",
+ "libc",
  "qr2term",
  "reqwest",
  "serde",

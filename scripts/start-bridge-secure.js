@@ -3,6 +3,8 @@
 
 const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const http = require("node:http");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -12,6 +14,9 @@ const {
   packagedBinaryPath,
   resolveRuntimeTarget,
 } = require("./bridge-binary");
+
+const DEFAULT_HEALTH_TIMEOUT_MS = 15000;
+const DEV_HEALTH_TIMEOUT_MS = 60000;
 
 function resolveRootDir() {
   let rootDir = process.env.INIT_CWD ? path.resolve(process.env.INIT_CWD) : path.resolve(__dirname, "..");
@@ -48,6 +53,103 @@ function readEnvFile(filePath) {
   }
 
   return nextEnv;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatHostForUrl(host) {
+  if (host.includes(":") && !host.startsWith("[")) {
+    return `[${host}]`;
+  }
+  return host;
+}
+
+function bridgePidFile(rootDir) {
+  return path.join(rootDir, ".bridge.pid");
+}
+
+function bridgeLogFile(rootDir) {
+  return path.join(rootDir, ".bridge.log");
+}
+
+function readPidFile(rootDir) {
+  try {
+    const raw = fs.readFileSync(bridgePidFile(rootDir), "utf8").trim();
+    const pid = Number.parseInt(raw, 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePidFile(rootDir, pid) {
+  fs.writeFileSync(bridgePidFile(rootDir), `${pid}\n`);
+}
+
+function removePidFile(rootDir) {
+  try {
+    fs.unlinkSync(bridgePidFile(rootDir));
+  } catch {}
+}
+
+function isProcessAlive(pid) {
+  if (!pid) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForHealth(env, pid, timeoutMs) {
+  const host = env.BRIDGE_HOST || "127.0.0.1";
+  const port = env.BRIDGE_PORT || "8787";
+  const url = new URL(`http://${formatHostForUrl(host)}:${port}/health`);
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const ok = await probeHealth(url);
+
+    if (ok) {
+      if (!isProcessAlive(pid)) {
+        throw new Error("bridge health endpoint responded, but the started process already exited");
+      }
+      return { host, port };
+    }
+
+    if (!isProcessAlive(pid)) {
+      throw new Error("bridge process exited before becoming healthy");
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error("bridge health check did not recover in time");
+}
+
+async function probeHealth(url) {
+  const client = url.protocol === "https:" ? https : http;
+  return await new Promise((resolve) => {
+    const req = client.request(
+      url,
+      { method: "GET", timeout: 3000 },
+      (response) => {
+        resolve(response.statusCode === 200);
+        response.resume();
+      }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
 }
 
 function commandExists(command) {
@@ -144,6 +246,69 @@ function spawnAndRelay(command, args, options) {
   });
 }
 
+async function spawnDetachedAndWait(command, args, options) {
+  const { cwd, env, rootDir, healthTimeoutMs } = options;
+  const logPath = bridgeLogFile(rootDir);
+  const host = env.BRIDGE_HOST || "127.0.0.1";
+  const port = env.BRIDGE_PORT || "8787";
+  const healthUrl = new URL(`http://${formatHostForUrl(host)}:${port}/health`);
+  const existingPid = readPidFile(rootDir);
+
+  if (existingPid && isProcessAlive(existingPid)) {
+    if (await probeHealth(healthUrl)) {
+      console.log(`Bridge already running (pid ${existingPid}).`);
+      console.log(`Logs: ${logPath}`);
+      console.log(`Bridge is healthy at http://${formatHostForUrl(host)}:${port}`);
+      return;
+    }
+  } else if (existingPid) {
+    removePidFile(rootDir);
+  }
+
+  if (await probeHealth(healthUrl)) {
+    console.error(
+      `error: another bridge is already responding at http://${formatHostForUrl(host)}:${port}. Stop it first with 'clawdex stop'.`
+    );
+    process.exit(1);
+  }
+
+  const output = fs.openSync(logPath, "a");
+  const error = fs.openSync(logPath, "a");
+
+  const child = spawn(command, args, {
+    cwd,
+    env,
+    detached: true,
+    stdio: ["ignore", output, error],
+  });
+
+  child.on("error", (spawnError) => {
+    console.error(`error: failed to start ${command}: ${spawnError.message}`);
+    removePidFile(rootDir);
+    process.exit(1);
+  });
+
+  if (!child.pid) {
+    console.error(`error: failed to determine pid for ${command}`);
+    process.exit(1);
+  }
+
+  writePidFile(rootDir, child.pid);
+  child.unref();
+
+  console.log(`Bridge starting in background (pid ${child.pid}).`);
+  console.log(`Logs: ${logPath}`);
+
+  try {
+    const endpoint = await waitForHealth(env, child.pid, healthTimeoutMs);
+    console.log(`Bridge is healthy at http://${formatHostForUrl(endpoint.host)}:${endpoint.port}`);
+  } catch (error) {
+    removePidFile(rootDir);
+    console.error(`error: ${error.message}. Check logs: ${logPath}`);
+    process.exit(1);
+  }
+}
+
 function buildBridgeFromSource(rootDir, env) {
   const cargoCmd = "cargo";
   const args = ["build", "--release", "--locked"];
@@ -163,30 +328,20 @@ function buildBridgeFromSource(rootDir, env) {
   }
 }
 
-function start() {
-  const rootDir = resolveRootDir();
-  const secureEnvFile = path.join(rootDir, ".env.secure");
-  if (!fs.existsSync(secureEnvFile)) {
-    console.error(`error: ${secureEnvFile} not found. Run: npm run secure:setup`);
-    process.exit(1);
-  }
-
-  const fileEnv = readEnvFile(secureEnvFile);
-  const env = { ...fileEnv, ...process.env };
-  const devMode = process.argv.includes("--dev") || env.BRIDGE_RUN_MODE === "dev";
-  const forceSourceBuild = env.CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD === "true";
-
+function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
   if (devMode) {
     if (!commandExists("cargo")) {
       console.error("error: missing Rust/Cargo toolchain for dev bridge mode.");
       process.exit(1);
     }
 
-    spawnAndRelay("cargo", ["run"], {
+    return {
+      command: "cargo",
+      args: ["run"],
       cwd: path.join(rootDir, "services", "rust-bridge"),
       env,
-    });
-    return;
+      healthTimeoutMs: DEV_HEALTH_TIMEOUT_MS,
+    };
   }
 
   const overrideBinary = env.CLAWDEX_BRIDGE_BINARY ? path.resolve(env.CLAWDEX_BRIDGE_BINARY) : "";
@@ -196,22 +351,37 @@ function start() {
       process.exit(1);
     }
     ensureExecutable(overrideBinary);
-    spawnAndRelay(overrideBinary, [], { cwd: rootDir, env });
-    return;
+    return {
+      command: overrideBinary,
+      args: [],
+      cwd: rootDir,
+      env,
+      healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+    };
   }
 
   const packagedBinary = packagedBinaryPath(rootDir, resolveRuntimeTarget());
   if (!forceSourceBuild && packagedBinary && fs.existsSync(packagedBinary)) {
     ensureExecutable(packagedBinary);
-    spawnAndRelay(packagedBinary, [], { cwd: rootDir, env });
-    return;
+    return {
+      command: packagedBinary,
+      args: [],
+      cwd: rootDir,
+      env,
+      healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+    };
   }
 
   const builtBinary = builtBinaryPath(rootDir, os.platform());
   if (isBuiltBinaryFresh(rootDir, builtBinary)) {
     ensureExecutable(builtBinary);
-    spawnAndRelay(builtBinary, [], { cwd: rootDir, env });
-    return;
+    return {
+      command: builtBinary,
+      args: [],
+      cwd: rootDir,
+      env,
+      healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+    };
   }
 
   if (!commandExists("cargo")) {
@@ -234,7 +404,44 @@ function start() {
   }
 
   ensureExecutable(builtBinary);
-  spawnAndRelay(builtBinary, [], { cwd: rootDir, env });
+  return {
+    command: builtBinary,
+    args: [],
+    cwd: rootDir,
+    env,
+    healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+  };
 }
 
-start();
+async function start() {
+  const rootDir = resolveRootDir();
+  const secureEnvFile = path.join(rootDir, ".env.secure");
+  if (!fs.existsSync(secureEnvFile)) {
+    console.error(`error: ${secureEnvFile} not found. Run: npm run secure:setup`);
+    process.exit(1);
+  }
+
+  const fileEnv = readEnvFile(secureEnvFile);
+  const env = { ...fileEnv, ...process.env };
+  const devMode = process.argv.includes("--dev") || env.BRIDGE_RUN_MODE === "dev";
+  const backgroundMode = process.argv.includes("--background");
+  const forceSourceBuild = env.CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD === "true";
+  const launch = resolveLaunch(rootDir, env, { devMode, forceSourceBuild });
+
+  if (backgroundMode) {
+    await spawnDetachedAndWait(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
+      rootDir,
+      healthTimeoutMs: launch.healthTimeoutMs,
+    });
+    return;
+  }
+
+  spawnAndRelay(launch.command, launch.args, { cwd: launch.cwd, env: launch.env });
+}
+
+start().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+});
