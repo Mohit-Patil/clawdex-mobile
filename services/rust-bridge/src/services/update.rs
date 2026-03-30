@@ -3,8 +3,10 @@ use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::Stdio,
+    time::Duration,
 };
 
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub(crate) struct BridgeRuntimeInfo {
     pub(crate) version: String,
     pub(crate) install_kind: BridgeInstallKind,
     pub(crate) self_update_supported: bool,
+    pub(crate) latest_version: Option<String>,
     pub(crate) updater_status: Option<BridgeUpdaterStatus>,
 }
 
@@ -88,11 +91,12 @@ impl UpdateService {
             && self.script_path.as_ref().is_some_and(|path| path.exists())
     }
 
-    pub(crate) fn runtime_info(&self) -> BridgeRuntimeInfo {
+    pub(crate) async fn runtime_info(&self) -> BridgeRuntimeInfo {
         BridgeRuntimeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             install_kind: self.install_kind,
             self_update_supported: self.is_self_update_supported(),
+            latest_version: fetch_latest_npm_version().await,
             updater_status: self.read_status(),
         }
     }
@@ -182,6 +186,35 @@ impl UpdateService {
         let raw = fs::read_to_string(status_path).ok()?;
         serde_json::from_str::<BridgeUpdaterStatus>(&raw).ok()
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmDistTagsResponse {
+    latest: String,
+}
+
+async fn fetch_latest_npm_version() -> Option<String> {
+    let client = HttpClient::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(4))
+        .build()
+        .ok()?;
+    let response = client
+        .get("https://registry.npmjs.org/-/package/clawdex-mobile/dist-tags")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let payload = response.json::<NpmDistTagsResponse>().await.ok()?;
+    let latest = payload.latest.trim();
+    if latest.is_empty() {
+        return None;
+    }
+
+    Some(latest.to_string())
 }
 
 fn find_package_root() -> Option<PathBuf> {

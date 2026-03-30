@@ -1,6 +1,6 @@
 {
   "name": "clawdex-mobile",
-  "version": "5.0.5-internal.6",
+  "version": "5.0.5-internal.7",
   "private": true,
   "main": "index.js",
   "scripts": {

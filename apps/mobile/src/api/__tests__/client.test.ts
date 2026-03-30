@@ -74,6 +74,7 @@ describe('HostBridgeApiClient', () => {
       version: '5.0.4',
       installKind: 'publishedCli',
       selfUpdateSupported: true,
+      latestVersion: '5.0.5',
       updaterStatus: null,
     });
 
@@ -82,6 +83,7 @@ describe('HostBridgeApiClient', () => {
 
     expect(ws.request).toHaveBeenCalledWith('bridge/runtime/read');
     expect(result.version).toBe('5.0.4');
+    expect(result.latestVersion).toBe('5.0.5');
   });
 
   it('startBridgeUpdate() calls bridge/update/start with latest by default', async () => {

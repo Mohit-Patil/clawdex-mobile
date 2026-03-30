@@ -4479,7 +4479,7 @@ async fn handle_bridge_method(
         })),
         "bridge/capabilities/read" => serde_json::to_value(state.bridge_capabilities())
             .map_err(|error| BridgeError::server(&error.to_string())),
-        "bridge/runtime/read" => serde_json::to_value(state.updater.runtime_info())
+        "bridge/runtime/read" => serde_json::to_value(state.updater.runtime_info().await)
             .map_err(|error| BridgeError::server(&error.to_string())),
         "bridge/update/start" => {
             let request: BridgeUpdateStartRequest =

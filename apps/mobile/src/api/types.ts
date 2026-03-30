@@ -471,6 +471,7 @@ export interface BridgeRuntimeInfo {
   version: string;
   installKind: BridgeInstallKind;
   selfUpdateSupported: boolean;
+  latestVersion?: string | null;
   updaterStatus?: BridgeUpdaterStatus | null;
 }
 

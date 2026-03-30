@@ -187,6 +187,7 @@ export function SettingsScreen({
     bridgeCapabilities?.supports.selfUpdate === true &&
     bridgeRuntime?.selfUpdateSupported === true;
   const bridgeUpdateStatus = bridgeRuntime?.updaterStatus ?? null;
+  const bridgeLatestVersion = bridgeRuntime?.latestVersion?.trim() || null;
 
   const checkHealth = useCallback(async () => {
     try {
@@ -517,12 +518,13 @@ export function SettingsScreen({
     setBridgeUpdateStarting(true);
     setBridgeUpdateActionError(null);
     try {
-      const response = await api.startBridgeUpdate('latest');
+      const response = await api.startBridgeUpdate(bridgeLatestVersion ?? 'latest');
       setBridgeUpdateModalVisible(false);
       setBridgeRuntime((previous) => ({
         version: previous?.version ?? 'unknown',
         installKind: previous?.installKind ?? 'unknown',
         selfUpdateSupported: previous?.selfUpdateSupported ?? true,
+        latestVersion: previous?.latestVersion ?? bridgeLatestVersion,
         updaterStatus: {
           state: 'scheduled',
           jobId: response.jobId,
@@ -538,13 +540,15 @@ export function SettingsScreen({
     } finally {
       setBridgeUpdateStarting(false);
     }
-  }, [api]);
+  }, [api, bridgeLatestVersion]);
 
   const bridgeUpdateOptions = useMemo<SelectionSheetOption[]>(
     () => [
       {
         key: 'update-latest',
-        title: bridgeUpdateStarting ? 'Starting update…' : 'Update bridge to latest',
+        title: bridgeUpdateStarting
+          ? 'Starting update…'
+          : `Update bridge to ${bridgeLatestVersion ?? 'latest'}`,
         description:
           'This launches a detached update job. The bridge will disconnect briefly, update in the background, and restart automatically.',
         icon: 'cloud-download-outline',
@@ -554,7 +558,7 @@ export function SettingsScreen({
         },
       },
     ],
-    [bridgeUpdateStarting, startBridgeUpdate]
+    [bridgeLatestVersion, bridgeUpdateStarting, startBridgeUpdate]
   );
 
   const enginePickerOptions = useMemo<SelectionSheetOption[]>(
@@ -923,6 +927,7 @@ export function SettingsScreen({
             ) : (
               <>
                 <Row label="Bridge version" value={bridgeRuntime?.version ?? 'Unknown'} />
+                <Row label="Latest available" value={bridgeLatestVersion ?? 'Unknown'} />
                 <Row
                   label="Install type"
                   value={formatInstallKind(bridgeRuntime?.installKind ?? 'unknown')}
