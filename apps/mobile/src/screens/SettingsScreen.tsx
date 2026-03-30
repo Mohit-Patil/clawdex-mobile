@@ -74,6 +74,8 @@ interface SettingsScreenProps {
   onOpenTerms: () => void;
 }
 
+type SettingsRoute = 'home' | 'chat' | 'account' | 'limits' | 'bridge' | 'appearance' | 'legal';
+
 export function SettingsScreen({
   api,
   ws,
@@ -130,6 +132,7 @@ export function SettingsScreen({
   const [bridgeUpdateModalVisible, setBridgeUpdateModalVisible] = useState(false);
   const [bridgeUpdateActionError, setBridgeUpdateActionError] = useState<string | null>(null);
   const [bridgeUpdateStarting, setBridgeUpdateStarting] = useState(false);
+  const [route, setRoute] = useState<SettingsRoute>('home');
 
   const availableEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
     ? bridgeCapabilities.availableEngines
@@ -188,6 +191,68 @@ export function SettingsScreen({
     bridgeRuntime?.selfUpdateSupported === true;
   const bridgeUpdateStatus = bridgeRuntime?.updaterStatus ?? null;
   const bridgeLatestVersion = bridgeRuntime?.latestVersion?.trim() || null;
+  const headerTitle =
+    route === 'chat'
+      ? 'Chat Preferences'
+      : route === 'account'
+        ? 'Account & Auth'
+        : route === 'limits'
+          ? 'Codex Usage Limits'
+          : route === 'bridge'
+            ? 'Bridge & Servers'
+            : route === 'appearance'
+              ? 'Appearance'
+              : route === 'legal'
+                ? 'Legal'
+                : 'Settings';
+  const headerIcon =
+    route === 'chat'
+      ? ('sparkles-outline' as const)
+      : route === 'account'
+        ? ('person-circle-outline' as const)
+        : route === 'limits'
+          ? ('speedometer-outline' as const)
+          : route === 'bridge'
+            ? ('server-outline' as const)
+            : route === 'appearance'
+              ? ('color-palette-outline' as const)
+              : route === 'legal'
+                ? ('document-text-outline' as const)
+                : ('settings' as const);
+  const bridgeStatusLabel = healthyAt ? 'Connected' : 'Offline';
+  const bridgeStatusColor = healthyAt ? colors.statusComplete : colors.textMuted;
+  const chatDefaultsSummary = normalizedDefaultModelId
+    ? `${defaultEngineLabel} · ${defaultModelLabel} · ${defaultEffortLabel}`
+    : `${defaultEngineLabel} · Server default`;
+  const appearanceSummary = `Current theme: ${appearancePreferenceLabel}`;
+  const accountSummary = accountLoading
+    ? 'Loading account details…'
+    : accountError
+      ? 'Account details unavailable'
+      : [
+          formatAccountType(account),
+          account?.planType ? formatPlanType(account.planType) : null,
+          account?.email ?? null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+  const usageLimitsSummary = rateLimitsLoading
+    ? 'Loading usage limits…'
+    : usageLimitBadges.length > 0
+      ? usageLimitBadges
+          .map((limit) => `${limit.label === 'weekly' ? 'Weekly' : limit.label} ${limit.remainingPercent}%`)
+          .join(' · ')
+      : rateLimitsError
+        ? 'Usage limit data unavailable'
+        : 'No usage limit data yet';
+  const bridgeSummary = [
+    bridgeProfileName,
+    bridgeRuntime?.version ? `Bridge ${bridgeRuntime.version}` : null,
+    bridgeStatusLabel,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const legalSummary = 'Privacy details and terms of service';
 
   const checkHealth = useCallback(async () => {
     try {
@@ -636,6 +701,489 @@ export function SettingsScreen({
     ]
   );
 
+  const renderHomeContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Overview</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Row label="Bridge" value={bridgeStatusLabel} valueColor={bridgeStatusColor} />
+        <Row label="Profile" value={bridgeProfileName} />
+        <Row label="Account" value={formatAccountType(account)} isLast />
+      </BlurView>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Preferences</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <MenuEntry
+          icon="sparkles-outline"
+          title="Chat Preferences"
+          description={chatDefaultsSummary}
+          onPress={() => setRoute('chat')}
+        />
+        <MenuEntry
+          icon="color-palette-outline"
+          title="Appearance"
+          description={appearanceSummary}
+          onPress={() => setRoute('appearance')}
+          isLast={!showCodexUsageLimits}
+        />
+        {showCodexUsageLimits ? (
+          <MenuEntry
+            icon="speedometer-outline"
+            title="Codex Usage Limits"
+            description={usageLimitsSummary}
+            onPress={() => setRoute('limits')}
+            isLast
+          />
+        ) : null}
+      </BlurView>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Connection</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <MenuEntry
+          icon="person-circle-outline"
+          title="Account & Auth"
+          description={accountSummary || 'Signed out'}
+          onPress={() => setRoute('account')}
+        />
+        <MenuEntry
+          icon="server-outline"
+          title="Bridge & Servers"
+          description={bridgeSummary}
+          onPress={() => setRoute('bridge')}
+          isLast
+        />
+      </BlurView>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Support</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <MenuEntry
+          icon="document-text-outline"
+          title="Legal"
+          description={legalSummary}
+          onPress={() => setRoute('legal')}
+          isLast
+        />
+      </BlurView>
+
+      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+    </>
+  );
+
+  const renderChatContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Defaults</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Pressable
+          onPress={openEngineModal}
+          disabled={availableEngines.length <= 1}
+          style={({ pressed }) => [
+            styles.settingRow,
+            pressed && availableEngines.length > 1 && styles.linkRowPressed,
+            availableEngines.length <= 1 && styles.settingRowDisabled,
+          ]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Default engine</Text>
+            <Text style={styles.settingValue} numberOfLines={1}>
+              {defaultEngineLabel}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+        <Pressable
+          onPress={openModelModal}
+          style={({ pressed }) => [styles.settingRow, pressed && styles.linkRowPressed]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Default model</Text>
+            <Text style={styles.settingValue} numberOfLines={1}>
+              {defaultModelLabel}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+        <Pressable
+          onPress={openEffortModal}
+          disabled={!canSelectDefaultEffort}
+          style={({ pressed }) => [
+            styles.settingRow,
+            styles.settingRowLast,
+            pressed && canSelectDefaultEffort && styles.linkRowPressed,
+            !canSelectDefaultEffort && styles.settingRowDisabled,
+          ]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Default reasoning</Text>
+            <Text style={styles.settingValue} numberOfLines={1}>
+              {defaultEffortLabel}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+      </BlurView>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Approvals & Permissions</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Pressable
+          onPress={() => setApprovalModeModalVisible(true)}
+          style={({ pressed }) => [
+            styles.settingRow,
+            styles.settingRowLast,
+            pressed && styles.linkRowPressed,
+          ]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Execution approval mode</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              {approvalModeLabel}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+      </BlurView>
+      <Text style={styles.subtleHintText}>
+        This controls command/file-change approvals only. It does not affect
+        request_user_input questions. Mobile chats request full Codex sandbox
+        access by default.
+      </Text>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Transcript</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <View style={[styles.settingRow, styles.settingRowLast]}>
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Show tool calls</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              Show web searches, MCP/OpenAI docs calls, commands, and file changes.
+            </Text>
+          </View>
+          <Switch
+            value={showToolCalls}
+            onValueChange={(value) => onShowToolCallsChange?.(value)}
+            trackColor={{ false: transcriptSwitchTrackColor, true: transcriptSwitchActiveColor }}
+            thumbColor={transcriptSwitchThumbColor}
+            ios_backgroundColor={transcriptSwitchTrackColor}
+          />
+        </View>
+      </BlurView>
+      <Text style={styles.subtleHintText}>
+        Live tool activity stays in a capped panel so the chat list does not
+        start jumping while a turn is running.
+      </Text>
+
+      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+    </>
+  );
+
+  const renderAppearanceContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Theme</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Pressable
+          onPress={() => setAppearanceModalVisible(true)}
+          style={({ pressed }) => [
+            styles.settingRow,
+            styles.settingRowLast,
+            pressed && styles.linkRowPressed,
+          ]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Theme</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              {appearancePreferenceLabel}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+      </BlurView>
+      <Text style={styles.subtleHintText}>
+        System follows your phone appearance. Existing installs stay dark until changed.
+      </Text>
+    </>
+  );
+
+  const renderAccountContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Account & Auth</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        {accountLoading ? (
+          <View style={styles.accountLoadingState}>
+            <ActivityIndicator color={colors.textPrimary} />
+            <Text style={styles.settingValue}>Loading account details…</Text>
+          </View>
+        ) : (
+          <>
+            <Row
+              label="Status"
+              value={formatAccountType(account)}
+              valueColor={account?.type ? colors.statusComplete : colors.textMuted}
+            />
+            {account?.email ? <Row label="Email" value={account.email} /> : null}
+            {account?.planType ? <Row label="Plan" value={formatPlanType(account.planType)} /> : null}
+            <Row
+              label="Bridge auth"
+              value={account?.requiresOpenaiAuth ? 'Required' : 'Optional'}
+              isLast
+            />
+          </>
+        )}
+      </BlurView>
+      {account?.type === null && account?.requiresOpenaiAuth ? (
+        <Text style={styles.subtleHintText}>
+          The bridge expects OpenAI auth, but mobile does not expose a login flow yet.
+        </Text>
+      ) : null}
+      {accountError ? <Text style={styles.errorText}>{accountError}</Text> : null}
+    </>
+  );
+
+  const renderLimitsContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Codex Usage Limits</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        {rateLimitsLoading ? (
+          <View style={styles.accountLoadingState}>
+            <ActivityIndicator color={colors.textPrimary} />
+            <Text style={styles.settingValue}>Loading usage limits…</Text>
+          </View>
+        ) : usageLimitBadges.length > 0 ? (
+          usageLimitBadges.map((limit, index) => {
+            const toneColor =
+              limit.tone === 'critical'
+                ? colors.statusError
+                : limit.tone === 'warning'
+                  ? colors.warning
+                  : colors.statusComplete;
+            const label = limit.label === 'weekly' ? 'Weekly' : limit.label;
+            const isLastLimit = index === usageLimitBadges.length - 1;
+
+            return (
+              <Fragment key={limit.id}>
+                <Row
+                  label={`${label} remaining`}
+                  value={`${String(limit.remainingPercent)}%`}
+                  valueColor={toneColor}
+                />
+                <Row
+                  label={`${label} resets`}
+                  value={formatComposerUsageLimitResetAt(limit.resetsAt)}
+                  isLast={isLastLimit}
+                />
+              </Fragment>
+            );
+          })
+        ) : (
+          <View style={styles.accountLoadingState}>
+            <Text style={styles.settingValue}>No usage limit data yet</Text>
+          </View>
+        )}
+      </BlurView>
+      <Text style={styles.subtleHintText}>
+        Reset times are shown in your local device timezone.
+      </Text>
+      {rateLimitsError ? <Text style={styles.errorText}>{rateLimitsError}</Text> : null}
+    </>
+  );
+
+  const renderBridgeContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Bridge Profiles</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Row label="Active profile" value={bridgeProfileName} />
+        <Row label="Saved profiles" value={String(bridgeProfiles.length)} />
+        <Row label="Storage" value="Secure device keychain" isLast />
+        <Text selectable style={styles.valueText}>
+          {bridgeUrl}
+        </Text>
+        <Pressable
+          onPress={() => setBridgeProfileModalVisible(true)}
+          style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
+        >
+          <Ionicons name="swap-horizontal-outline" size={15} color={colors.textPrimary} />
+          <Text style={styles.bridgeEditBtnText}>Switch profile</Text>
+        </Pressable>
+        <Pressable
+          onPress={onAddBridgeProfile}
+          style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
+        >
+          <Ionicons name="add-circle-outline" size={15} color={colors.textPrimary} />
+          <Text style={styles.bridgeEditBtnText}>Add profile</Text>
+        </Pressable>
+        <Pressable
+          onPress={onEditBridgeProfile}
+          style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
+        >
+          <Ionicons name="create-outline" size={15} color={colors.textPrimary} />
+          <Text style={styles.bridgeEditBtnText}>Edit active profile</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => {
+            void onClearSavedBridges?.();
+          }}
+          style={({ pressed }) => [styles.bridgeResetBtn, pressed && styles.bridgeResetBtnPressed]}
+        >
+          <Ionicons name="refresh-circle-outline" size={15} color={colors.error} />
+          <Text style={styles.bridgeResetBtnText}>Clear saved bridges</Text>
+        </Pressable>
+      </BlurView>
+      <Text style={styles.subtleHintText}>
+        Bridge URLs and tokens are stored in the secure device keychain so you can switch
+        servers without retyping secrets.
+      </Text>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge Maintenance</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        {bridgeRuntimeLoading ? (
+          <View style={styles.accountLoadingState}>
+            <ActivityIndicator color={colors.textPrimary} />
+            <Text style={styles.settingValue}>Loading bridge runtime…</Text>
+          </View>
+        ) : (
+          <>
+            <Row label="Bridge version" value={bridgeRuntime?.version ?? 'Unknown'} />
+            <Row label="Latest available" value={bridgeLatestVersion ?? 'Unknown'} />
+            <Row
+              label="Install type"
+              value={formatInstallKind(bridgeRuntime?.installKind ?? 'unknown')}
+            />
+            {bridgeUpdateStatus ? (
+              <Row
+                label="Last updater state"
+                value={formatBridgeUpdaterState(bridgeUpdateStatus.state)}
+              />
+            ) : null}
+            {bridgeUpdateStatus ? (
+              <Row
+                label="Updater message"
+                value={bridgeUpdateStatus.message}
+                isLast={!canSelfUpdateBridge}
+              />
+            ) : null}
+            {!bridgeUpdateStatus ? (
+              <Row
+                label="Updater status"
+                value={canSelfUpdateBridge ? 'Ready' : 'Unavailable'}
+                isLast
+              />
+            ) : null}
+          </>
+        )}
+        <Pressable
+          disabled={!canSelfUpdateBridge || bridgeUpdateStarting}
+          onPress={() => setBridgeUpdateModalVisible(true)}
+          style={({ pressed }) => [
+            styles.bridgeEditBtn,
+            (!canSelfUpdateBridge || bridgeUpdateStarting) && styles.settingRowDisabled,
+            pressed && canSelfUpdateBridge && !bridgeUpdateStarting && styles.bridgeEditBtnPressed,
+          ]}
+        >
+          <Ionicons name="cloud-download-outline" size={15} color={colors.textPrimary} />
+          <Text style={styles.bridgeEditBtnText}>
+            {bridgeUpdateStarting ? 'Starting bridge update…' : 'Update bridge'}
+          </Text>
+        </Pressable>
+      </BlurView>
+      {bridgeUpdateActionError ? <Text style={styles.errorText}>{bridgeUpdateActionError}</Text> : null}
+      {bridgeRuntimeError ? <Text style={styles.errorText}>{bridgeRuntimeError}</Text> : null}
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Engines</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <EngineAvailabilityRow
+          engine="codex"
+          available={availableEngines.includes('codex')}
+          active={activeEngine === 'codex'}
+        />
+        <EngineAvailabilityRow
+          engine="opencode"
+          available={availableEngines.includes('opencode')}
+          active={activeEngine === 'opencode'}
+          isLast
+        />
+      </BlurView>
+      <Text style={styles.subtleHintText}>
+        The new chat engine picker only appears when multiple engines are available on
+        this bridge.
+      </Text>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Health</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Row
+          label="Status"
+          value={healthyAt ? 'OK' : 'Unknown'}
+          valueColor={healthyAt ? colors.statusComplete : colors.textMuted}
+        />
+        <Row label="Last seen" value={healthyAt ?? '—'} />
+        <Row label="Uptime" value={uptimeSec !== null ? `${uptimeSec}s` : '—'} />
+        <Row
+          label="WebSocket"
+          value={wsConnected ? 'Connected' : 'Disconnected'}
+          valueColor={wsConnected ? colors.statusComplete : colors.statusError}
+          isLast
+        />
+      </BlurView>
+
+      <Pressable
+        onPress={() => {
+          void checkHealth();
+          void loadBridgeCapabilities();
+          void loadBridgeRuntime();
+          void refreshModelOptions();
+          void loadAccount();
+          void loadRateLimits();
+        }}
+        style={({ pressed }) => [styles.refreshBtn, pressed && styles.refreshBtnPressed]}
+      >
+        <Ionicons name="refresh" size={16} color={colors.white} />
+        <Text style={styles.refreshBtnText}>Refresh settings</Text>
+      </Pressable>
+    </>
+  );
+
+  const renderLegalContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Legal</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Pressable
+          onPress={onOpenPrivacy}
+          style={({ pressed }) => [styles.linkRow, pressed && styles.linkRowPressed]}
+        >
+          <View style={styles.linkRowLeft}>
+            <Ionicons name="shield-checkmark-outline" size={16} color={colors.textPrimary} />
+            <Text style={styles.linkRowLabel}>Privacy details</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+        <Pressable
+          onPress={onOpenTerms}
+          style={({ pressed }) => [styles.linkRow, pressed && styles.linkRowPressed]}
+        >
+          <View style={styles.linkRowLeft}>
+            <Ionicons name="document-text-outline" size={16} color={colors.textPrimary} />
+            <Text style={styles.linkRowLabel}>Terms of service</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+      </BlurView>
+    </>
+  );
+
+  const renderBodyContent = () => {
+    switch (route) {
+      case 'chat':
+        return renderChatContent();
+      case 'appearance':
+        return renderAppearanceContent();
+      case 'account':
+        return renderAccountContent();
+      case 'limits':
+        return renderLimitsContent();
+      case 'bridge':
+        return renderBridgeContent();
+      case 'legal':
+        return renderLegalContent();
+      default:
+        return renderHomeContent();
+    }
+  };
+
   return (
     <View style={styles.container}>
       <LinearGradient
@@ -644,413 +1192,21 @@ export function SettingsScreen({
       />
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
-          <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
-            <Ionicons name="menu" size={22} color={colors.textPrimary} />
-          </Pressable>
-          <Ionicons name="settings" size={16} color={colors.textPrimary} />
-          <Text style={styles.headerTitle}>Settings</Text>
+          {route === 'home' ? (
+            <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
+              <Ionicons name="menu" size={22} color={colors.textPrimary} />
+            </Pressable>
+          ) : (
+            <Pressable onPress={() => setRoute('home')} hitSlop={8} style={styles.menuBtn}>
+              <Ionicons name="chevron-back" size={22} color={colors.textPrimary} />
+            </Pressable>
+          )}
+          <Ionicons name={headerIcon} size={16} color={colors.textPrimary} />
+          <Text style={styles.headerTitle}>{headerTitle}</Text>
         </View>
 
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
-          <Text style={styles.sectionLabel}>Chat Defaults</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <Pressable
-              onPress={openEngineModal}
-              disabled={availableEngines.length <= 1}
-              style={({ pressed }) => [
-                styles.settingRow,
-                pressed && availableEngines.length > 1 && styles.linkRowPressed,
-                availableEngines.length <= 1 && styles.settingRowDisabled,
-              ]}
-            >
-              <View style={styles.settingRowLeft}>
-                <Text style={styles.rowLabel}>Default engine</Text>
-                <Text style={styles.settingValue} numberOfLines={1}>
-                  {defaultEngineLabel}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </Pressable>
-            <Pressable
-              onPress={openModelModal}
-              style={({ pressed }) => [
-                styles.settingRow,
-                pressed && styles.linkRowPressed,
-              ]}
-            >
-              <View style={styles.settingRowLeft}>
-                <Text style={styles.rowLabel}>Default model</Text>
-                <Text style={styles.settingValue} numberOfLines={1}>
-                  {defaultModelLabel}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </Pressable>
-            <Pressable
-              onPress={openEffortModal}
-              disabled={!canSelectDefaultEffort}
-              style={({ pressed }) => [
-                styles.settingRow,
-                styles.settingRowLast,
-                pressed && canSelectDefaultEffort && styles.linkRowPressed,
-                !canSelectDefaultEffort && styles.settingRowDisabled,
-              ]}
-            >
-              <View style={styles.settingRowLeft}>
-                <Text style={styles.rowLabel}>Default reasoning</Text>
-                <Text style={styles.settingValue} numberOfLines={1}>
-                  {defaultEffortLabel}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </Pressable>
-          </BlurView>
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Appearance</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <Pressable
-              onPress={() => setAppearanceModalVisible(true)}
-              style={({ pressed }) => [
-                styles.settingRow,
-                styles.settingRowLast,
-                pressed && styles.linkRowPressed,
-              ]}
-            >
-              <View style={styles.settingRowLeft}>
-                <Text style={styles.rowLabel}>Theme</Text>
-                <Text style={styles.settingValue} numberOfLines={2}>
-                  {appearancePreferenceLabel}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </Pressable>
-          </BlurView>
-          <Text style={styles.subtleHintText}>
-            System follows your phone appearance. Existing installs stay dark until changed.
-          </Text>
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Approvals & Permissions</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <Pressable
-              onPress={() => setApprovalModeModalVisible(true)}
-              style={({ pressed }) => [
-                styles.settingRow,
-                styles.settingRowLast,
-                pressed && styles.linkRowPressed,
-              ]}
-            >
-              <View style={styles.settingRowLeft}>
-                <Text style={styles.rowLabel}>Execution approval mode</Text>
-                <Text style={styles.settingValue} numberOfLines={2}>
-                  {approvalModeLabel}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </Pressable>
-          </BlurView>
-          <Text style={styles.subtleHintText}>
-            This controls command/file-change approvals only. It does not affect
-            request_user_input questions. Mobile chats request full Codex sandbox
-            access by default.
-          </Text>
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Transcript</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <View style={[styles.settingRow, styles.settingRowLast]}>
-              <View style={styles.settingRowLeft}>
-                <Text style={styles.rowLabel}>Show tool calls</Text>
-                <Text style={styles.settingValue} numberOfLines={2}>
-                  Show web searches, MCP/OpenAI docs calls, commands, and file changes.
-                </Text>
-              </View>
-              <Switch
-                value={showToolCalls}
-                onValueChange={(value) => onShowToolCallsChange?.(value)}
-                trackColor={{ false: transcriptSwitchTrackColor, true: transcriptSwitchActiveColor }}
-                thumbColor={transcriptSwitchThumbColor}
-                ios_backgroundColor={transcriptSwitchTrackColor}
-              />
-            </View>
-          </BlurView>
-          <Text style={styles.subtleHintText}>
-            Live tool activity stays in a capped panel so the chat list does not
-            start jumping while a turn is running.
-          </Text>
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Account & Auth</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            {accountLoading ? (
-              <View style={styles.accountLoadingState}>
-                <ActivityIndicator color={colors.textPrimary} />
-                <Text style={styles.settingValue}>Loading account details…</Text>
-              </View>
-            ) : (
-              <>
-                <Row
-                  label="Status"
-                  value={formatAccountType(account)}
-                  valueColor={account?.type ? colors.statusComplete : colors.textMuted}
-                />
-                {account?.email ? (
-                  <Row label="Email" value={account.email} />
-                ) : null}
-                {account?.planType ? (
-                  <Row label="Plan" value={formatPlanType(account.planType)} />
-                ) : null}
-                <Row
-                  label="Bridge auth"
-                  value={account?.requiresOpenaiAuth ? 'Required' : 'Optional'}
-                  isLast
-                />
-              </>
-            )}
-          </BlurView>
-          {account?.type === null && account?.requiresOpenaiAuth ? (
-            <Text style={styles.subtleHintText}>
-              The bridge expects OpenAI auth, but mobile does not expose a login flow yet.
-            </Text>
-          ) : null}
-          {accountError ? <Text style={styles.errorText}>{accountError}</Text> : null}
-
-          {showCodexUsageLimits ? (
-            <>
-              <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Codex Usage Limits</Text>
-              <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-                {rateLimitsLoading ? (
-                  <View style={styles.accountLoadingState}>
-                    <ActivityIndicator color={colors.textPrimary} />
-                    <Text style={styles.settingValue}>Loading usage limits…</Text>
-                  </View>
-                ) : usageLimitBadges.length > 0 ? (
-                  usageLimitBadges.map((limit, index) => {
-                    const toneColor =
-                      limit.tone === 'critical'
-                        ? colors.statusError
-                        : limit.tone === 'warning'
-                          ? colors.warning
-                          : colors.statusComplete;
-                    const label = limit.label === 'weekly' ? 'Weekly' : limit.label;
-                    const isLastLimit = index === usageLimitBadges.length - 1;
-
-                    return (
-                      <Fragment key={limit.id}>
-                        <Row
-                          label={`${label} remaining`}
-                          value={`${String(limit.remainingPercent)}%`}
-                          valueColor={toneColor}
-                        />
-                        <Row
-                          label={`${label} resets`}
-                          value={formatComposerUsageLimitResetAt(limit.resetsAt)}
-                          isLast={isLastLimit}
-                        />
-                      </Fragment>
-                    );
-                  })
-                ) : (
-                  <View style={styles.accountLoadingState}>
-                    <Text style={styles.settingValue}>No usage limit data yet</Text>
-                  </View>
-                )}
-              </BlurView>
-              <Text style={styles.subtleHintText}>
-                Reset times are shown in your local device timezone.
-              </Text>
-              {rateLimitsError ? <Text style={styles.errorText}>{rateLimitsError}</Text> : null}
-            </>
-          ) : null}
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge Profiles</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <Row label="Active profile" value={bridgeProfileName} />
-            <Row label="Saved profiles" value={String(bridgeProfiles.length)} />
-            <Row label="Storage" value="Secure device keychain" isLast />
-            <Text selectable style={styles.valueText}>
-              {bridgeUrl}
-            </Text>
-            <Pressable
-              onPress={() => setBridgeProfileModalVisible(true)}
-              style={({ pressed }) => [
-                styles.bridgeEditBtn,
-                pressed && styles.bridgeEditBtnPressed,
-              ]}
-            >
-              <Ionicons name="swap-horizontal-outline" size={15} color={colors.textPrimary} />
-              <Text style={styles.bridgeEditBtnText}>Switch profile</Text>
-            </Pressable>
-            <Pressable
-              onPress={onAddBridgeProfile}
-              style={({ pressed }) => [
-                styles.bridgeEditBtn,
-                pressed && styles.bridgeEditBtnPressed,
-              ]}
-            >
-              <Ionicons name="add-circle-outline" size={15} color={colors.textPrimary} />
-              <Text style={styles.bridgeEditBtnText}>Add profile</Text>
-            </Pressable>
-            <Pressable
-              onPress={onEditBridgeProfile}
-              style={({ pressed }) => [
-                styles.bridgeEditBtn,
-                pressed && styles.bridgeEditBtnPressed,
-              ]}
-            >
-              <Ionicons name="create-outline" size={15} color={colors.textPrimary} />
-              <Text style={styles.bridgeEditBtnText}>Edit active profile</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                void onClearSavedBridges?.();
-              }}
-              style={({ pressed }) => [
-                styles.bridgeResetBtn,
-                pressed && styles.bridgeResetBtnPressed,
-              ]}
-            >
-              <Ionicons name="refresh-circle-outline" size={15} color={colors.error} />
-              <Text style={styles.bridgeResetBtnText}>Clear saved bridges</Text>
-            </Pressable>
-          </BlurView>
-          <Text style={styles.subtleHintText}>
-            Bridge URLs and tokens are stored in the secure device keychain so you can switch
-            servers without retyping secrets.
-          </Text>
-          {bridgeRuntimeError ? <Text style={styles.errorText}>{bridgeRuntimeError}</Text> : null}
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge Maintenance</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            {bridgeRuntimeLoading ? (
-              <View style={styles.accountLoadingState}>
-                <ActivityIndicator color={colors.textPrimary} />
-                <Text style={styles.settingValue}>Loading bridge runtime…</Text>
-              </View>
-            ) : (
-              <>
-                <Row label="Bridge version" value={bridgeRuntime?.version ?? 'Unknown'} />
-                <Row label="Latest available" value={bridgeLatestVersion ?? 'Unknown'} />
-                <Row
-                  label="Install type"
-                  value={formatInstallKind(bridgeRuntime?.installKind ?? 'unknown')}
-                />
-                {bridgeUpdateStatus ? (
-                  <Row
-                    label="Last updater state"
-                    value={formatBridgeUpdaterState(bridgeUpdateStatus.state)}
-                  />
-                ) : null}
-                {bridgeUpdateStatus ? (
-                  <Row
-                    label="Updater message"
-                    value={bridgeUpdateStatus.message}
-                    isLast={!canSelfUpdateBridge}
-                  />
-                ) : null}
-                {!bridgeUpdateStatus ? (
-                  <Row
-                    label="Updater status"
-                    value={
-                      canSelfUpdateBridge
-                        ? 'Ready'
-                        : 'Unavailable'
-                    }
-                    isLast
-                  />
-                ) : null}
-              </>
-            )}
-            <Pressable
-              disabled={!canSelfUpdateBridge || bridgeUpdateStarting}
-              onPress={() => setBridgeUpdateModalVisible(true)}
-              style={({ pressed }) => [
-                styles.bridgeEditBtn,
-                (!canSelfUpdateBridge || bridgeUpdateStarting) && styles.settingRowDisabled,
-                pressed && canSelfUpdateBridge && !bridgeUpdateStarting && styles.bridgeEditBtnPressed,
-              ]}
-            >
-              <Ionicons name="cloud-download-outline" size={15} color={colors.textPrimary} />
-              <Text style={styles.bridgeEditBtnText}>
-                {bridgeUpdateStarting ? 'Starting bridge update…' : 'Update bridge'}
-              </Text>
-            </Pressable>
-          </BlurView>
-          {bridgeUpdateActionError ? <Text style={styles.errorText}>{bridgeUpdateActionError}</Text> : null}
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Engines</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <EngineAvailabilityRow
-              engine="codex"
-              available={availableEngines.includes('codex')}
-              active={activeEngine === 'codex'}
-            />
-            <EngineAvailabilityRow
-              engine="opencode"
-              available={availableEngines.includes('opencode')}
-              active={activeEngine === 'opencode'}
-              isLast
-            />
-          </BlurView>
-          <Text style={styles.subtleHintText}>
-            The new chat engine picker only appears when multiple engines are available on
-            this bridge.
-          </Text>
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Health</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <Row
-              label="Status"
-              value={healthyAt ? 'OK' : 'Unknown'}
-              valueColor={healthyAt ? colors.statusComplete : colors.textMuted}
-            />
-            <Row label="Last seen" value={healthyAt ?? '—'} />
-            <Row label="Uptime" value={uptimeSec !== null ? `${uptimeSec}s` : '—'} />
-            <Row
-              label="WebSocket"
-              value={wsConnected ? 'Connected' : 'Disconnected'}
-              valueColor={wsConnected ? colors.statusComplete : colors.statusError}
-              isLast
-            />
-          </BlurView>
-
-          <Pressable
-            onPress={() => {
-              void checkHealth();
-              void loadBridgeCapabilities();
-              void loadBridgeRuntime();
-              void refreshModelOptions();
-              void loadAccount();
-              void loadRateLimits();
-            }}
-            style={({ pressed }) => [styles.refreshBtn, pressed && styles.refreshBtnPressed]}
-          >
-            <Ionicons name="refresh" size={16} color={colors.white} />
-            <Text style={styles.refreshBtnText}>Refresh settings</Text>
-          </Pressable>
-
-          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Legal</Text>
-          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-            <Pressable
-              onPress={onOpenPrivacy}
-              style={({ pressed }) => [styles.linkRow, pressed && styles.linkRowPressed]}
-            >
-              <View style={styles.linkRowLeft}>
-                <Ionicons name="shield-checkmark-outline" size={16} color={colors.textPrimary} />
-                <Text style={styles.linkRowLabel}>Privacy details</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </Pressable>
-            <Pressable
-              onPress={onOpenTerms}
-              style={({ pressed }) => [styles.linkRow, pressed && styles.linkRowPressed]}
-            >
-              <View style={styles.linkRowLeft}>
-                <Ionicons name="document-text-outline" size={16} color={colors.textPrimary} />
-                <Text style={styles.linkRowLabel}>Terms of service</Text>
-              </View>
-              <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-            </Pressable>
-          </BlurView>
-
-          {error ? <Text style={styles.errorText}>{error}</Text> : null}
+          {renderBodyContent()}
         </ScrollView>
       </SafeAreaView>
 
@@ -1179,6 +1335,48 @@ function EngineAvailabilityRow({
       valueColor={valueColor}
       isLast={isLast}
     />
+  );
+}
+
+function MenuEntry({
+  icon,
+  title,
+  description,
+  onPress,
+  isLast,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+  description: string;
+  onPress: () => void;
+  isLast?: boolean;
+}) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const { colors } = theme;
+
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.menuRow,
+        isLast && styles.menuRowLast,
+        pressed && styles.linkRowPressed,
+      ]}
+    >
+      <View style={styles.menuRowLeft}>
+        <View style={styles.menuIconWrap}>
+          <Ionicons name={icon} size={16} color={colors.textPrimary} />
+        </View>
+        <View style={styles.menuTextWrap}>
+          <Text style={styles.menuTitle}>{title}</Text>
+          <Text style={styles.menuDescription} numberOfLines={2}>
+            {description}
+          </Text>
+        </View>
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+    </Pressable>
   );
 }
 
@@ -1394,6 +1592,45 @@ const createStyles = (theme: AppTheme) => {
       alignItems: 'center',
       justifyContent: 'space-between',
       paddingVertical: theme.spacing.md,
+    },
+    menuRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: theme.spacing.md,
+      paddingVertical: theme.spacing.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: settingsDivider,
+    },
+    menuRowLast: {
+      borderBottomWidth: 0,
+    },
+    menuRowLeft: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.md,
+      flex: 1,
+    },
+    menuIconWrap: {
+      width: 32,
+      height: 32,
+      borderRadius: theme.radius.sm,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: neutralControlBackground,
+    },
+    menuTextWrap: {
+      flex: 1,
+      gap: 3,
+    },
+    menuTitle: {
+      ...theme.typography.body,
+      color: settingsPrimaryText,
+      fontWeight: '600',
+    },
+    menuDescription: {
+      ...theme.typography.caption,
+      color: settingsValueColor,
     },
     linkRowPressed: {
       backgroundColor: neutralControlPressed,
