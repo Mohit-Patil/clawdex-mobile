@@ -34,38 +34,62 @@ jobs:
             package_target: darwin-arm64
             rust_target: aarch64-apple-darwin
             binary_path: services/rust-bridge/target/aarch64-apple-darwin/release/codex-rust-bridge
+            build_mode: host
+            apt_packages: ""
+            linker: ""
+            linker_env: ""
+            build_container: ""
+            max_glibc: ""
           - runner: macos-26-intel
             package_target: darwin-x64
             rust_target: x86_64-apple-darwin
             binary_path: services/rust-bridge/target/x86_64-apple-darwin/release/codex-rust-bridge
+            build_mode: host
+            apt_packages: ""
+            linker: ""
+            linker_env: ""
+            build_container: ""
+            max_glibc: ""
           - runner: ubuntu-latest
             package_target: linux-x64
             rust_target: x86_64-unknown-linux-gnu
             binary_path: services/rust-bridge/target/x86_64-unknown-linux-gnu/release/codex-rust-bridge
+            build_mode: linux-compat
             apt_packages: ""
             linker: ""
             linker_env: ""
+            build_container: ubuntu:20.04
+            max_glibc: "2.31"
           - runner: ubuntu-latest
             package_target: linux-arm64
             rust_target: aarch64-unknown-linux-gnu
             binary_path: services/rust-bridge/target/aarch64-unknown-linux-gnu/release/codex-rust-bridge
+            build_mode: linux-compat
             apt_packages: gcc-aarch64-linux-gnu
             linker: aarch64-linux-gnu-gcc
             linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            build_container: ubuntu:20.04
+            max_glibc: "2.31"
           - runner: ubuntu-latest
             package_target: linux-armv7l
             rust_target: armv7-unknown-linux-gnueabihf
             binary_path: services/rust-bridge/target/armv7-unknown-linux-gnueabihf/release/codex-rust-bridge
+            build_mode: linux-compat
             apt_packages: gcc-arm-linux-gnueabihf
             linker: arm-linux-gnueabihf-gcc
             linker_env: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
+            build_container: ubuntu:20.04
+            max_glibc: "2.31"
           - runner: windows-latest
             package_target: win32-x64
             rust_target: x86_64-pc-windows-msvc
             binary_path: services/rust-bridge/target/x86_64-pc-windows-msvc/release/codex-rust-bridge.exe
+            build_mode: host
             apt_packages: ""
             linker: ""
             linker_env: ""
+            build_container: ""
+            max_glibc: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -77,31 +101,89 @@ jobs:
           package-manager-cache: false
 
       - name: Setup Rust toolchain
+        if: matrix.build_mode == 'host'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
       - name: Cache Rust dependencies
+        if: matrix.build_mode == 'host'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             services/rust-bridge -> target
 
       - name: Install Linux cross toolchain
-        if: matrix.apt_packages != ''
+        if: matrix.build_mode == 'host' && matrix.apt_packages != ''
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.apt_packages }}
 
       - name: Configure cross linker
-        if: matrix.linker_env != ''
+        if: matrix.build_mode == 'host' && matrix.linker_env != ''
         shell: bash
         run: |
           echo "${{ matrix.linker_env }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
 
       - name: Build bridge binary
+        if: matrix.build_mode == 'host'
         working-directory: services/rust-bridge
         run: cargo build --release --locked --target ${{ matrix.rust_target }}
+
+      - name: Build Linux bridge binary in compatibility container
+        if: matrix.build_mode == 'linux-compat'
+        env:
+          BUILD_CONTAINER: ${{ matrix.build_container }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          CONTAINER_APT_PACKAGES: ${{ matrix.apt_packages }}
+          LINKER: ${{ matrix.linker }}
+          LINKER_ENV: ${{ matrix.linker_env }}
+        run: |
+          docker run --rm \
+            -e RUST_TARGET \
+            -e CONTAINER_APT_PACKAGES \
+            -e LINKER \
+            -e LINKER_ENV \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${BUILD_CONTAINER}" \
+            bash -lc '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y ca-certificates curl build-essential pkg-config ${CONTAINER_APT_PACKAGES}
+              curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+              . "$HOME/.cargo/env"
+              rustup target add "${RUST_TARGET}"
+              if [ -n "${LINKER_ENV}" ]; then
+                export "${LINKER_ENV}=${LINKER}"
+              fi
+              cargo build --release --locked --manifest-path services/rust-bridge/Cargo.toml --target "${RUST_TARGET}"
+            '
+          sudo chown -R "$(id -u):$(id -g)" services/rust-bridge/target
+
+      - name: Verify Linux glibc floor
+        if: matrix.max_glibc != ''
+        env:
+          BINARY_PATH: ${{ matrix.binary_path }}
+          MAX_GLIBC: ${{ matrix.max_glibc }}
+        run: |
+          REQUIRED_GLIBC="$(
+            strings "${BINARY_PATH}" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+              | sed 's/GLIBC_//' \
+              | sort -V \
+              | tail -n 1 || true
+          )"
+          if [ -z "${REQUIRED_GLIBC}" ]; then
+            echo "Failed to determine required glibc version for ${BINARY_PATH}."
+            exit 1
+          fi
+          if [ "$(printf '%s\n%s\n' "${REQUIRED_GLIBC}" "${MAX_GLIBC}" | sort -V | tail -n 1)" != "${MAX_GLIBC}" ]; then
+            echo "Binary ${BINARY_PATH} requires glibc ${REQUIRED_GLIBC}, expected <= ${MAX_GLIBC}."
+            exit 1
+          fi
+          echo "Binary ${BINARY_PATH} requires glibc ${REQUIRED_GLIBC} (ok <= ${MAX_GLIBC})."
 
       - name: Stage packaged bridge binary
         run: node scripts/bridge-binary.js stage --target ${{ matrix.package_target }} --from ${{ matrix.binary_path }}
