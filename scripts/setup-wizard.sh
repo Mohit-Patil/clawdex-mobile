@@ -144,6 +144,38 @@ parse_engine_list_csv() {
   return 0
 }
 
+parse_existing_engine_list_csv() {
+  local raw="$1"
+  local normalized=""
+  local seen=","
+  local part=""
+  local -a parts=()
+  local -a parsed=()
+
+  IFS=',' read -r -a parts <<<"$raw"
+  for part in "${parts[@]}"; do
+    normalized="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [[ -z "$normalized" ]]; then
+      continue
+    fi
+    if ! validate_engine_name "$normalized"; then
+      continue
+    fi
+    if [[ "$seen" == *",$normalized,"* ]]; then
+      continue
+    fi
+    parsed+=("$normalized")
+    seen="${seen}${normalized},"
+  done
+
+  if (( ${#parsed[@]} == 0 )); then
+    return 1
+  fi
+
+  SELECTED_ENGINES=("${parsed[@]}")
+  return 0
+}
+
 engine_list_contains() {
   local needle="$1"
   shift
@@ -202,7 +234,7 @@ load_existing_engine_selection() {
   local engine=""
 
   raw="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
-  if [[ -n "$raw" ]] && parse_engine_list_csv "$raw"; then
+  if [[ -n "$raw" ]] && parse_existing_engine_list_csv "$raw"; then
     engine="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
     if validate_engine_name "$engine"; then
       ACTIVE_ENGINE="$engine"
@@ -929,6 +961,11 @@ print_existing_setup_summary() {
   token="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
   network_mode="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
   harnesses="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
+  if [[ -n "$harnesses" ]] && ! parse_existing_engine_list_csv "$harnesses"; then
+    harnesses=""
+  elif [[ -n "$harnesses" ]]; then
+    harnesses="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")"
+  fi
   if [[ -z "$harnesses" ]]; then
     harnesses="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
   fi

@@ -5377,8 +5377,9 @@ fn parse_enabled_bridge_engines_csv(raw: &str) -> Result<Vec<BridgeRuntimeEngine
         if normalized.is_empty() {
             continue;
         }
-        let engine = parse_bridge_runtime_engine(&normalized)
-            .ok_or_else(|| format!("unsupported BRIDGE_ENABLED_ENGINES entry: {normalized}"))?;
+        let Some(engine) = parse_bridge_runtime_engine(&normalized) else {
+            continue;
+        };
         if seen.insert(engine) {
             parsed.push(engine);
         }
@@ -8044,6 +8045,16 @@ mod tests {
         assert_eq!(
             parsed,
             vec![BridgeRuntimeEngine::Opencode, BridgeRuntimeEngine::Codex]
+        );
+    }
+
+    #[test]
+    fn parse_enabled_bridge_engines_csv_ignores_unknown_entries() {
+        let parsed =
+            parse_enabled_bridge_engines_csv("codex,t3code,opencode").expect("engine csv");
+        assert_eq!(
+            parsed,
+            vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode]
         );
     }
 
