@@ -8050,8 +8050,7 @@ mod tests {
 
     #[test]
     fn parse_enabled_bridge_engines_csv_ignores_unknown_entries() {
-        let parsed =
-            parse_enabled_bridge_engines_csv("codex,t3code,opencode").expect("engine csv");
+        let parsed = parse_enabled_bridge_engines_csv("codex,t3code,opencode").expect("engine csv");
         assert_eq!(
             parsed,
             vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode]
