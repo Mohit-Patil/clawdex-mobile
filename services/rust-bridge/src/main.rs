@@ -277,7 +277,9 @@ impl RuntimeBackend {
     async fn start(config: &Arc<BridgeConfig>, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
         let preferred_engine = config.active_engine;
         let codex_enabled = config.enabled_engines.contains(&BridgeRuntimeEngine::Codex);
-        let opencode_enabled = config.enabled_engines.contains(&BridgeRuntimeEngine::Opencode);
+        let opencode_enabled = config
+            .enabled_engines
+            .contains(&BridgeRuntimeEngine::Opencode);
         let mut codex = None;
         let mut opencode = None;
 
