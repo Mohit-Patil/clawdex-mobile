@@ -1,6 +1,6 @@
 {
   "name": "clawdex-mobile",
-  "version": "5.0.7",
+  "version": "5.0.8-internal.0",
   "description": "Private-network mobile bridge and CLI for Codex and OpenCode",
   "keywords": [
     "codex",
