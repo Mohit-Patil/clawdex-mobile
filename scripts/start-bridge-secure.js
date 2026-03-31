@@ -17,9 +17,10 @@ const {
 
 const DEFAULT_HEALTH_TIMEOUT_MS = 15000;
 const DEV_HEALTH_TIMEOUT_MS = 60000;
-const PAIRING_QR_TIMEOUT_MS = 15000;
 let qrcodeTerminal = null;
 let qrcodeTerminalLoaded = false;
+let qrcodeTerminalLoadError = null;
+let pairingQrRenderError = null;
 
 function resolveRootDir() {
   let rootDir = process.env.INIT_CWD ? path.resolve(process.env.INIT_CWD) : path.resolve(__dirname, "..");
@@ -116,14 +117,16 @@ function loadQrcodeTerminal() {
   qrcodeTerminalLoaded = true;
   try {
     qrcodeTerminal = require("qrcode-terminal");
-  } catch {
+  } catch (error) {
     qrcodeTerminal = null;
+    qrcodeTerminalLoadError = error;
   }
 
   return qrcodeTerminal;
 }
 
 function printPairingQr(env, endpoint) {
+  pairingQrRenderError = null;
   const qr = loadQrcodeTerminal();
   if (!qr) {
     return false;
@@ -134,7 +137,7 @@ function printPairingQr(env, endpoint) {
     if (payload) {
       console.log("");
       console.log("Bridge pairing QR (scan from mobile onboarding):");
-      qr.generate(payload);
+      qr.generate(payload, { small: true });
       console.log("QR contains bridge URL + token for one-tap onboarding.");
       console.log("");
       return true;
@@ -147,15 +150,48 @@ function printPairingQr(env, endpoint) {
 
     console.log("");
     console.log("Bridge token QR fallback (scan from mobile onboarding):");
-    qr.generate(tokenPayload);
+    qr.generate(tokenPayload, { small: true });
     console.log(
       `Full pairing QR unavailable because BRIDGE_HOST=${endpoint.host} is a bind address. Enter URL manually in onboarding.`
     );
     console.log("");
     return true;
-  } catch {
+  } catch (error) {
+    pairingQrRenderError = error;
     return false;
   }
+}
+
+function printPairingQrUnavailableMessage(env) {
+  const token = readNonEmptyEnv(env, "BRIDGE_AUTH_TOKEN");
+  if (!token) {
+    console.log(
+      "Pairing QR unavailable because BRIDGE_AUTH_TOKEN is not set. Bridge URL is above for manual onboarding."
+    );
+    return;
+  }
+
+  if (pairingQrRenderError) {
+    console.log(
+      `Pairing QR unavailable because terminal rendering failed: ${pairingQrRenderError.message}. Bridge URL/token are above for manual onboarding.`
+    );
+    return;
+  }
+
+  if (qrcodeTerminalLoaded && !qrcodeTerminal) {
+    const detail =
+      qrcodeTerminalLoadError && qrcodeTerminalLoadError.message
+        ? ` (${qrcodeTerminalLoadError.message})`
+        : "";
+    console.log(
+      `Pairing QR unavailable because the terminal QR renderer could not be loaded${detail}. Bridge URL/token are above for manual onboarding.`
+    );
+    return;
+  }
+
+  console.log(
+    "Pairing QR unavailable due to an unexpected startup condition. Bridge URL/token are above for manual onboarding."
+  );
 }
 
 function shouldShowPairingQr(env) {
@@ -181,65 +217,6 @@ function bridgePidFile(rootDir) {
 
 function bridgeLogFile(rootDir) {
   return path.join(rootDir, ".bridge.log");
-}
-
-function extractLatestPairingQrBlock(logContents) {
-  const lines = logContents.split(/\r?\n/);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index];
-    if (line.includes("Bridge pairing QR (scan from mobile onboarding):")) {
-      const endIndex = lines.findIndex(
-        (entry, offset) =>
-          offset > index && entry.includes("QR contains bridge URL + token for one-tap onboarding.")
-      );
-      if (endIndex !== -1) {
-        return lines.slice(index, endIndex + 1).join("\n").trimEnd();
-      }
-    }
-
-    if (line.includes("Bridge token QR fallback (scan from mobile onboarding):")) {
-      const endIndex = lines.findIndex(
-        (entry, offset) =>
-          offset > index &&
-          entry.includes("Full pairing QR unavailable because BRIDGE_HOST=")
-      );
-      if (endIndex !== -1) {
-        return lines.slice(index, endIndex + 1).join("\n").trimEnd();
-      }
-    }
-  }
-
-  return null;
-}
-
-function printLatestPairingQr(logPath, startOffset = 0) {
-  try {
-    const raw = fs.readFileSync(logPath);
-    const contents = raw.slice(startOffset).toString("utf8");
-    const qrBlock = extractLatestPairingQrBlock(contents);
-    if (!qrBlock) {
-      return false;
-    }
-    console.log("");
-    console.log(qrBlock);
-    console.log("");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitForLatestPairingQr(logPath, startOffset, timeoutMs = PAIRING_QR_TIMEOUT_MS) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    if (printLatestPairingQr(logPath, startOffset)) {
-      return true;
-    }
-    await sleep(250);
-  }
-
-  return false;
 }
 
 function readPidFile(rootDir) {
@@ -430,7 +407,7 @@ async function spawnDetachedAndWait(command, args, options) {
       const endpoint = { host, port };
       printBridgeAccessDetails(env, endpoint);
       if (shouldShowPairingQr(env) && !printPairingQr(env, endpoint)) {
-        printLatestPairingQr(logPath);
+        printPairingQrUnavailableMessage(env);
       }
       return;
     }
@@ -447,7 +424,6 @@ async function spawnDetachedAndWait(command, args, options) {
 
   const output = fs.openSync(logPath, "a");
   const error = fs.openSync(logPath, "a");
-  const logStartOffset = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
 
   const child = spawn(command, args, {
     cwd,
@@ -478,12 +454,8 @@ async function spawnDetachedAndWait(command, args, options) {
     console.log("Bridge is healthy.");
     printBridgeAccessDetails(env, endpoint);
 
-    const shouldPrintQr = shouldShowPairingQr(env);
-    const printedGeneratedQr = shouldPrintQr && printPairingQr(env, endpoint);
-    if (shouldPrintQr && !printedGeneratedQr && !(await waitForLatestPairingQr(logPath, logStartOffset))) {
-      console.log(
-        "Pairing QR not found in the new bridge startup log. Bridge URL/token are above. Open logs if you need to inspect startup output."
-      );
+    if (shouldShowPairingQr(env) && !printPairingQr(env, endpoint)) {
+      printPairingQrUnavailableMessage(env);
     }
   } catch (error) {
     removePidFile(rootDir);

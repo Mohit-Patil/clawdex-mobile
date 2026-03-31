@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "codex-rust-bridge"
-version = "5.0.7"
+version = "5.0.8-internal.0"
 dependencies = [
  "axum",
  "base64",
