@@ -38,7 +38,7 @@ npm install -g clawdex-mobile@latest
 clawdex init
 ```
 
-Then open the mobile app and connect using the printed bridge URL/token.
+Then open the mobile app and connect using the printed bridge URL/token or pairing QR.
 `clawdex init` now writes config, starts the bridge in the background, and returns you to the shell. Bridge logs go to `.bridge.log`.
 
 The npm package is bridge-only. It does not install Expo or the mobile source tree. On supported macOS, Linux, and Windows hosts it uses bundled bridge binaries, so normal startup does not compile Rust.

@@ -59,11 +59,37 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function readNonEmptyEnv(env, key) {
+  const value = env[key];
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
 function formatHostForUrl(host) {
   if (host.includes(":") && !host.startsWith("[")) {
     return `[${host}]`;
   }
   return host;
+}
+
+function buildBridgeUrl(host, port) {
+  return `http://${formatHostForUrl(host)}:${port}`;
+}
+
+function shouldShowPairingQr(env) {
+  const raw = readNonEmptyEnv(env, "BRIDGE_SHOW_PAIRING_QR");
+  return raw ? raw.toLowerCase() !== "false" : true;
+}
+
+function printBridgeAccessDetails(env, endpoint) {
+  const bridgeUrl = buildBridgeUrl(endpoint.host, endpoint.port);
+  console.log(`Bridge URL: ${bridgeUrl}`);
+
+  const token = readNonEmptyEnv(env, "BRIDGE_AUTH_TOKEN");
+  if (token) {
+    console.log(`Bridge token: ${token}`);
+  }
+
+  return bridgeUrl;
 }
 
 function bridgePidFile(rootDir) {
@@ -317,8 +343,11 @@ async function spawnDetachedAndWait(command, args, options) {
     if (await probeHealth(healthUrl)) {
       console.log(`Bridge already running (pid ${existingPid}).`);
       console.log(`Logs: ${logPath}`);
-      console.log(`Bridge is healthy at http://${formatHostForUrl(host)}:${port}`);
-      printLatestPairingQr(logPath);
+      console.log("Bridge is healthy.");
+      printBridgeAccessDetails(env, { host, port });
+      if (shouldShowPairingQr(env)) {
+        printLatestPairingQr(logPath);
+      }
       return;
     }
   } else if (existingPid) {
@@ -362,9 +391,13 @@ async function spawnDetachedAndWait(command, args, options) {
 
   try {
     const endpoint = await waitForHealth(env, child.pid, healthTimeoutMs);
-    console.log(`Bridge is healthy at http://${formatHostForUrl(endpoint.host)}:${endpoint.port}`);
-    if (!(await waitForLatestPairingQr(logPath, logStartOffset))) {
-      console.log("Pairing QR not found in the new bridge startup log. Open logs if you need to inspect startup output.");
+    console.log("Bridge is healthy.");
+    printBridgeAccessDetails(env, endpoint);
+
+    if (shouldShowPairingQr(env) && !(await waitForLatestPairingQr(logPath, logStartOffset, 8000))) {
+      console.log(
+        "Pairing QR not found in the new bridge startup log. Bridge URL/token are above. Open logs if you need to inspect startup output."
+      );
     }
   } catch (error) {
     removePidFile(rootDir);

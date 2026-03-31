@@ -28,7 +28,7 @@ After `clawdex init`, expected sequence:
 
 1. Secure config is written or reused
 2. The bridge starts in the background
-3. The wizard prints the bridge URL/token for manual mobile pairing
+3. The wizard prints the bridge URL, token, and pairing QR for mobile onboarding
 4. Bridge logs are written to `.bridge.log`
 
 Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `linux-armv7l`, and `win32-x64`. On those hosts, normal bridge startup does not require a Rust compile.

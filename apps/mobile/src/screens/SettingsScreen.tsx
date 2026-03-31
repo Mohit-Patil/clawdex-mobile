@@ -4,6 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -57,6 +58,10 @@ import {
   presentTipPaywall,
   purchaseTipPackage,
 } from '../tips';
+import {
+  canOpenAppStoreWriteReviewPage,
+  openAppStoreWriteReviewPage,
+} from '../storeReview';
 
 interface SettingsScreenProps {
   api: HostBridgeApiClient;
@@ -293,6 +298,8 @@ export function SettingsScreen({
   const shouldShowManualTipTierList = !nativeTipPaywallAvailable || tipActionError !== null;
   const tipPreviewPackages = tipPackages.slice(0, 4);
   const legalSummary = 'Privacy details and terms of service';
+  const canRateOnAppStore =
+    Platform.OS === 'ios' && canOpenAppStoreWriteReviewPage();
 
   const checkHealth = useCallback(async () => {
     try {
@@ -634,6 +641,26 @@ export function SettingsScreen({
     setRoute('tips');
   }, [handleOpenTipPaywall, nativeTipPaywallAvailable, setRoute]);
 
+  const handleOpenAppStoreReview = useCallback(() => {
+    void (async () => {
+      try {
+        const opened = await openAppStoreWriteReviewPage();
+        if (!opened) {
+          setError('App Store reviews are only available on iOS.');
+          return;
+        }
+
+        setError(null);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'Unable to open the App Store review page.'
+        );
+      }
+    })();
+  }, []);
+
   const approvalModeOptions = useMemo<SelectionSheetOption[]>(
     () => [
       {
@@ -889,6 +916,14 @@ export function SettingsScreen({
 
       <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Support</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        {canRateOnAppStore ? (
+          <MenuEntry
+            icon="star-outline"
+            title="Rate Clawdex"
+            description="Leave a rating or written review on the App Store"
+            onPress={handleOpenAppStoreReview}
+          />
+        ) : null}
         <MenuEntry
           icon="heart-outline"
           title="Support Clawdex"

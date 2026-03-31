@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
     hash::{Hash, Hasher},
-    io::SeekFrom,
+    io::{SeekFrom, Write},
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{
@@ -5404,6 +5404,11 @@ fn build_token_only_pairing_payload(config: &BridgeConfig) -> Option<String> {
     )
 }
 
+fn flush_pairing_output() {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+}
+
 fn maybe_print_pairing_qr(config: &BridgeConfig) {
     if !config.show_pairing_qr {
         return;
@@ -5414,15 +5419,18 @@ fn maybe_print_pairing_qr(config: &BridgeConfig) {
         println!("Bridge pairing QR (scan from mobile onboarding):");
         if let Err(error) = qr2term::print_qr(payload.as_bytes()) {
             eprintln!("failed to render pairing QR: {error}");
+            flush_pairing_output();
             return;
         }
         println!("QR contains bridge URL + token for one-tap onboarding.");
         println!();
+        flush_pairing_output();
         return;
     }
 
     let Some(payload) = build_token_only_pairing_payload(config) else {
         eprintln!("bridge token QR skipped because BRIDGE_AUTH_TOKEN is not set");
+        flush_pairing_output();
         return;
     };
 
@@ -5430,6 +5438,7 @@ fn maybe_print_pairing_qr(config: &BridgeConfig) {
     println!("Bridge token QR fallback (scan from mobile onboarding):");
     if let Err(error) = qr2term::print_qr(payload.as_bytes()) {
         eprintln!("failed to render pairing QR: {error}");
+        flush_pairing_output();
         return;
     }
     println!(
@@ -5437,6 +5446,7 @@ fn maybe_print_pairing_qr(config: &BridgeConfig) {
         config.host
     );
     println!();
+    flush_pairing_output();
 }
 
 fn parse_bool_env(name: &str) -> bool {
@@ -9007,6 +9017,71 @@ mod tests {
         assert!(constant_time_eq("secret-token", "secret-token"));
         assert!(!constant_time_eq("secret-token", "secret-tok3n"));
         assert!(!constant_time_eq("secret-token", "secret-token-extra"));
+    }
+
+    #[test]
+    fn build_pairing_payload_includes_url_and_token_for_connectable_host() {
+        let config = BridgeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8787,
+            workdir: PathBuf::from("/tmp/workdir"),
+            cli_bin: "codex".to_string(),
+            opencode_cli_bin: "opencode".to_string(),
+            active_engine: BridgeRuntimeEngine::Codex,
+            enabled_engines: vec![BridgeRuntimeEngine::Codex],
+            opencode_host: "127.0.0.1".to_string(),
+            opencode_port: 4090,
+            opencode_server_username: "opencode".to_string(),
+            opencode_server_password: Some("secret-token".to_string()),
+            auth_token: Some("secret-token".to_string()),
+            auth_enabled: true,
+            allow_insecure_no_auth: false,
+            allow_query_token_auth: false,
+            allow_outside_root_cwd: false,
+            disable_terminal_exec: false,
+            terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: true,
+        };
+
+        let payload = build_pairing_payload(&config).expect("pairing payload");
+        let parsed: Value = serde_json::from_str(&payload).expect("valid json");
+
+        assert_eq!(parsed["type"], "clawdex-bridge-pair");
+        assert_eq!(parsed["bridgeUrl"], "http://127.0.0.1:8787");
+        assert_eq!(parsed["bridgeToken"], "secret-token");
+    }
+
+    #[test]
+    fn build_pairing_payload_uses_token_only_fallback_for_unspecified_bind_host() {
+        let config = BridgeConfig {
+            host: "0.0.0.0".to_string(),
+            port: 8787,
+            workdir: PathBuf::from("/tmp/workdir"),
+            cli_bin: "codex".to_string(),
+            opencode_cli_bin: "opencode".to_string(),
+            active_engine: BridgeRuntimeEngine::Codex,
+            enabled_engines: vec![BridgeRuntimeEngine::Codex],
+            opencode_host: "127.0.0.1".to_string(),
+            opencode_port: 4090,
+            opencode_server_username: "opencode".to_string(),
+            opencode_server_password: Some("secret-token".to_string()),
+            auth_token: Some("secret-token".to_string()),
+            auth_enabled: true,
+            allow_insecure_no_auth: false,
+            allow_query_token_auth: false,
+            allow_outside_root_cwd: false,
+            disable_terminal_exec: false,
+            terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: true,
+        };
+
+        assert!(build_pairing_payload(&config).is_none());
+
+        let fallback = build_token_only_pairing_payload(&config).expect("token-only payload");
+        let parsed: Value = serde_json::from_str(&fallback).expect("valid json");
+
+        assert_eq!(parsed["type"], "clawdex-bridge-token");
+        assert_eq!(parsed["bridgeToken"], "secret-token");
     }
 
     #[test]

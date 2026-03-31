@@ -3,11 +3,13 @@ import 'react-native-gesture-handler';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AppState,
   ActivityIndicator,
   Keyboard,
   Pressable,
   StatusBar,
   StyleSheet,
+  type AppStateStatus,
   useColorScheme,
   useWindowDimensions,
   View,
@@ -54,6 +56,15 @@ import {
 } from './src/screens/OnboardingScreen';
 import { PrivacyScreen } from './src/screens/PrivacyScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
+import {
+  AUTO_STORE_REVIEW_THRESHOLD_MS,
+  createDefaultAutoStoreReviewState,
+  isAutoStoreReviewEligible,
+  loadAutoStoreReviewState,
+  requestNativeStoreReview,
+  saveAutoStoreReviewState,
+  type AutoStoreReviewState,
+} from './src/storeReview';
 import { TermsScreen } from './src/screens/TermsScreen';
 import { configureRevenueCatIfNeeded } from './src/tips';
 import {
@@ -81,6 +92,7 @@ const DRAWER_MAX_SHADOW_OPACITY = 0.24;
 const DRAWER_MAX_SHADOW_RADIUS = 26;
 const DRAWER_MAX_ELEVATION = 18;
 const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
+const AUTO_STORE_REVIEW_RETRY_MS = 24 * 60 * 60 * 1000;
 
 export default function App() {
   const systemColorScheme = useColorScheme();
@@ -142,9 +154,25 @@ export default function App() {
   const [showToolCalls, setShowToolCalls] = useState(false);
   const [appearancePreference, setAppearancePreference] =
     useState<AppearancePreference>('system');
+  const [appLifecycleState, setAppLifecycleState] = useState<AppStateStatus>(
+    AppState.currentState
+  );
+  const [storeReviewStateLoaded, setStoreReviewStateLoaded] = useState(false);
+  const [storeReviewState, setStoreReviewState] = useState<AutoStoreReviewState>(
+    createDefaultAutoStoreReviewState
+  );
+  const [automaticStoreReviewRetryAt, setAutomaticStoreReviewRetryAt] = useState<number | null>(
+    null
+  );
   const [drawerVisible, setDrawerVisible] = useState(false);
   const drawerOpenRef = useRef(false);
   const drawerVisibleRef = useRef(false);
+  const appLifecycleStateRef = useRef(AppState.currentState);
+  const activeUsageStartedAtRef = useRef<number | null>(
+    AppState.currentState === 'active' ? Date.now() : null
+  );
+  const storeReviewStateRef = useRef<AutoStoreReviewState>(createDefaultAutoStoreReviewState());
+  const automaticStoreReviewInFlightRef = useRef(false);
   const { width: screenWidth } = useWindowDimensions();
   const resolvedThemeMode = resolveThemeMode(appearancePreference, systemColorScheme);
   const theme = useMemo(() => createAppTheme(resolvedThemeMode), [resolvedThemeMode]);
@@ -202,6 +230,206 @@ export default function App() {
       );
     });
   }, []);
+
+  const persistStoreReviewState = useCallback(async (nextState: AutoStoreReviewState) => {
+    try {
+      await saveAutoStoreReviewState(nextState);
+    } catch {
+      // Best effort persistence only.
+    }
+  }, []);
+
+  const updateStoreReviewState = useCallback(
+    (recipe: (previous: AutoStoreReviewState) => AutoStoreReviewState) => {
+      setStoreReviewState((previous) => {
+        const nextState = recipe(previous);
+        if (
+          previous.accumulatedForegroundMs === nextState.accumulatedForegroundMs &&
+          previous.automaticRequestAt === nextState.automaticRequestAt
+        ) {
+          return previous;
+        }
+
+        storeReviewStateRef.current = nextState;
+        void persistStoreReviewState(nextState);
+        return nextState;
+      });
+    },
+    [persistStoreReviewState]
+  );
+
+  const flushActiveUsageTime = useCallback(
+    (now = Date.now(), keepActive = false) => {
+      const activeUsageStartedAt = activeUsageStartedAtRef.current;
+      if (appLifecycleStateRef.current !== 'active' || activeUsageStartedAt === null) {
+        if (keepActive && appLifecycleStateRef.current === 'active') {
+          activeUsageStartedAtRef.current = now;
+        }
+        return;
+      }
+
+      const elapsedMs = Math.max(0, now - activeUsageStartedAt);
+      activeUsageStartedAtRef.current = keepActive ? now : null;
+      if (elapsedMs <= 0) {
+        return;
+      }
+
+      updateStoreReviewState((previous) => ({
+        ...previous,
+        accumulatedForegroundMs: previous.accumulatedForegroundMs + elapsedMs,
+      }));
+    },
+    [updateStoreReviewState]
+  );
+
+  const getEffectiveForegroundUsageMs = useCallback(() => {
+    const currentState = storeReviewStateRef.current;
+    if (
+      appLifecycleStateRef.current !== 'active' ||
+      activeUsageStartedAtRef.current === null
+    ) {
+      return currentState.accumulatedForegroundMs;
+    }
+
+    return (
+      currentState.accumulatedForegroundMs +
+      Math.max(0, Date.now() - activeUsageStartedAtRef.current)
+    );
+  }, []);
+
+  const requestAutomaticStoreReview = useCallback(async () => {
+    if (
+      automaticStoreReviewInFlightRef.current ||
+      !settingsLoaded ||
+      !storeReviewStateLoaded ||
+      currentScreen === 'Onboarding' ||
+      (automaticStoreReviewRetryAt !== null && automaticStoreReviewRetryAt > Date.now())
+    ) {
+      return;
+    }
+
+    const effectiveState: AutoStoreReviewState = {
+      ...storeReviewStateRef.current,
+      accumulatedForegroundMs: getEffectiveForegroundUsageMs(),
+    };
+    if (!isAutoStoreReviewEligible(effectiveState)) {
+      return;
+    }
+
+    automaticStoreReviewInFlightRef.current = true;
+    try {
+      const now = Date.now();
+      flushActiveUsageTime(now, true);
+      const didRequest = await requestNativeStoreReview();
+      if (!didRequest) {
+        setAutomaticStoreReviewRetryAt(now + AUTO_STORE_REVIEW_RETRY_MS);
+        return;
+      }
+
+      setAutomaticStoreReviewRetryAt(null);
+      updateStoreReviewState((previous) => ({
+        ...previous,
+        automaticRequestAt: new Date(now).toISOString(),
+      }));
+    } catch (error) {
+      setAutomaticStoreReviewRetryAt(Date.now() + AUTO_STORE_REVIEW_RETRY_MS);
+      console.warn(
+        `Automatic store review request failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    } finally {
+      automaticStoreReviewInFlightRef.current = false;
+    }
+  }, [
+    currentScreen,
+    flushActiveUsageTime,
+    getEffectiveForegroundUsageMs,
+    automaticStoreReviewRetryAt,
+    settingsLoaded,
+    storeReviewStateLoaded,
+    updateStoreReviewState,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadStoreReviewPromptState = async () => {
+      const nextState = await loadAutoStoreReviewState();
+      if (cancelled) {
+        return;
+      }
+
+      storeReviewStateRef.current = nextState;
+      setStoreReviewState(nextState);
+      setStoreReviewStateLoaded(true);
+    };
+
+    void loadStoreReviewPromptState();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const previousState = appLifecycleStateRef.current;
+      if (previousState === 'active' && nextState !== 'active') {
+        flushActiveUsageTime(Date.now(), false);
+      }
+
+      if (previousState !== 'active' && nextState === 'active') {
+        activeUsageStartedAtRef.current = Date.now();
+      }
+
+      appLifecycleStateRef.current = nextState;
+      setAppLifecycleState(nextState);
+    });
+
+    return () => {
+      subscription.remove();
+      flushActiveUsageTime(Date.now(), false);
+    };
+  }, [flushActiveUsageTime]);
+
+  useEffect(() => {
+    if (
+      appLifecycleState !== 'active' ||
+      !settingsLoaded ||
+      !storeReviewStateLoaded ||
+      currentScreen === 'Onboarding' ||
+      storeReviewState.automaticRequestAt
+    ) {
+      return;
+    }
+
+    const thresholdRemainingMs = AUTO_STORE_REVIEW_THRESHOLD_MS - getEffectiveForegroundUsageMs();
+    const retryRemainingMs =
+      automaticStoreReviewRetryAt === null ? 0 : automaticStoreReviewRetryAt - Date.now();
+    const remainingMs = Math.max(thresholdRemainingMs, retryRemainingMs);
+    if (remainingMs <= 0) {
+      void requestAutomaticStoreReview();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void requestAutomaticStoreReview();
+    }, remainingMs);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [
+    appLifecycleState,
+    automaticStoreReviewRetryAt,
+    currentScreen,
+    getEffectiveForegroundUsageMs,
+    requestAutomaticStoreReview,
+    settingsLoaded,
+    storeReviewState.accumulatedForegroundMs,
+    storeReviewState.automaticRequestAt,
+    storeReviewStateLoaded,
+  ]);
 
   const saveAppSettings = useCallback(
     async (
