@@ -194,7 +194,7 @@ sync_active_engine_from_selection() {
     return
   fi
 
-  if engine_list_contains "$ACTIVE_ENGINE" "${SELECTED_ENGINES[@]}"; then
+  if selected_engines_contains "$ACTIVE_ENGINE"; then
     return
   fi
 
@@ -213,6 +213,30 @@ format_engine_list() {
   done
 
   printf '%s' "$result"
+}
+
+selected_engines_contains() {
+  local needle="$1"
+
+  if (( ${#SELECTED_ENGINES[@]} == 0 )); then
+    return 1
+  fi
+
+  engine_list_contains "$needle" "${SELECTED_ENGINES[@]}"
+}
+
+format_selected_engines() {
+  if (( ${#SELECTED_ENGINES[@]} == 0 )); then
+    printf ''
+    return 0
+  fi
+
+  format_engine_list "${SELECTED_ENGINES[@]}"
+}
+
+selected_engines_csv() {
+  local IFS=','
+  printf '%s' "${SELECTED_ENGINES[*]-}"
 }
 
 engine_from_menu_label() {
@@ -957,7 +981,11 @@ print_existing_setup_summary() {
   local harnesses=""
   local source_path=""
   local saved_active_engine="$ACTIVE_ENGINE"
-  local -a saved_selected_engines=("${SELECTED_ENGINES[@]}")
+  local -a saved_selected_engines=()
+
+  if (( ${#SELECTED_ENGINES[@]} > 0 )); then
+    saved_selected_engines=("${SELECTED_ENGINES[@]}")
+  fi
 
   if [[ ! -f "$SECURE_ENV_FILE" ]]; then
     return 1
@@ -971,7 +999,7 @@ print_existing_setup_summary() {
   if [[ -n "$harnesses" ]] && ! parse_existing_engine_list_csv "$harnesses"; then
     harnesses=""
   elif [[ -n "$harnesses" ]]; then
-    harnesses="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")"
+    harnesses="$(selected_engines_csv)"
   fi
   if [[ -z "$harnesses" ]]; then
     harnesses="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
@@ -999,7 +1027,10 @@ print_existing_setup_summary() {
   fi
   echo "source: $source_path"
 
-  SELECTED_ENGINES=("${saved_selected_engines[@]}")
+  SELECTED_ENGINES=()
+  if (( ${#saved_selected_engines[@]} > 0 )); then
+    SELECTED_ENGINES=("${saved_selected_engines[@]}")
+  fi
   ACTIVE_ENGINE="$saved_active_engine"
 }
 
@@ -1082,12 +1113,12 @@ choose_bridge_network_mode() {
 choose_runtime_engine() {
   local label=""
   MENU_MULTI_PRESELECTED="Codex"
-  if engine_list_contains "codex" "${SELECTED_ENGINES[@]}"; then
+  if selected_engines_contains "codex"; then
     MENU_MULTI_PRESELECTED="Codex"
   else
     MENU_MULTI_PRESELECTED=""
   fi
-  if engine_list_contains "opencode" "${SELECTED_ENGINES[@]}"; then
+  if selected_engines_contains "opencode"; then
     if [[ -n "$MENU_MULTI_PRESELECTED" ]]; then
       MENU_MULTI_PRESELECTED+=","
     fi
@@ -1101,7 +1132,7 @@ choose_runtime_engine() {
     SELECTED_ENGINES+=("$(engine_from_menu_label "$label")")
   done
   sync_active_engine_from_selection
-  info "Selected harnesses: $(format_engine_list "${SELECTED_ENGINES[@]}")."
+  info "Selected harnesses: $(format_selected_engines)."
 }
 
 infer_network_mode_from_host() {
@@ -1217,6 +1248,11 @@ ensure_opencode_cli() {
 
 ensure_selected_engine_clis() {
   local engine=""
+
+  if (( ${#SELECTED_ENGINES[@]} == 0 )); then
+    abort_wizard "Select at least one harness before continuing."
+  fi
+
   for engine in "${SELECTED_ENGINES[@]}"; do
     case "$engine" in
       codex)
@@ -1613,16 +1649,16 @@ fi
 load_existing_engine_selection
 if [[ "$CONFIG_ACTION" == "keep" ]]; then
   if [[ "$ENGINE_SELECTION_PRESET" == "false" ]]; then
-    info "Keeping existing harnesses: $(format_engine_list "${SELECTED_ENGINES[@]}")."
+    info "Keeping existing harnesses: $(format_selected_engines)."
   else
-    info "Harness selection preset via flag: $(format_engine_list "${SELECTED_ENGINES[@]}")."
+    info "Harness selection preset via flag: $(format_selected_engines)."
   fi
 else
   section "Harnesses"
   if [[ "$ENGINE_SELECTION_PRESET" == "false" ]]; then
     choose_runtime_engine
   else
-    info "Harness selection preset via flag: $(format_engine_list "${SELECTED_ENGINES[@]}")."
+    info "Harness selection preset via flag: $(format_selected_engines)."
   fi
 fi
 
@@ -1652,7 +1688,7 @@ if [[ "$CONFIG_ACTION" != "keep" ]]; then
   esac
 
   section "Write secure config"
-  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" "$SCRIPT_DIR/setup-secure-dev.sh"
+  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(selected_engines_csv)" "$SCRIPT_DIR/setup-secure-dev.sh"
 else
   ok "Keeping existing secure config."
   NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
@@ -1677,10 +1713,10 @@ else
     fi
 
     section "Write secure config"
-    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" "$SCRIPT_DIR/setup-secure-dev.sh"
-  elif [[ "$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")" != "$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" ]]; then
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(selected_engines_csv)" "$SCRIPT_DIR/setup-secure-dev.sh"
+  elif [[ "$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")" != "$(selected_engines_csv)" ]]; then
     section "Write secure config"
-    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" "$SCRIPT_DIR/setup-secure-dev.sh"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(selected_engines_csv)" "$SCRIPT_DIR/setup-secure-dev.sh"
   fi
 fi
 
@@ -1711,7 +1747,7 @@ BRIDGE_PORT="${BRIDGE_PORT:-8787}"
 section "Summary"
 rail_echo "Bridge mode: $NETWORK_MODE"
 rail_echo "Bridge endpoint: http://$BRIDGE_HOST:$BRIDGE_PORT"
-rail_echo "Harnesses: $(format_engine_list "${SELECTED_ENGINES[@]}")"
+rail_echo "Harnesses: $(format_selected_engines)"
 rail_echo "Secure env: $SECURE_ENV_FILE"
 if [[ "$FLOW" == "quickstart" ]]; then
   rail_echo "${DIM}Tip: re-run with Manual mode for full control at each step.${RESET}"

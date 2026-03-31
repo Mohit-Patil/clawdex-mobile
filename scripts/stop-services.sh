@@ -73,6 +73,23 @@ extract_env_value() {
   ' "$file"
 }
 
+stop_launchctl_job() {
+  local label="$1"
+
+  if [[ -z "$label" ]] || ! command -v launchctl >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local domain="gui/$(id -u)/$label"
+  if ! launchctl print "$domain" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  echo "Stopping launchd job: $label"
+  launchctl bootout "$domain" >/dev/null 2>&1 || launchctl remove "$label" >/dev/null 2>&1 || true
+  return 0
+}
+
 stop_process_group() {
   local label="$1"
   local pattern="$2"
@@ -111,7 +128,12 @@ stop_process_group() {
 
 echo "Stopping Clawdex services for project: $ROOT_DIR"
 
+BRIDGE_PORT="${BRIDGE_PORT:-$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT" || true)}"
+BRIDGE_PORT="${BRIDGE_PORT:-8787}"
+
 stop_process_group "Expo" "$ROOT_DIR/.*/expo start|$ROOT_DIR/node_modules/.bin/expo start"
+stop_launchctl_job "clawdex.bridge.$BRIDGE_PORT" || true
+stop_process_group "Bridge launcher" "$ROOT_DIR/scripts/start-bridge-secure\\.js|node .*start-bridge-secure\\.js"
 stop_pid_file_process "Rust bridge" "$BRIDGE_PID_FILE" || true
 stop_process_group "Rust bridge" "$ROOT_DIR/services/rust-bridge|codex-rust-bridge|@codex/rust-bridge"
 stop_process_group "Legacy TS bridge" "$ROOT_DIR/services/mac-bridge|@codex/mac-bridge"

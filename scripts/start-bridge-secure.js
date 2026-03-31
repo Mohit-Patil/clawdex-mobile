@@ -17,6 +17,9 @@ const {
 
 const DEFAULT_HEALTH_TIMEOUT_MS = 15000;
 const DEV_HEALTH_TIMEOUT_MS = 60000;
+const PAIRING_QR_TIMEOUT_MS = 15000;
+let qrcodeTerminal = null;
+let qrcodeTerminalLoaded = false;
 
 function resolveRootDir() {
   let rootDir = process.env.INIT_CWD ? path.resolve(process.env.INIT_CWD) : path.resolve(__dirname, "..");
@@ -75,6 +78,86 @@ function buildBridgeUrl(host, port) {
   return `http://${formatHostForUrl(host)}:${port}`;
 }
 
+function isUnspecifiedBindHost(host) {
+  const normalized = String(host || "").trim().toLowerCase();
+  return normalized === "0.0.0.0" || normalized === "::" || normalized === "[::]";
+}
+
+function buildPairingPayload(env, endpoint) {
+  const token = readNonEmptyEnv(env, "BRIDGE_AUTH_TOKEN");
+  if (!token || isUnspecifiedBindHost(endpoint.host)) {
+    return null;
+  }
+
+  return JSON.stringify({
+    type: "clawdex-bridge-pair",
+    bridgeUrl: buildBridgeUrl(endpoint.host, endpoint.port),
+    bridgeToken: token,
+  });
+}
+
+function buildTokenOnlyPairingPayload(env) {
+  const token = readNonEmptyEnv(env, "BRIDGE_AUTH_TOKEN");
+  if (!token) {
+    return null;
+  }
+
+  return JSON.stringify({
+    type: "clawdex-bridge-token",
+    bridgeToken: token,
+  });
+}
+
+function loadQrcodeTerminal() {
+  if (qrcodeTerminalLoaded) {
+    return qrcodeTerminal;
+  }
+
+  qrcodeTerminalLoaded = true;
+  try {
+    qrcodeTerminal = require("qrcode-terminal");
+  } catch {
+    qrcodeTerminal = null;
+  }
+
+  return qrcodeTerminal;
+}
+
+function printPairingQr(env, endpoint) {
+  const qr = loadQrcodeTerminal();
+  if (!qr) {
+    return false;
+  }
+
+  try {
+    const payload = buildPairingPayload(env, endpoint);
+    if (payload) {
+      console.log("");
+      console.log("Bridge pairing QR (scan from mobile onboarding):");
+      qr.generate(payload);
+      console.log("QR contains bridge URL + token for one-tap onboarding.");
+      console.log("");
+      return true;
+    }
+
+    const tokenPayload = buildTokenOnlyPairingPayload(env);
+    if (!tokenPayload) {
+      return false;
+    }
+
+    console.log("");
+    console.log("Bridge token QR fallback (scan from mobile onboarding):");
+    qr.generate(tokenPayload);
+    console.log(
+      `Full pairing QR unavailable because BRIDGE_HOST=${endpoint.host} is a bind address. Enter URL manually in onboarding.`
+    );
+    console.log("");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function shouldShowPairingQr(env) {
   const raw = readNonEmptyEnv(env, "BRIDGE_SHOW_PAIRING_QR");
   return raw ? raw.toLowerCase() !== "false" : true;
@@ -131,8 +214,8 @@ function extractLatestPairingQrBlock(logContents) {
 
 function printLatestPairingQr(logPath, startOffset = 0) {
   try {
-    const raw = fs.readFileSync(logPath, "utf8");
-    const contents = startOffset > 0 ? raw.slice(startOffset) : raw;
+    const raw = fs.readFileSync(logPath);
+    const contents = raw.slice(startOffset).toString("utf8");
     const qrBlock = extractLatestPairingQrBlock(contents);
     if (!qrBlock) {
       return false;
@@ -146,7 +229,7 @@ function printLatestPairingQr(logPath, startOffset = 0) {
   }
 }
 
-async function waitForLatestPairingQr(logPath, startOffset, timeoutMs = 4000) {
+async function waitForLatestPairingQr(logPath, startOffset, timeoutMs = PAIRING_QR_TIMEOUT_MS) {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
@@ -344,8 +427,9 @@ async function spawnDetachedAndWait(command, args, options) {
       console.log(`Bridge already running (pid ${existingPid}).`);
       console.log(`Logs: ${logPath}`);
       console.log("Bridge is healthy.");
-      printBridgeAccessDetails(env, { host, port });
-      if (shouldShowPairingQr(env)) {
+      const endpoint = { host, port };
+      printBridgeAccessDetails(env, endpoint);
+      if (shouldShowPairingQr(env) && !printPairingQr(env, endpoint)) {
         printLatestPairingQr(logPath);
       }
       return;
@@ -394,7 +478,9 @@ async function spawnDetachedAndWait(command, args, options) {
     console.log("Bridge is healthy.");
     printBridgeAccessDetails(env, endpoint);
 
-    if (shouldShowPairingQr(env) && !(await waitForLatestPairingQr(logPath, logStartOffset, 8000))) {
+    const shouldPrintQr = shouldShowPairingQr(env);
+    const printedGeneratedQr = shouldPrintQr && printPairingQr(env, endpoint);
+    if (shouldPrintQr && !printedGeneratedQr && !(await waitForLatestPairingQr(logPath, logStartOffset))) {
       console.log(
         "Pairing QR not found in the new bridge startup log. Bridge URL/token are above. Open logs if you need to inspect startup output."
       );
