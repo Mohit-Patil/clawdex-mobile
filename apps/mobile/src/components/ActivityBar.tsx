@@ -1,9 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
-import { colors, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 export type ActivityTone = 'running' | 'complete' | 'error' | 'idle';
 
@@ -20,15 +20,16 @@ const ICON_BY_TONE: Record<ActivityTone, keyof typeof Ionicons.glyphMap> = {
   idle: 'ellipse-outline',
 };
 
-const COLOR_BY_TONE: Record<ActivityTone, string> = {
-  running: colors.statusRunning,
-  complete: colors.statusComplete,
-  error: colors.statusError,
-  idle: colors.statusIdle,
-};
-
 export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
-  const color = COLOR_BY_TONE[tone];
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const colorByTone: Record<ActivityTone, string> = {
+    running: theme.colors.statusRunning,
+    complete: theme.colors.statusComplete,
+    error: theme.colors.statusError,
+    idle: theme.colors.statusIdle,
+  };
+  const color = colorByTone[tone];
   const [dotFrame, setDotFrame] = useState(0);
 
   useEffect(() => {
@@ -49,7 +50,7 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
   return (
     <BlurView
       intensity={42}
-      tint={Platform.OS === 'ios' ? 'systemUltraThinMaterialDark' : 'dark'}
+      tint={theme.activityBarTint}
       blurMethod="dimezisBlurViewSdk31Plus"
       style={styles.container}
     >
@@ -67,29 +68,32 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    borderRadius: 10,
-    overflow: 'hidden',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    backgroundColor: 'rgba(18, 22, 28, 0.16)',
-    marginHorizontal: spacing.lg,
-    marginBottom: spacing.xs / 2,
-  },
-  content: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: 3,
-  },
-  text: {
-    ...typography.caption,
-    fontSize: 11,
-    lineHeight: 15,
-    fontWeight: '600',
-    color: colors.textPrimary,
-    flex: 1,
-  },
-});
+const createStyles = (theme: AppTheme) =>
+  StyleSheet.create({
+    container: {
+      borderRadius: 10,
+      overflow: 'hidden',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.isDark
+        ? 'rgba(18, 22, 28, 0.16)'
+        : 'rgba(255, 255, 255, 0.70)',
+      marginHorizontal: theme.spacing.lg,
+      marginBottom: theme.spacing.xs / 2,
+    },
+    content: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.xs,
+      paddingHorizontal: theme.spacing.sm + 2,
+      paddingVertical: 3,
+    },
+    text: {
+      ...theme.typography.caption,
+      fontSize: 11,
+      lineHeight: 15,
+      fontWeight: '600',
+      color: theme.colors.textPrimary,
+      flex: 1,
+    },
+  });

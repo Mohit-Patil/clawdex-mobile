@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, {
   useAnimatedStyle,
@@ -6,7 +6,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import { colors, spacing } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 import {
   appendVoiceWaveformSample,
   createVoiceWaveformSeed,
@@ -31,6 +31,8 @@ interface WaveformBarProps {
 }
 
 function WaveformBar({ ageOpacity, level }: WaveformBarProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const animatedLevel = useSharedValue(level);
 
   useEffect(() => {
@@ -64,6 +66,8 @@ export function VoiceRecordingWaveform({
   durationMillis,
   metering,
 }: VoiceRecordingWaveformProps) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [samples, setSamples] = useState<number[]>(() =>
     createVoiceWaveformSeed(VOICE_WAVEFORM_BAR_COUNT)
   );
@@ -124,58 +128,59 @@ export function VoiceRecordingWaveform({
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    gap: spacing.xs,
-    justifyContent: 'center',
-    minHeight: 40,
-  },
-  metaRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  labelRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: spacing.xs,
-  },
-  liveDot: {
-    backgroundColor: colors.error,
-    borderRadius: 4,
-    height: 8,
-    width: 8,
-  },
-  label: {
-    color: colors.textMuted,
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-  },
-  timer: {
-    color: colors.textSecondary,
-    fontFamily: 'monospace',
-    fontSize: 12,
-    fontVariant: ['tabular-nums'],
-  },
-  waveformRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 3,
-    height: MAX_BAR_HEIGHT,
-    overflow: 'hidden',
-  },
-  barTrack: {
-    alignItems: 'center',
-    height: MAX_BAR_HEIGHT,
-    justifyContent: 'center',
-    width: 3,
-  },
-  bar: {
-    backgroundColor: colors.textPrimary,
-    borderRadius: 999,
-    width: 3,
-  },
-});
+const createStyles = (theme: AppTheme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      gap: theme.spacing.xs,
+      justifyContent: 'center',
+      minHeight: 40,
+    },
+    metaRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+    },
+    labelRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: theme.spacing.xs,
+    },
+    liveDot: {
+      backgroundColor: theme.colors.error,
+      borderRadius: 4,
+      height: 8,
+      width: 8,
+    },
+    label: {
+      color: theme.colors.textMuted,
+      fontSize: 11,
+      fontWeight: '600',
+      letterSpacing: 0.4,
+      textTransform: 'uppercase',
+    },
+    timer: {
+      color: theme.colors.textSecondary,
+      fontFamily: 'monospace',
+      fontSize: 12,
+      fontVariant: ['tabular-nums'],
+    },
+    waveformRow: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: 3,
+      height: MAX_BAR_HEIGHT,
+      overflow: 'hidden',
+    },
+    barTrack: {
+      alignItems: 'center',
+      height: MAX_BAR_HEIGHT,
+      justifyContent: 'center',
+      width: 3,
+    },
+    bar: {
+      backgroundColor: theme.colors.textPrimary,
+      borderRadius: 999,
+      width: 3,
+    },
+  });

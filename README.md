@@ -38,7 +38,8 @@ npm install -g clawdex-mobile@latest
 clawdex init
 ```
 
-Then open the mobile app and scan the pairing QR.
+Then open the mobile app and connect using the printed bridge URL/token.
+`clawdex init` now writes config, starts the bridge in the background, and returns you to the shell. Bridge logs go to `.bridge.log`.
 
 The npm package is bridge-only. It does not install Expo or the mobile source tree. On supported macOS, Linux, and Windows hosts it uses bundled bridge binaries, so normal startup does not compile Rust.
 The current interactive setup helpers are still macOS/Linux-oriented.
@@ -58,16 +59,16 @@ OpenCode is supported directly from the CLI now.
 ```bash
 npm install -g opencode-ai
 npm install -g clawdex-mobile@latest
-clawdex init --engine opencode
+clawdex init --engines codex,opencode
 ```
 
-That writes `BRIDGE_ACTIVE_ENGINE=opencode` to `.env.secure` and uses OpenCode as the preferred runtime when the bridge starts.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode` to `.env.secure`, so the mobile app can control both harnesses from one bridge.
 
 Notes:
 
-- `clawdex init` without `--engine` still defaults to Codex.
-- If both CLIs are installed, the bridge can surface chats from both engines in the mobile app.
-- To switch later, rerun `clawdex init --engine codex` or `clawdex init --engine opencode`.
+- `clawdex init` without flags now lets you multi-select harnesses in the wizard with Space, then Enter to continue.
+- Use `clawdex init --engine codex` or `clawdex init --engine opencode` if you want a single-harness setup.
+- Use `clawdex init --engines codex,opencode` if you want both non-interactively.
 
 ## Monorepo Development
 
@@ -89,7 +90,7 @@ Use `npm run setup:wizard -- --no-start` if you only want to write config.
 
 ## Main Commands
 
-- `clawdex init [--engine codex|opencode] [--no-start]`
+- `clawdex init [--engine codex|opencode] [--engines codex,opencode] [--no-start]`
 - `clawdex stop`
 - `clawdex upgrade` / `clawdex update`
 - `clawdex version`

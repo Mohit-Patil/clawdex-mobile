@@ -149,12 +149,13 @@ dependencies = [
 
 [[package]]
 name = "codex-rust-bridge"
-version = "5.0.4"
+version = "5.0.5"
 dependencies = [
  "axum",
  "base64",
  "chrono",
  "futures-util",
+ "libc",
  "qr2term",
  "reqwest",
  "serde",

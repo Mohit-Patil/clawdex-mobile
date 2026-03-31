@@ -19,7 +19,7 @@ import type {
   GitStatusFile,
   GitStatusResponse,
 } from '../api/types';
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 import {
   parseUnifiedGitDiff,
   type UnifiedDiffFile,
@@ -33,6 +33,7 @@ interface GitScreenProps {
 }
 
 export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) {
+  const theme = useAppTheme();
   const [activeChat, setActiveChat] = useState(chat);
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
   const [diff, setDiff] = useState<GitDiffResponse | null>(null);
@@ -54,6 +55,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
   const diffSelectionRequestRef = useRef(0);
   const diffSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { height: windowHeight } = useWindowDimensions();
+  const styles = useMemo(() => createStyles(theme), [theme]);
 
   useEffect(() => {
     setActiveChat(chat);
@@ -301,7 +303,20 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     () => parseAheadCount(status?.raw ?? ''),
     [status?.raw]
   );
+  const hasUpstream = useMemo(
+    () => parseHasUpstream(status?.raw ?? ''),
+    [status?.raw]
+  );
   const canPush = aheadCount > 0;
+  const canPublishBranch = !hasUpstream && isPublishableBranch(status?.branch);
+  const showPushAction = canPush || canPublishBranch;
+  const pushButtonLabel = pushing
+    ? canPublishBranch
+      ? 'Publishing...'
+      : 'Pushing...'
+    : canPublishBranch
+      ? 'Publish branch'
+      : `Push (${aheadCount})`;
   const selectedDiffFile = useMemo(() => {
     if (parsedDiff.files.length === 0) {
       return null;
@@ -426,7 +441,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Pressable onPress={onBack} hitSlop={8} style={styles.backBtn}>
-          <Ionicons name="chevron-back" size={22} color={colors.textPrimary} />
+          <Ionicons name="chevron-back" size={22} color={theme.colors.textPrimary} />
         </Pressable>
         <View style={styles.headerTitles}>
           <Text style={styles.headerTitle}>Git</Text>
@@ -444,7 +459,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
           ]}
           disabled={loading}
         >
-          <Ionicons name="refresh" size={16} color={colors.textMuted} />
+          <Ionicons name="refresh" size={16} color={theme.colors.textMuted} />
         </Pressable>
       </View>
 
@@ -461,11 +476,11 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
             style={styles.input}
             value={workspaceDraft}
             onChangeText={setWorkspaceDraft}
-            keyboardAppearance="dark"
+            keyboardAppearance={theme.keyboardAppearance}
             onSubmitEditing={commitWorkspaceIfChanged}
             onBlur={commitWorkspaceIfChanged}
             placeholder="/path/to/project"
-            placeholderTextColor={colors.textMuted}
+            placeholderTextColor={theme.colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="done"
@@ -483,7 +498,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
         </View>
 
         {loading ? (
-          <ActivityIndicator color={colors.textPrimary} style={styles.loader} />
+          <ActivityIndicator color={theme.colors.textPrimary} style={styles.loader} />
         ) : (
           <>
             <View style={styles.card}>
@@ -500,6 +515,15 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
                   {status?.clean ? 'clean' : 'changes'}
                 </Text>
               </View>
+              {isPublishableBranch(status?.branch) ? (
+                <>
+                  <View style={styles.separator} />
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Published</Text>
+                    <Text style={styles.infoValue}>{hasUpstream ? 'Yes' : 'No'}</Text>
+                  </View>
+                </>
+              ) : null}
               {canPush ? (
                 <>
                   <View style={styles.separator} />
@@ -516,9 +540,9 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
               style={styles.input}
               value={commitMessage}
               onChangeText={setCommitMessage}
-              keyboardAppearance="dark"
+              keyboardAppearance={theme.keyboardAppearance}
               placeholder="Commit message..."
-              placeholderTextColor={colors.textMuted}
+              placeholderTextColor={theme.colors.textMuted}
             />
 
             <Pressable
@@ -536,7 +560,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
               </Text>
             </Pressable>
 
-            {canPush ? (
+            {showPushAction ? (
               <Pressable
                 onPress={() => void push()}
                 disabled={pushing || committing || loading}
@@ -548,7 +572,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
                 ]}
               >
                 <Text style={styles.actionBtnText}>
-                  {pushing ? 'Pushing...' : `Push (${aheadCount})`}
+                  {pushButtonLabel}
                 </Text>
               </Pressable>
             ) : null}
@@ -823,7 +847,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
 
                       {showDiffFileSwitching ? (
                         <View style={styles.diffLoadingContainer}>
-                          <ActivityIndicator color={colors.textPrimary} size="small" />
+                          <ActivityIndicator color={theme.colors.textPrimary} size="small" />
                           <Text style={styles.diffLoadingText}>Loading diff…</Text>
                         </View>
                       ) : diffFileForView.hunks.length === 0 ? (
@@ -911,40 +935,40 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (theme: AppTheme) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgMain,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   backBtn: {
-    padding: spacing.xs,
+    padding: theme.spacing.xs,
   },
   headerTitles: {
     flex: 1,
   },
   headerTitle: {
-    ...typography.headline,
-    color: colors.textPrimary,
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
   },
   headerSubtitle: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   refreshBtn: {
-    padding: spacing.xs,
-    borderRadius: radius.full,
+    padding: theme.spacing.xs,
+    borderRadius: theme.radius.full,
   },
   refreshBtnPressed: {
-    backgroundColor: colors.bgItem,
+    backgroundColor: theme.colors.bgItem,
   },
   refreshBtnDisabled: {
     opacity: 0.4,
@@ -953,140 +977,140 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   bodyContent: {
-    padding: spacing.lg,
-    gap: spacing.md,
+    padding: theme.spacing.lg,
+    gap: theme.spacing.md,
   },
   loader: {
-    marginTop: spacing.lg,
+    marginTop: theme.spacing.lg,
   },
   card: {
-    borderRadius: radius.md,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    padding: spacing.md,
-    backgroundColor: colors.bgItem,
-    gap: spacing.sm,
+    borderColor: theme.colors.borderLight,
+    padding: theme.spacing.md,
+    backgroundColor: theme.colors.bgItem,
+    gap: theme.spacing.sm,
   },
   sectionLabel: {
-    ...typography.caption,
+    ...theme.typography.caption,
     textTransform: 'uppercase',
     letterSpacing: 0.7,
-    marginTop: spacing.sm,
-    marginBottom: spacing.xs,
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.xs,
   },
   sectionLabelResetMargin: {
     marginTop: 0,
     marginBottom: 0,
   },
   input: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    color: colors.textPrimary,
+    borderColor: theme.colors.borderLight,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.spacing.lg,
+    paddingVertical: theme.spacing.md,
+    color: theme.colors.textPrimary,
     fontSize: 15,
   },
   actionBtn: {
-    backgroundColor: colors.accent,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
+    backgroundColor: theme.colors.accent,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.spacing.md,
     alignItems: 'center',
-    marginTop: spacing.sm,
+    marginTop: theme.spacing.sm,
   },
   actionBtnPressed: {
-    backgroundColor: colors.accentPressed,
+    backgroundColor: theme.colors.accentPressed,
   },
   actionBtnDisabled: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
     opacity: 0.6,
   },
   pushBtn: {
-    marginTop: spacing.xs,
+    marginTop: theme.spacing.xs,
   },
   actionBtnText: {
-    ...typography.headline,
-    color: colors.black,
+    ...theme.typography.headline,
+    color: theme.colors.accentText,
     fontSize: 15,
   },
   metaText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   warningText: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: spacing.sm,
+    paddingVertical: theme.spacing.sm,
   },
   separator: {
     height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.borderLight,
+    backgroundColor: theme.colors.borderLight,
   },
   infoLabel: {
-    ...typography.body,
-    color: colors.textMuted,
+    ...theme.typography.body,
+    color: theme.colors.textMuted,
   },
   infoValue: {
-    ...typography.body,
+    ...theme.typography.body,
     fontWeight: '600',
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   clean: {
-    color: colors.statusComplete,
+    color: theme.colors.statusComplete,
   },
   dirty: {
-    color: colors.statusError,
+    color: theme.colors.statusError,
   },
   filesCard: {
-    backgroundColor: colors.bgItem,
-    borderRadius: radius.md,
+    backgroundColor: theme.colors.bgItem,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     overflow: 'hidden',
   },
   filesHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: spacing.sm,
-    marginTop: spacing.sm,
+    gap: theme.spacing.sm,
+    marginTop: theme.spacing.sm,
   },
   filesHeaderActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   filesScroll: {
     minHeight: 56,
   },
   filesScrollContent: {
-    paddingVertical: spacing.xs,
+    paddingVertical: theme.spacing.xs,
   },
   fileRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
+    borderTopColor: theme.colors.borderLight,
   },
   fileCode: {
-    ...typography.mono,
-    color: colors.textMuted,
+    ...theme.typography.mono,
+    color: theme.colors.textMuted,
     width: 24,
     fontSize: 12,
     lineHeight: 18,
   },
   filePath: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     flex: 1,
     flexShrink: 1,
     lineHeight: 18,
@@ -1095,7 +1119,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   filePathInteractive: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   filePathDisabled: {
     opacity: 0.6,
@@ -1103,19 +1127,19 @@ const styles = StyleSheet.create({
   fileStats: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
-    marginLeft: spacing.sm,
+    gap: theme.spacing.xs,
+    marginLeft: theme.spacing.sm,
   },
   fileActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
-    marginLeft: spacing.sm,
+    gap: theme.spacing.xs,
+    marginLeft: theme.spacing.sm,
   },
   fileActionBtn: {
-    borderRadius: radius.sm,
+    borderRadius: theme.radius.sm,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 6,
   },
   fileActionBtnStage: {
@@ -1133,14 +1157,14 @@ const styles = StyleSheet.create({
     opacity: 0.55,
   },
   fileActionText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   bulkActionBtn: {
-    borderRadius: radius.sm,
+    borderRadius: theme.radius.sm,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: 7,
   },
   bulkActionBtnStage: {
@@ -1152,80 +1176,80 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(239, 68, 68, 0.2)',
   },
   bulkActionText: {
-    ...typography.caption,
-    color: colors.textPrimary,
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
     fontWeight: '600',
   },
   fileAdded: {
-    ...typography.mono,
+    ...theme.typography.mono,
     color: '#88DA95',
     fontSize: 12,
   },
   fileRemoved: {
-    ...typography.mono,
+    ...theme.typography.mono,
     color: '#F29B9B',
     fontSize: 12,
   },
   diffSummaryRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   diffSummaryPill: {
     flex: 1,
-    backgroundColor: colors.bgItem,
-    borderRadius: radius.md,
+    backgroundColor: theme.colors.bgItem,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    borderColor: theme.colors.borderLight,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     gap: 2,
   },
   diffSummaryLabel: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   diffSummaryValue: {
-    ...typography.body,
+    ...theme.typography.body,
     fontWeight: '700',
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   diffCard: {
-    backgroundColor: colors.bgItem,
-    borderRadius: radius.md,
+    backgroundColor: theme.colors.bgItem,
+    borderRadius: theme.radius.md,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     overflow: 'hidden',
   },
   diffTabsScroll: {
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   diffTabsContent: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
-    gap: spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
+    gap: theme.spacing.sm,
   },
   diffTab: {
     minWidth: 140,
     maxWidth: 220,
-    backgroundColor: colors.bgInput,
-    borderRadius: radius.sm,
+    backgroundColor: theme.colors.bgInput,
+    borderRadius: theme.radius.sm,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderLight,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.sm,
-    gap: spacing.xs,
+    borderColor: theme.colors.borderLight,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
+    gap: theme.spacing.xs,
   },
   diffTabActive: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgItem,
   },
   diffTabPressed: {
     opacity: 0.85,
   },
   diffTabTitle: {
-    ...typography.body,
-    color: colors.textPrimary,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
     flexShrink: 1,
     fontSize: 13,
     lineHeight: 18,
@@ -1233,66 +1257,66 @@ const styles = StyleSheet.create({
   diffTabStats: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   diffFileHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
+    gap: theme.spacing.md,
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   diffFilePath: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     flex: 1,
     flexShrink: 1,
     fontSize: 13,
     lineHeight: 18,
   },
   diffFileStatus: {
-    ...typography.caption,
+    ...theme.typography.caption,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   diffLoadingContainer: {
     minHeight: 120,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.lg,
-    gap: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.lg,
+    gap: theme.spacing.sm,
   },
   diffLoadingText: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   diffVerticalScroll: {
     minHeight: 120,
   },
   diffVerticalContent: {
-    paddingVertical: spacing.sm,
+    paddingVertical: theme.spacing.sm,
   },
   diffLines: {
     minWidth: '100%',
   },
   hunkBlock: {
-    marginBottom: spacing.sm,
+    marginBottom: theme.spacing.sm,
   },
   hunkHeader: {
-    ...typography.mono,
+    ...theme.typography.mono,
     color: '#AFC6F7',
     backgroundColor: 'rgba(175, 198, 247, 0.14)',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.borderLight,
+    borderTopColor: theme.colors.borderLight,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   diffLineRow: {
     flexDirection: 'row',
@@ -1306,22 +1330,22 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(239, 68, 68, 0.14)',
   },
   diffLineRowMeta: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: theme.colors.bgCanvasAccent,
   },
   diffLineNumber: {
-    ...typography.mono,
+    ...theme.typography.mono,
     width: 44,
     textAlign: 'right',
-    color: colors.textMuted,
-    paddingHorizontal: spacing.xs,
+    color: theme.colors.textMuted,
+    paddingHorizontal: theme.spacing.xs,
     paddingVertical: 3,
     fontSize: 11,
     lineHeight: 17,
   },
   diffLinePrefix: {
-    ...typography.mono,
+    ...theme.typography.mono,
     width: 16,
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
     paddingVertical: 3,
     fontSize: 11,
     lineHeight: 17,
@@ -1336,23 +1360,23 @@ const styles = StyleSheet.create({
     color: '#B8C4D8',
   },
   diffLineText: {
-    ...typography.mono,
-    color: colors.textPrimary,
-    paddingRight: spacing.md,
+    ...theme.typography.mono,
+    color: theme.colors.textPrimary,
+    paddingRight: theme.spacing.md,
     paddingVertical: 3,
     fontSize: 12,
     lineHeight: 17,
   },
   emptyFilesText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
   },
   errorText: {
-    ...typography.caption,
-    color: colors.error,
-    marginTop: spacing.xs,
+    ...theme.typography.caption,
+    color: theme.colors.error,
+    marginTop: theme.spacing.xs,
   },
 });
 
@@ -1435,6 +1459,19 @@ function parseAheadCount(rawStatus: string): number {
 
   const value = Number.parseInt(match[1], 10);
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function parseHasUpstream(rawStatus: string): boolean {
+  const header = rawStatus
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('## '));
+  return header?.includes('...') ?? false;
+}
+
+function isPublishableBranch(branch: string | null | undefined): boolean {
+  const normalized = branch?.trim();
+  return Boolean(normalized && normalized !== 'unknown' && !normalized.startsWith('HEAD'));
 }
 
 function formatDiffLineNumber(value: number | null): string {

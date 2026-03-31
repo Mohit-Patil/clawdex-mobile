@@ -35,7 +35,64 @@ print_step() {
 
 list_matching_pids() {
   local pattern="$1"
-  pgrep -f "$pattern" 2>/dev/null || true
+  ps -ax -o pid= -o command= 2>/dev/null | awk -v pattern="$pattern" '
+    $0 ~ pattern { print $1 }
+  ' || true
+}
+
+stop_pid_file_process() {
+  local label="$1"
+  local pid_file="$2"
+  local pid=""
+
+  if [[ ! -f "$pid_file" ]]; then
+    return 1
+  fi
+
+  pid="$(tr -dc '0-9' <"$pid_file")"
+  if [[ -z "$pid" ]]; then
+    rm -f "$pid_file"
+    return 1
+  fi
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pid_file"
+    return 1
+  fi
+
+  echo "Stopping $label process from pid file: $pid"
+  kill -INT "$pid" 2>/dev/null || true
+  sleep 1
+
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+  fi
+
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    echo "Force stopped $label process: $pid"
+  else
+    echo "$label stopped."
+  fi
+
+  rm -f "$pid_file"
+  return 0
+}
+
+extract_env_value() {
+  local file="$1"
+  local key="$2"
+  [[ -f "$file" ]] || return 1
+
+  awk -F= -v key="$key" '
+    $1 == key {
+      sub(/^[[:space:]]+/, "", $2)
+      sub(/[[:space:]]+$/, "", $2)
+      print $2
+      exit
+    }
+  ' "$file"
 }
 
 stop_process_group() {
@@ -95,8 +152,18 @@ fi
 print_step "Stop running services"
 if $auto_yes || confirm_prompt "Stop running bridge and Expo processes for this project?"; then
   stop_process_group "Expo" "$ROOT_DIR/.*/expo start|$ROOT_DIR/node_modules/.bin/expo start"
+  stop_pid_file_process "Rust bridge" "$BRIDGE_PID_FILE" || true
   stop_process_group "Rust bridge" "$ROOT_DIR/services/rust-bridge|codex-rust-bridge|@codex/rust-bridge"
   stop_process_group "Legacy TS bridge" "$ROOT_DIR/services/mac-bridge|@codex/mac-bridge"
+  if [[ -f "$SECURE_ENV_FILE" ]]; then
+    BRIDGE_ENABLED_ENGINES="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES" || true)"
+    BRIDGE_ACTIVE_ENGINE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE" || true)"
+    BRIDGE_OPENCODE_PORT="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_OPENCODE_PORT" || true)"
+    BRIDGE_OPENCODE_PORT="${BRIDGE_OPENCODE_PORT:-4090}"
+    if [[ ",$BRIDGE_ENABLED_ENGINES,$BRIDGE_ACTIVE_ENGINE," == *",opencode,"* ]]; then
+      stop_process_group "OpenCode server" "opencode serve --hostname .* --port $BRIDGE_OPENCODE_PORT|\\.opencode serve --hostname .* --port $BRIDGE_OPENCODE_PORT"
+    fi
+  fi
 else
   echo "Skipped process shutdown."
 fi

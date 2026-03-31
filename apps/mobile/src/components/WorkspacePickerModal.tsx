@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -14,7 +14,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { FileSystemEntry, WorkspaceSummary } from '../api/types';
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 interface WorkspacePickerModalProps {
   visible: boolean;
@@ -53,14 +53,16 @@ export function WorkspacePickerModal({
   onSelectPath,
   onClose,
 }: WorkspacePickerModalProps) {
+  const theme = useAppTheme();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingSelectionPath, setPendingSelectionPath] = useState<string | null>(
     selectedPath ?? currentPath ?? bridgeRoot
   );
-  const topInset = Math.max(insets.top + spacing.lg, 72);
-  const bottomInset = Math.max(insets.bottom + spacing.lg, 72);
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const topInset = Math.max(insets.top + theme.spacing.lg, 72);
+  const bottomInset = Math.max(insets.bottom + theme.spacing.lg, 72);
   const cardHeight = Math.min(
     Math.max(560, Math.round(windowHeight * 0.82)),
     windowHeight - topInset - bottomInset
@@ -122,7 +124,7 @@ export function WorkspacePickerModal({
                 onPress={onClose}
                 style={({ pressed }) => [styles.closeButton, pressed && styles.pressed]}
               >
-                <Ionicons name="close" size={18} color={colors.textSecondary} />
+                <Ionicons name="close" size={18} color={theme.colors.textSecondary} />
               </Pressable>
             </View>
 
@@ -151,13 +153,13 @@ export function WorkspacePickerModal({
               </View>
 
               <View style={styles.searchField}>
-                <Ionicons name="search" size={16} color={colors.textMuted} />
+                <Ionicons name="search" size={16} color={theme.colors.textMuted} />
                 <TextInput
                   value={searchQuery}
                   onChangeText={setSearchQuery}
-                  keyboardAppearance="dark"
+                  keyboardAppearance={theme.keyboardAppearance}
                   placeholder="Search folders"
-                  placeholderTextColor={colors.textMuted}
+                  placeholderTextColor={theme.colors.textMuted}
                   style={styles.searchInput}
                   autoCapitalize="none"
                   autoCorrect={false}
@@ -191,7 +193,7 @@ export function WorkspacePickerModal({
                           style={({ pressed }) => [styles.rowMainAction, pressed && styles.pressed]}
                         >
                           <View style={styles.recentIconWrap}>
-                            <Ionicons name="time-outline" size={16} color={colors.textSecondary} />
+                            <Ionicons name="time-outline" size={16} color={theme.colors.textSecondary} />
                           </View>
                           <View style={styles.recentCopy}>
                             <Text style={styles.recentTitle} numberOfLines={1}>
@@ -264,7 +266,7 @@ export function WorkspacePickerModal({
                     pressed && parentPath && !loadingEntries && styles.pressed,
                   ]}
                 >
-                  <Ionicons name="return-up-back" size={14} color={colors.textSecondary} />
+                  <Ionicons name="return-up-back" size={14} color={theme.colors.textSecondary} />
                   <Text style={styles.upButtonText}>Up one level</Text>
                 </Pressable>
 
@@ -334,7 +336,7 @@ export function WorkspacePickerModal({
                             <Ionicons
                               name={entry.isGitRepo ? 'git-branch-outline' : 'folder-outline'}
                               size={18}
-                              color={colors.textSecondary}
+                              color={theme.colors.textSecondary}
                             />
                           </View>
                           <View style={styles.entryCopy}>
@@ -434,9 +436,11 @@ function LoadingRow({
   label: string;
   compact?: boolean;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   return (
     <View style={[styles.statusRow, compact && styles.statusRowCompact]}>
-      <ActivityIndicator color={colors.textPrimary} />
+      <ActivityIndicator color={theme.colors.textPrimary} />
       <Text style={styles.statusText}>{label}</Text>
     </View>
   );
@@ -449,6 +453,8 @@ function EmptyRow({
   label: string;
   compact?: boolean;
 }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   return (
     <View style={[styles.statusRow, compact && styles.statusRowCompact]}>
       <Text style={styles.statusText}>{label}</Text>
@@ -552,38 +558,43 @@ function formatRelativeTime(iso?: string): string | null {
   return `${String(Math.floor(days / 30))} mo ago`;
 }
 
-const styles = StyleSheet.create({
+const createStyles = (theme: AppTheme) => {
+  const modalShadow = theme.isDark
+    ? '0 24px 44px rgba(0, 0, 0, 0.34)'
+    : '0 18px 36px rgba(15, 23, 42, 0.14)';
+
+  return StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.62)',
+    backgroundColor: theme.colors.overlayBackdrop,
   },
   outer: {
     flex: 1,
     justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
   },
   card: {
     borderRadius: 28,
     borderCurve: 'continuous',
-    backgroundColor: '#07090C',
+    backgroundColor: theme.colors.bgElevated,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.09)',
+    borderColor: theme.colors.borderLight,
     overflow: 'hidden',
-    boxShadow: '0 24px 44px rgba(0, 0, 0, 0.34)',
+    boxShadow: modalShadow,
   },
   header: {
     minHeight: 68,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.md,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.md,
   },
   headerSpacer: {
     width: 36,
   },
   title: {
-    ...typography.headline,
+    ...theme.typography.headline,
     fontSize: 18,
     fontWeight: '700',
     textAlign: 'center',
@@ -591,208 +602,208 @@ const styles = StyleSheet.create({
   closeButton: {
     width: 36,
     height: 36,
-    borderRadius: radius.full,
+    borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.04)',
+    backgroundColor: theme.colors.bgInput,
     borderWidth: 1,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
   },
   body: {
     flex: 1,
-    paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.lg,
-    gap: spacing.md,
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.lg,
+    gap: theme.spacing.md,
   },
   connectionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.md,
+    gap: theme.spacing.md,
   },
   connectionText: {
     flex: 1,
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   defaultButton: {
     minHeight: 32,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.full,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: theme.radius.full,
     borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.bgItem,
     alignItems: 'center',
     justifyContent: 'center',
   },
   defaultButtonSelected: {
-    borderColor: colors.borderHighlight,
-    backgroundColor: colors.bgInput,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgInput,
   },
   defaultButtonText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
   },
   defaultButtonTextSelected: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
   },
   searchField: {
     minHeight: 44,
-    borderRadius: radius.lg,
+    borderRadius: theme.radius.lg,
     borderWidth: 1,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgInput,
-    paddingHorizontal: spacing.md,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgInput,
+    paddingHorizontal: theme.spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   searchInput: {
     flex: 1,
-    ...typography.body,
+    ...theme.typography.body,
     paddingVertical: 0,
   },
   breadcrumbRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   upButton: {
     minHeight: 32,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.full,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.radius.full,
     borderWidth: 1,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: colors.bgItem,
+    backgroundColor: theme.colors.bgItem,
   },
   upButtonText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
   },
   breadcrumbScroll: {
     alignItems: 'center',
-    paddingRight: spacing.md,
-    gap: spacing.xs,
+    paddingRight: theme.spacing.md,
+    gap: theme.spacing.xs,
   },
   breadcrumbItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   breadcrumbSlash: {
-    ...typography.mono,
-    color: colors.textMuted,
+    ...theme.typography.mono,
+    color: theme.colors.textMuted,
   },
   breadcrumbChip: {
     minHeight: 30,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.md,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.radius.md,
     justifyContent: 'center',
   },
   breadcrumbChipActive: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: 1,
-    borderColor: colors.borderHighlight,
+    borderColor: theme.colors.borderHighlight,
   },
   breadcrumbText: {
-    ...typography.mono,
+    ...theme.typography.mono,
     fontSize: 12,
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
   },
   breadcrumbTextActive: {
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   breadcrumbEmpty: {
-    ...typography.caption,
-    color: colors.textMuted,
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
   },
   sectionHeader: {
-    paddingTop: spacing.xs,
+    paddingTop: theme.spacing.xs,
   },
   sectionTitle: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 11,
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
     textTransform: 'uppercase',
     letterSpacing: 0.8,
   },
   recentCard: {
     maxHeight: 184,
-    borderRadius: radius.lg,
+    borderRadius: theme.radius.lg,
     borderWidth: 1,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
     overflow: 'hidden',
   },
   recentRow: {
     minHeight: 54,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   rowMainAction: {
     flex: 1,
     minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   rowActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.xs,
+    gap: theme.spacing.xs,
   },
   rowSelectButton: {
     minHeight: 30,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.full,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.radius.full,
     borderWidth: 1,
-    borderColor: colors.borderHighlight,
+    borderColor: theme.colors.borderHighlight,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'transparent',
   },
   rowSelectButtonActive: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent,
+    backgroundColor: theme.colors.accent,
+    borderColor: theme.colors.accent,
   },
   rowSelectButtonText: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 11,
-    color: colors.textPrimary,
+    color: theme.colors.textPrimary,
     fontWeight: '700',
   },
   rowSelectButtonTextActive: {
-    color: colors.black,
+    color: theme.colors.accentText,
   },
   rowOpenButton: {
     minHeight: 30,
-    paddingHorizontal: spacing.sm,
-    borderRadius: radius.full,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: theme.radius.full,
     borderWidth: 1,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
   },
   rowOpenButtonText: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 11,
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
     fontWeight: '700',
   },
   recentRowSelected: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
   },
   recentRowLast: {
     borderBottomWidth: 0,
@@ -800,72 +811,72 @@ const styles = StyleSheet.create({
   recentIconWrap: {
     width: 30,
     height: 30,
-    borderRadius: radius.full,
+    borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: 1,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
   },
   recentCopy: {
     flex: 1,
     gap: 2,
   },
   recentTitle: {
-    ...typography.body,
+    ...theme.typography.body,
     fontSize: 13,
     lineHeight: 18,
     fontWeight: '600',
   },
   recentPath: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 11,
     lineHeight: 15,
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   recentMeta: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 11,
     lineHeight: 15,
-    color: colors.textSecondary,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
   },
   helperText: {
-    ...typography.caption,
+    ...theme.typography.caption,
     fontSize: 11,
     lineHeight: 15,
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   errorText: {
-    ...typography.caption,
-    color: '#FF8A8A',
+    ...theme.typography.caption,
+    color: theme.colors.error,
   },
   browserCard: {
     flex: 1,
     minHeight: 228,
-    borderRadius: radius.lg,
+    borderRadius: theme.radius.lg,
     borderWidth: 1,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.bgItem,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
     overflow: 'hidden',
   },
   entryListScroll: {
     flex: 1,
   },
   entryListContent: {
-    paddingVertical: spacing.xs,
+    paddingVertical: theme.spacing.xs,
   },
   entryRow: {
     minHeight: 54,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: theme.spacing.md,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
+    borderBottomColor: theme.colors.borderLight,
   },
   entryRowSelected: {
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
   },
   entryRowLast: {
     borderBottomWidth: 0,
@@ -873,62 +884,62 @@ const styles = StyleSheet.create({
   entryIconWrap: {
     width: 32,
     height: 32,
-    borderRadius: radius.md,
+    borderRadius: theme.radius.md,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.bgInput,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: 1,
-    borderColor: colors.borderLight,
+    borderColor: theme.colors.borderLight,
   },
   entryCopy: {
     flex: 1,
   },
   entryName: {
-    ...typography.body,
+    ...theme.typography.body,
     fontSize: 13,
     lineHeight: 18,
     fontWeight: '600',
   },
   footer: {
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   footerPath: {
-    ...typography.mono,
+    ...theme.typography.mono,
     fontSize: 10,
     lineHeight: 14,
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   footerActions: {
     flexDirection: 'row',
-    gap: spacing.sm,
+    gap: theme.spacing.sm,
   },
   footerButton: {
     minHeight: 48,
-    borderRadius: radius.lg,
+    borderRadius: theme.radius.lg,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
     flex: 1,
   },
   footerButtonSecondary: {
-    backgroundColor: colors.bgMain,
+    backgroundColor: theme.colors.bgInput,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: theme.colors.border,
   },
   footerButtonPrimary: {
-    backgroundColor: colors.accent,
+    backgroundColor: theme.colors.accent,
   },
   footerButtonPrimaryPressed: {
-    backgroundColor: colors.accentPressed,
+    backgroundColor: theme.colors.accentPressed,
   },
   footerButtonSecondaryText: {
-    ...typography.body,
-    color: colors.textSecondary,
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
     fontWeight: '600',
   },
   footerButtonPrimaryText: {
-    ...typography.body,
-    color: colors.black,
+    ...theme.typography.body,
+    color: theme.colors.accentText,
     fontWeight: '700',
   },
   statusRow: {
@@ -936,16 +947,16 @@ const styles = StyleSheet.create({
     minHeight: 132,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
+    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.lg,
   },
   statusRowCompact: {
     minHeight: 96,
   },
   statusText: {
-    ...typography.body,
+    ...theme.typography.body,
     textAlign: 'center',
-    color: colors.textMuted,
+    color: theme.colors.textMuted,
   },
   buttonDisabled: {
     opacity: 0.42,
@@ -954,3 +965,4 @@ const styles = StyleSheet.create({
     opacity: 0.86,
   },
 });
+};

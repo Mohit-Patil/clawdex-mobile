@@ -29,6 +29,7 @@ web-build/
 # iOS
 /ios/
 /apps/mobile/ios/
+/apps/mobile/local-builds/
 ios/Pods/
 ios/*.xcworkspace
 ios/*.xcodeproj/xcuserdata/

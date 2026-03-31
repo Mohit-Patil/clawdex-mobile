@@ -24,6 +24,14 @@ const privacyPolicyUrl =
   process.env.EXPO_PUBLIC_PRIVACY_POLICY_URL?.trim() || defaultPrivacyPolicyUrl;
 const termsOfServiceUrl =
   process.env.EXPO_PUBLIC_TERMS_OF_SERVICE_URL?.trim() || defaultTermsOfServiceUrl;
+const revenueCatIosApiKey =
+  process.env.EXPO_PUBLIC_REVENUECAT_IOS_API_KEY?.trim() || null;
+const revenueCatAndroidApiKey =
+  process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY?.trim() || null;
+const revenueCatTestStoreApiKey =
+  process.env.EXPO_PUBLIC_REVENUECAT_TEST_STORE_API_KEY?.trim() || null;
+const revenueCatTipsOfferingId =
+  process.env.EXPO_PUBLIC_REVENUECAT_TIPS_OFFERING_ID?.trim() || null;
 const externalStatusFullSyncDebounceMs = parseNonNegativeIntEnv(
   process.env.EXPO_PUBLIC_EXTERNAL_STATUS_FULL_SYNC_DEBOUNCE_MS,
   450
@@ -42,7 +50,11 @@ export const env = {
   allowInsecureRemoteBridge,
   externalStatusFullSyncDebounceMs,
   privacyPolicyUrl,
-  termsOfServiceUrl
+  termsOfServiceUrl,
+  revenueCatIosApiKey,
+  revenueCatAndroidApiKey,
+  revenueCatTestStoreApiKey,
+  revenueCatTipsOfferingId,
 };
 
 function parseNonNegativeIntEnv(value: string | undefined, fallback: number): number {

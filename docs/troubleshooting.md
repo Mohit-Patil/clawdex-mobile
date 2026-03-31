@@ -36,6 +36,7 @@ npm run stop:services
 - For the shipped mobile app, rescan the bridge QR or update the stored token in Settings.
 - For a local dev build, also ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` in `apps/mobile/.env`.
 - Restart the bridge after token changes.
+- If an in-app bridge update fails, inspect `.bridge-updater.log` and `.bridge-update-status.json` in the bridge install root.
 
 ## Tailscale issues
 

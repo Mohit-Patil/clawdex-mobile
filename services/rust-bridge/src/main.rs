@@ -32,7 +32,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client as HttpClient, Method as HttpMethod, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use services::{GitService, TerminalService};
+use services::{GitService, TerminalService, UpdateService};
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
@@ -75,6 +75,7 @@ struct BridgeConfig {
     cli_bin: String,
     opencode_cli_bin: String,
     active_engine: BridgeRuntimeEngine,
+    enabled_engines: Vec<BridgeRuntimeEngine>,
     opencode_host: String,
     opencode_port: u16,
     opencode_server_username: String,
@@ -105,10 +106,17 @@ impl BridgeConfig {
         let cli_bin = env::var("CODEX_CLI_BIN").unwrap_or_else(|_| "codex".to_string());
         let opencode_cli_bin =
             env::var("OPENCODE_CLI_BIN").unwrap_or_else(|_| "opencode".to_string());
-        let active_engine = match env::var("BRIDGE_ACTIVE_ENGINE") {
+        let requested_active_engine = match env::var("BRIDGE_ACTIVE_ENGINE") {
             Ok(raw) => parse_bridge_runtime_engine(raw.trim())
                 .ok_or_else(|| format!("unsupported BRIDGE_ACTIVE_ENGINE value: {raw}"))?,
             Err(_) => BridgeRuntimeEngine::Codex,
+        };
+        let enabled_engines = parse_enabled_bridge_engines_env()?
+            .unwrap_or_else(|| legacy_default_enabled_engines(requested_active_engine));
+        let active_engine = if enabled_engines.contains(&requested_active_engine) {
+            requested_active_engine
+        } else {
+            enabled_engines[0]
         };
         let opencode_host =
             env::var("BRIDGE_OPENCODE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -159,6 +167,7 @@ impl BridgeConfig {
             cli_bin,
             opencode_cli_bin,
             active_engine,
+            enabled_engines,
             opencode_host,
             opencode_port,
             opencode_server_username,
@@ -220,10 +229,11 @@ struct AppState {
     backend: Arc<RuntimeBackend>,
     terminal: Arc<TerminalService>,
     git: Arc<GitService>,
+    updater: Arc<UpdateService>,
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 enum BridgeRuntimeEngine {
     Codex,
@@ -245,11 +255,14 @@ struct BridgeCapabilitySupport {
     review_start: bool,
     turn_steer: bool,
     command_output_delta: bool,
+    self_update: bool,
 }
 
 impl AppState {
     fn bridge_capabilities(&self) -> BridgeCapabilities {
-        self.backend.capabilities()
+        let mut capabilities = self.backend.capabilities();
+        capabilities.supports.self_update = self.updater.is_self_update_supported();
+        capabilities
     }
 }
 
@@ -263,45 +276,57 @@ struct RuntimeBackend {
 impl RuntimeBackend {
     async fn start(config: &Arc<BridgeConfig>, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
         let preferred_engine = config.active_engine;
+        let codex_enabled = config.enabled_engines.contains(&BridgeRuntimeEngine::Codex);
+        let opencode_enabled = config
+            .enabled_engines
+            .contains(&BridgeRuntimeEngine::Opencode);
         let mut codex = None;
         let mut opencode = None;
 
         match preferred_engine {
             BridgeRuntimeEngine::Codex => {
-                let app_server = AppServerBridge::start(
-                    &config.cli_bin,
-                    BridgeRuntimeEngine::Codex,
-                    hub.clone(),
-                )
-                .await?;
-                spawn_rollout_live_sync(hub.clone());
-                codex = Some(app_server);
+                if codex_enabled {
+                    let app_server = AppServerBridge::start(
+                        &config.cli_bin,
+                        BridgeRuntimeEngine::Codex,
+                        hub.clone(),
+                    )
+                    .await?;
+                    spawn_rollout_live_sync(hub.clone());
+                    codex = Some(app_server);
+                }
 
-                match OpencodeBackend::start(config, hub).await {
-                    Ok(backend) => opencode = Some(backend),
-                    Err(error) => eprintln!(
-                        "opencode backend unavailable; continuing with codex only: {error}"
-                    ),
+                if opencode_enabled {
+                    match OpencodeBackend::start(config, hub).await {
+                        Ok(backend) => opencode = Some(backend),
+                        Err(error) => eprintln!(
+                            "opencode backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
+                    }
                 }
             }
             BridgeRuntimeEngine::Opencode => {
-                let backend = OpencodeBackend::start(config, hub.clone()).await?;
-                opencode = Some(backend);
+                if opencode_enabled {
+                    let backend = OpencodeBackend::start(config, hub.clone()).await?;
+                    opencode = Some(backend);
+                }
 
-                match AppServerBridge::start(
-                    &config.cli_bin,
-                    BridgeRuntimeEngine::Codex,
-                    hub.clone(),
-                )
-                .await
-                {
-                    Ok(app_server) => {
-                        spawn_rollout_live_sync(hub);
-                        codex = Some(app_server);
+                if codex_enabled {
+                    match AppServerBridge::start(
+                        &config.cli_bin,
+                        BridgeRuntimeEngine::Codex,
+                        hub.clone(),
+                    )
+                    .await
+                    {
+                        Ok(app_server) => {
+                            spawn_rollout_live_sync(hub);
+                            codex = Some(app_server);
+                        }
+                        Err(error) => eprintln!(
+                            "codex backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
                     }
-                    Err(error) => eprintln!(
-                        "codex backend unavailable; continuing with opencode only: {error}"
-                    ),
                 }
             }
         }
@@ -311,6 +336,15 @@ impl RuntimeBackend {
             codex,
             opencode,
         }))
+    }
+
+    async fn shutdown(&self) {
+        if let Some(codex) = &self.codex {
+            codex.request_shutdown().await;
+        }
+        if let Some(opencode) = &self.opencode {
+            opencode.request_shutdown().await;
+        }
     }
 
     fn engine(&self) -> BridgeRuntimeEngine {
@@ -335,11 +369,13 @@ impl RuntimeBackend {
                 review_start: true,
                 turn_steer: true,
                 command_output_delta: true,
+                self_update: false,
             },
             BridgeRuntimeEngine::Opencode => BridgeCapabilitySupport {
                 review_start: false,
                 turn_steer: false,
                 command_output_delta: false,
+                self_update: false,
             },
         };
         let available_engines = self.available_engines();
@@ -573,6 +609,95 @@ impl RuntimeBackend {
     }
 }
 
+fn configure_managed_child_command(command: &mut Command) {
+    command.kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+}
+
+async fn terminate_managed_child(pid: u32, label: &str) {
+    #[cfg(unix)]
+    {
+        terminate_process_group_unix(pid, label).await;
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        terminate_process_tree_windows(pid, label).await;
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    let _ = (pid, label);
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> &'static str {
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = sigint.recv() => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "Ctrl+C"
+}
+
+#[cfg(unix)]
+async fn terminate_process_group_unix(pid: u32, label: &str) {
+    let process_group = pid as i32;
+    if process_group <= 0 {
+        return;
+    }
+
+    let terminate_result = unsafe { libc::killpg(process_group, libc::SIGTERM) };
+    if terminate_result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            eprintln!("failed to terminate {label} process group {process_group}: {error}");
+        }
+        return;
+    }
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let kill_result = unsafe { libc::killpg(process_group, 0) };
+    if kill_result == 0 {
+        let force_result = unsafe { libc::killpg(process_group, libc::SIGKILL) };
+        if force_result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!("failed to force-kill {label} process group {process_group}: {error}");
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn terminate_process_tree_windows(pid: u32, label: &str) {
+    let status = Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F")
+        .status()
+        .await;
+
+    match status {
+        Ok(result) if result.success() => {}
+        Ok(result) => eprintln!("failed to terminate {label} process tree {pid}: {result}"),
+        Err(error) => eprintln!("failed to terminate {label} process tree {pid}: {error}"),
+    }
+}
+
 enum RuntimeBackendRef<'a> {
     Codex(&'a Arc<AppServerBridge>),
     Opencode(&'a Arc<OpencodeBackend>),
@@ -746,6 +871,7 @@ impl ClientHub {
 struct AppServerBridge {
     engine: BridgeRuntimeEngine,
     child: Mutex<Child>,
+    child_pid: u32,
     writer: Mutex<ChildStdin>,
     pending_requests: Mutex<HashMap<u64, PendingRequest>>,
     internal_waiters: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
@@ -788,15 +914,22 @@ impl AppServerBridge {
         engine: BridgeRuntimeEngine,
         hub: Arc<ClientHub>,
     ) -> Result<Arc<Self>, String> {
-        let mut child = Command::new(cli_bin)
+        let mut command = Command::new(cli_bin);
+        command
             .arg("app-server")
             .arg("--listen")
             .arg("stdio://")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_managed_child_command(&mut command);
+
+        let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start app-server: {error}"))?;
+        let child_pid = child
+            .id()
+            .ok_or_else(|| "app-server pid unavailable".to_string())?;
 
         let stdin = child
             .stdin
@@ -814,6 +947,7 @@ impl AppServerBridge {
         let bridge = Arc::new(Self {
             engine,
             child: Mutex::new(child),
+            child_pid,
             writer: Mutex::new(stdin),
             pending_requests: Mutex::new(HashMap::new()),
             internal_waiters: Mutex::new(HashMap::new()),
@@ -832,6 +966,10 @@ impl AppServerBridge {
         bridge.initialize().await?;
 
         Ok(bridge)
+    }
+
+    async fn request_shutdown(&self) {
+        terminate_managed_child(self.child_pid, "app-server").await;
     }
 
     async fn initialize(&self) -> Result<(), String> {
@@ -1492,6 +1630,7 @@ struct OpencodePendingUserInputEntry {
 
 struct OpencodeBackend {
     child: Mutex<Child>,
+    child_pid: u32,
     hub: Arc<ClientHub>,
     http: HttpClient,
     base_url: Url,
@@ -1520,6 +1659,7 @@ impl OpencodeBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_managed_child_command(&mut command);
 
         if let Some(password) = config.opencode_server_password.as_deref() {
             command.env("OPENCODE_SERVER_PASSWORD", password);
@@ -1529,6 +1669,9 @@ impl OpencodeBackend {
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start opencode serve: {error}"))?;
+        let child_pid = child
+            .id()
+            .ok_or_else(|| "opencode pid unavailable".to_string())?;
 
         let stdout = child
             .stdout
@@ -1547,6 +1690,7 @@ impl OpencodeBackend {
 
         let backend = Arc::new(Self {
             child: Mutex::new(child),
+            child_pid,
             hub,
             http: HttpClient::builder()
                 .build()
@@ -1571,6 +1715,10 @@ impl OpencodeBackend {
         backend.spawn_global_event_loop();
 
         Ok(backend)
+    }
+
+    async fn request_shutdown(&self) {
+        terminate_managed_child(self.child_pid, "opencode").await;
     }
 
     fn spawn_stdout_loop(self: &Arc<Self>, stdout: ChildStdout) {
@@ -3762,6 +3910,12 @@ struct TerminalExecResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeUpdateStartRequest {
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitStatusResponse {
     branch: String,
     clean: bool,
@@ -4077,6 +4231,7 @@ async fn main() {
         config.workdir.clone(),
         config.allow_outside_root_cwd,
     ));
+    let updater = Arc::new(UpdateService::discover());
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -4085,13 +4240,14 @@ async fn main() {
         backend,
         terminal,
         git,
+        updater,
     });
 
     let app = Router::new()
         .route("/rpc", get(ws_handler))
         .route("/health", get(health_handler))
         .route("/local-image", get(local_image_handler))
-        .with_state(state);
+        .with_state(state.clone());
 
     let bind_addr = format!("{}:{}", config.host, config.port);
     let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
@@ -4105,7 +4261,18 @@ async fn main() {
     println!("rust-bridge listening on {bind_addr}");
     maybe_print_pairing_qr(&config);
 
-    if let Err(error) = axum::serve(listener, app).await {
+    let shutdown_backend = state.backend.clone();
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let signal = wait_for_shutdown_signal().await;
+            eprintln!("shutdown signal received ({signal}), terminating managed backends");
+            shutdown_backend.shutdown().await;
+        })
+        .await;
+
+    state.backend.shutdown().await;
+
+    if let Err(error) = serve_result {
         eprintln!("server error: {error}");
         std::process::exit(1);
     }
@@ -4444,6 +4611,19 @@ async fn handle_bridge_method(
         })),
         "bridge/capabilities/read" => serde_json::to_value(state.bridge_capabilities())
             .map_err(|error| BridgeError::server(&error.to_string())),
+        "bridge/runtime/read" => serde_json::to_value(state.updater.runtime_info().await)
+            .map_err(|error| BridgeError::server(&error.to_string())),
+        "bridge/update/start" => {
+            let request: BridgeUpdateStartRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let target_version = request.version.as_deref().unwrap_or("latest");
+            let result = state
+                .updater
+                .start_update(target_version, std::process::id(), &now_iso())
+                .map_err(|error| BridgeError::server(&error))?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
         "bridge/events/replay" => {
             let request: EventReplayRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
@@ -5318,6 +5498,53 @@ fn parse_csv_env(name: &str, fallback: &[&str]) -> HashSet<String> {
             .map(str::to_string)
             .collect(),
         Err(_) => fallback.iter().map(|entry| entry.to_string()).collect(),
+    }
+}
+
+fn parse_enabled_bridge_engines_csv(raw: &str) -> Result<Vec<BridgeRuntimeEngine>, String> {
+    let mut parsed = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in raw.split(',') {
+        let normalized = entry.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        let Some(engine) = parse_bridge_runtime_engine(&normalized) else {
+            continue;
+        };
+        if seen.insert(engine) {
+            parsed.push(engine);
+        }
+    }
+
+    if parsed.is_empty() {
+        return Err(
+            "BRIDGE_ENABLED_ENGINES must include one or more of: codex, opencode".to_string(),
+        );
+    }
+
+    Ok(parsed)
+}
+
+fn parse_enabled_bridge_engines_env() -> Result<Option<Vec<BridgeRuntimeEngine>>, String> {
+    let raw = match env::var("BRIDGE_ENABLED_ENGINES") {
+        Ok(raw) => raw,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(Some(parse_enabled_bridge_engines_csv(&raw)?))
+}
+
+fn legacy_default_enabled_engines(
+    requested_active_engine: BridgeRuntimeEngine,
+) -> Vec<BridgeRuntimeEngine> {
+    match requested_active_engine {
+        BridgeRuntimeEngine::Codex => {
+            vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode]
+        }
+        BridgeRuntimeEngine::Opencode => {
+            vec![BridgeRuntimeEngine::Opencode, BridgeRuntimeEngine::Codex]
+        }
     }
 }
 
@@ -7278,6 +7505,7 @@ mod tests {
         Arc::new(AppServerBridge {
             engine: BridgeRuntimeEngine::Codex,
             child: Mutex::new(child),
+            child_pid: 0,
             writer: Mutex::new(writer),
             pending_requests: Mutex::new(HashMap::new()),
             internal_waiters: Mutex::new(HashMap::new()),
@@ -7306,6 +7534,7 @@ mod tests {
 
         Arc::new(OpencodeBackend {
             child: Mutex::new(child),
+            child_pid: 0,
             hub,
             http: HttpClient::builder().build().expect("build reqwest client"),
             base_url: Url::parse("http://127.0.0.1:4090/").expect("valid opencode base url"),
@@ -7372,6 +7601,7 @@ mod tests {
             cli_bin: "cat".to_string(),
             opencode_cli_bin: "opencode".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
+            enabled_engines: vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode],
             opencode_host: "127.0.0.1".to_string(),
             opencode_port: 4090,
             opencode_server_username: "opencode".to_string(),
@@ -7400,6 +7630,7 @@ mod tests {
             config.workdir.clone(),
             config.allow_outside_root_cwd,
         ));
+        let updater = Arc::new(UpdateService::discover());
 
         Arc::new(AppState {
             config,
@@ -7408,6 +7639,7 @@ mod tests {
             backend,
             terminal,
             git,
+            updater,
         })
     }
 
@@ -7938,6 +8170,25 @@ mod tests {
         assert!(capabilities.supports.review_start);
 
         shutdown_test_backend(&state.backend).await;
+    }
+
+    #[test]
+    fn parse_enabled_bridge_engines_csv_preserves_order_and_removes_duplicates() {
+        let parsed =
+            parse_enabled_bridge_engines_csv("opencode,codex,opencode").expect("engine csv");
+        assert_eq!(
+            parsed,
+            vec![BridgeRuntimeEngine::Opencode, BridgeRuntimeEngine::Codex]
+        );
+    }
+
+    #[test]
+    fn parse_enabled_bridge_engines_csv_ignores_unknown_entries() {
+        let parsed = parse_enabled_bridge_engines_csv("codex,t3code,opencode").expect("engine csv");
+        assert_eq!(
+            parsed,
+            vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode]
+        );
     }
 
     #[tokio::test]
@@ -8767,6 +9018,7 @@ mod tests {
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
+            enabled_engines: vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode],
             opencode_host: "127.0.0.1".to_string(),
             opencode_port: 4090,
             opencode_server_username: "opencode".to_string(),
@@ -8881,6 +9133,7 @@ mod tests {
         let bridge = Arc::new(AppServerBridge {
             engine: BridgeRuntimeEngine::Codex,
             child: Mutex::new(child),
+            child_pid: 0,
             writer: Mutex::new(writer),
             pending_requests: Mutex::new(HashMap::new()),
             internal_waiters: Mutex::new(HashMap::new()),

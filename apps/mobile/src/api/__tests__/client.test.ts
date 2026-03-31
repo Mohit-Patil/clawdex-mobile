@@ -68,6 +68,42 @@ describe('HostBridgeApiClient', () => {
     });
   });
 
+  it('readBridgeRuntime() calls bridge/runtime/read', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      version: '5.0.4',
+      installKind: 'publishedCli',
+      selfUpdateSupported: true,
+      latestVersion: '5.0.5',
+      updaterStatus: null,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readBridgeRuntime();
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/runtime/read');
+    expect(result.version).toBe('5.0.4');
+    expect(result.latestVersion).toBe('5.0.5');
+  });
+
+  it('startBridgeUpdate() calls bridge/update/start with latest by default', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      ok: true,
+      jobId: 'bridge-update-1',
+      targetVersion: 'latest',
+      message: 'scheduled',
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.startBridgeUpdate();
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/update/start', {
+      version: 'latest',
+    });
+    expect(result.ok).toBe(true);
+  });
+
   it('readAccountRateLimits() falls back to first populated keyed snapshot with snake_case payloads', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({

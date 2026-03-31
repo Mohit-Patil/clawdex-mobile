@@ -29,10 +29,14 @@ TAILSCALE_IP=""
 BRIDGE_HOST=""
 BRIDGE_PORT=""
 ACTIVE_ENGINE="${BRIDGE_ACTIVE_ENGINE:-codex}"
-ENGINE_PRESET="false"
+declare -a SELECTED_ENGINES=()
+ENGINE_SELECTION_PRESET="false"
 AUTO_START="true"
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MENU_RESULT=""
+MENU_MULTI_RESULT=""
+MENU_MULTI_PRESELECTED=""
+declare -a MENU_MULTI_RESULT_ITEMS=()
 SECTION_COUNT=0
 RAIL_GLYPH="${DIM}│${RESET}"
 RAIL_BRANCH="${DIM}├─${RESET}"
@@ -46,10 +50,6 @@ warn() { rail_echo "${YELLOW}$*${RESET}"; }
 ok() { rail_echo "${GREEN}$*${RESET}"; }
 fail() { printf "%s ${RED}%s${RESET}\n" "$RAIL_GLYPH" "$*" >&2; }
 SETUP_VERBOSE_INSTALLS="${CLAWDEX_SETUP_VERBOSE:-false}"
-
-if [[ -n "${BRIDGE_ACTIVE_ENGINE:-}" ]]; then
-  ENGINE_PRESET="true"
-fi
 
 run_quiet_command() {
   local label="$1"
@@ -83,7 +83,9 @@ Usage: $(basename "$0") [options]
 Options:
   --no-start               Configure everything but do not start bridge
   --engine <codex|opencode>
-                           Set preferred engine before writing .env.secure
+                           Select a single harness non-interactively
+  --engines <codex,opencode>
+                           Select one or more harnesses non-interactively
   -h, --help               Show this help
 EOF
 }
@@ -110,6 +112,152 @@ format_engine_name() {
   esac
 }
 
+parse_engine_list_csv() {
+  local raw="$1"
+  local normalized=""
+  local seen=","
+  local part=""
+  local -a parts=()
+  local -a parsed=()
+
+  IFS=',' read -r -a parts <<<"$raw"
+  for part in "${parts[@]}"; do
+    normalized="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [[ -z "$normalized" ]]; then
+      continue
+    fi
+    if ! validate_engine_name "$normalized"; then
+      return 1
+    fi
+    if [[ "$seen" == *",$normalized,"* ]]; then
+      continue
+    fi
+    parsed+=("$normalized")
+    seen="${seen}${normalized},"
+  done
+
+  if (( ${#parsed[@]} == 0 )); then
+    return 1
+  fi
+
+  SELECTED_ENGINES=("${parsed[@]}")
+  return 0
+}
+
+parse_existing_engine_list_csv() {
+  local raw="$1"
+  local normalized=""
+  local seen=","
+  local part=""
+  local -a parts=()
+  local -a parsed=()
+
+  IFS=',' read -r -a parts <<<"$raw"
+  for part in "${parts[@]}"; do
+    normalized="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    if [[ -z "$normalized" ]]; then
+      continue
+    fi
+    if ! validate_engine_name "$normalized"; then
+      continue
+    fi
+    if [[ "$seen" == *",$normalized,"* ]]; then
+      continue
+    fi
+    parsed+=("$normalized")
+    seen="${seen}${normalized},"
+  done
+
+  if (( ${#parsed[@]} == 0 )); then
+    return 1
+  fi
+
+  SELECTED_ENGINES=("${parsed[@]}")
+  return 0
+}
+
+engine_list_contains() {
+  local needle="$1"
+  shift
+  local value=""
+  for value in "$@"; do
+    if [[ "$value" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+sync_active_engine_from_selection() {
+  if (( ${#SELECTED_ENGINES[@]} == 0 )); then
+    ACTIVE_ENGINE="codex"
+    return
+  fi
+
+  if engine_list_contains "$ACTIVE_ENGINE" "${SELECTED_ENGINES[@]}"; then
+    return
+  fi
+
+  ACTIVE_ENGINE="${SELECTED_ENGINES[0]}"
+}
+
+format_engine_list() {
+  local engine=""
+  local result=""
+
+  for engine in "$@"; do
+    if [[ -n "$result" ]]; then
+      result+=", "
+    fi
+    result+="$(format_engine_name "$engine")"
+  done
+
+  printf '%s' "$result"
+}
+
+engine_from_menu_label() {
+  case "$1" in
+    "Codex")
+      printf 'codex'
+      ;;
+    "OpenCode")
+      printf 'opencode'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+load_existing_engine_selection() {
+  local raw=""
+  local engine=""
+
+  if [[ "$ENGINE_SELECTION_PRESET" == "true" ]]; then
+    sync_active_engine_from_selection
+    return 0
+  fi
+
+  raw="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
+  if [[ -n "$raw" ]] && parse_existing_engine_list_csv "$raw"; then
+    engine="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
+    if validate_engine_name "$engine"; then
+      ACTIVE_ENGINE="$engine"
+    else
+      ACTIVE_ENGINE="${SELECTED_ENGINES[0]}"
+    fi
+    sync_active_engine_from_selection
+    return 0
+  fi
+
+  engine="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
+  if ! validate_engine_name "$engine"; then
+    engine="codex"
+  fi
+  SELECTED_ENGINES=("$engine")
+  ACTIVE_ENGINE="$engine"
+}
+
 parse_args() {
   while (($# > 0)); do
     case "$1" in
@@ -129,7 +277,23 @@ parse_args() {
           exit 1
         fi
         ACTIVE_ENGINE="$2"
-        ENGINE_PRESET="true"
+        SELECTED_ENGINES=("$2")
+        ENGINE_SELECTION_PRESET="true"
+        shift 2
+        ;;
+      --engines)
+        if (($# < 2)); then
+          echo "error: --engines requires a comma-separated value (for example: codex,opencode)." >&2
+          print_usage >&2
+          exit 1
+        fi
+        if ! parse_engine_list_csv "$2"; then
+          echo "error: unsupported --engines value '$2'. Use one or more of 'codex' and 'opencode'." >&2
+          print_usage >&2
+          exit 1
+        fi
+        ACTIVE_ENGINE="${SELECTED_ENGINES[0]}"
+        ENGINE_SELECTION_PRESET="true"
         shift 2
         ;;
       -h|--help)
@@ -485,6 +649,123 @@ menu_select() {
   printf "\r\033[2K%s %s %s: %s\n" "$rail" "$branch" "$prompt" "$MENU_RESULT"
 }
 
+menu_multiselect() {
+  local prompt="$1"
+  shift
+  local -a options=("$@")
+  local option_count="${#options[@]}"
+  local selected=0
+  local lines_to_render=$((option_count + 3))
+  local i=0
+  local key=""
+  local key_rest=""
+  local rail="$RAIL_GLYPH"
+  local branch="$RAIL_BRANCH"
+  local child="$RAIL_CHILD"
+  local help_text="${DIM}Space toggles. Enter continues.${RESET}"
+  local summary=""
+  local mark=""
+  local selected_count=0
+  local option=""
+  local preselected=",${MENU_MULTI_PRESELECTED},"
+  local -a checked=()
+
+  if (( option_count == 0 )); then
+    abort_wizard "menu_multiselect requires at least one option."
+  fi
+
+  for option in "${options[@]}"; do
+    if [[ "$preselected" == *",$option,"* ]]; then
+      checked+=(1)
+    else
+      checked+=(0)
+    fi
+  done
+
+  tput civis >/dev/null 2>&1 || true
+
+  while true; do
+    printf "\r\033[2K%s\n" "$rail"
+    printf "\r\033[2K%s %s %s\n" "$rail" "$branch" "$prompt"
+    for ((i = 0; i < option_count; i++)); do
+      if (( checked[i] == 1 )); then
+        mark="[x]"
+      else
+        mark="[ ]"
+      fi
+
+      if (( i == selected )); then
+        printf "\r\033[2K%s %s ${GREEN}%s${RESET} %s\n" "$rail" "$child" "$mark" "${options[$i]}"
+      else
+        printf "\r\033[2K%s %s ${DIM}%s${RESET} %s\n" "$rail" "$child" "$mark" "${options[$i]}"
+      fi
+    done
+    printf "\r\033[2K%s %s %s\n" "$rail" "$child" "$help_text"
+
+    IFS= read -rsn1 key || abort_wizard
+
+    if [[ "$key" == $'\x03' ]]; then
+      abort_wizard
+    fi
+
+    if [[ "$key" == $'\x1b' ]]; then
+      key_rest=""
+      IFS= read -rsn2 key_rest || true
+      key+="$key_rest"
+    fi
+
+    case "$key" in
+      "")
+        selected_count=0
+        for ((i = 0; i < option_count; i++)); do
+          if (( checked[i] == 1 )); then
+            selected_count=$((selected_count + 1))
+          fi
+        done
+        if (( selected_count > 0 )); then
+          break
+        fi
+        help_text="${YELLOW}Select at least one option. Space toggles. Enter continues.${RESET}"
+        ;;
+      " ")
+        checked[selected]=$((1 - checked[selected]))
+        help_text="${DIM}Space toggles. Enter continues.${RESET}"
+        ;;
+      $'\x1b[A'|k|K)
+        selected=$(((selected - 1 + option_count) % option_count))
+        ;;
+      $'\x1b[B'|j|J)
+        selected=$(((selected + 1) % option_count))
+        ;;
+      q|Q)
+        abort_wizard
+        ;;
+      *)
+        ;;
+    esac
+
+    printf "\033[%dA" "$lines_to_render"
+  done
+
+  MENU_MULTI_RESULT_ITEMS=()
+  for ((i = 0; i < option_count; i++)); do
+    if (( checked[i] == 1 )); then
+      MENU_MULTI_RESULT_ITEMS+=("${options[$i]}")
+    fi
+  done
+
+  MENU_MULTI_RESULT="$(IFS=,; printf '%s' "${MENU_MULTI_RESULT_ITEMS[*]}")"
+  summary="$(IFS=', '; printf '%s' "${MENU_MULTI_RESULT_ITEMS[*]}")"
+
+  tput cnorm >/dev/null 2>&1 || true
+  printf "\033[%dA" "$lines_to_render"
+  for ((i = 0; i < lines_to_render; i++)); do
+    printf "\r\033[2K\n"
+  done
+  printf "\033[%dA" "$lines_to_render"
+  printf "\r\033[2K%s %s %s: %s\n" "$rail" "$branch" "$prompt" "$summary"
+}
+
 confirm_prompt() {
   local prompt="$1"
   local default="${2:-N}"
@@ -673,8 +954,10 @@ print_existing_setup_summary() {
   local port=""
   local token=""
   local network_mode=""
-  local engine=""
+  local harnesses=""
   local source_path=""
+  local saved_active_engine="$ACTIVE_ENGINE"
+  local -a saved_selected_engines=("${SELECTED_ENGINES[@]}")
 
   if [[ ! -f "$SECURE_ENV_FILE" ]]; then
     return 1
@@ -684,9 +967,14 @@ print_existing_setup_summary() {
   port="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
   token="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
   network_mode="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
-  engine="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
-  if ! validate_engine_name "$engine"; then
-    engine="codex"
+  harnesses="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
+  if [[ -n "$harnesses" ]] && ! parse_existing_engine_list_csv "$harnesses"; then
+    harnesses=""
+  elif [[ -n "$harnesses" ]]; then
+    harnesses="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")"
+  fi
+  if [[ -z "$harnesses" ]]; then
+    harnesses="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
   fi
 
   if [[ -z "$host" ]] && [[ -z "$port" ]] && [[ -z "$token" ]]; then
@@ -703,13 +991,16 @@ print_existing_setup_summary() {
   if [[ -n "$network_mode" ]]; then
     echo "bridge.networkMode: $network_mode"
   fi
-  if [[ -n "$engine" ]]; then
-    echo "bridge.engine: $engine"
+  if [[ -n "$harnesses" ]]; then
+    echo "bridge.harnesses: $harnesses"
   fi
   if [[ -n "$token" ]]; then
     echo "bridge.token: present"
   fi
   echo "source: $source_path"
+
+  SELECTED_ENGINES=("${saved_selected_engines[@]}")
+  ACTIVE_ENGINE="$saved_active_engine"
 }
 
 require_security_ack() {
@@ -789,20 +1080,28 @@ choose_bridge_network_mode() {
 }
 
 choose_runtime_engine() {
-  menu_select "Preferred engine" "Codex" "OpenCode"
-  case "$MENU_RESULT" in
-    "Codex")
-      ACTIVE_ENGINE="codex"
-      info "Codex selected."
-      ;;
-    "OpenCode")
-      ACTIVE_ENGINE="opencode"
-      info "OpenCode selected."
-      ;;
-    *)
-      abort_wizard "Unexpected preferred engine."
-      ;;
-  esac
+  local label=""
+  MENU_MULTI_PRESELECTED="Codex"
+  if engine_list_contains "codex" "${SELECTED_ENGINES[@]}"; then
+    MENU_MULTI_PRESELECTED="Codex"
+  else
+    MENU_MULTI_PRESELECTED=""
+  fi
+  if engine_list_contains "opencode" "${SELECTED_ENGINES[@]}"; then
+    if [[ -n "$MENU_MULTI_PRESELECTED" ]]; then
+      MENU_MULTI_PRESELECTED+=","
+    fi
+    MENU_MULTI_PRESELECTED+="OpenCode"
+  fi
+
+  info "Select the harnesses this phone should control."
+  menu_multiselect "Harnesses to control" "Codex" "OpenCode"
+  SELECTED_ENGINES=()
+  for label in "${MENU_MULTI_RESULT_ITEMS[@]}"; do
+    SELECTED_ENGINES+=("$(engine_from_menu_label "$label")")
+  done
+  sync_active_engine_from_selection
+  info "Selected harnesses: $(format_engine_list "${SELECTED_ENGINES[@]}")."
 }
 
 infer_network_mode_from_host() {
@@ -916,18 +1215,21 @@ ensure_opencode_cli() {
   fi
 }
 
-ensure_selected_engine_cli() {
-  case "$ACTIVE_ENGINE" in
-    codex)
-      ensure_codex_cli
-      ;;
-    opencode)
-      ensure_opencode_cli
-      ;;
-    *)
-      abort_wizard "Unsupported preferred engine '$ACTIVE_ENGINE'."
-      ;;
-  esac
+ensure_selected_engine_clis() {
+  local engine=""
+  for engine in "${SELECTED_ENGINES[@]}"; do
+    case "$engine" in
+      codex)
+        ensure_codex_cli
+        ;;
+      opencode)
+        ensure_opencode_cli
+        ;;
+      *)
+        abort_wizard "Unsupported harness '$engine'."
+        ;;
+    esac
+  done
 }
 
 ensure_tailscale_cli() {
@@ -1264,13 +1566,12 @@ confirm_phone_network_ready() {
   esac
 }
 
-start_bridge_foreground() {
-  rail_echo "Starting bridge in foreground."
-  rail_echo "Press Ctrl+C to stop the bridge."
+start_bridge_background() {
+  rail_echo "Starting bridge in background."
   echo ""
   (
     cd "$ROOT_DIR"
-    npm run secure:bridge
+    node "$SCRIPT_DIR/start-bridge-secure.js" --background
   )
 }
 
@@ -1309,28 +1610,24 @@ if [[ "$CONFIG_ACTION" == "reset" ]]; then
   ok "Previous secure config removed: $SECURE_ENV_FILE"
 fi
 
-section "Preferred engine"
-EXISTING_ACTIVE_ENGINE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ACTIVE_ENGINE")"
-if ! validate_engine_name "$EXISTING_ACTIVE_ENGINE"; then
-  EXISTING_ACTIVE_ENGINE="codex"
-fi
+load_existing_engine_selection
 if [[ "$CONFIG_ACTION" == "keep" ]]; then
-  if [[ "$ENGINE_PRESET" == "false" ]]; then
-    ACTIVE_ENGINE="$EXISTING_ACTIVE_ENGINE"
-    info "Keeping existing preferred engine: $(format_engine_name "$ACTIVE_ENGINE")."
+  if [[ "$ENGINE_SELECTION_PRESET" == "false" ]]; then
+    info "Keeping existing harnesses: $(format_engine_list "${SELECTED_ENGINES[@]}")."
   else
-    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
+    info "Harness selection preset via flag: $(format_engine_list "${SELECTED_ENGINES[@]}")."
   fi
 else
-  if [[ "$ENGINE_PRESET" == "false" ]]; then
+  section "Harnesses"
+  if [[ "$ENGINE_SELECTION_PRESET" == "false" ]]; then
     choose_runtime_engine
   else
-    info "Preferred engine preset via flag: $(format_engine_name "$ACTIVE_ENGINE")."
+    info "Harness selection preset via flag: $(format_engine_list "${SELECTED_ENGINES[@]}")."
   fi
 fi
 
 section "Runtime dependency"
-ensure_selected_engine_cli
+ensure_selected_engine_clis
 
 if [[ "$CONFIG_ACTION" != "keep" ]]; then
   section "Bridge network mode"
@@ -1355,7 +1652,7 @@ if [[ "$CONFIG_ACTION" != "keep" ]]; then
   esac
 
   section "Write secure config"
-  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
+  BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" "$SCRIPT_DIR/setup-secure-dev.sh"
 else
   ok "Keeping existing secure config."
   NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
@@ -1380,10 +1677,10 @@ else
     fi
 
     section "Write secure config"
-    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
-  elif [[ "$ACTIVE_ENGINE" != "$EXISTING_ACTIVE_ENGINE" ]]; then
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" "$SCRIPT_DIR/setup-secure-dev.sh"
+  elif [[ "$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")" != "$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" ]]; then
     section "Write secure config"
-    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" "$SCRIPT_DIR/setup-secure-dev.sh"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(IFS=,; printf '%s' "${SELECTED_ENGINES[*]}")" "$SCRIPT_DIR/setup-secure-dev.sh"
   fi
 fi
 
@@ -1403,6 +1700,7 @@ fi
 
 BRIDGE_HOST="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
 BRIDGE_PORT="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
+BRIDGE_TOKEN="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
 NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
 if [[ -z "$NETWORK_MODE" ]]; then
   NETWORK_MODE="$(infer_network_mode_from_host "$BRIDGE_HOST")"
@@ -1413,7 +1711,7 @@ BRIDGE_PORT="${BRIDGE_PORT:-8787}"
 section "Summary"
 rail_echo "Bridge mode: $NETWORK_MODE"
 rail_echo "Bridge endpoint: http://$BRIDGE_HOST:$BRIDGE_PORT"
-rail_echo "Preferred engine: $(format_engine_name "$ACTIVE_ENGINE")"
+rail_echo "Harnesses: $(format_engine_list "${SELECTED_ENGINES[@]}")"
 rail_echo "Secure env: $SECURE_ENV_FILE"
 if [[ "$FLOW" == "quickstart" ]]; then
   rail_echo "${DIM}Tip: re-run with Manual mode for full control at each step.${RESET}"
@@ -1422,16 +1720,25 @@ fi
 section "Hatch"
 if [[ "$AUTO_START" == "true" ]]; then
   rail_echo "Auto-start enabled."
-  rail_echo "Launching bridge in foreground..."
-  start_bridge_foreground
-  exit $?
+  rail_echo "Launching bridge in background..."
+  start_bridge_background || exit $?
 else
   rail_echo "Auto-start disabled by --no-start."
   rail_echo "Skipping bridge launch."
 fi
 
 section "Next steps"
-rail_echo "1) cd $ROOT_DIR && npm run secure:bridge"
-rail_echo "2) Open the mobile app and use onboarding to connect (URL + token QR)."
+if [[ "$AUTO_START" == "true" ]]; then
+  rail_echo "1) Open the mobile app and use onboarding to connect."
+  rail_echo "Bridge URL: http://$BRIDGE_HOST:$BRIDGE_PORT"
+  if [[ -n "$BRIDGE_TOKEN" ]]; then
+    rail_echo "Bridge token: $BRIDGE_TOKEN"
+  fi
+  rail_echo "Bridge logs: $ROOT_DIR/.bridge.log"
+  rail_echo "2) Stop the bridge later with: clawdex stop"
+else
+  rail_echo "1) cd $ROOT_DIR && npm run secure:bridge"
+  rail_echo "2) Open the mobile app and use onboarding to connect (URL + token QR)."
+fi
 rail_blank
 rail_echo "${DIM}You can rerun this anytime: npm run setup:wizard${RESET}"

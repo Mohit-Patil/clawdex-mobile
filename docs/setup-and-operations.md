@@ -2,32 +2,34 @@
 
 This guide is the detailed companion to the top-level `README.md`.
 
-## Choosing a Runtime
+## Choosing Harnesses
 
-The bridge defaults to `codex`.
+The setup wizard now lets you choose which harnesses the phone should control.
 
-Use the setup wizard to make `opencode` the preferred engine:
+If you want both Codex and OpenCode:
 
 ```bash
-clawdex init --engine opencode
+clawdex init --engines codex,opencode
 ```
 
 From a source checkout, the equivalent command is:
 
 ```bash
-npm run setup:wizard -- --engine opencode
+npm run setup:wizard -- --engines codex,opencode
 ```
 
-That writes `BRIDGE_ACTIVE_ENGINE=opencode` into `.env.secure`. To switch back, rerun setup with `--engine codex` or edit `.env.secure` directly.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode` into `.env.secure`, so the bridge starts both backends and the mobile app can control both from one UI.
+
+If you want only one harness, use `--engine codex` or `--engine opencode`.
 
 ## Onboarding Output Cues
 
 After `clawdex init`, expected sequence:
 
 1. Secure config is written or reused
-2. The bridge starts in the foreground
-3. A pairing QR is printed for the mobile app
-4. Bridge logs stay attached until you stop the process
+2. The bridge starts in the background
+3. The wizard prints the bridge URL/token for manual mobile pairing
+4. Bridge logs are written to `.bridge.log`
 
 Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `linux-armv7l`, and `win32-x64`. On those hosts, normal bridge startup does not require a Rust compile.
 
@@ -52,7 +54,7 @@ npm run secure:setup
 To generate OpenCode-first config instead:
 
 ```bash
-BRIDGE_ACTIVE_ENGINE=opencode npm run secure:setup
+BRIDGE_ENABLED_ENGINES=codex,opencode npm run secure:setup
 ```
 
 Creates/updates:
@@ -69,14 +71,25 @@ npm run secure:bridge
 If you want a one-off OpenCode launch without rewriting `.env.secure`:
 
 ```bash
-BRIDGE_ACTIVE_ENGINE=opencode npm run secure:bridge
+BRIDGE_ENABLED_ENGINES=codex,opencode npm run secure:bridge
 ```
 
-`codex` remains the default. When both CLIs are available, the bridge can start both backends and merge chat lists while still routing each thread by engine.
+When both CLIs are selected, the bridge starts both backends and merges chat lists while still routing each thread by engine.
 
 ### 4) Pair from the mobile app
 
 Open the installed mobile app on your phone, then scan the bridge QR. If needed, enter the bridge URL manually (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). The chosen bridge URL is stored on-device and can be changed later in Settings.
+
+### In-app Bridge Update
+
+For published `clawdex-mobile` CLI installs, the mobile Settings screen can start a bridge update safely.
+
+- Open `Settings > Bridge Maintenance`
+- Tap `Update bridge`
+- The app will disconnect briefly while a detached helper job stops the current bridge, runs `npm install -g clawdex-mobile@latest`, and starts the bridge again
+- If the upgrade step fails, the helper attempts to restart the previous bridge automatically
+
+Source checkouts do not expose this button because they need repo-specific update logic that is not safe to automate generically from mobile.
 
 ## Local Mobile Development Only
 
@@ -128,7 +141,8 @@ npm run teardown -- --yes
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query-token auth fallback |
 | `CODEX_CLI_BIN` | codex executable |
-| `BRIDGE_ACTIVE_ENGINE` | preferred backend (`codex` default, `opencode` optional) |
+| `BRIDGE_ACTIVE_ENGINE` | internal preferred routing backend used when multiple harnesses are enabled |
+| `BRIDGE_ENABLED_ENGINES` | selected harnesses to expose (`codex`, `opencode`, or both) |
 | `OPENCODE_CLI_BIN` | opencode executable for dual-engine startup |
 | `BRIDGE_OPENCODE_HOST` | loopback host for spawned opencode server |
 | `BRIDGE_OPENCODE_PORT` | loopback port for spawned opencode server |
@@ -146,6 +160,18 @@ npm run teardown -- --yes
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
 | `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` | in-app Terms link |
+| `EXPO_PUBLIC_REVENUECAT_IOS_API_KEY` | RevenueCat public SDK key for iOS tip purchases |
+| `EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY` | RevenueCat public SDK key for Android tip purchases |
+| `EXPO_PUBLIC_REVENUECAT_TEST_STORE_API_KEY` | RevenueCat Test Store public SDK key for Expo Go / Store Client tip testing |
+| `EXPO_PUBLIC_REVENUECAT_TIPS_OFFERING_ID` | optional RevenueCat offering identifier for the tip jar (`current` if omitted) |
+
+If you enable the optional tip jar:
+
+- Configure 4–5 non-subscription products in RevenueCat and attach them to a dedicated Offering
+- Use consumables for repeatable “tip” tiers
+- Enable In-App Purchase for the app’s Apple bundle identifier in App Store Connect / Apple Developer
+- Use the RevenueCat Test Store SDK key in Expo Go; use the real iOS SDK key only in native builds/TestFlight/App Store builds
+- Rebuild the native app after adding `react-native-purchases`
 
 ## Production Readiness Checklist
 

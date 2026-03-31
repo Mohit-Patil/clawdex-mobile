@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   Alert,
   Linking,
@@ -13,7 +13,7 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { colors, radius, spacing, typography } from '../theme';
+import { useAppTheme, type AppTheme } from '../theme';
 
 interface PrivacyScreenProps {
   policyUrl: string | null;
@@ -21,6 +21,9 @@ interface PrivacyScreenProps {
 }
 
 export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
+  const theme = useAppTheme();
+  const { colors } = theme;
+  const styles = useMemo(() => createStyles(theme), [theme]);
   const [openingPolicy, setOpeningPolicy] = useState(false);
 
   const openPolicy = useCallback(async () => {
@@ -50,7 +53,7 @@ export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
         style={StyleSheet.absoluteFill}
       />
       <SafeAreaView style={styles.safeArea}>
-        <BlurView intensity={80} tint="dark" style={styles.header}>
+        <BlurView intensity={80} tint={theme.blurTint} style={styles.header}>
           <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
             <Ionicons name="menu" size={22} color={colors.textPrimary} />
           </Pressable>
@@ -89,7 +92,7 @@ export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
           </Section>
 
           <Text style={styles.sectionLabel}>Official Policy</Text>
-          <BlurView intensity={50} tint="dark" style={styles.card}>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
             <Text style={styles.cardTitle}>Privacy policy URL</Text>
             <Text selectable style={styles.policyUrl}>
               {policyUrl ?? 'Not configured. Set EXPO_PUBLIC_PRIVACY_POLICY_URL.'}
@@ -116,81 +119,85 @@ export function PrivacyScreen({ policyUrl, onOpenDrawer }: PrivacyScreenProps) {
 }
 
 function Section({ title, children }: { title: string; children: string }) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
   return (
     <>
       <Text style={styles.sectionLabel}>{title}</Text>
-      <BlurView intensity={50} tint="dark" style={styles.card}>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
         <Text style={styles.bodyText}>{children}</Text>
       </BlurView>
     </>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bgMain },
-  safeArea: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderHighlight
-  },
-  menuBtn: { padding: spacing.xs },
-  headerTitle: { ...typography.headline, color: colors.textPrimary },
-  body: { flex: 1 },
-  bodyContent: { padding: spacing.lg, paddingBottom: spacing.xxl },
-  sectionLabel: {
-    ...typography.caption,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginTop: spacing.sm,
-    marginBottom: spacing.sm,
-    color: colors.textMuted,
-    marginLeft: spacing.xs
-  },
-  card: {
-    borderRadius: radius.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.borderHighlight,
-    padding: spacing.lg,
-    marginBottom: spacing.sm,
-    overflow: 'hidden'
-  },
-  bodyText: {
-    ...typography.body,
-    color: colors.textSecondary
-  },
-  cardTitle: {
-    ...typography.headline,
-    color: colors.textPrimary
-  },
-  policyUrl: {
-    ...typography.mono,
-    marginTop: spacing.sm,
-    color: colors.textMuted
-  },
-  openBtn: {
-    marginTop: spacing.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.md,
-    backgroundColor: colors.accent
-  },
-  openBtnPressed: {
-    backgroundColor: colors.accentPressed
-  },
-  openBtnDisabled: {
-    backgroundColor: colors.bgItem
-  },
-  openBtnText: {
-    ...typography.headline,
-    color: colors.white
-  }
-});
+const createStyles = (theme: AppTheme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: theme.colors.bgMain },
+    safeArea: { flex: 1 },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+      paddingHorizontal: theme.spacing.lg,
+      paddingVertical: theme.spacing.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.colors.borderHighlight,
+    },
+    menuBtn: { padding: theme.spacing.xs },
+    headerTitle: { ...theme.typography.headline, color: theme.colors.textPrimary },
+    body: { flex: 1 },
+    bodyContent: { padding: theme.spacing.lg, paddingBottom: theme.spacing.xxl },
+    sectionLabel: {
+      ...theme.typography.caption,
+      textTransform: 'uppercase',
+      letterSpacing: 0.8,
+      marginTop: theme.spacing.sm,
+      marginBottom: theme.spacing.sm,
+      color: theme.colors.textMuted,
+      marginLeft: theme.spacing.xs,
+    },
+    card: {
+      borderRadius: theme.radius.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.colors.borderHighlight,
+      padding: theme.spacing.lg,
+      marginBottom: theme.spacing.sm,
+      overflow: 'hidden',
+      backgroundColor: theme.colors.bgCanvasAccent,
+    },
+    bodyText: {
+      ...theme.typography.body,
+      color: theme.colors.textSecondary,
+    },
+    cardTitle: {
+      ...theme.typography.headline,
+      color: theme.colors.textPrimary,
+    },
+    policyUrl: {
+      ...theme.typography.mono,
+      marginTop: theme.spacing.sm,
+      color: theme.colors.textMuted,
+    },
+    openBtn: {
+      marginTop: theme.spacing.md,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.sm,
+      borderRadius: theme.radius.md,
+      paddingVertical: theme.spacing.md,
+      paddingHorizontal: theme.spacing.md,
+      backgroundColor: theme.colors.accent,
+    },
+    openBtnPressed: {
+      backgroundColor: theme.colors.accentPressed,
+    },
+    openBtnDisabled: {
+      backgroundColor: theme.colors.bgItem,
+    },
+    openBtnText: {
+      ...theme.typography.headline,
+      color: theme.colors.accentText,
+    },
+  });
