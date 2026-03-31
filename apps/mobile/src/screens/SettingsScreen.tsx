@@ -11,6 +11,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import type { PurchasesOffering, PurchasesPackage } from 'react-native-purchases';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
@@ -43,6 +44,19 @@ import {
   type AppearancePreference,
   type AppTheme,
 } from '../theme';
+import {
+  getTipJarUnavailableReason,
+  isTipPaywallTemplateAvailable,
+  getTipOfferingSummary,
+  getTipTierDescription,
+  getTipTierMeta,
+  getTipTierTitle,
+  isRevenueCatPurchaseCancelled,
+  isTipJarAvailable,
+  loadTipOffering,
+  presentTipPaywall,
+  purchaseTipPackage,
+} from '../tips';
 
 interface SettingsScreenProps {
   api: HostBridgeApiClient;
@@ -74,7 +88,15 @@ interface SettingsScreenProps {
   onOpenTerms: () => void;
 }
 
-type SettingsRoute = 'home' | 'chat' | 'account' | 'limits' | 'bridge' | 'appearance' | 'legal';
+type SettingsRoute =
+  | 'home'
+  | 'chat'
+  | 'account'
+  | 'limits'
+  | 'bridge'
+  | 'appearance'
+  | 'tips'
+  | 'legal';
 
 export function SettingsScreen({
   api,
@@ -132,6 +154,14 @@ export function SettingsScreen({
   const [bridgeUpdateModalVisible, setBridgeUpdateModalVisible] = useState(false);
   const [bridgeUpdateActionError, setBridgeUpdateActionError] = useState<string | null>(null);
   const [bridgeUpdateStarting, setBridgeUpdateStarting] = useState(false);
+  const [tipOffering, setTipOffering] = useState<PurchasesOffering | null>(null);
+  const [tipPackages, setTipPackages] = useState<PurchasesPackage[]>([]);
+  const [tipsLoading, setTipsLoading] = useState(false);
+  const [tipsError, setTipsError] = useState<string | null>(null);
+  const [tipActionError, setTipActionError] = useState<string | null>(null);
+  const [tipActionMessage, setTipActionMessage] = useState<string | null>(null);
+  const [tipPurchasingPackageId, setTipPurchasingPackageId] = useState<string | null>(null);
+  const [tipPaywallOpening, setTipPaywallOpening] = useState(false);
   const [route, setRoute] = useState<SettingsRoute>('home');
 
   const availableEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
@@ -199,9 +229,11 @@ export function SettingsScreen({
         : route === 'limits'
           ? 'Codex Usage Limits'
           : route === 'bridge'
-            ? 'Bridge & Servers'
-            : route === 'appearance'
-              ? 'Appearance'
+          ? 'Bridge & Servers'
+          : route === 'appearance'
+            ? 'Appearance'
+            : route === 'tips'
+              ? 'Support Clawdex'
               : route === 'legal'
                 ? 'Legal'
                 : 'Settings';
@@ -213,9 +245,11 @@ export function SettingsScreen({
         : route === 'limits'
           ? ('speedometer-outline' as const)
           : route === 'bridge'
-            ? ('server-outline' as const)
-            : route === 'appearance'
-              ? ('color-palette-outline' as const)
+          ? ('server-outline' as const)
+          : route === 'appearance'
+            ? ('color-palette-outline' as const)
+            : route === 'tips'
+              ? ('heart-outline' as const)
               : route === 'legal'
                 ? ('document-text-outline' as const)
                 : ('settings' as const);
@@ -252,6 +286,12 @@ export function SettingsScreen({
   ]
     .filter(Boolean)
     .join(' · ');
+  const tipJarSummary = isTipJarAvailable()
+    ? getTipOfferingSummary(tipOffering, tipPackages.length)
+    : 'Configure RevenueCat to enable tips';
+  const nativeTipPaywallAvailable = isTipPaywallTemplateAvailable();
+  const shouldShowManualTipTierList = !nativeTipPaywallAvailable || tipActionError !== null;
+  const tipPreviewPackages = tipPackages.slice(0, 4);
   const legalSummary = 'Privacy details and terms of service';
 
   const checkHealth = useCallback(async () => {
@@ -330,6 +370,30 @@ export function SettingsScreen({
     }
   }, [api]);
 
+  const loadTips = useCallback(async () => {
+    if (!isTipJarAvailable()) {
+      setTipOffering(null);
+      setTipPackages([]);
+      setTipsError(getTipJarUnavailableReason());
+      return;
+    }
+
+    setTipsError(null);
+    setTipsLoading(true);
+    try {
+      const snapshot = await loadTipOffering();
+      setTipOffering(snapshot.offering);
+      setTipPackages(snapshot.packages);
+      setTipsError(null);
+    } catch (err) {
+      setTipOffering(null);
+      setTipPackages([]);
+      setTipsError((err as Error).message);
+    } finally {
+      setTipsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const t = setTimeout(() => {
       void checkHealth();
@@ -369,6 +433,20 @@ export function SettingsScreen({
       }),
     [loadAccount, loadRateLimits, ws]
   );
+
+  useEffect(() => {
+    if (
+      route !== 'tips' ||
+      tipsLoading ||
+      tipOffering ||
+      tipPackages.length > 0 ||
+      tipsError !== null
+    ) {
+      return;
+    }
+
+    void loadTips();
+  }, [loadTips, route, tipOffering, tipPackages.length, tipsError, tipsLoading]);
 
   const openEngineModal = useCallback(() => {
     if (availableEngines.length <= 1) {
@@ -499,6 +577,62 @@ export function SettingsScreen({
     },
     [onApprovalModeChange]
   );
+
+  const handlePurchaseTip = useCallback(async (aPackage: PurchasesPackage) => {
+    setTipActionError(null);
+    setTipActionMessage(null);
+    setTipPurchasingPackageId(aPackage.identifier);
+
+    try {
+      await purchaseTipPackage(aPackage);
+      setTipActionMessage('Thanks for supporting Clawdex.');
+    } catch (err) {
+      if (!isRevenueCatPurchaseCancelled(err)) {
+        setTipActionError((err as Error).message);
+      }
+    } finally {
+      setTipPurchasingPackageId(null);
+    }
+  }, []);
+
+  const handleOpenTipPaywall = useCallback(async () => {
+    setTipActionError(null);
+    setTipActionMessage(null);
+    setTipPaywallOpening(true);
+
+    try {
+      let nextOffering = tipOffering;
+
+      if (!nextOffering || tipPackages.length === 0) {
+        const snapshot = await loadTipOffering();
+        nextOffering = snapshot.offering;
+        setTipOffering(snapshot.offering);
+        setTipPackages(snapshot.packages);
+      }
+
+      const result = await presentTipPaywall(nextOffering);
+      if (result === 'purchased') {
+        setTipActionMessage('Thanks for supporting Clawdex.');
+      } else if (result === 'restored') {
+        setTipActionMessage('Previous tip purchase restored.');
+      } else if (result === 'notPresented') {
+        setTipActionError('The RevenueCat paywall was not available for this offering.');
+      }
+    } catch (err) {
+      setTipActionError((err as Error).message);
+    } finally {
+      setTipPaywallOpening(false);
+    }
+  }, [tipOffering, tipPackages]);
+
+  const handleOpenSupportClawdex = useCallback(() => {
+    if (nativeTipPaywallAvailable) {
+      void handleOpenTipPaywall();
+      return;
+    }
+
+    setRoute('tips');
+  }, [handleOpenTipPaywall, nativeTipPaywallAvailable, setRoute]);
 
   const approvalModeOptions = useMemo<SelectionSheetOption[]>(
     () => [
@@ -755,6 +889,12 @@ export function SettingsScreen({
 
       <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Support</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <MenuEntry
+          icon="heart-outline"
+          title="Support Clawdex"
+          description={tipJarSummary}
+          onPress={handleOpenSupportClawdex}
+        />
         <MenuEntry
           icon="document-text-outline"
           title="Legal"
@@ -1165,6 +1305,170 @@ export function SettingsScreen({
     </>
   );
 
+  const renderTipsContent = () => (
+    <>
+      <Text style={styles.sectionLabel}>Support Clawdex</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <LinearGradient
+          colors={
+            theme.isDark
+              ? ['rgba(26, 33, 44, 0.96)', 'rgba(17, 22, 31, 0.94)']
+              : ['#FFFFFF', '#EEF4FB']
+          }
+          style={styles.tipHeroPanel}
+        >
+          <View style={styles.tipHero}>
+            <View style={styles.tipHeroIcon}>
+              <Ionicons name="heart-outline" size={18} color={colors.textPrimary} />
+            </View>
+            <View style={styles.tipHeroCopy}>
+              <Text style={styles.tipHeroEyebrow}>Support the build</Text>
+              <Text style={styles.tipHeroTitle}>Leave a one-time tip</Text>
+              <Text style={styles.tipHeroDescription}>
+                Help fund bridge updates, native polish, and ongoing mobile improvements.
+              </Text>
+            </View>
+          </View>
+
+          {tipPreviewPackages.length > 0 ? (
+            <View style={styles.tipPreviewGrid}>
+              {tipPreviewPackages.map((aPackage) => (
+                <View key={aPackage.identifier} style={styles.tipPreviewCard}>
+                  <Text style={styles.tipPreviewPrice}>{aPackage.product.priceString}</Text>
+                  <Text style={styles.tipPreviewLabel} numberOfLines={1}>
+                    {getTipTierTitle(aPackage)}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          <Pressable
+            onPress={() => {
+              if (nativeTipPaywallAvailable) {
+                void handleOpenTipPaywall();
+              } else {
+                void loadTips();
+              }
+            }}
+            disabled={tipsLoading || tipPaywallOpening || tipPurchasingPackageId !== null}
+            style={({ pressed }) => [
+              styles.tipPrimaryBtn,
+              (tipsLoading || tipPaywallOpening || tipPurchasingPackageId !== null) &&
+                styles.settingRowDisabled,
+              pressed &&
+                !tipsLoading &&
+                !tipPaywallOpening &&
+                tipPurchasingPackageId === null &&
+                styles.tipPrimaryBtnPressed,
+            ]}
+          >
+            {tipsLoading || tipPaywallOpening ? (
+              <ActivityIndicator color={theme.colors.accentText} />
+            ) : (
+              <Ionicons name="heart" size={16} color={theme.colors.accentText} />
+            )}
+            <Text style={styles.tipPrimaryBtnText}>
+              {nativeTipPaywallAvailable ? 'Open tip jar' : 'Refresh tip tiers'}
+            </Text>
+          </Pressable>
+
+          <Text style={styles.tipHeroFootnote}>
+            {nativeTipPaywallAvailable
+              ? 'Uses RevenueCat paywall templates on native builds.'
+              : 'Expo Go uses the manual tier list below.'}
+          </Text>
+        </LinearGradient>
+
+        <Row label="Billing" value="Apple in-app purchase" />
+        <Row
+          label="Presentation"
+          value={nativeTipPaywallAvailable ? 'RevenueCat template' : 'Manual tier list'}
+          isLast={!tipOffering}
+        />
+        {tipOffering ? (
+          <Row
+            label="Offering"
+            value={tipOffering.serverDescription.trim() || tipOffering.identifier}
+            isLast
+          />
+        ) : null}
+      </BlurView>
+
+      {shouldShowManualTipTierList ? (
+        <>
+          <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Tip tiers</Text>
+          <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+            {tipsLoading ? (
+              <View style={styles.accountLoadingState}>
+                <ActivityIndicator color={colors.textPrimary} />
+                <Text style={styles.settingValue}>Loading tip tiers…</Text>
+              </View>
+            ) : tipPackages.length > 0 ? (
+              tipPackages.map((aPackage, index) => (
+                <TipTierEntry
+                  key={aPackage.identifier}
+                  aPackage={aPackage}
+                  busy={tipPurchasingPackageId === aPackage.identifier}
+                  disabled={
+                    tipPaywallOpening ||
+                    (tipPurchasingPackageId !== null &&
+                      tipPurchasingPackageId !== aPackage.identifier)
+                  }
+                  isLast={index === tipPackages.length - 1}
+                  onPress={() => {
+                    void handlePurchaseTip(aPackage);
+                  }}
+                />
+              ))
+            ) : (
+              <View style={styles.accountLoadingState}>
+                <Text style={styles.settingValue}>
+                  {isTipJarAvailable()
+                    ? 'No tip tiers are configured yet.'
+                    : 'RevenueCat tip support is not configured in this build.'}
+                </Text>
+              </View>
+            )}
+
+            <Pressable
+              onPress={() => {
+                void loadTips();
+              }}
+              disabled={tipsLoading || tipPurchasingPackageId !== null || tipPaywallOpening}
+              style={({ pressed }) => [
+                styles.bridgeEditBtn,
+                (tipsLoading || tipPurchasingPackageId !== null || tipPaywallOpening) &&
+                  styles.settingRowDisabled,
+                pressed &&
+                  !tipsLoading &&
+                  tipPurchasingPackageId === null &&
+                  !tipPaywallOpening &&
+                  styles.bridgeEditBtnPressed,
+              ]}
+            >
+              <Ionicons name="refresh-outline" size={15} color={colors.textPrimary} />
+              <Text style={styles.bridgeEditBtnText}>Refresh tip tiers</Text>
+            </Pressable>
+          </BlurView>
+          <Text style={styles.subtleHintText}>
+            Configure 4–5 consumable, non-subscription products in your RevenueCat offering to
+            control the tier order, labels, and prices from the dashboard.
+          </Text>
+        </>
+      ) : (
+        <Text style={[styles.subtleHintText, styles.tipTemplateHint]}>
+          The native build opens your configured RevenueCat paywall template and keeps the raw
+          tier list out of the way.
+        </Text>
+      )}
+
+      {tipActionMessage ? <Text style={styles.successText}>{tipActionMessage}</Text> : null}
+      {tipActionError ? <Text style={styles.errorText}>{tipActionError}</Text> : null}
+      {tipsError ? <Text style={styles.errorText}>{tipsError}</Text> : null}
+    </>
+  );
+
   const renderBodyContent = () => {
     switch (route) {
       case 'chat':
@@ -1177,6 +1481,8 @@ export function SettingsScreen({
         return renderLimitsContent();
       case 'bridge':
         return renderBridgeContent();
+      case 'tips':
+        return renderTipsContent();
       case 'legal':
         return renderLegalContent();
       default:
@@ -1376,6 +1682,51 @@ function MenuEntry({
         </View>
       </View>
       <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+    </Pressable>
+  );
+}
+
+function TipTierEntry({
+  aPackage,
+  busy,
+  disabled,
+  isLast,
+  onPress,
+}: {
+  aPackage: PurchasesPackage;
+  busy: boolean;
+  disabled: boolean;
+  isLast?: boolean;
+  onPress: () => void;
+}) {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+
+  return (
+    <Pressable
+      disabled={disabled || busy}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.tipTierRow,
+        isLast && styles.tipTierRowLast,
+        (disabled || busy) && styles.settingRowDisabled,
+        pressed && !disabled && !busy && styles.linkRowPressed,
+      ]}
+    >
+      <View style={styles.tipTierTextWrap}>
+        <Text style={styles.tipTierTitle}>{getTipTierTitle(aPackage)}</Text>
+        <Text style={styles.tipTierDescription} numberOfLines={2}>
+          {getTipTierDescription(aPackage)}
+        </Text>
+      </View>
+      <View style={styles.tipTierMetaWrap}>
+        {busy ? (
+          <ActivityIndicator color={theme.colors.textPrimary} />
+        ) : (
+          <Text style={styles.tipTierPrice}>{aPackage.product.priceString}</Text>
+        )}
+        <Text style={styles.tipTierMeta}>{getTipTierMeta(aPackage)}</Text>
+      </View>
     </Pressable>
   );
 }
@@ -1632,6 +1983,136 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: settingsValueColor,
     },
+    tipHero: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: theme.spacing.md,
+      paddingVertical: theme.spacing.md,
+    },
+    tipHeroPanel: {
+      marginHorizontal: -theme.spacing.lg,
+      marginTop: -theme.spacing.xs,
+      marginBottom: theme.spacing.md,
+      paddingHorizontal: theme.spacing.lg,
+      paddingTop: theme.spacing.sm,
+      paddingBottom: theme.spacing.md,
+      gap: theme.spacing.md,
+    },
+    tipHeroIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: theme.radius.sm,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: neutralControlBackground,
+    },
+    tipHeroCopy: {
+      flex: 1,
+      gap: 4,
+    },
+    tipHeroEyebrow: {
+      ...theme.typography.caption,
+      color: settingsLabelColor,
+      textTransform: 'uppercase',
+      letterSpacing: 0.8,
+    },
+    tipHeroTitle: {
+      ...theme.typography.headline,
+      color: settingsPrimaryText,
+      fontWeight: '700',
+    },
+    tipHeroDescription: {
+      ...theme.typography.caption,
+      color: settingsValueColor,
+    },
+    tipPreviewGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: theme.spacing.sm,
+    },
+    tipPreviewCard: {
+      minWidth: 112,
+      flexGrow: 1,
+      borderRadius: theme.radius.md,
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.md,
+      backgroundColor: theme.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.78)',
+      borderWidth: 1,
+      borderColor: settingsCardBorder,
+      gap: 4,
+    },
+    tipPreviewPrice: {
+      ...theme.typography.headline,
+      color: settingsPrimaryText,
+      fontSize: 17,
+    },
+    tipPreviewLabel: {
+      ...theme.typography.caption,
+      color: settingsValueColor,
+      fontWeight: '600',
+    },
+    tipPrimaryBtn: {
+      borderRadius: theme.radius.md,
+      backgroundColor: theme.colors.accent,
+      paddingVertical: theme.spacing.md,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.sm,
+      boxShadow: `0px 8px 20px ${theme.colors.accent}33`,
+    },
+    tipPrimaryBtnPressed: {
+      backgroundColor: theme.colors.accentPressed,
+    },
+    tipPrimaryBtnText: {
+      ...theme.typography.body,
+      color: theme.colors.accentText,
+      fontWeight: '700',
+    },
+    tipHeroFootnote: {
+      ...theme.typography.caption,
+      color: settingsLabelColor,
+      textAlign: 'center',
+    },
+    tipTierRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: theme.spacing.md,
+      paddingVertical: theme.spacing.md,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: settingsDivider,
+    },
+    tipTierRowLast: {
+      borderBottomWidth: 0,
+    },
+    tipTierTextWrap: {
+      flex: 1,
+      gap: 4,
+    },
+    tipTierTitle: {
+      ...theme.typography.body,
+      color: settingsPrimaryText,
+      fontWeight: '700',
+    },
+    tipTierDescription: {
+      ...theme.typography.caption,
+      color: settingsValueColor,
+    },
+    tipTierMetaWrap: {
+      minWidth: 92,
+      alignItems: 'flex-end',
+      gap: 3,
+    },
+    tipTierPrice: {
+      ...theme.typography.body,
+      color: settingsPrimaryText,
+      fontWeight: '700',
+    },
+    tipTierMeta: {
+      ...theme.typography.caption,
+      color: settingsLabelColor,
+    },
     linkRowPressed: {
       backgroundColor: neutralControlPressed,
     },
@@ -1649,6 +2130,15 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.error,
       marginTop: theme.spacing.md,
+      textAlign: 'center',
+    },
+    successText: {
+      ...theme.typography.caption,
+      color: theme.colors.statusComplete,
+      marginTop: theme.spacing.md,
+      textAlign: 'center',
+    },
+    tipTemplateHint: {
       textAlign: 'center',
     },
   });

@@ -10,15 +10,20 @@
       "env": {
         "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true",
         "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://mohit-patil.github.io/clawdex-mobile/privacy/",
-        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://mohit-patil.github.io/clawdex-mobile/terms/"
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://mohit-patil.github.io/clawdex-mobile/terms/",
+        "EXPO_PUBLIC_REVENUECAT_IOS_API_KEY": "appl_NyGgzMTiZcbrEYTemPoyzwtKLcb",
+        "EXPO_PUBLIC_REVENUECAT_TIPS_OFFERING_ID": "tips"
       }
     },
     "preview": {
       "distribution": "internal",
+      "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true",
         "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://mohit-patil.github.io/clawdex-mobile/privacy/",
-        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://mohit-patil.github.io/clawdex-mobile/terms/"
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://mohit-patil.github.io/clawdex-mobile/terms/",
+        "EXPO_PUBLIC_REVENUECAT_IOS_API_KEY": "appl_NyGgzMTiZcbrEYTemPoyzwtKLcb",
+        "EXPO_PUBLIC_REVENUECAT_TIPS_OFFERING_ID": "tips"
       }
     },
     "production": {
@@ -26,7 +31,9 @@
       "env": {
         "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH": "true",
         "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://mohit-patil.github.io/clawdex-mobile/privacy/",
-        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://mohit-patil.github.io/clawdex-mobile/terms/"
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://mohit-patil.github.io/clawdex-mobile/terms/",
+        "EXPO_PUBLIC_REVENUECAT_IOS_API_KEY": "appl_NyGgzMTiZcbrEYTemPoyzwtKLcb",
+        "EXPO_PUBLIC_REVENUECAT_TIPS_OFFERING_ID": "tips"
       }
     }
   },

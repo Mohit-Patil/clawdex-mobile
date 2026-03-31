@@ -9,6 +9,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -132,6 +133,7 @@ const SUGGESTIONS = [
   'Explain the current codebase structure',
   'Write tests for the main module',
 ];
+const OPEN_CHAT_MIN_LOADING_MS = 500;
 
 interface ActivityState {
   tone: ActivityTone;
@@ -148,12 +150,21 @@ interface ActivePlanState {
   updatedAt: string;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface PendingPlanImplementationPrompt {
   threadId: string;
   turnId: string;
 }
 
-type AttachmentMenuAction = 'workspace-path' | 'phone-file' | 'phone-image' | null;
+type AttachmentMenuAction =
+  | 'workspace-path'
+  | 'phone-file'
+  | 'phone-image'
+  | 'phone-camera'
+  | null;
 
 interface ThreadContextUsage {
   totalTokens: number | null;
@@ -503,6 +514,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
     const [openingChatId, setOpeningChatId] = useState<string | null>(
       initialPendingSnapshot ? null : pendingOpenChatId ?? null
+    );
+    const openingChatStartedAtRef = useRef<number>(
+      initialPendingSnapshot || !pendingOpenChatId ? 0 : Date.now()
     );
     const [draft, setDraft] = useState('');
     const [sending, setSending] = useState(false);
@@ -2099,6 +2113,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setSelectedChatId(null);
       setPendingChatEngine(fallbackDefaultChatEngine);
       setSelectedCollaborationMode('default');
+      openingChatStartedAtRef.current = 0;
       setOpeningChatId(null);
       setDraft('');
       setError(null);
@@ -2727,6 +2742,35 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       });
     }, [runAttachmentPicker, uploadMobileAttachment]);
 
+    const captureImageFromCamera = useCallback(async () => {
+      await runAttachmentPicker(async () => {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) {
+          setError('Camera permission is required to take a photo');
+          return;
+        }
+
+        const result = await ImagePicker.launchCameraAsync({
+          mediaTypes: ['images'] as ImagePicker.MediaType[],
+          quality: 1,
+          base64: true,
+          allowsEditing: false,
+        });
+        if (result.canceled || !result.assets[0]) {
+          return;
+        }
+
+        const image = result.assets[0];
+        await uploadMobileAttachment({
+          uri: image.uri,
+          fileName: image.fileName ?? 'camera-photo.jpg',
+          mimeType: image.mimeType ?? 'image/jpeg',
+          kind: 'image',
+          dataBase64: image.base64 ?? undefined,
+        });
+      });
+    }, [runAttachmentPicker, uploadMobileAttachment]);
+
     const openAttachmentMenu = useCallback(() => {
       if (attachmentPickerInProgressRef.current || uploadingAttachment) {
         return;
@@ -2790,6 +2834,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           if (action === 'phone-image') {
             void pickImageFromDevice();
+            return;
+          }
+
+          if (action === 'phone-camera') {
+            void captureImageFromCamera();
           }
         }, 180);
       });
@@ -2803,6 +2852,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       };
     }, [
       attachmentMenuVisible,
+      captureImageFromCamera,
       openAttachmentPathModal,
       pendingAttachmentMenuAction,
       pickFileFromDevice,
@@ -2885,9 +2935,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             setPendingAttachmentMenuAction('phone-image');
           },
         },
+        {
+          key: 'phone-camera',
+          title: 'Take photo',
+          description: 'Capture a new photo and attach it right away.',
+          icon: 'camera-outline',
+          disabled: attachmentControlsDisabled,
+          onPress: () => {
+            setAttachmentMenuVisible(false);
+            setPendingAttachmentMenuAction('phone-camera');
+          },
+        },
       ],
       [
         attachmentControlsDisabled,
+        captureImageFromCamera,
         openAttachmentPathModal,
         pickFileFromDevice,
         pickImageFromDevice,
@@ -4019,8 +4081,25 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             } else {
               scrollToBottomIfPinned(false);
             }
-            setOpeningChatId((current) => (current === chatId ? null : current));
+            const startedAt = openingChatStartedAtRef.current;
+            if (startedAt > 0) {
+              const remainingMs = OPEN_CHAT_MIN_LOADING_MS - (Date.now() - startedAt);
+              if (remainingMs > 0) {
+                await sleep(remainingMs);
+              }
+            }
+            if (requestId !== loadChatRequestRef.current) {
+              return;
+            }
+            setOpeningChatId((current) => {
+              if (current === chatId) {
+                openingChatStartedAtRef.current = 0;
+                return null;
+              }
+              return current;
+            });
           } else {
+            openingChatStartedAtRef.current = 0;
             setOpeningChatId(null);
           }
         }
@@ -4048,6 +4127,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (isSameChat) {
           setSelectedChatId(id);
+          openingChatStartedAtRef.current = 0;
           setOpeningChatId(null);
           setError(null);
           if (hasSnapshot && optimisticChat) {
@@ -4062,6 +4142,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         setSelectedChatId(id);
+        openingChatStartedAtRef.current = hasSnapshot ? 0 : Date.now();
         setOpeningChatId(hasSnapshot ? null : id);
         setSending(false);
         setCreating(false);
@@ -4246,7 +4327,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
     }));
 
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (!pendingOpenChatId) {
         return;
       }
@@ -7201,7 +7282,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           visible={attachmentMenuVisible}
           eyebrow="Attachments"
           title="Add context"
-          subtitle="Bring in a workspace path, a file, or an image."
+          subtitle="Bring in a workspace path, a file, a saved image, or a fresh photo."
           options={attachmentMenuOptions}
           onClose={() => setAttachmentMenuVisible(false)}
         />

@@ -3,7 +3,7 @@
     "name": "Clawdex Mobile",
     "slug": "clawdex-mobile",
     "scheme": "clawdex",
-    "version": "5.0.5-internal.12",
+    "version": "5.0.5",
     "userInterfaceStyle": "automatic",
     "orientation": "portrait",
     "icon": "./assets/brand/app-icon.png",
@@ -48,14 +48,14 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Clawdex uses the camera to scan bridge pairing QR codes."
+          "cameraPermission": "Clawdex uses the camera to scan bridge pairing QR codes and capture photos you want to attach to a chat."
         }
       ],
       [
         "expo-image-picker",
         {
           "photosPermission": "Clawdex uses your photo library so you can choose an image from your phone and attach it to a chat prompt or workflow sent to your own host bridge.",
-          "cameraPermission": "Clawdex uses the camera to scan bridge pairing QR codes.",
+          "cameraPermission": "Clawdex uses the camera to scan bridge pairing QR codes and capture photos you want to attach to a chat.",
           "microphonePermission": "Clawdex uses the microphone to record a short voice message that is transcribed into your chat input."
         }
       ],

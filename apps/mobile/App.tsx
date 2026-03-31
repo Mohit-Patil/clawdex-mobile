@@ -55,6 +55,7 @@ import {
 import { PrivacyScreen } from './src/screens/PrivacyScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { TermsScreen } from './src/screens/TermsScreen';
+import { configureRevenueCatIfNeeded } from './src/tips';
 import {
   AppThemeProvider,
   createAppTheme,
@@ -193,6 +194,14 @@ export default function App() {
     ws.connect();
     return () => ws.disconnect();
   }, [ws]);
+
+  useEffect(() => {
+    void configureRevenueCatIfNeeded().catch((error) => {
+      console.warn(
+        `RevenueCat setup skipped: ${error instanceof Error ? error.message : String(error)}`
+      );
+    });
+  }, []);
 
   const saveAppSettings = useCallback(
     async (

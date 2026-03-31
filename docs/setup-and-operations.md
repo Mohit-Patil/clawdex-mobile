@@ -160,6 +160,18 @@ npm run teardown -- --yes
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
 | `EXPO_PUBLIC_TERMS_OF_SERVICE_URL` | in-app Terms link |
+| `EXPO_PUBLIC_REVENUECAT_IOS_API_KEY` | RevenueCat public SDK key for iOS tip purchases |
+| `EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY` | RevenueCat public SDK key for Android tip purchases |
+| `EXPO_PUBLIC_REVENUECAT_TEST_STORE_API_KEY` | RevenueCat Test Store public SDK key for Expo Go / Store Client tip testing |
+| `EXPO_PUBLIC_REVENUECAT_TIPS_OFFERING_ID` | optional RevenueCat offering identifier for the tip jar (`current` if omitted) |
+
+If you enable the optional tip jar:
+
+- Configure 4–5 non-subscription products in RevenueCat and attach them to a dedicated Offering
+- Use consumables for repeatable “tip” tiers
+- Enable In-App Purchase for the app’s Apple bundle identifier in App Store Connect / Apple Developer
+- Use the RevenueCat Test Store SDK key in Expo Go; use the real iOS SDK key only in native builds/TestFlight/App Store builds
+- Rebuild the native app after adding `react-native-purchases`
 
 ## Production Readiness Checklist
 
