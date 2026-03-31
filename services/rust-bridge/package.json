@@ -1,6 +1,6 @@
 {
   "name": "@codex/rust-bridge",
-  "version": "5.0.5",
+  "version": "5.0.6",
   "private": true,
   "scripts": {
     "dev": "cargo run",

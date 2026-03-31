@@ -74,6 +74,65 @@ function bridgeLogFile(rootDir) {
   return path.join(rootDir, ".bridge.log");
 }
 
+function extractLatestPairingQrBlock(logContents) {
+  const lines = logContents.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line.includes("Bridge pairing QR (scan from mobile onboarding):")) {
+      const endIndex = lines.findIndex(
+        (entry, offset) =>
+          offset > index && entry.includes("QR contains bridge URL + token for one-tap onboarding.")
+      );
+      if (endIndex !== -1) {
+        return lines.slice(index, endIndex + 1).join("\n").trimEnd();
+      }
+    }
+
+    if (line.includes("Bridge token QR fallback (scan from mobile onboarding):")) {
+      const endIndex = lines.findIndex(
+        (entry, offset) =>
+          offset > index &&
+          entry.includes("Full pairing QR unavailable because BRIDGE_HOST=")
+      );
+      if (endIndex !== -1) {
+        return lines.slice(index, endIndex + 1).join("\n").trimEnd();
+      }
+    }
+  }
+
+  return null;
+}
+
+function printLatestPairingQr(logPath, startOffset = 0) {
+  try {
+    const raw = fs.readFileSync(logPath, "utf8");
+    const contents = startOffset > 0 ? raw.slice(startOffset) : raw;
+    const qrBlock = extractLatestPairingQrBlock(contents);
+    if (!qrBlock) {
+      return false;
+    }
+    console.log("");
+    console.log(qrBlock);
+    console.log("");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForLatestPairingQr(logPath, startOffset, timeoutMs = 4000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (printLatestPairingQr(logPath, startOffset)) {
+      return true;
+    }
+    await sleep(250);
+  }
+
+  return false;
+}
+
 function readPidFile(rootDir) {
   try {
     const raw = fs.readFileSync(bridgePidFile(rootDir), "utf8").trim();
@@ -259,6 +318,7 @@ async function spawnDetachedAndWait(command, args, options) {
       console.log(`Bridge already running (pid ${existingPid}).`);
       console.log(`Logs: ${logPath}`);
       console.log(`Bridge is healthy at http://${formatHostForUrl(host)}:${port}`);
+      printLatestPairingQr(logPath);
       return;
     }
   } else if (existingPid) {
@@ -274,6 +334,7 @@ async function spawnDetachedAndWait(command, args, options) {
 
   const output = fs.openSync(logPath, "a");
   const error = fs.openSync(logPath, "a");
+  const logStartOffset = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
 
   const child = spawn(command, args, {
     cwd,
@@ -302,6 +363,9 @@ async function spawnDetachedAndWait(command, args, options) {
   try {
     const endpoint = await waitForHealth(env, child.pid, healthTimeoutMs);
     console.log(`Bridge is healthy at http://${formatHostForUrl(endpoint.host)}:${endpoint.port}`);
+    if (!(await waitForLatestPairingQr(logPath, logStartOffset))) {
+      console.log("Pairing QR not found in the new bridge startup log. Open logs if you need to inspect startup output.");
+    }
   } catch (error) {
     removePidFile(rootDir);
     console.error(`error: ${error.message}. Check logs: ${logPath}`);
