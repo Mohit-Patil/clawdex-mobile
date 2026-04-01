@@ -17,10 +17,12 @@ import {
 import {
   AppState,
   ActivityIndicator,
+  Dimensions,
   FlatList,
   InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
+  type KeyboardEvent,
   Modal,
   Platform,
   Pressable,
@@ -597,6 +599,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [selectedCollaborationMode, setSelectedCollaborationMode] =
       useState<CollaborationMode>('default');
     const [keyboardVisible, setKeyboardVisible] = useState(false);
+    const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
+    const [composerHeight, setComposerHeight] = useState(0);
     const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
     const [queueDispatching, setQueueDispatching] = useState(false);
     const [queuePaused, setQueuePaused] = useState(false);
@@ -750,8 +754,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     useEffect(() => {
       const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
       const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-      const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
-      const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+      const showSub = Keyboard.addListener(showEvent, (event: KeyboardEvent) => {
+        setKeyboardVisible(true);
+
+        if (Platform.OS !== 'android') {
+          return;
+        }
+
+        const keyboardTop = event.endCoordinates?.screenY;
+        const keyboardHeight = event.endCoordinates?.height ?? 0;
+        const screenHeight = Dimensions.get('screen').height;
+        const overlap =
+          typeof keyboardTop === 'number' && Number.isFinite(keyboardTop)
+            ? Math.max(0, screenHeight - keyboardTop)
+            : Math.max(0, keyboardHeight);
+        setAndroidKeyboardInset(overlap);
+      });
+      const hideSub = Keyboard.addListener(hideEvent, () => {
+        setKeyboardVisible(false);
+        setAndroidKeyboardInset(0);
+      });
       return () => {
         showSub.remove();
         hideSub.remove();
@@ -6802,6 +6824,129 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const chatBottomInset = shouldShowComposer
       ? theme.spacing.lg
       : Math.max(theme.spacing.xxl, safeAreaInsets.bottom + theme.spacing.lg);
+    const composerSafeAreaBottomInset = safeAreaInsets.bottom;
+    const composerOverlayInset =
+      Platform.OS === 'android' && keyboardVisible ? androidKeyboardInset : 0;
+    const androidComposerReservedInset = shouldShowComposer
+      ? Math.max(
+          theme.spacing.lg,
+          composerHeight +
+            composerOverlayInset +
+            theme.spacing.sm
+        )
+      : chatBottomInset;
+    const renderComposer = (overlay: boolean) => (
+      <View
+        onLayout={
+          overlay
+            ? (event) => {
+                const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+                setComposerHeight((previous) => (previous === nextHeight ? previous : nextHeight));
+              }
+            : undefined
+        }
+        style={[
+          styles.composerContainer,
+          overlay ? styles.composerContainerOverlay : null,
+          overlay ? { bottom: composerOverlayInset } : null,
+          !overlay && !keyboardVisible ? styles.composerContainerResting : null,
+        ]}
+      >
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        {pendingApproval ? (
+          <ApprovalBanner
+            approval={pendingApproval}
+            onResolve={handleResolveApproval}
+          />
+        ) : null}
+        {showQueuedMessageDock && oldestQueuedMessage ? (
+          <QueuedMessageDock
+            queuedMessage={oldestQueuedMessage}
+            remainingQueuedMessagesCount={remainingQueuedMessagesCount}
+            steerEnabled={canSteerQueuedMessage}
+            cancelEnabled={canCancelQueuedMessage}
+            steerDisabledReason={queuedMessageSteerDisabledReason}
+            onCancelQueuedMessage={(messageId) => {
+              handleCancelQueuedMessage(messageId);
+            }}
+            onSteerQueuedMessage={() => {
+              void handleSteerQueuedMessage();
+            }}
+          />
+        ) : null}
+        {showSlashSuggestions ? (
+          <ScrollView
+            style={[
+              styles.slashSuggestions,
+              { maxHeight: slashSuggestionsMaxHeight },
+            ]}
+            contentContainerStyle={styles.slashSuggestionsContent}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+          >
+            {slashSuggestions.map((command, index) => {
+              const suffix = command.argsHint ? ` ${command.argsHint}` : '';
+              return (
+                <Pressable
+                  key={`${command.name}-${String(index)}`}
+                  onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
+                  style={({ pressed }) => [
+                    styles.slashSuggestionItem,
+                    index === slashSuggestions.length - 1 &&
+                      styles.slashSuggestionItemLast,
+                    pressed && styles.slashSuggestionItemPressed,
+                  ]}
+                >
+                  <Text style={styles.slashSuggestionTitle}>{`/${command.name}${suffix}`}</Text>
+                  <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
+                    {command.mobileSupported
+                      ? command.summary
+                      : `${command.summary} · CLI only`}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        ) : null}
+        {overlay && showFloatingActivity ? (
+          <View pointerEvents="none" style={styles.activityDock}>
+            <ActivityBar
+              title={visibleActivity.title}
+              detail={activityDetail}
+              tone={visibleActivity.tone}
+            />
+          </View>
+        ) : null}
+        <ChatInput
+          value={draft}
+          onChangeText={setDraft}
+          onFocus={handleComposerFocus}
+          onSubmit={() => void handleSubmit()}
+          onStop={() => handleStopTurn()}
+          showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
+          isStopping={stoppingTurn}
+          onAttachPress={openAttachmentMenu}
+          attachDisabled={attachmentControlsDisabled}
+          attachments={composerAttachments}
+          onRemoveAttachment={removeComposerAttachment}
+          isLoading={isLoading}
+          placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
+          voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
+          voiceRecordingDurationMillis={
+            canUseVoiceInput ? voiceRecorder.recordingDurationMillis : 0
+          }
+          voiceMetering={canUseVoiceInput ? voiceRecorder.recordingMetering : null}
+          onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
+          safeAreaBottomInset={composerSafeAreaBottomInset}
+          keyboardVisible={keyboardVisible}
+          footer={
+            composerUsageLimitBadges.length > 0 ? (
+              <ComposerUsageLimits limits={composerUsageLimitBadges} />
+            ) : null
+          }
+        />
+      </View>
+    );
 
     useEffect(() => {
       if (!selectedChat || isOpeningChat || !shouldAutoEnablePlanModeFromChat(selectedChat)) {
@@ -7127,156 +7272,117 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           </View>
         ) : null}
 
-        <KeyboardAvoidingView
-          style={styles.keyboardAvoiding}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          enabled={Platform.OS === 'ios'}
-        >
-          {selectedChat && !isOpeningChat ? (
-            <ChatView
-              chat={selectedChat}
-              parentChat={selectedParentChat}
-              bridgeUrl={bridgeUrl}
-              bridgeToken={bridgeToken}
-              showToolCalls={showToolCalls}
-              agentThreadStatusById={agentThreadStatusById}
-              scrollRef={scrollRef}
-              inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
-              onInlineOptionSelect={handleInlineOptionSelect}
-              onPinnedAutoScroll={scrollToBottomIfPinned}
-              onScrollInteractionStart={clearPendingScrollRetries}
-              autoScrollStateRef={autoScrollStateRef}
-              bottomInset={chatBottomInset}
-            />
-          ) : isOpeningChat ? (
-            <View style={styles.chatLoadingContainer}>
-              <ActivityIndicator size="small" color={theme.colors.textMuted} />
-              <Text style={styles.chatLoadingText}>Opening chat...</Text>
-            </View>
-          ) : (
-            <ComposeView
-              startWorkspaceLabel={defaultStartWorkspaceLabel}
-              showEnginePicker={availableNewChatEngines.length > 1}
-              engineLabel={activeChatEngineLabel}
-              modelReasoningLabel={modelReasoningLabel}
-              collaborationModeLabel={collaborationModeLabel}
-              fastModeEnabled={fastModeEnabled}
-              fastModeLabel={fastModeLabel}
-              onSuggestion={(s) => setDraft(s)}
-              onOpenWorkspacePicker={openWorkspaceModal}
-              onOpenEnginePicker={openEngineModal}
-              onOpenModelReasoningPicker={openModelReasoningMenu}
-              onOpenCollaborationModePicker={openCollaborationModeMenu}
-              onToggleFastMode={() => {
-                void toggleFastMode();
-              }}
-            />
-          )}
-
-          {showFloatingActivity ? (
-            <View pointerEvents="none" style={styles.activityDock}>
-              <ActivityBar
-                title={visibleActivity.title}
-                detail={activityDetail}
-                tone={visibleActivity.tone}
-              />
-            </View>
-          ) : null}
-
-          {shouldShowComposer ? (
-            <View
-              style={[
-                styles.composerContainer,
-                !keyboardVisible ? styles.composerContainerResting : null,
-              ]}
-            >
-              {error ? <Text style={styles.errorText}>{error}</Text> : null}
-              {pendingApproval ? (
-                <ApprovalBanner
-                  approval={pendingApproval}
-                  onResolve={handleResolveApproval}
+        {Platform.OS === 'android' ? (
+          <View style={styles.bodyContainer}>
+            <KeyboardAvoidingView style={styles.keyboardAvoiding} enabled={false}>
+              {selectedChat && !isOpeningChat ? (
+                <ChatView
+                  chat={selectedChat}
+                  parentChat={selectedParentChat}
+                  bridgeUrl={bridgeUrl}
+                  bridgeToken={bridgeToken}
+                  showToolCalls={showToolCalls}
+                  agentThreadStatusById={agentThreadStatusById}
+                  scrollRef={scrollRef}
+                  inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
+                  onInlineOptionSelect={handleInlineOptionSelect}
+                  onPinnedAutoScroll={scrollToBottomIfPinned}
+                  onScrollInteractionStart={clearPendingScrollRetries}
+                  autoScrollStateRef={autoScrollStateRef}
+                  bottomInset={androidComposerReservedInset}
                 />
-              ) : null}
-              {showQueuedMessageDock && oldestQueuedMessage ? (
-                <QueuedMessageDock
-                  queuedMessage={oldestQueuedMessage}
-                  remainingQueuedMessagesCount={remainingQueuedMessagesCount}
-                  steerEnabled={canSteerQueuedMessage}
-                  cancelEnabled={canCancelQueuedMessage}
-                  steerDisabledReason={queuedMessageSteerDisabledReason}
-                  onCancelQueuedMessage={(messageId) => {
-                    handleCancelQueuedMessage(messageId);
-                  }}
-                  onSteerQueuedMessage={() => {
-                    void handleSteerQueuedMessage();
+              ) : isOpeningChat ? (
+                <View style={styles.chatLoadingContainer}>
+                  <ActivityIndicator size="small" color={theme.colors.textMuted} />
+                  <Text style={styles.chatLoadingText}>Opening chat...</Text>
+                </View>
+              ) : (
+                <ComposeView
+                  startWorkspaceLabel={defaultStartWorkspaceLabel}
+                  showEnginePicker={availableNewChatEngines.length > 1}
+                  engineLabel={activeChatEngineLabel}
+                  modelReasoningLabel={modelReasoningLabel}
+                  collaborationModeLabel={collaborationModeLabel}
+                  fastModeEnabled={fastModeEnabled}
+                  fastModeLabel={fastModeLabel}
+                  keyboardVisible={keyboardVisible}
+                  bottomInset={androidComposerReservedInset}
+                  onSuggestion={(s) => setDraft(s)}
+                  onOpenWorkspacePicker={openWorkspaceModal}
+                  onOpenEnginePicker={openEngineModal}
+                  onOpenModelReasoningPicker={openModelReasoningMenu}
+                  onOpenCollaborationModePicker={openCollaborationModeMenu}
+                  onToggleFastMode={() => {
+                    void toggleFastMode();
                   }}
                 />
-              ) : null}
-              {showSlashSuggestions ? (
-                <ScrollView
-                  style={[
-                    styles.slashSuggestions,
-                    { maxHeight: slashSuggestionsMaxHeight },
-                  ]}
-                  contentContainerStyle={styles.slashSuggestionsContent}
-                  keyboardShouldPersistTaps="handled"
-                  nestedScrollEnabled
-                >
-                  {slashSuggestions.map((command, index) => {
-                    const suffix = command.argsHint ? ` ${command.argsHint}` : '';
-                    return (
-                      <Pressable
-                        key={`${command.name}-${String(index)}`}
-                        onPress={() => setDraft(`/${command.name}${command.argsHint ? ' ' : ''}`)}
-                        style={({ pressed }) => [
-                          styles.slashSuggestionItem,
-                          index === slashSuggestions.length - 1 &&
-                            styles.slashSuggestionItemLast,
-                          pressed && styles.slashSuggestionItemPressed,
-                        ]}
-                      >
-                        <Text style={styles.slashSuggestionTitle}>{`/${command.name}${suffix}`}</Text>
-                        <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
-                          {command.mobileSupported
-                            ? command.summary
-                            : `${command.summary} · CLI only`}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              ) : null}
-              <ChatInput
-                value={draft}
-                onChangeText={setDraft}
-                onFocus={handleComposerFocus}
-                onSubmit={() => void handleSubmit()}
-                onStop={() => handleStopTurn()}
-                showStopButton={isTurnLoading || isTurnLikelyRunning || stoppingTurn}
-                isStopping={stoppingTurn}
-                onAttachPress={openAttachmentMenu}
-                attachDisabled={attachmentControlsDisabled}
-                attachments={composerAttachments}
-                onRemoveAttachment={removeComposerAttachment}
-                isLoading={isLoading}
-                placeholder={selectedChat ? 'Reply...' : 'Message Codex...'}
-                voiceState={canUseVoiceInput ? voiceRecorder.voiceState : 'idle'}
-                voiceRecordingDurationMillis={
-                  canUseVoiceInput ? voiceRecorder.recordingDurationMillis : 0
-                }
-                voiceMetering={canUseVoiceInput ? voiceRecorder.recordingMetering : null}
-                onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
-                safeAreaBottomInset={safeAreaInsets.bottom}
-                keyboardVisible={keyboardVisible}
-                footer={
-                  composerUsageLimitBadges.length > 0 ? (
-                    <ComposerUsageLimits limits={composerUsageLimitBadges} />
-                  ) : null
-                }
+              )}
+            </KeyboardAvoidingView>
+
+            {shouldShowComposer ? renderComposer(true) : null}
+          </View>
+        ) : (
+          <KeyboardAvoidingView
+            style={styles.keyboardAvoiding}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            enabled={Platform.OS === 'ios'}
+          >
+            {selectedChat && !isOpeningChat ? (
+              <ChatView
+                chat={selectedChat}
+                parentChat={selectedParentChat}
+                bridgeUrl={bridgeUrl}
+                bridgeToken={bridgeToken}
+                showToolCalls={showToolCalls}
+                agentThreadStatusById={agentThreadStatusById}
+                scrollRef={scrollRef}
+                inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
+                onInlineOptionSelect={handleInlineOptionSelect}
+                onPinnedAutoScroll={scrollToBottomIfPinned}
+                onScrollInteractionStart={clearPendingScrollRetries}
+                autoScrollStateRef={autoScrollStateRef}
+                bottomInset={chatBottomInset}
               />
-            </View>
-          ) : null}
-        </KeyboardAvoidingView>
+            ) : isOpeningChat ? (
+              <View style={styles.chatLoadingContainer}>
+                <ActivityIndicator size="small" color={theme.colors.textMuted} />
+                <Text style={styles.chatLoadingText}>Opening chat...</Text>
+              </View>
+            ) : (
+              <ComposeView
+                startWorkspaceLabel={defaultStartWorkspaceLabel}
+                showEnginePicker={availableNewChatEngines.length > 1}
+                engineLabel={activeChatEngineLabel}
+                modelReasoningLabel={modelReasoningLabel}
+                collaborationModeLabel={collaborationModeLabel}
+                fastModeEnabled={fastModeEnabled}
+                fastModeLabel={fastModeLabel}
+                keyboardVisible={false}
+                bottomInset={0}
+                onSuggestion={(s) => setDraft(s)}
+                onOpenWorkspacePicker={openWorkspaceModal}
+                onOpenEnginePicker={openEngineModal}
+                onOpenModelReasoningPicker={openModelReasoningMenu}
+                onOpenCollaborationModePicker={openCollaborationModeMenu}
+                onToggleFastMode={() => {
+                  void toggleFastMode();
+                }}
+              />
+            )}
+
+            {showFloatingActivity ? (
+              <View pointerEvents="none" style={styles.activityDock}>
+                <ActivityBar
+                  title={visibleActivity.title}
+                  detail={activityDetail}
+                  tone={visibleActivity.tone}
+                />
+              </View>
+            ) : null}
+
+            {shouldShowComposer ? renderComposer(false) : null}
+          </KeyboardAvoidingView>
+        )}
 
         <SelectionSheet
           visible={attachmentMenuVisible}
@@ -7649,6 +7755,8 @@ function ComposeView({
   collaborationModeLabel,
   fastModeEnabled,
   fastModeLabel,
+  keyboardVisible,
+  bottomInset,
   onSuggestion,
   onOpenWorkspacePicker,
   onOpenEnginePicker,
@@ -7663,6 +7771,8 @@ function ComposeView({
   collaborationModeLabel: string;
   fastModeEnabled: boolean;
   fastModeLabel: string;
+  keyboardVisible: boolean;
+  bottomInset: number;
   onSuggestion: (s: string) => void;
   onOpenWorkspacePicker: () => void;
   onOpenEnginePicker: () => void;
@@ -7672,11 +7782,19 @@ function ComposeView({
 }) {
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const contentContainerStyle =
+    Platform.OS === 'android'
+      ? [
+          styles.composeContainer,
+          keyboardVisible ? styles.composeContainerKeyboardOpen : null,
+          { paddingBottom: bottomInset },
+        ]
+      : styles.composeContainer;
 
   return (
     <ScrollView
       style={styles.composeScroll}
-      contentContainerStyle={styles.composeContainer}
+      contentContainerStyle={contentContainerStyle}
       showsVerticalScrollIndicator={false}
       keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
       keyboardShouldPersistTaps="handled"
@@ -8022,7 +8140,10 @@ const ChatView = memo(function ChatView({
     autoScrollStateRef.current.isMomentumScrolling = false;
   }, [autoScrollStateRef, chat.id]);
   const messageListContentStyle = useMemo(
-    () => [styles.messageListContent, { paddingBottom: bottomInset }],
+    () =>
+      Platform.OS === 'android'
+        ? [styles.messageListContent, { paddingTop: bottomInset }]
+        : [styles.messageListContent, { paddingBottom: bottomInset }],
     [bottomInset, styles.messageListContent]
   );
   const isLargeChat = displayItems.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
@@ -10293,12 +10414,20 @@ const createStyles = (theme: AppTheme) => {
 
   bodyContainer: {
     flex: 1,
+    position: 'relative',
   },
   keyboardAvoiding: {
     flex: 1,
   },
   composerContainer: {
     backgroundColor: theme.colors.bgMain,
+  },
+  composerContainerOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 4,
   },
   composerContainerResting: {
     marginBottom: 0,
@@ -11046,6 +11175,11 @@ const createStyles = (theme: AppTheme) => {
     justifyContent: 'center',
     paddingHorizontal: theme.spacing.xl,
     paddingBottom: theme.spacing.xxl * 2,
+  },
+  composeContainerKeyboardOpen: {
+    justifyContent: 'flex-start',
+    paddingTop: theme.spacing.xl,
+    paddingBottom: theme.spacing.xl,
   },
   composeIcon: {
     marginBottom: theme.spacing.lg,

@@ -85,3 +85,6 @@ apps/clawdex-store-screenshots/
 screenshots/
 screenshot-preview.png
 .playwright-mcp/
+/demo/
+/output/
+/apps/clawdex-demo-video/
