@@ -640,6 +640,11 @@ const createStyles = (theme: AppTheme) => {
     borderRadius: theme.radius.lg,
     paddingHorizontal: theme.spacing.lg,
     paddingVertical: theme.spacing.md,
+    ...(theme.isDark
+      ? {}
+      : {
+          boxShadow: '0px 3px 10px rgba(15, 31, 54, 0.08)',
+        }),
   },
   userBubbleWithAttachments: {
     minWidth: 196,
