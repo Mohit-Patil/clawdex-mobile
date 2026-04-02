@@ -113,7 +113,7 @@ export function SettingsScreen({
   defaultChatEngine,
   defaultEngineSettings,
   approvalMode,
-  showToolCalls = false,
+  showToolCalls = true,
   appearancePreference = 'system',
   onDefaultChatEngineChange,
   onDefaultModelSettingsChange,

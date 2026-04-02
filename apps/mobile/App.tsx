@@ -151,7 +151,7 @@ export default function App() {
     createEmptyEngineDefaultSettingsMap
   );
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('yolo');
-  const [showToolCalls, setShowToolCalls] = useState(false);
+  const [showToolCalls, setShowToolCalls] = useState(true);
   const [appearancePreference, setAppearancePreference] =
     useState<AppearancePreference>('system');
   const [appLifecycleState, setAppLifecycleState] = useState<AppStateStatus>(
@@ -472,7 +472,7 @@ export default function App() {
       setDefaultChatEngine('codex');
       setDefaultEngineSettings(createEmptyEngineDefaultSettingsMap());
       setApprovalMode('yolo');
-      setShowToolCalls(false);
+      setShowToolCalls(true);
       setAppearancePreference('system');
     };
 
