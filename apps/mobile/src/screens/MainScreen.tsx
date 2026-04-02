@@ -604,6 +604,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
     const [queueDispatching, setQueueDispatching] = useState(false);
     const [queuePaused, setQueuePaused] = useState(false);
+    const [steeringMessage, setSteeringMessage] = useState<QueuedChatMessage | null>(null);
     const [relatedAgentThreads, setRelatedAgentThreads] = useState<ChatSummary[]>([]);
     const [agentRootThreadId, setAgentRootThreadId] = useState<string | null>(null);
     const [agentPanelCollapsed, setAgentPanelCollapsed] = useState(false);
@@ -2173,6 +2174,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setQueuedMessages([]);
       setQueueDispatching(false);
       setQueuePaused(false);
+      setSteeringMessage(null);
       setActivity({
         tone: 'idle',
         title: 'Ready',
@@ -4059,6 +4061,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               });
             } else {
               clearRunWatchdog();
+              cacheThreadTurnState(chatId, {
+                activeTurnId: null,
+                runWatchdogUntil: 0,
+              });
               setActivity(
                 chat.status === 'complete'
                   ? {
@@ -4804,15 +4810,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const handleSteerQueuedMessage = useCallback(async () => {
       const threadId = selectedChatId?.trim();
-      const expectedTurnId = activeTurnIdRef.current?.trim() ?? '';
+      const snapshotTurnId = threadId
+        ? threadRuntimeSnapshotsRef.current[threadId]?.activeTurnId?.trim() ?? ''
+        : '';
+      const expectedTurnId = activeTurnIdRef.current?.trim() || snapshotTurnId;
       const nextQueuedMessage = queuedMessages[0] ?? null;
       const canSteer =
         Boolean(threadId) &&
         Boolean(expectedTurnId) &&
         Boolean(nextQueuedMessage) &&
         !pendingApproval?.id &&
-        !pendingUserInputRequest?.id &&
-        Boolean(selectedChat && isChatLikelyRunning(selectedChat));
+        !pendingUserInputRequest?.id;
 
       if (!threadId || !expectedTurnId || !nextQueuedMessage || !canSteer) {
         return;
@@ -4820,23 +4828,65 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       try {
         setError(null);
+        bumpRunWatchdog();
+        setSteeringMessage(nextQueuedMessage);
         await api.steerChatTurn(threadId, expectedTurnId, {
           content: nextQueuedMessage.content,
           mentions: nextQueuedMessage.mentions,
           localImages: nextQueuedMessage.localImages,
         });
+        const optimisticContent = toOptimisticUserContent(
+          nextQueuedMessage.content,
+          nextQueuedMessage.mentions,
+          nextQueuedMessage.localImages
+        );
+        const optimisticMessage: ChatTranscriptMessage = {
+          id: `msg-${Date.now()}`,
+          role: 'user',
+          content: optimisticContent,
+          createdAt: new Date().toISOString(),
+        };
+        queueOptimisticUserMessage(threadId, optimisticMessage);
+        setSelectedChat((prev) => {
+          if (!prev || prev.id !== threadId) {
+            return prev;
+          }
+
+          return {
+            ...prev,
+            lastMessagePreview:
+              normalizeChatMessageMatchContent(optimisticMessage.content).slice(0, 120) ||
+              prev.lastMessagePreview,
+            messages: [...prev.messages, optimisticMessage],
+          };
+        });
         setQueuedMessages((prev) =>
           prev[0]?.id === nextQueuedMessage.id ? prev.slice(1) : prev
         );
+        setSteeringMessage((previous) =>
+          previous?.id === nextQueuedMessage.id ? null : previous
+        );
+        setQueuePaused(false);
+        scrollToBottomReliable(true);
+        setActivity({
+          tone: 'running',
+          title: 'Steering turn',
+          detail: 'Message sent to the current run',
+        });
       } catch (err) {
+        setSteeringMessage((previous) =>
+          previous?.id === nextQueuedMessage.id ? null : previous
+        );
         setError((err as Error).message);
       }
     }, [
       api,
+      bumpRunWatchdog,
       pendingApproval?.id,
       pendingUserInputRequest?.id,
+      queueOptimisticUserMessage,
       queuedMessages,
-      selectedChat,
+      scrollToBottomReliable,
       selectedChatId,
     ]);
 
@@ -4912,6 +4962,26 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       stoppingTurn,
       uploadingAttachment,
     ]);
+
+    useEffect(() => {
+      setSteeringMessage(null);
+    }, [selectedChat?.id]);
+
+    useEffect(() => {
+      if (!steeringMessage) {
+        return;
+      }
+
+      const shouldKeepSteeringMessage =
+        Boolean(activeTurnId) ||
+        runWatchdogUntilRef.current > Date.now() ||
+        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+      if (shouldKeepSteeringMessage) {
+        return;
+      }
+
+      setSteeringMessage(null);
+    }, [activeTurnId, runWatchdogNow, selectedChat, steeringMessage]);
 
     const handleInlineOptionSelect = useCallback(
       (value: string) => {
@@ -6020,6 +6090,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setUserInputDrafts({});
           setUserInputError(null);
           setResolvingUserInput(false);
+          setSteeringMessage(null);
           if (!completedTurnId || completedTurnId === activeTurnIdRef.current) {
             setActiveTurnId(null);
           }
@@ -6236,8 +6307,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   );
                 } else {
                   clearRunWatchdog();
+                  cacheThreadTurnState(threadId, {
+                    activeTurnId: null,
+                    runWatchdogUntil: 0,
+                  });
                   setActiveTurnId(null);
                   setStoppingTurn(false);
+                  setSteeringMessage(null);
                   if (!pendingApprovalId && !pendingUserInputRequestId) {
                     setActiveCommands([]);
                     setStreamingText(null);
@@ -6613,7 +6689,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     ]);
 
     const oldestQueuedMessage = queuedMessages[0] ?? null;
-    const remainingQueuedMessagesCount = Math.max(0, queuedMessages.length - 1);
+    const displayedQueuedMessage = steeringMessage ?? oldestQueuedMessage;
+    const remainingQueuedMessagesCount = steeringMessage
+      ? queuedMessages.length
+      : Math.max(0, queuedMessages.length - 1);
     const visibleActivity = (() => {
       if (isOpeningChat) {
         return {
@@ -6780,22 +6859,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChat ? (planPanelCollapsedByThread[selectedChat.id] ?? false) : false;
     const fastModeControlDisabled = isOpeningChat;
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
+    const steerTargetTurnId = resolveSteerTargetTurnId(
+      activeTurnId,
+      selectedThreadRuntimeSnapshot?.activeTurnId
+    );
     const canSteerQueuedMessage =
       Boolean(oldestQueuedMessage) &&
       Boolean(selectedChatId) &&
-      Boolean(activeTurnId) &&
+      Boolean(steerTargetTurnId) &&
       !pendingApproval &&
       !pendingUserInputRequest &&
-      Boolean(selectedChat && isChatLikelyRunning(selectedChat));
+      !steeringMessage;
     const canCancelQueuedMessage =
-      Boolean(oldestQueuedMessage) && !queueDispatching;
-    const queuedMessageSteerDisabledReason = pendingApproval
+      Boolean(oldestQueuedMessage) && !queueDispatching && !steeringMessage;
+    const queuedMessageSteerDisabledReason = steeringMessage
+      ? 'Sending the queued message to the current turn.'
+      : pendingApproval
       ? 'Waiting for approval before steering.'
       : pendingUserInputRequest
         ? 'Waiting for required input before steering.'
+        : !steerTargetTurnId && oldestQueuedMessage
+          ? 'Steer becomes available once the current turn has started.'
         : null;
     const showQueuedMessageDock =
-      Boolean(selectedChat) && !isOpeningChat && Boolean(oldestQueuedMessage);
+      Boolean(selectedChat) && !isOpeningChat && Boolean(displayedQueuedMessage);
     const showPlanImplementationPrompt =
       Boolean(selectedPlanImplementationPrompt) &&
       !isOpeningChat &&
@@ -6860,12 +6947,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             onResolve={handleResolveApproval}
           />
         ) : null}
-        {showQueuedMessageDock && oldestQueuedMessage ? (
+        {showQueuedMessageDock && displayedQueuedMessage ? (
           <QueuedMessageDock
-            queuedMessage={oldestQueuedMessage}
+            queuedMessage={displayedQueuedMessage}
             remainingQueuedMessagesCount={remainingQueuedMessagesCount}
             steerEnabled={canSteerQueuedMessage}
             cancelEnabled={canCancelQueuedMessage}
+            steeringActive={Boolean(steeringMessage)}
             steerDisabledReason={queuedMessageSteerDisabledReason}
             onCancelQueuedMessage={(messageId) => {
               handleCancelQueuedMessage(messageId);
@@ -8564,6 +8652,7 @@ function QueuedMessageDock({
   remainingQueuedMessagesCount,
   steerEnabled,
   cancelEnabled,
+  steeringActive,
   steerDisabledReason,
   onCancelQueuedMessage,
   onSteerQueuedMessage,
@@ -8572,6 +8661,7 @@ function QueuedMessageDock({
   remainingQueuedMessagesCount: number;
   steerEnabled: boolean;
   cancelEnabled: boolean;
+  steeringActive: boolean;
   steerDisabledReason: string | null;
   onCancelQueuedMessage: (messageId: string) => void;
   onSteerQueuedMessage: () => void;
@@ -8584,7 +8674,9 @@ function QueuedMessageDock({
       <View style={[styles.planCard, styles.planOverlayCard, styles.queuedMessageCard]}>
         <View style={styles.queuedMessageHeader}>
           <View style={styles.queuedMessageHeaderText}>
-            <Text style={styles.planCardTitle}>Queued message</Text>
+            <Text style={styles.planCardTitle}>
+              {steeringActive ? 'Steering message' : 'Queued message'}
+            </Text>
             {remainingQueuedMessagesCount > 0 ? (
               <Text style={styles.queuedMessageSummary}>
                 {`+${String(remainingQueuedMessagesCount)} more queued`}
@@ -8627,7 +8719,7 @@ function QueuedMessageDock({
                   !steerEnabled && styles.queuedMessageActionLabelDisabled,
                 ]}
               >
-                Steer
+                {steeringActive ? 'Steering…' : 'Steer'}
               </Text>
             </Pressable>
           </View>
@@ -9355,6 +9447,19 @@ function resolveSelectedServiceTier(
   }
 
   return toFastModeServiceTier(defaultServiceTier);
+}
+
+function resolveSteerTargetTurnId(
+  activeTurnId: string | null | undefined,
+  snapshotActiveTurnId: string | null | undefined
+): string | null {
+  const normalizedActiveTurnId = activeTurnId?.trim() ?? '';
+  if (normalizedActiveTurnId) {
+    return normalizedActiveTurnId;
+  }
+
+  const normalizedSnapshotTurnId = snapshotActiveTurnId?.trim() ?? '';
+  return normalizedSnapshotTurnId || null;
 }
 
 function toApprovalPolicyForMode(mode: ApprovalMode | null | undefined): ApprovalPolicy {
