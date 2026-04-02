@@ -8,9 +8,31 @@ describe('parseAppSettings', () => {
       defaultStartCwd: null,
       defaultChatEngine: 'codex',
       approvalMode: 'yolo',
-      showToolCalls: false,
+      showToolCalls: true,
       appearancePreference: 'system',
     });
+  });
+
+  it('defaults showToolCalls to true when unset in stored settings', () => {
+    expect(
+      parseAppSettings(
+        JSON.stringify({
+          version: 6,
+          appearancePreference: 'system',
+        })
+      ).showToolCalls
+    ).toBe(true);
+  });
+
+  it('preserves an explicit false showToolCalls preference', () => {
+    expect(
+      parseAppSettings(
+        JSON.stringify({
+          version: 6,
+          showToolCalls: false,
+        })
+      ).showToolCalls
+    ).toBe(false);
   });
 
   it('migrates version 4 installs to dark appearance when unset', () => {

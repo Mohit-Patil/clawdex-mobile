@@ -27,7 +27,7 @@ export function parseAppSettings(raw: string): {
       defaultChatEngine: 'codex',
       defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
       approvalMode: 'yolo',
-      showToolCalls: false,
+      showToolCalls: true,
       appearancePreference: 'system',
     };
   }
@@ -52,7 +52,7 @@ export function parseAppSettings(raw: string): {
         defaultChatEngine: 'codex',
         defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
         approvalMode: 'yolo',
-        showToolCalls: false,
+        showToolCalls: true,
         appearancePreference: 'system',
       };
     }
@@ -84,9 +84,10 @@ export function parseAppSettings(raw: string): {
       approvalMode: normalizeStoredApprovalMode(
         (parsed as { approvalMode?: unknown }).approvalMode
       ),
-      showToolCalls: normalizeBoolean(
-        (parsed as { showToolCalls?: unknown }).showToolCalls
-      ),
+      showToolCalls:
+        typeof (parsed as { showToolCalls?: unknown }).showToolCalls === 'undefined'
+          ? true
+          : normalizeBoolean((parsed as { showToolCalls?: unknown }).showToolCalls),
       appearancePreference: normalizeStoredAppearancePreference(
         (parsed as { appearancePreference?: unknown }).appearancePreference,
         parsedVersion === 4 ? 'dark' : 'system'
@@ -100,7 +101,7 @@ export function parseAppSettings(raw: string): {
       defaultChatEngine: 'codex',
       defaultEngineSettings: createEmptyEngineDefaultSettingsMap(),
       approvalMode: 'yolo',
-      showToolCalls: false,
+      showToolCalls: true,
       appearancePreference: 'system',
     };
   }

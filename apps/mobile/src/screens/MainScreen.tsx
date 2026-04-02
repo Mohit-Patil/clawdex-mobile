@@ -309,6 +309,8 @@ interface ChatModelPreference {
   updatedAt: string;
 }
 
+type SelectedServiceTier = ServiceTier | null | undefined;
+
 const SLASH_COMMANDS: SlashCommandDefinition[] = [
   {
     name: 'permissions',
@@ -491,7 +493,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       defaultChatEngine,
       defaultEngineSettings,
       approvalMode,
-      showToolCalls = false,
+      showToolCalls = true,
       onDefaultStartCwdChange,
       onChatContextChange,
       pendingOpenChatId,
@@ -592,9 +594,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
     const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
     const [selectedEffort, setSelectedEffort] = useState<ReasoningEffort | null>(null);
-    const [selectedServiceTier, setSelectedServiceTier] = useState<ServiceTier | null>(
-      null
-    );
+    const [selectedServiceTier, setSelectedServiceTier] = useState<SelectedServiceTier>();
     const [defaultServiceTier, setDefaultServiceTier] = useState<ServiceTier | null>(null);
     const [selectedCollaborationMode, setSelectedCollaborationMode] =
       useState<CollaborationMode>('default');
@@ -2019,7 +2019,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       setSelectedModelId(preferredDefaultModelId);
       setSelectedEffort(preferredDefaultEffort);
-      setSelectedServiceTier(defaultServiceTier);
+      setSelectedServiceTier(undefined);
     }, [
       defaultServiceTier,
       pendingChatEngine,
@@ -2057,8 +2057,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           )
         : defaultServiceTier
     );
-    const activeServiceTier = toFastModeServiceTier(
-      selectedServiceTier ?? (!selectedChatId ? defaultServiceTier : null) ?? null
+    const activeServiceTier = resolveSelectedServiceTier(
+      selectedServiceTier,
+      selectedChatId ? null : defaultServiceTier
     );
     const fastModeEnabled = activeServiceTier === 'fast';
     const supportsSelectedEffort =
@@ -2139,7 +2140,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setOpeningChatId(null);
       setDraft('');
       setError(null);
-      setSelectedServiceTier(defaultServiceTier);
+      setSelectedServiceTier(undefined);
       setActiveCommands([]);
       setThreadContextUsage(null);
       setPendingApproval(null);
@@ -9343,6 +9344,17 @@ function toFastModeServiceTier(
   serviceTier: ServiceTier | null | undefined
 ): ServiceTier | null {
   return serviceTier === 'fast' ? 'fast' : null;
+}
+
+function resolveSelectedServiceTier(
+  selectedServiceTier: SelectedServiceTier,
+  defaultServiceTier: ServiceTier | null | undefined
+): ServiceTier | null {
+  if (selectedServiceTier !== undefined) {
+    return toFastModeServiceTier(selectedServiceTier);
+  }
+
+  return toFastModeServiceTier(defaultServiceTier);
 }
 
 function toApprovalPolicyForMode(mode: ApprovalMode | null | undefined): ApprovalPolicy {
