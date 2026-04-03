@@ -89,6 +89,7 @@ interface SettingsScreenProps {
   onSwitchBridgeProfile?: (profileId: string) => void | Promise<void>;
   onClearSavedBridges?: () => void | Promise<void>;
   onOpenDrawer: () => void;
+  onOpenBrowser?: () => void;
   onOpenPrivacy: () => void;
   onOpenTerms: () => void;
 }
@@ -125,6 +126,7 @@ export function SettingsScreen({
   onSwitchBridgeProfile,
   onClearSavedBridges,
   onOpenDrawer,
+  onOpenBrowser,
   onOpenPrivacy,
   onOpenTerms,
 }: SettingsScreenProps) {
@@ -156,6 +158,9 @@ export function SettingsScreen({
   const [bridgeRuntime, setBridgeRuntime] = useState<BridgeRuntimeInfo | null>(null);
   const [bridgeRuntimeLoading, setBridgeRuntimeLoading] = useState(false);
   const [bridgeRuntimeError, setBridgeRuntimeError] = useState<string | null>(null);
+  const [bridgeRestartModalVisible, setBridgeRestartModalVisible] = useState(false);
+  const [bridgeRestartActionError, setBridgeRestartActionError] = useState<string | null>(null);
+  const [bridgeRestartStarting, setBridgeRestartStarting] = useState(false);
   const [bridgeUpdateModalVisible, setBridgeUpdateModalVisible] = useState(false);
   const [bridgeUpdateActionError, setBridgeUpdateActionError] = useState<string | null>(null);
   const [bridgeUpdateStarting, setBridgeUpdateStarting] = useState(false);
@@ -224,7 +229,12 @@ export function SettingsScreen({
   const canSelfUpdateBridge =
     bridgeCapabilities?.supports.selfUpdate === true &&
     bridgeRuntime?.selfUpdateSupported === true;
+  const canSafeRestartBridge = bridgeRuntime?.safeRestartSupported === true;
   const bridgeUpdateStatus = bridgeRuntime?.updaterStatus ?? null;
+  const bridgeMaintenanceBusy = bridgeUpdateStarting || bridgeRestartStarting;
+  const bridgeMaintenanceActive = bridgeUpdateStatus
+    ? isBridgeMaintenanceInProgress(bridgeUpdateStatus.state)
+    : false;
   const bridgeLatestVersion = bridgeRuntime?.latestVersion?.trim() || null;
   const headerTitle =
     route === 'chat'
@@ -740,6 +750,35 @@ export function SettingsScreen({
     [activeBridgeProfileId, bridgeProfiles, onSwitchBridgeProfile]
   );
 
+  const startBridgeRestart = useCallback(async () => {
+    setBridgeRestartStarting(true);
+    setBridgeRestartActionError(null);
+    try {
+      const response = await api.startBridgeRestart();
+      setBridgeRestartModalVisible(false);
+      setBridgeRuntime((previous) => ({
+        version: previous?.version ?? 'unknown',
+        installKind: previous?.installKind ?? 'unknown',
+        selfUpdateSupported: previous?.selfUpdateSupported ?? false,
+        safeRestartSupported: previous?.safeRestartSupported ?? true,
+        latestVersion: previous?.latestVersion ?? bridgeLatestVersion,
+        updaterStatus: {
+          state: 'scheduled',
+          jobId: response.jobId,
+          targetVersion: previous?.version ?? 'current',
+          message: response.message,
+          updatedAt: new Date().toISOString(),
+          startedAt: new Date().toISOString(),
+          logPath: response.logPath ?? null,
+        },
+      }));
+    } catch (err) {
+      setBridgeRestartActionError((err as Error).message);
+    } finally {
+      setBridgeRestartStarting(false);
+    }
+  }, [api, bridgeLatestVersion]);
+
   const startBridgeUpdate = useCallback(async () => {
     setBridgeUpdateStarting(true);
     setBridgeUpdateActionError(null);
@@ -750,6 +789,7 @@ export function SettingsScreen({
         version: previous?.version ?? 'unknown',
         installKind: previous?.installKind ?? 'unknown',
         selfUpdateSupported: previous?.selfUpdateSupported ?? true,
+        safeRestartSupported: previous?.safeRestartSupported ?? true,
         latestVersion: previous?.latestVersion ?? bridgeLatestVersion,
         updaterStatus: {
           state: 'scheduled',
@@ -768,6 +808,23 @@ export function SettingsScreen({
     }
   }, [api, bridgeLatestVersion]);
 
+  const bridgeRestartOptions = useMemo<SelectionSheetOption[]>(
+    () => [
+      {
+        key: 'restart-safe',
+        title: bridgeRestartStarting ? 'Scheduling restart…' : 'Restart bridge safely',
+        description:
+          'This launches a detached restart job. The bridge will stop, relaunch in the background, and reconnect once health recovers.',
+        icon: 'refresh-outline',
+        disabled: bridgeMaintenanceBusy || bridgeMaintenanceActive,
+        onPress: () => {
+          void startBridgeRestart();
+        },
+      },
+    ],
+    [bridgeMaintenanceActive, bridgeMaintenanceBusy, bridgeRestartStarting, startBridgeRestart]
+  );
+
   const bridgeUpdateOptions = useMemo<SelectionSheetOption[]>(
     () => [
       {
@@ -778,13 +835,13 @@ export function SettingsScreen({
         description:
           'This launches a detached update job. The bridge will disconnect briefly, update in the background, and restart automatically.',
         icon: 'cloud-download-outline',
-        disabled: bridgeUpdateStarting,
+        disabled: bridgeMaintenanceBusy || bridgeMaintenanceActive,
         onPress: () => {
           void startBridgeUpdate();
         },
       },
     ],
-    [bridgeLatestVersion, bridgeUpdateStarting, startBridgeUpdate]
+    [bridgeLatestVersion, bridgeMaintenanceActive, bridgeMaintenanceBusy, bridgeUpdateStarting, startBridgeUpdate]
   );
 
   const enginePickerOptions = useMemo<SelectionSheetOption[]>(
@@ -910,6 +967,14 @@ export function SettingsScreen({
           title="Bridge & Servers"
           description={bridgeSummary}
           onPress={() => setRoute('bridge')}
+        />
+        <MenuEntry
+          icon="globe-outline"
+          title="Local Preview Browser"
+          description="Open localhost web apps from the bridge machine inside Clawdex"
+          onPress={() => {
+            onOpenBrowser?.();
+          }}
           isLast
         />
       </BlurView>
@@ -1221,33 +1286,57 @@ export function SettingsScreen({
             />
             {bridgeUpdateStatus ? (
               <Row
-                label="Last updater state"
+                label="Last maintenance state"
                 value={formatBridgeUpdaterState(bridgeUpdateStatus.state)}
               />
             ) : null}
             {bridgeUpdateStatus ? (
               <Row
-                label="Updater message"
+                label="Maintenance message"
                 value={bridgeUpdateStatus.message}
-                isLast={!canSelfUpdateBridge}
+                isLast
               />
             ) : null}
             {!bridgeUpdateStatus ? (
               <Row
-                label="Updater status"
-                value={canSelfUpdateBridge ? 'Ready' : 'Unavailable'}
+                label="Maintenance status"
+                value={canSelfUpdateBridge || canSafeRestartBridge ? 'Ready' : 'Unavailable'}
                 isLast
               />
             ) : null}
           </>
         )}
         <Pressable
-          disabled={!canSelfUpdateBridge || bridgeUpdateStarting}
+          disabled={!canSafeRestartBridge || bridgeMaintenanceBusy || bridgeMaintenanceActive}
+          onPress={() => setBridgeRestartModalVisible(true)}
+          style={({ pressed }) => [
+            styles.bridgeEditBtn,
+            (!canSafeRestartBridge || bridgeMaintenanceBusy || bridgeMaintenanceActive) &&
+              styles.settingRowDisabled,
+            pressed &&
+              canSafeRestartBridge &&
+              !bridgeMaintenanceBusy &&
+              !bridgeMaintenanceActive &&
+              styles.bridgeEditBtnPressed,
+          ]}
+        >
+          <Ionicons name="refresh-outline" size={15} color={colors.textPrimary} />
+          <Text style={styles.bridgeEditBtnText}>
+            {bridgeRestartStarting ? 'Scheduling bridge restart…' : 'Restart bridge safely'}
+          </Text>
+        </Pressable>
+        <Pressable
+          disabled={!canSelfUpdateBridge || bridgeMaintenanceBusy || bridgeMaintenanceActive}
           onPress={() => setBridgeUpdateModalVisible(true)}
           style={({ pressed }) => [
             styles.bridgeEditBtn,
-            (!canSelfUpdateBridge || bridgeUpdateStarting) && styles.settingRowDisabled,
-            pressed && canSelfUpdateBridge && !bridgeUpdateStarting && styles.bridgeEditBtnPressed,
+            (!canSelfUpdateBridge || bridgeMaintenanceBusy || bridgeMaintenanceActive) &&
+              styles.settingRowDisabled,
+            pressed &&
+              canSelfUpdateBridge &&
+              !bridgeMaintenanceBusy &&
+              !bridgeMaintenanceActive &&
+              styles.bridgeEditBtnPressed,
           ]}
         >
           <Ionicons name="cloud-download-outline" size={15} color={colors.textPrimary} />
@@ -1256,6 +1345,7 @@ export function SettingsScreen({
           </Text>
         </Pressable>
       </BlurView>
+      {bridgeRestartActionError ? <Text style={styles.errorText}>{bridgeRestartActionError}</Text> : null}
       {bridgeUpdateActionError ? <Text style={styles.errorText}>{bridgeUpdateActionError}</Text> : null}
       {bridgeRuntimeError ? <Text style={styles.errorText}>{bridgeRuntimeError}</Text> : null}
 
@@ -1579,6 +1669,17 @@ export function SettingsScreen({
       />
 
       <SelectionSheet
+        visible={bridgeRestartModalVisible}
+        eyebrow="Bridge Maintenance"
+        title="Restart bridge safely"
+        subtitle="This will briefly disconnect the app while the bridge stops and relaunches in the background."
+        options={bridgeRestartOptions}
+        loading={bridgeRestartStarting}
+        loadingLabel="Scheduling bridge restart…"
+        onClose={() => setBridgeRestartModalVisible(false)}
+      />
+
+      <SelectionSheet
         visible={bridgeUpdateModalVisible}
         eyebrow="Bridge Maintenance"
         title="Update bridge"
@@ -1798,6 +1899,16 @@ function formatBridgeUpdaterState(state: string): string {
     default:
       return state;
   }
+}
+
+function isBridgeMaintenanceInProgress(state: string): boolean {
+  return (
+    state === 'scheduled' ||
+    state === 'stopping' ||
+    state === 'upgrading' ||
+    state === 'starting' ||
+    state === 'waitingForHealth'
+  );
 }
 
 const createStyles = (theme: AppTheme) => {

@@ -28,7 +28,7 @@ import {
 } from './chatThreadTree';
 import { useAppTheme, type AppTheme } from '../theme';
 
-type Screen = 'Main' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = 'Main' | 'Browser' | 'Settings' | 'Privacy' | 'Terms';
 
 interface DrawerContentProps {
   api: HostBridgeApiClient;
@@ -99,7 +99,6 @@ export function DrawerContent({
   const queuedLoadChatsRef = useRef<{ showRefresh: boolean } | null>(null);
   const scheduledLoadChatsRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const allChatSections = useMemo(() => buildChatWorkspaceSections(chats), [chats]);
   const filteredChats = useMemo(
     () => filterDrawerChatsByEngines(chats, selectedChatEngines),
     [chats, selectedChatEngines]
@@ -475,8 +474,8 @@ export function DrawerContent({
                 </View>
                 <View style={styles.heroCopy}>
                   <Text style={styles.heroTitle}>Clawdex</Text>
-                  <Text style={styles.heroSubtitle} numberOfLines={1}>
-                    Threads, terminal, and git in a focused mobile control deck.
+                  <Text style={styles.heroMeta} numberOfLines={1}>
+                    {formatCompactCount(chats.length)} chats · {formatCompactCount(runningChatCount)} live
                   </Text>
                 </View>
                 <View
@@ -507,27 +506,6 @@ export function DrawerContent({
                   </Text>
                 </View>
               </View>
-
-              <View style={styles.heroStatsRow}>
-                <View style={styles.heroStat}>
-                  <Text style={styles.heroStatValue}>{formatCompactCount(chats.length)}</Text>
-                  <Text style={styles.heroStatLabel}>Chats</Text>
-                </View>
-                <View style={styles.heroStatsDivider} />
-                <View style={styles.heroStat}>
-                  <Text style={styles.heroStatValue}>
-                    {formatCompactCount(runningChatCount)}
-                  </Text>
-                  <Text style={styles.heroStatLabel}>Running</Text>
-                </View>
-                <View style={styles.heroStatsDivider} />
-                <View style={styles.heroStat}>
-                  <Text style={styles.heroStatValue}>
-                    {formatCompactCount(allChatSections.length)}
-                  </Text>
-                  <Text style={styles.heroStatLabel}>Spaces</Text>
-                </View>
-              </View>
             </View>
 
             <View style={styles.actionRow}>
@@ -540,6 +518,17 @@ export function DrawerContent({
               >
                 <Ionicons name="add" size={18} color={theme.colors.accentText} />
                 <Text style={styles.primaryActionText}>New chat</Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Open preview browser"
+                style={({ pressed }) => [
+                  styles.secondaryActionButton,
+                  pressed && styles.secondaryActionButtonPressed,
+                ]}
+                onPress={() => handleNavigate('Browser')}
+              >
+                <Ionicons name="globe-outline" size={17} color={theme.colors.textPrimary} />
+                <Text style={styles.secondaryActionText}>Browser</Text>
               </Pressable>
             </View>
           </View>
@@ -981,23 +970,23 @@ const createStyles = (theme: AppTheme) => {
     gap: theme.spacing.xs + 2,
   },
   heroCard: {
-    borderRadius: 16,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgElevated,
-    padding: theme.spacing.sm + 2,
-    gap: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.sm + 2,
+    paddingVertical: theme.spacing.sm,
     boxShadow: cardShadow,
   },
   heroHeaderRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: theme.spacing.xs + 2,
   },
   brandBadge: {
-    width: 34,
-    height: 34,
-    borderRadius: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: theme.colors.bgItem,
@@ -1014,7 +1003,7 @@ const createStyles = (theme: AppTheme) => {
     fontSize: 16,
     fontWeight: '700',
   },
-  heroSubtitle: {
+  heroMeta: {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     fontSize: 11,
@@ -1062,39 +1051,26 @@ const createStyles = (theme: AppTheme) => {
   connectionTextDisconnected: {
     color: connectionTextDisconnected,
   },
-  heroStatsRow: {
-    flexDirection: 'row',
-    alignItems: 'stretch',
+  secondaryActionButton: {
+    flex: 1,
+    height: 42,
     borderRadius: 14,
-    backgroundColor: theme.colors.bgMain,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
-    overflow: 'hidden',
-  },
-  heroStat: {
-    flex: 1,
+    backgroundColor: theme.colors.bgItem,
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
-    paddingVertical: theme.spacing.sm,
+    justifyContent: 'center',
+    gap: theme.spacing.xs,
   },
-  heroStatValue: {
+  secondaryActionButtonPressed: {
+    backgroundColor: theme.colors.bgInput,
+  },
+  secondaryActionText: {
     ...theme.typography.body,
     color: theme.colors.textPrimary,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
-    fontVariant: ['tabular-nums'],
-  },
-  heroStatLabel: {
-    ...theme.typography.caption,
-    color: theme.colors.textMuted,
-    fontSize: 10,
-    lineHeight: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.7,
-  },
-  heroStatsDivider: {
-    width: StyleSheet.hairlineWidth,
-    backgroundColor: theme.colors.borderLight,
   },
   actionRow: {
     flexDirection: 'row',

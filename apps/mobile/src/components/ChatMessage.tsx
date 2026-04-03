@@ -14,6 +14,7 @@ import {
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
+import { extractLocalPreviewUrls } from '../browserPreview';
 import { useAppTheme, type AppTheme } from '../theme';
 import { toMarkdownImageSource } from './chatImageSource';
 
@@ -21,6 +22,7 @@ interface ChatMessageProps {
   message: ApiChatMessage;
   bridgeUrl?: string | null;
   bridgeToken?: string | null;
+  onOpenLocalPreview?: (targetUrl: string) => void;
 }
 
 interface ToolActivityGroupProps {
@@ -37,14 +39,19 @@ type UserMessageBlock =
   | { kind: 'file'; value: string }
   | { kind: 'image'; source: ImageSourcePropType; accessibilityLabel?: string };
 
-function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }: ChatMessageProps) {
+function ChatMessageComponent({
+  message,
+  bridgeUrl = null,
+  bridgeToken = null,
+  onOpenLocalPreview,
+}: ChatMessageProps) {
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const markdownStyles = useMemo(() => createMarkdownStyles(theme), [theme]);
   const isUser = message.role === 'user';
   const markdownRules = useMemo(
-    () => createMarkdownRules(bridgeUrl, bridgeToken),
-    [bridgeToken, bridgeUrl]
+    () => createMarkdownRules(bridgeUrl, bridgeToken, onOpenLocalPreview),
+    [bridgeToken, bridgeUrl, onOpenLocalPreview]
   );
   const [expandedTimelineEntries, setExpandedTimelineEntries] = useState<
     Record<string, boolean>
@@ -56,6 +63,13 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
     () =>
       isUser ? parseUserMessageBlocks(message.content, bridgeUrl, bridgeToken) : [],
     [bridgeToken, bridgeUrl, isUser, message.content]
+  );
+  const localPreviewUrls = useMemo(
+    () =>
+      message.role === 'assistant' || message.role === 'system'
+        ? extractLocalPreviewUrls(message.content)
+        : [],
+    [message.content, message.role]
   );
 
   const renderedMessage = isUser ? (
@@ -316,6 +330,25 @@ function ChatMessageComponent({ message, bridgeUrl = null, bridgeToken = null }:
       <Markdown style={markdownStyles} rules={markdownRules}>
         {message.content || '\u258D'}
       </Markdown>
+      {localPreviewUrls.length > 0 && onOpenLocalPreview ? (
+        <View style={styles.localPreviewLinkList}>
+          {localPreviewUrls.map((targetUrl) => (
+            <Pressable
+              key={`${message.id}-${targetUrl}`}
+              onPress={() => onOpenLocalPreview(targetUrl)}
+              style={({ pressed }) => [
+                styles.localPreviewLink,
+                pressed && styles.localPreviewLinkPressed,
+              ]}
+            >
+              <Ionicons name="globe-outline" size={14} color={theme.colors.textPrimary} />
+              <Text style={styles.localPreviewLinkText} numberOfLines={1}>
+                {`Open ${targetUrl} in Browser`}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -338,7 +371,8 @@ function areChatMessagePropsEqual(
     previous.createdAt === next.createdAt &&
     previous.systemKind === next.systemKind &&
     prevProps.bridgeUrl === nextProps.bridgeUrl &&
-    prevProps.bridgeToken === nextProps.bridgeToken
+    prevProps.bridgeToken === nextProps.bridgeToken &&
+    prevProps.onOpenLocalPreview === nextProps.onOpenLocalPreview
   );
 }
 
@@ -488,7 +522,8 @@ const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
 
 function createMarkdownRules(
   bridgeUrl: string | null,
-  bridgeToken: string | null
+  bridgeToken: string | null,
+  onOpenLocalPreview?: (targetUrl: string) => void
 ): RenderRules {
   return {
     text: (node, _children, _parent, styles, inheritedStyles = {}) => (
@@ -586,7 +621,7 @@ function createMarkdownRules(
         <SelectableMessageText
           key={node.key}
           style={styles.link}
-          onPress={() => openMarkdownLink(href, onLinkPress)}
+          onPress={() => openMarkdownLink(href, onLinkPress, onOpenLocalPreview)}
         >
           {children}
         </SelectableMessageText>
@@ -743,6 +778,31 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     marginTop: theme.spacing.xs,
+  },
+  localPreviewLinkList: {
+    marginTop: theme.spacing.sm,
+    gap: theme.spacing.xs,
+  },
+  localPreviewLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+    alignSelf: 'flex-start',
+    borderRadius: theme.radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    maxWidth: '100%',
+  },
+  localPreviewLinkPressed: {
+    opacity: 0.84,
+  },
+  localPreviewLinkText: {
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
+    flexShrink: 1,
   },
   toolGroupCard: {
     borderRadius: theme.radius.md,
@@ -1037,8 +1097,14 @@ function toPathBasename(path: string): string {
 
 function openMarkdownLink(
   href: string,
-  onLinkPress?: (url: string) => boolean
+  onLinkPress?: (url: string) => boolean,
+  onOpenLocalPreview?: (targetUrl: string) => void
 ): void {
+  if (onOpenLocalPreview && extractLocalPreviewUrls(href).length > 0) {
+    onOpenLocalPreview(href);
+    return;
+  }
+
   const shouldOpen = onLinkPress ? onLinkPress(href) !== false : true;
   if (!shouldOpen) {
     return;

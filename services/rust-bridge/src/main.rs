@@ -6,24 +6,27 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant, SystemTime},
 };
 
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        FromRequestParts, Query, Request, State,
     },
     http::{
-        header::{CACHE_CONTROL, CONTENT_TYPE},
-        HeaderMap, StatusCode,
+        header::{
+            CACHE_CONTROL, CONNECTION, CONTENT_TYPE, COOKIE, HOST, LOCATION, ORIGIN, REFERER,
+            SET_COOKIE, UPGRADE,
+        },
+        HeaderMap, HeaderValue, Method, StatusCode, Uri,
     },
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
     Json, Router,
 };
 use base64::{engine::general_purpose, Engine as _};
@@ -37,8 +40,12 @@ use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{mpsc, oneshot, Mutex, RwLock},
+    sync::{mpsc, oneshot, watch, Mutex, RwLock},
     time::timeout,
+};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message as UpstreamWsMessage},
 };
 
 mod services;
@@ -66,11 +73,19 @@ const ROLLOUT_LIVE_SYNC_DEDUP_CAPACITY: usize = 8_192;
 const OPENCODE_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const OPENCODE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OPENCODE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const BROWSER_PREVIEW_COOKIE_NAME: &str = "clawdex_preview";
+const BROWSER_PREVIEW_SESSION_TTL: Duration = Duration::from_secs(60 * 60 * 12);
+const BROWSER_PREVIEW_MAX_SESSIONS: usize = 12;
+const BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const BROWSER_PREVIEW_DISCOVERY_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const BROWSER_PREVIEW_DISCOVERY_PORTS: &[u16] =
+    &[3000, 3001, 4173, 4200, 4321, 5000, 5173, 8000, 8080, 8081];
 
 #[derive(Clone)]
 struct BridgeConfig {
     host: String,
     port: u16,
+    preview_port: u16,
     workdir: PathBuf,
     cli_bin: String,
     opencode_cli_bin: String,
@@ -97,6 +112,13 @@ impl BridgeConfig {
             .ok()
             .and_then(|v| v.parse::<u16>().ok())
             .unwrap_or(8787);
+        let preview_port = env::var("BRIDGE_PREVIEW_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or_else(|| port.checked_add(1).unwrap_or(8788));
+        if preview_port == port {
+            return Err("BRIDGE_PREVIEW_PORT must differ from BRIDGE_PORT".to_string());
+        }
 
         let configured_workdir = env::var("BRIDGE_WORKDIR")
             .map(PathBuf::from)
@@ -163,6 +185,7 @@ impl BridgeConfig {
         Ok(Self {
             host,
             port,
+            preview_port,
             workdir,
             cli_bin,
             opencode_cli_bin,
@@ -230,6 +253,7 @@ struct AppState {
     terminal: Arc<TerminalService>,
     git: Arc<GitService>,
     updater: Arc<UpdateService>,
+    preview: Arc<BrowserPreviewService>,
 }
 
 #[allow(dead_code)]
@@ -256,13 +280,224 @@ struct BridgeCapabilitySupport {
     turn_steer: bool,
     command_output_delta: bool,
     self_update: bool,
+    browser_preview: bool,
 }
 
 impl AppState {
     fn bridge_capabilities(&self) -> BridgeCapabilities {
         let mut capabilities = self.backend.capabilities();
         capabilities.supports.self_update = self.updater.is_self_update_supported();
+        capabilities.supports.browser_preview = self.preview.is_available();
         capabilities
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPreviewSessionResponse {
+    session_id: String,
+    target_url: String,
+    preview_port: u16,
+    bootstrap_path: String,
+    created_at: String,
+    last_accessed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPreviewDiscoverySuggestion {
+    target_url: String,
+    port: u16,
+    label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPreviewDiscoveryResponse {
+    scanned_at: String,
+    suggestions: Vec<BrowserPreviewDiscoverySuggestion>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPreviewCreateRequest {
+    target_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPreviewCloseRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserPreviewSessionEntry {
+    id: String,
+    target_url: Url,
+    bootstrap_token: String,
+    created_at: String,
+    last_accessed_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserPreviewResolvedSession {
+    target_url: Url,
+}
+
+struct BrowserPreviewService {
+    preview_port: u16,
+    available: AtomicBool,
+    next_session_counter: AtomicU64,
+    http: HttpClient,
+    sessions: RwLock<HashMap<String, BrowserPreviewSessionEntry>>,
+}
+
+impl BrowserPreviewService {
+    fn new(preview_port: u16) -> Self {
+        Self {
+            preview_port,
+            available: AtomicBool::new(false),
+            next_session_counter: AtomicU64::new(1),
+            http: HttpClient::builder()
+                .danger_accept_invalid_certs(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("build browser preview client"),
+            sessions: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        self.available.load(Ordering::Relaxed)
+    }
+
+    fn set_available(&self, available: bool) {
+        self.available.store(available, Ordering::Relaxed);
+    }
+
+    async fn create_session(
+        &self,
+        target_url: &str,
+    ) -> Result<BrowserPreviewSessionResponse, BridgeError> {
+        if !self.is_available() {
+            return Err(BridgeError::server("browser preview server is unavailable"));
+        }
+
+        let target_url = normalize_browser_preview_target_url(target_url)?;
+        let created_at = now_iso();
+        let session_id = self.next_id("preview-session");
+        let bootstrap_token = self.next_id("preview-token");
+        let entry = BrowserPreviewSessionEntry {
+            id: session_id.clone(),
+            target_url,
+            bootstrap_token,
+            created_at: created_at.clone(),
+            last_accessed_at: created_at,
+        };
+
+        let mut sessions = self.sessions.write().await;
+        prune_expired_preview_sessions(&mut sessions);
+        evict_excess_preview_sessions(&mut sessions);
+        sessions.insert(session_id, entry.clone());
+        Ok(self.to_session_response(&entry))
+    }
+
+    async fn list_sessions(&self) -> Vec<BrowserPreviewSessionResponse> {
+        let mut sessions = self.sessions.write().await;
+        prune_expired_preview_sessions(&mut sessions);
+
+        let mut entries = sessions.values().cloned().collect::<Vec<_>>();
+        entries.sort_by(|left, right| right.last_accessed_at.cmp(&left.last_accessed_at));
+        entries
+            .iter()
+            .map(|entry| self.to_session_response(entry))
+            .collect()
+    }
+
+    async fn close_session(&self, session_id: &str) -> bool {
+        let mut sessions = self.sessions.write().await;
+        sessions.remove(session_id).is_some()
+    }
+
+    async fn resolve_bootstrap(
+        &self,
+        session_id: &str,
+        bootstrap_token: &str,
+    ) -> Option<BrowserPreviewResolvedSession> {
+        let mut sessions = self.sessions.write().await;
+        prune_expired_preview_sessions(&mut sessions);
+        let entry = sessions.get_mut(session_id)?;
+        if !constant_time_eq(&entry.bootstrap_token, bootstrap_token) {
+            return None;
+        }
+
+        entry.last_accessed_at = now_iso();
+        Some(BrowserPreviewResolvedSession {
+            target_url: entry.target_url.clone(),
+        })
+    }
+
+    async fn resolve_cookie(&self, bootstrap_token: &str) -> Option<BrowserPreviewResolvedSession> {
+        let mut sessions = self.sessions.write().await;
+        prune_expired_preview_sessions(&mut sessions);
+        let now = now_iso();
+
+        for entry in sessions.values_mut() {
+            if constant_time_eq(&entry.bootstrap_token, bootstrap_token) {
+                entry.last_accessed_at = now.clone();
+                return Some(BrowserPreviewResolvedSession {
+                    target_url: entry.target_url.clone(),
+                });
+            }
+        }
+
+        None
+    }
+
+    async fn discover_targets(&self) -> BrowserPreviewDiscoveryResponse {
+        let mut suggestions = Vec::new();
+        for port in BROWSER_PREVIEW_DISCOVERY_PORTS {
+            if is_loopback_port_reachable(*port).await {
+                suggestions.push(BrowserPreviewDiscoverySuggestion {
+                    target_url: format!("http://127.0.0.1:{port}"),
+                    port: *port,
+                    label: browser_preview_label_for_port(*port),
+                });
+            }
+        }
+
+        BrowserPreviewDiscoveryResponse {
+            scanned_at: now_iso(),
+            suggestions,
+        }
+    }
+
+    fn to_session_response(
+        &self,
+        entry: &BrowserPreviewSessionEntry,
+    ) -> BrowserPreviewSessionResponse {
+        BrowserPreviewSessionResponse {
+            session_id: entry.id.clone(),
+            target_url: entry.target_url.to_string(),
+            preview_port: self.preview_port,
+            bootstrap_path: build_preview_bootstrap_path(
+                &entry.target_url,
+                &entry.id,
+                &entry.bootstrap_token,
+            ),
+            created_at: entry.created_at.clone(),
+            last_accessed_at: entry.last_accessed_at.clone(),
+        }
+    }
+
+    fn next_id(&self, prefix: &str) -> String {
+        let nonce = self.next_session_counter.fetch_add(1, Ordering::Relaxed);
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let raw = format!("{prefix}:{stamp:x}:{nonce:x}");
+        general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
     }
 }
 
@@ -370,12 +605,14 @@ impl RuntimeBackend {
                 turn_steer: true,
                 command_output_delta: true,
                 self_update: false,
+                browser_preview: false,
             },
             BridgeRuntimeEngine::Opencode => BridgeCapabilitySupport {
                 review_start: false,
                 turn_steer: false,
                 command_output_delta: false,
                 self_update: false,
+                browser_preview: false,
             },
         };
         let available_engines = self.available_engines();
@@ -4232,6 +4469,7 @@ async fn main() {
         config.allow_outside_root_cwd,
     ));
     let updater = Arc::new(UpdateService::discover());
+    let preview = Arc::new(BrowserPreviewService::new(config.preview_port));
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -4241,12 +4479,17 @@ async fn main() {
         terminal,
         git,
         updater,
+        preview,
     });
 
     let app = Router::new()
         .route("/rpc", get(ws_handler))
         .route("/health", get(health_handler))
         .route("/local-image", get(local_image_handler))
+        .with_state(state.clone());
+    let preview_app = Router::new()
+        .route("/", any(preview_entry_handler))
+        .route("/{*path}", any(preview_entry_handler))
         .with_state(state.clone());
 
     let bind_addr = format!("{}:{}", config.host, config.port);
@@ -4258,19 +4501,54 @@ async fn main() {
         }
     };
 
+    let preview_bind_addr = format!("{}:{}", config.host, config.preview_port);
+    let preview_listener = match tokio::net::TcpListener::bind(&preview_bind_addr).await {
+        Ok(listener) => {
+            state.preview.set_available(true);
+            Some(listener)
+        }
+        Err(error) => {
+            eprintln!("browser preview disabled: failed to bind {preview_bind_addr}: {error}");
+            None
+        }
+    };
+
     println!("rust-bridge listening on {bind_addr}");
+    if preview_listener.is_some() {
+        println!("browser preview listening on {preview_bind_addr}");
+    }
     maybe_print_pairing_qr(&config);
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let preview_task = preview_listener.map(|listener| {
+        let mut preview_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let serve_result = axum::serve(listener, preview_app)
+                .with_graceful_shutdown(async move {
+                    wait_for_shutdown_trigger(&mut preview_shutdown_rx).await;
+                })
+                .await;
+            if let Err(error) = serve_result {
+                eprintln!("browser preview server error: {error}");
+            }
+        })
+    });
     let shutdown_backend = state.backend.clone();
+    let shutdown_signal_tx = shutdown_tx.clone();
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let signal = wait_for_shutdown_signal().await;
             eprintln!("shutdown signal received ({signal}), terminating managed backends");
+            let _ = shutdown_signal_tx.send(true);
             shutdown_backend.shutdown().await;
         })
         .await;
 
+    let _ = shutdown_tx.send(true);
     state.backend.shutdown().await;
+    if let Some(task) = preview_task {
+        let _ = task.await;
+    }
 
     if let Err(error) = serve_result {
         eprintln!("server error: {error}");
@@ -4398,6 +4676,267 @@ async fn local_image_handler(
             )
                 .into_response()
         })
+}
+
+async fn preview_entry_handler(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let (mut parts, body) = request.into_parts();
+
+    if is_websocket_upgrade_request(&parts.method, &parts.headers) {
+        return handle_preview_websocket_request(state, &mut parts).await;
+    }
+
+    handle_preview_http_request(state, parts, body).await
+}
+
+async fn handle_preview_http_request(
+    state: Arc<AppState>,
+    parts: axum::http::request::Parts,
+    body: Body,
+) -> Response {
+    let (session, bootstrap_token, sanitized_path_and_query) =
+        match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
+        {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
+
+    if let Some(token) = bootstrap_token {
+        return preview_bootstrap_redirect_response(&sanitized_path_and_query, &token);
+    }
+
+    let upstream_url =
+        match build_preview_upstream_url(&session.target_url, &sanitized_path_and_query, false) {
+            Ok(url) => url,
+            Err(error) => {
+                return preview_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("invalid preview request path: {error}"),
+                );
+            }
+        };
+
+    let body_bytes = match to_bytes(body, BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("preview request body exceeds limit: {error}"),
+            );
+        }
+    };
+
+    let mut upstream_request = state
+        .preview
+        .http
+        .request(to_reqwest_method(&parts.method), upstream_url.clone())
+        .body(body_bytes);
+    for (name, value) in parts.headers.iter() {
+        let header_name = name.as_str();
+        if should_skip_preview_request_header(header_name) {
+            continue;
+        }
+
+        if header_name.eq_ignore_ascii_case(COOKIE.as_str()) {
+            if let Some(filtered_cookie) = filter_preview_cookie_header(value) {
+                upstream_request = upstream_request.header(name, filtered_cookie);
+            }
+            continue;
+        }
+
+        if let Some(rewritten) =
+            rewrite_preview_request_header(header_name, value, &session.target_url)
+        {
+            upstream_request = upstream_request.header(name, rewritten);
+        }
+    }
+
+    let upstream_response = match upstream_request.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("failed to reach preview target: {error}"),
+            );
+        }
+    };
+
+    let request_host = parts
+        .headers
+        .get(HOST.as_str())
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let status = StatusCode::from_u16(upstream_response.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let upstream_headers = upstream_response.headers().clone();
+    let mut response = Response::new(Body::from_stream(upstream_response.bytes_stream()));
+    *response.status_mut() = status;
+
+    for (name, value) in upstream_headers.iter() {
+        if should_skip_preview_response_header(name.as_str()) {
+            continue;
+        }
+
+        if name.as_str().eq_ignore_ascii_case(LOCATION.as_str()) {
+            if let Some(rewritten) =
+                rewrite_preview_location_header(value, &session.target_url, request_host.as_deref())
+            {
+                response.headers_mut().append(LOCATION, rewritten);
+            }
+            continue;
+        }
+
+        response.headers_mut().append(name.clone(), value.clone());
+    }
+
+    response
+}
+
+async fn handle_preview_websocket_request(
+    state: Arc<AppState>,
+    parts: &mut axum::http::request::Parts,
+) -> Response {
+    let (session, _bootstrap_token, sanitized_path_and_query) =
+        match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
+        {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
+
+    let upstream_url =
+        match build_preview_upstream_url(&session.target_url, &sanitized_path_and_query, true) {
+            Ok(url) => url,
+            Err(error) => {
+                return preview_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("invalid websocket preview path: {error}"),
+                );
+            }
+        };
+
+    let original_headers = parts.headers.clone();
+    let mut upstream_request = match upstream_url.as_str().into_client_request() {
+        Ok(request) => request,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("failed to create websocket request: {error}"),
+            );
+        }
+    };
+    for (name, value) in original_headers.iter() {
+        let header_name = name.as_str();
+        if should_skip_preview_websocket_request_header(header_name) {
+            continue;
+        }
+
+        if header_name.eq_ignore_ascii_case(COOKIE.as_str()) {
+            if let Some(filtered_cookie) = filter_preview_cookie_header(value) {
+                upstream_request.headers_mut().append(name, filtered_cookie);
+            }
+            continue;
+        }
+
+        if let Some(rewritten) =
+            rewrite_preview_request_header(header_name, value, &session.target_url)
+        {
+            upstream_request.headers_mut().append(name, rewritten);
+        }
+    }
+
+    let (upstream_socket, upstream_response) = match connect_async(upstream_request).await {
+        Ok(result) => result,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("failed to connect websocket preview target: {error}"),
+            );
+        }
+    };
+
+    let websocket_upgrade = match WebSocketUpgrade::from_request_parts(parts, &state).await {
+        Ok(upgrade) => upgrade,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid websocket upgrade request: {error}"),
+            );
+        }
+    };
+
+    let accepted_protocol = upstream_response
+        .headers()
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let websocket_upgrade = if let Some(protocol) = accepted_protocol {
+        websocket_upgrade.protocols([protocol])
+    } else {
+        websocket_upgrade
+    };
+
+    websocket_upgrade
+        .on_upgrade(move |socket| async move {
+            proxy_preview_websocket(socket, upstream_socket).await;
+        })
+        .into_response()
+}
+
+async fn proxy_preview_websocket(
+    socket: WebSocket,
+    upstream_socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    let (mut client_tx, mut client_rx) = socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream_socket.split();
+
+    let mut client_to_upstream = tokio::spawn(async move {
+        while let Some(message) = client_rx.next().await {
+            let Ok(message) = message else {
+                break;
+            };
+
+            let upstream_message = match message {
+                Message::Text(text) => UpstreamWsMessage::Text(text.to_string().into()),
+                Message::Binary(data) => UpstreamWsMessage::Binary(data),
+                Message::Ping(data) => UpstreamWsMessage::Ping(data),
+                Message::Pong(data) => UpstreamWsMessage::Pong(data),
+                Message::Close(_) => UpstreamWsMessage::Close(None),
+            };
+
+            if upstream_tx.send(upstream_message).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut upstream_to_client = tokio::spawn(async move {
+        while let Some(message) = upstream_rx.next().await {
+            let Ok(message) = message else {
+                break;
+            };
+
+            let client_message = match message {
+                UpstreamWsMessage::Text(text) => Message::Text(text.to_string().into()),
+                UpstreamWsMessage::Binary(data) => Message::Binary(data),
+                UpstreamWsMessage::Ping(data) => Message::Ping(data),
+                UpstreamWsMessage::Pong(data) => Message::Pong(data),
+                UpstreamWsMessage::Close(_) => Message::Close(None),
+                UpstreamWsMessage::Frame(_) => continue,
+            };
+
+            if client_tx.send(client_message).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = &mut client_to_upstream => upstream_to_client.abort(),
+        _ = &mut upstream_to_client => client_to_upstream.abort(),
+    }
 }
 
 async fn ws_handler(
@@ -4613,6 +5152,34 @@ async fn handle_bridge_method(
             .map_err(|error| BridgeError::server(&error.to_string())),
         "bridge/runtime/read" => serde_json::to_value(state.updater.runtime_info().await)
             .map_err(|error| BridgeError::server(&error.to_string())),
+        "bridge/browser/session/create" => {
+            let request: BrowserPreviewCreateRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let session = state.preview.create_session(&request.target_url).await?;
+            serde_json::to_value(session).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/browser/sessions/list" => {
+            let sessions = state.preview.list_sessions().await;
+            serde_json::to_value(json!({ "sessions": sessions }))
+                .map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/browser/session/close" => {
+            let request: BrowserPreviewCloseRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let session_id = request.session_id.trim();
+            if session_id.is_empty() {
+                return Err(BridgeError::invalid_params("sessionId must not be empty"));
+            }
+            Ok(json!({
+                "closed": state.preview.close_session(session_id).await,
+            }))
+        }
+        "bridge/browser/targets/discover" => {
+            let result = state.preview.discover_targets().await;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
         "bridge/update/start" => {
             let request: BridgeUpdateStartRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
@@ -4621,6 +5188,13 @@ async fn handle_bridge_method(
             let result = state
                 .updater
                 .start_update(target_version, std::process::id(), &now_iso())
+                .map_err(|error| BridgeError::server(&error))?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/restart/start" => {
+            let result = state
+                .updater
+                .start_restart(std::process::id(), &now_iso())
                 .map_err(|error| BridgeError::server(&error))?;
             serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
@@ -5447,6 +6021,489 @@ fn maybe_print_pairing_qr(config: &BridgeConfig) {
     );
     println!();
     flush_pairing_output();
+}
+
+async fn wait_for_shutdown_trigger(shutdown_rx: &mut watch::Receiver<bool>) {
+    if *shutdown_rx.borrow() {
+        return;
+    }
+
+    while shutdown_rx.changed().await.is_ok() {
+        if *shutdown_rx.borrow() {
+            break;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreviewBootstrapParams {
+    session_id: Option<String>,
+    bootstrap_token: Option<String>,
+    sanitized_path_and_query: String,
+}
+
+async fn resolve_preview_session_from_request(
+    preview: &BrowserPreviewService,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<(BrowserPreviewResolvedSession, Option<String>, String), Response> {
+    let params = parse_preview_bootstrap_params(uri);
+    if let (Some(session_id), Some(bootstrap_token)) = (
+        params.session_id.as_deref(),
+        params.bootstrap_token.as_deref(),
+    ) {
+        let Some(session) = preview.resolve_bootstrap(session_id, bootstrap_token).await else {
+            return Err(preview_error_response(
+                StatusCode::UNAUTHORIZED,
+                "preview session is invalid or expired; reopen it from Clawdex",
+            ));
+        };
+
+        return Ok((
+            session,
+            Some(bootstrap_token.to_string()),
+            params.sanitized_path_and_query,
+        ));
+    }
+
+    let Some(cookie_token) = read_cookie_value(headers, BROWSER_PREVIEW_COOKIE_NAME) else {
+        return Err(preview_error_response(
+            StatusCode::UNAUTHORIZED,
+            "preview session is missing; reopen it from Clawdex",
+        ));
+    };
+    let Some(session) = preview.resolve_cookie(&cookie_token).await else {
+        return Err(preview_error_response(
+            StatusCode::UNAUTHORIZED,
+            "preview session expired; reopen it from Clawdex",
+        ));
+    };
+
+    Ok((session, None, params.sanitized_path_and_query))
+}
+
+fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
+    let Ok(mut parsed) = Url::parse(&format!("http://preview{}", uri)) else {
+        return PreviewBootstrapParams {
+            session_id: None,
+            bootstrap_token: None,
+            sanitized_path_and_query: uri
+                .path_and_query()
+                .map(|value| value.as_str().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "/".to_string()),
+        };
+    };
+
+    let mut session_id = None;
+    let mut bootstrap_token = None;
+    let mut retained_pairs = Vec::new();
+    for (key, value) in parsed.query_pairs() {
+        if key == "sid" {
+            session_id = Some(value.to_string());
+            continue;
+        }
+        if key == "st" {
+            bootstrap_token = Some(value.to_string());
+            continue;
+        }
+        retained_pairs.push((key.to_string(), value.to_string()));
+    }
+
+    parsed.set_query(None);
+    if !retained_pairs.is_empty() {
+        let mut query_pairs = parsed.query_pairs_mut();
+        for (key, value) in &retained_pairs {
+            query_pairs.append_pair(key, value);
+        }
+    }
+
+    let sanitized_path_and_query = format!(
+        "{}{}",
+        parsed.path(),
+        parsed
+            .query()
+            .map(|value| format!("?{value}"))
+            .unwrap_or_default()
+    );
+
+    PreviewBootstrapParams {
+        session_id,
+        bootstrap_token,
+        sanitized_path_and_query,
+    }
+}
+
+fn preview_bootstrap_redirect_response(
+    sanitized_path_and_query: &str,
+    bootstrap_token: &str,
+) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::TEMPORARY_REDIRECT;
+    response.headers_mut().insert(
+        LOCATION,
+        HeaderValue::from_str(sanitized_path_and_query)
+            .unwrap_or_else(|_| HeaderValue::from_static("/")),
+    );
+    if let Ok(cookie) = build_preview_cookie_header(bootstrap_token) {
+        response.headers_mut().append(SET_COOKIE, cookie);
+    }
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store, private"));
+    response
+}
+
+fn preview_error_response(status: StatusCode, message: &str) -> Response {
+    let body = format!(
+        "<!doctype html><html><body style=\"font-family:-apple-system,system-ui,sans-serif;padding:24px;background:#111;color:#f5f5f5\"><h1 style=\"font-size:18px;margin:0 0 12px\">Preview unavailable</h1><p style=\"margin:0;color:#d4d4d4\">{}</p></body></html>",
+        html_escape(message)
+    );
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| Response::new(Body::from(message.to_string())))
+}
+
+fn build_preview_cookie_header(bootstrap_token: &str) -> Result<HeaderValue, String> {
+    HeaderValue::from_str(&format!(
+        "{BROWSER_PREVIEW_COOKIE_NAME}={bootstrap_token}; HttpOnly; Path=/; SameSite=Lax; Max-Age={}",
+        BROWSER_PREVIEW_SESSION_TTL.as_secs()
+    ))
+    .map_err(|error| error.to_string())
+}
+
+fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw_cookie = headers.get(COOKIE)?.to_str().ok()?;
+    for segment in raw_cookie.split(';') {
+        let trimmed = segment.trim();
+        let Some((cookie_name, cookie_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if cookie_name.trim() == name {
+            let value = cookie_value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn normalize_browser_preview_target_url(raw: &str) -> Result<Url, BridgeError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(BridgeError::invalid_params("targetUrl must not be empty"));
+    }
+
+    let mut parsed = Url::parse(trimmed)
+        .map_err(|error| BridgeError::invalid_params(&format!("invalid targetUrl: {error}")))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(BridgeError::invalid_params(
+            "targetUrl must use http:// or https://",
+        ));
+    }
+    if parsed.username().trim().len() > 0 || parsed.password().is_some() {
+        return Err(BridgeError::invalid_params(
+            "targetUrl must not include username or password",
+        ));
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(BridgeError::invalid_params("targetUrl host is required"));
+    };
+    if !is_loopback_preview_host(host) {
+        return Err(BridgeError::invalid_params(
+            "browser preview only supports localhost, 127.0.0.1, or ::1 targets",
+        ));
+    }
+
+    parsed.set_fragment(None);
+    if parsed.path().trim().is_empty() {
+        parsed.set_path("/");
+    }
+
+    Ok(parsed)
+}
+
+fn is_loopback_preview_host(host: &str) -> bool {
+    matches!(
+        host.trim().to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
+}
+
+fn build_preview_bootstrap_path(
+    target_url: &Url,
+    session_id: &str,
+    bootstrap_token: &str,
+) -> String {
+    let mut bootstrap_url = target_url.clone();
+    bootstrap_url.set_fragment(None);
+
+    let mut query_pairs = bootstrap_url
+        .query_pairs()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
+    query_pairs.push(("sid".to_string(), session_id.to_string()));
+    query_pairs.push(("st".to_string(), bootstrap_token.to_string()));
+    bootstrap_url.set_query(None);
+    if !query_pairs.is_empty() {
+        let mut serializer = bootstrap_url.query_pairs_mut();
+        for (key, value) in &query_pairs {
+            serializer.append_pair(key, value);
+        }
+    }
+
+    format!(
+        "{}{}",
+        bootstrap_url.path(),
+        bootstrap_url
+            .query()
+            .map(|value| format!("?{value}"))
+            .unwrap_or_default()
+    )
+}
+
+fn build_preview_upstream_url(
+    target_url: &Url,
+    sanitized_path_and_query: &str,
+    websocket: bool,
+) -> Result<Url, String> {
+    let parsed_path = Url::parse(&format!("http://preview{}", sanitized_path_and_query))
+        .map_err(|error| error.to_string())?;
+    let mut upstream_url = target_url.clone();
+    if websocket {
+        let scheme = if target_url.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        };
+        upstream_url
+            .set_scheme(scheme)
+            .map_err(|_| "failed to rewrite websocket scheme".to_string())?;
+    }
+    upstream_url.set_path(parsed_path.path());
+    upstream_url.set_query(parsed_path.query());
+    Ok(upstream_url)
+}
+
+fn is_websocket_upgrade_request(method: &Method, headers: &HeaderMap) -> bool {
+    method == Method::GET
+        && headers
+            .get(CONNECTION)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_ascii_lowercase().contains("upgrade"))
+            .unwrap_or(false)
+        && headers
+            .get(UPGRADE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.eq_ignore_ascii_case("websocket"))
+            .unwrap_or(false)
+}
+
+fn to_reqwest_method(method: &Method) -> HttpMethod {
+    HttpMethod::from_bytes(method.as_str().as_bytes()).unwrap_or(HttpMethod::GET)
+}
+
+fn should_skip_preview_request_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "connection"
+            | "upgrade"
+            | "content-length"
+            | "transfer-encoding"
+            | "proxy-connection"
+    )
+}
+
+fn should_skip_preview_websocket_request_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "connection"
+            | "upgrade"
+            | "sec-websocket-key"
+            | "sec-websocket-version"
+            | "sec-websocket-extensions"
+            | "content-length"
+            | "transfer-encoding"
+            | "proxy-connection"
+    )
+}
+
+fn should_skip_preview_response_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn filter_preview_cookie_header(value: &HeaderValue) -> Option<HeaderValue> {
+    let raw = value.to_str().ok()?;
+    let filtered = raw
+        .split(';')
+        .filter_map(|segment| {
+            let trimmed = segment.trim();
+            let (cookie_name, _) = trimmed.split_once('=')?;
+            if cookie_name.trim() == BROWSER_PREVIEW_COOKIE_NAME {
+                return None;
+            }
+            Some(trimmed.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    if filtered.is_empty() {
+        return None;
+    }
+
+    HeaderValue::from_str(&filtered).ok()
+}
+
+fn rewrite_preview_request_header(
+    name: &str,
+    value: &HeaderValue,
+    target_url: &Url,
+) -> Option<HeaderValue> {
+    if name.eq_ignore_ascii_case(ORIGIN.as_str()) {
+        return HeaderValue::from_str(&target_origin_string(target_url)).ok();
+    }
+
+    if name.eq_ignore_ascii_case(REFERER.as_str()) {
+        let raw = value.to_str().ok()?;
+        let Ok(mut referer) = Url::parse(raw) else {
+            return Some(value.clone());
+        };
+        let _ = referer.set_scheme(target_url.scheme());
+        let _ = referer.set_host(target_url.host_str());
+        let _ = referer.set_port(target_url.port());
+        return HeaderValue::from_str(referer.as_str()).ok();
+    }
+
+    Some(value.clone())
+}
+
+fn rewrite_preview_location_header(
+    value: &HeaderValue,
+    target_url: &Url,
+    request_host: Option<&str>,
+) -> Option<HeaderValue> {
+    let raw = value.to_str().ok()?;
+    let Ok(location_url) = Url::parse(raw) else {
+        return Some(value.clone());
+    };
+    if location_url.scheme() != target_url.scheme()
+        || location_url.host_str() != target_url.host_str()
+        || location_url.port_or_known_default() != target_url.port_or_known_default()
+    {
+        return Some(value.clone());
+    }
+
+    let request_host = request_host?.trim();
+    let rewritten = format!(
+        "http://{}{}{}",
+        request_host,
+        location_url.path(),
+        location_url
+            .query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
+    );
+    HeaderValue::from_str(&rewritten).ok()
+}
+
+fn target_origin_string(target_url: &Url) -> String {
+    let default_port = target_url.port_or_known_default();
+    let explicit_port = target_url.port();
+    if explicit_port.is_some() && explicit_port != default_port {
+        format!(
+            "{}://{}:{}",
+            target_url.scheme(),
+            target_url.host_str().unwrap_or("127.0.0.1"),
+            explicit_port.unwrap_or_default()
+        )
+    } else {
+        format!(
+            "{}://{}",
+            target_url.scheme(),
+            target_url.host_str().unwrap_or("127.0.0.1")
+        )
+    }
+}
+
+async fn is_loopback_port_reachable(port: u16) -> bool {
+    timeout(
+        BROWSER_PREVIEW_DISCOVERY_CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .map(|result| result.is_ok())
+    .unwrap_or(false)
+}
+
+fn browser_preview_label_for_port(port: u16) -> String {
+    match port {
+        3000 => "Local dev server on :3000".to_string(),
+        3001 => "Local dev server on :3001".to_string(),
+        4173 => "Vite preview on :4173".to_string(),
+        4200 => "Angular dev server on :4200".to_string(),
+        4321 => "Metro / Expo web on :4321".to_string(),
+        5000 => "Local dev server on :5000".to_string(),
+        5173 => "Vite dev server on :5173".to_string(),
+        8000 => "Local dev server on :8000".to_string(),
+        8080 => "Local dev server on :8080".to_string(),
+        8081 => "Metro bundler on :8081".to_string(),
+        _ => format!("Local dev server on :{port}"),
+    }
+}
+
+fn prune_expired_preview_sessions(sessions: &mut HashMap<String, BrowserPreviewSessionEntry>) {
+    let cutoff = SystemTime::now()
+        .checked_sub(BROWSER_PREVIEW_SESSION_TTL)
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64);
+
+    let Some(cutoff_secs) = cutoff else {
+        return;
+    };
+
+    sessions.retain(|_, entry| {
+        chrono::DateTime::parse_from_rfc3339(&entry.last_accessed_at)
+            .map(|value| value.timestamp() >= cutoff_secs)
+            .unwrap_or(true)
+    });
+}
+
+fn evict_excess_preview_sessions(sessions: &mut HashMap<String, BrowserPreviewSessionEntry>) {
+    while sessions.len() + 1 > BROWSER_PREVIEW_MAX_SESSIONS {
+        let Some(oldest_id) = sessions
+            .values()
+            .min_by(|left, right| left.last_accessed_at.cmp(&right.last_accessed_at))
+            .map(|entry| entry.id.clone())
+        else {
+            break;
+        };
+        sessions.remove(&oldest_id);
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn parse_bool_env(name: &str) -> bool {
@@ -7607,6 +8664,7 @@ mod tests {
         let config = Arc::new(BridgeConfig {
             host: "127.0.0.1".to_string(),
             port: 8787,
+            preview_port: 8788,
             workdir: workdir.clone(),
             cli_bin: "cat".to_string(),
             opencode_cli_bin: "opencode".to_string(),
@@ -7641,6 +8699,7 @@ mod tests {
             config.allow_outside_root_cwd,
         ));
         let updater = Arc::new(UpdateService::discover());
+        let preview = Arc::new(BrowserPreviewService::new(config.preview_port));
 
         Arc::new(AppState {
             config,
@@ -7650,6 +8709,7 @@ mod tests {
             terminal,
             git,
             updater,
+            preview,
         })
     }
 
@@ -9024,6 +10084,7 @@ mod tests {
         let config = BridgeConfig {
             host: "127.0.0.1".to_string(),
             port: 8787,
+            preview_port: 8788,
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
@@ -9056,6 +10117,7 @@ mod tests {
         let config = BridgeConfig {
             host: "0.0.0.0".to_string(),
             port: 8787,
+            preview_port: 8788,
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
@@ -9089,6 +10151,7 @@ mod tests {
         let base = BridgeConfig {
             host: "127.0.0.1".to_string(),
             port: 8787,
+            preview_port: 8788,
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),

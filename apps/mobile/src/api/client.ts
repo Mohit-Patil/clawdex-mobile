@@ -13,8 +13,11 @@ import type {
   AccountRateLimitSnapshot,
   ApprovalPolicy,
   ApprovalDecision,
+  BrowserPreviewDiscoveryResponse,
+  BrowserPreviewSession,
   BridgeCapabilities,
   BridgeRuntimeInfo,
+  BridgeRestartStartResponse,
   BridgeUpdateStartResponse,
   ChatEngine,
   CollaborationMode,
@@ -201,6 +204,10 @@ export class HostBridgeApiClient {
     });
   }
 
+  startBridgeRestart(): Promise<BridgeRestartStartResponse> {
+    return this.ws.request<BridgeRestartStartResponse>('bridge/restart/start');
+  }
+
   async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {
     const response = await this.ws.request<Record<string, unknown>>('account/rateLimits/read');
     return readSelectedAccountRateLimits(response);
@@ -287,6 +294,46 @@ export class HostBridgeApiClient {
       directoriesOnly: request?.directoriesOnly !== false,
     });
     return readFileSystemListResponse(response);
+  }
+
+  async createBrowserPreviewSession(targetUrl: string): Promise<BrowserPreviewSession> {
+    const response = await this.ws.request<Record<string, unknown>>(
+      'bridge/browser/session/create',
+      {
+        targetUrl,
+      }
+    );
+    const session = readBrowserPreviewSession(response);
+    if (!session) {
+      throw new Error('bridge/browser/session/create returned an invalid session payload');
+    }
+    return session;
+  }
+
+  async listBrowserPreviewSessions(): Promise<BrowserPreviewSession[]> {
+    const response = await this.ws.request<Record<string, unknown>>('bridge/browser/sessions/list');
+    const record = toRecord(response) ?? {};
+    const rawSessions = Array.isArray(record.sessions) ? record.sessions : [];
+    return rawSessions
+      .map((entry) => readBrowserPreviewSession(entry))
+      .filter((entry): entry is BrowserPreviewSession => entry !== null);
+  }
+
+  async closeBrowserPreviewSession(sessionId: string): Promise<boolean> {
+    const response = await this.ws.request<Record<string, unknown>>(
+      'bridge/browser/session/close',
+      {
+        sessionId,
+      }
+    );
+    return response.closed === true;
+  }
+
+  async discoverBrowserPreviewTargets(): Promise<BrowserPreviewDiscoveryResponse> {
+    const response = await this.ws.request<Record<string, unknown>>(
+      'bridge/browser/targets/discover'
+    );
+    return readBrowserPreviewDiscoveryResponse(response);
   }
 
   async createChat(body: CreateChatRequest): Promise<Chat> {
@@ -1090,6 +1137,77 @@ function readFileSystemListResponse(value: unknown): FileSystemListResponse {
         };
       })
       .filter((entry): entry is FileSystemListResponse['entries'][number] => entry !== null),
+  };
+}
+
+function readBrowserPreviewSession(value: unknown): BrowserPreviewSession | null {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const sessionId = readString(record.sessionId)?.trim() ?? '';
+  const targetUrl = readString(record.targetUrl)?.trim() ?? '';
+  const bootstrapPath = readString(record.bootstrapPath)?.trim() ?? '';
+  const previewPortRaw = record.previewPort;
+  const previewPort =
+    typeof previewPortRaw === 'number'
+      ? Math.max(1, Math.trunc(previewPortRaw))
+      : typeof previewPortRaw === 'string'
+        ? Math.max(1, Number.parseInt(previewPortRaw, 10) || 0)
+        : 0;
+  const createdAt = readTimestampIso(record.createdAt);
+  const lastAccessedAt = readTimestampIso(record.lastAccessedAt);
+
+  if (!sessionId || !targetUrl || !bootstrapPath || previewPort <= 0 || !createdAt) {
+    return null;
+  }
+
+  return {
+    sessionId,
+    targetUrl,
+    previewPort,
+    bootstrapPath,
+    createdAt,
+    lastAccessedAt: lastAccessedAt ?? createdAt,
+  };
+}
+
+function readBrowserPreviewDiscoveryResponse(value: unknown): BrowserPreviewDiscoveryResponse {
+  const record = toRecord(value) ?? {};
+  const rawSuggestions = Array.isArray(record.suggestions) ? record.suggestions : [];
+
+  return {
+    scannedAt: readTimestampIso(record.scannedAt) ?? new Date(0).toISOString(),
+    suggestions: rawSuggestions
+      .map((entry) => {
+        const item = toRecord(entry);
+        if (!item) {
+          return null;
+        }
+
+        const targetUrl = readString(item.targetUrl)?.trim() ?? '';
+        const label = readString(item.label)?.trim() ?? '';
+        const portRaw = item.port;
+        const port =
+          typeof portRaw === 'number'
+            ? Math.max(1, Math.trunc(portRaw))
+            : typeof portRaw === 'string'
+              ? Math.max(1, Number.parseInt(portRaw, 10) || 0)
+              : 0;
+        if (!targetUrl || !label || port <= 0) {
+          return null;
+        }
+
+        return {
+          targetUrl,
+          label,
+          port,
+        };
+      })
+      .filter(
+        (entry): entry is BrowserPreviewDiscoveryResponse['suggestions'][number] => entry !== null
+      ),
   };
 }
 

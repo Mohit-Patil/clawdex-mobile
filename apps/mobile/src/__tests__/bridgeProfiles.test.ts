@@ -1,3 +1,4 @@
+import type * as BridgeProfilesModule from '../bridgeProfiles';
 import {
   createEmptyBridgeProfileStore,
   deriveBridgeProfileName,
@@ -80,5 +81,109 @@ describe('bridgeProfiles', () => {
 
     expect(switched.activeProfileId).toBe('profile-2');
     expect(switched.profiles).toHaveLength(2);
+  });
+});
+
+describe('bridgeProfiles storage', () => {
+  const bridgeProfileStoreKey = 'clawdex.bridge-profiles.v1';
+  const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+
+  afterEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    if (originalLocalStorage) {
+      Object.defineProperty(globalThis, 'localStorage', originalLocalStorage);
+    } else {
+      Reflect.deleteProperty(globalThis, 'localStorage');
+    }
+  });
+
+  it('uses browser storage on web instead of expo-secure-store', async () => {
+    const getItem = jest.fn().mockReturnValue(
+      JSON.stringify({
+        activeProfileId: 'profile-1',
+        profiles: [
+          {
+            id: 'profile-1',
+            name: 'Web Bridge',
+            bridgeUrl: 'http://127.0.0.1:8787',
+            bridgeToken: 'token-web',
+          },
+        ],
+      })
+    );
+    const setItem = jest.fn();
+    const removeItem = jest.fn();
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: { getItem, setItem, removeItem },
+    });
+
+    const secureStoreMock = {
+      AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY: 'after-first-unlock',
+      getItemAsync: jest.fn(),
+      setItemAsync: jest.fn(),
+      deleteItemAsync: jest.fn(),
+    };
+
+    jest.doMock('react-native', () => ({
+      Platform: { OS: 'web' },
+    }));
+    jest.doMock('expo-secure-store', () => secureStoreMock);
+
+    let bridgeProfiles!: typeof BridgeProfilesModule;
+    jest.isolateModules(() => {
+      bridgeProfiles = jest.requireActual('../bridgeProfiles') as typeof BridgeProfilesModule;
+    });
+    const loaded = await bridgeProfiles.loadBridgeProfileStore();
+    await bridgeProfiles.saveBridgeProfileStore(loaded);
+    await bridgeProfiles.clearBridgeProfileStore();
+
+    expect(getItem).toHaveBeenCalledWith(bridgeProfileStoreKey);
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(removeItem).toHaveBeenCalledWith(bridgeProfileStoreKey);
+    expect(secureStoreMock.getItemAsync).not.toHaveBeenCalled();
+    expect(secureStoreMock.setItemAsync).not.toHaveBeenCalled();
+    expect(secureStoreMock.deleteItemAsync).not.toHaveBeenCalled();
+  });
+
+  it('uses expo-secure-store on native platforms', async () => {
+    const secureStoreMock = {
+      AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY: 'after-first-unlock',
+      getItemAsync: jest.fn().mockResolvedValue(
+        JSON.stringify({
+          activeProfileId: null,
+          profiles: [],
+        })
+      ),
+      setItemAsync: jest.fn().mockResolvedValue(undefined),
+      deleteItemAsync: jest.fn().mockResolvedValue(undefined),
+    };
+
+    jest.doMock('react-native', () => ({
+      Platform: { OS: 'ios' },
+    }));
+    jest.doMock('expo-secure-store', () => secureStoreMock);
+
+    let bridgeProfiles!: typeof BridgeProfilesModule;
+    jest.isolateModules(() => {
+      bridgeProfiles = jest.requireActual('../bridgeProfiles') as typeof BridgeProfilesModule;
+    });
+    const loaded = await bridgeProfiles.loadBridgeProfileStore();
+    await bridgeProfiles.saveBridgeProfileStore(loaded);
+    await bridgeProfiles.clearBridgeProfileStore();
+
+    expect(secureStoreMock.getItemAsync).toHaveBeenCalledWith(bridgeProfileStoreKey);
+    expect(secureStoreMock.setItemAsync).toHaveBeenCalledWith(
+      bridgeProfileStoreKey,
+      JSON.stringify({
+        activeProfileId: null,
+        profiles: [],
+      }),
+      {
+        keychainAccessible: 'after-first-unlock',
+      }
+    );
+    expect(secureStoreMock.deleteItemAsync).toHaveBeenCalledWith(bridgeProfileStoreKey);
   });
 });

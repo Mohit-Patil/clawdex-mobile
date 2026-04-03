@@ -36,7 +36,17 @@ npm run stop:services
 - For the shipped mobile app, rescan the bridge QR or update the stored token in Settings.
 - For a local dev build, also ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` in `apps/mobile/.env`.
 - Restart the bridge after token changes.
+- On secure-launcher installs, `Settings > Bridge Maintenance > Restart bridge safely` can do that from the phone.
 - If an in-app bridge update fails, inspect `.bridge-updater.log` and `.bridge-update-status.json` in the bridge install root.
+
+## Local browser preview does not open
+
+- The in-app browser only supports loopback targets from the bridge host: `localhost`, `127.0.0.1`, or `::1`.
+- Use entries like `localhost:3000`, `127.0.0.1:5173`, or just a port number.
+- If Browser reports preview is unavailable, check whether `BRIDGE_PREVIEW_PORT` is already in use on the host.
+- By default the preview server binds to `BRIDGE_PORT + 1`.
+- Restart the bridge after changing `BRIDGE_PREVIEW_PORT`.
+- If the page shell loads but live reload does not, verify the target dev server is still serving its WebSocket/HMR endpoint locally.
 
 ## Tailscale issues
 

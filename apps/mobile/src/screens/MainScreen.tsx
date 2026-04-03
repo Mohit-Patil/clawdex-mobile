@@ -119,6 +119,7 @@ interface MainScreenProps {
   bridgeToken?: string | null;
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
+  onOpenLocalPreview?: (targetUrl: string) => void;
   defaultStartCwd?: string | null;
   defaultChatEngine?: ChatEngine | null;
   defaultEngineSettings?: EngineDefaultSettingsMap | null;
@@ -489,6 +490,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       bridgeToken = null,
       onOpenDrawer,
       onOpenGit,
+      onOpenLocalPreview: onOpenLocalPreviewHandler,
       defaultStartCwd,
       defaultChatEngine,
       defaultEngineSettings,
@@ -7370,6 +7372,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   parentChat={selectedParentChat}
                   bridgeUrl={bridgeUrl}
                   bridgeToken={bridgeToken}
+                  onOpenLocalPreview={onOpenLocalPreviewHandler}
                   showToolCalls={showToolCalls}
                   agentThreadStatusById={agentThreadStatusById}
                   scrollRef={scrollRef}
@@ -7422,6 +7425,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 parentChat={selectedParentChat}
                 bridgeUrl={bridgeUrl}
                 bridgeToken={bridgeToken}
+                onOpenLocalPreview={onOpenLocalPreviewHandler}
                 showToolCalls={showToolCalls}
                 agentThreadStatusById={agentThreadStatusById}
                 scrollRef={scrollRef}
@@ -7999,6 +8003,7 @@ interface ChatViewProps {
   parentChat: Chat | null;
   bridgeUrl: string;
   bridgeToken: string | null;
+  onOpenLocalPreview?: (targetUrl: string) => void;
   showToolCalls: boolean;
   agentThreadStatusById: ReadonlyMap<string, Chat['status']>;
   scrollRef: React.RefObject<FlatList<TranscriptDisplayItem> | null>;
@@ -8141,6 +8146,7 @@ const ChatView = memo(function ChatView({
   parentChat,
   bridgeUrl,
   bridgeToken,
+  onOpenLocalPreview,
   showToolCalls,
   agentThreadStatusById,
   scrollRef,
@@ -8254,7 +8260,12 @@ const ChatView = memo(function ChatView({
       const showInlineChoices = inlineChoiceSet?.messageId === msg.id;
       return (
         <View style={styles.chatMessageBlock}>
-          <ChatMessage message={msg} bridgeUrl={bridgeUrl} bridgeToken={bridgeToken} />
+          <ChatMessage
+            message={msg}
+            bridgeUrl={bridgeUrl}
+            bridgeToken={bridgeToken}
+            onOpenLocalPreview={onOpenLocalPreview}
+          />
           {showInlineChoices ? (
             <View style={styles.inlineChoiceOptions}>
               {inlineChoiceSet.options.map((option, index) => (
@@ -8382,6 +8393,7 @@ function areChatViewPropsEqual(previous: ChatViewProps, next: ChatViewProps): bo
     previous.parentChat === next.parentChat &&
     previous.bridgeUrl === next.bridgeUrl &&
     previous.bridgeToken === next.bridgeToken &&
+    previous.onOpenLocalPreview === next.onOpenLocalPreview &&
     previous.showToolCalls === next.showToolCalls &&
     previous.agentThreadStatusById === next.agentThreadStatusById &&
     previous.scrollRef === next.scrollRef &&

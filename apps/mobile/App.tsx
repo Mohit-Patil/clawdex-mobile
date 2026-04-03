@@ -47,6 +47,7 @@ import {
 } from './src/bridgeProfiles';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
+import { BrowserScreen } from './src/screens/BrowserScreen';
 import { GitScreen } from './src/screens/GitScreen';
 import { MainScreen, type MainScreenHandle } from './src/screens/MainScreen';
 import {
@@ -74,7 +75,7 @@ import {
   type AppearancePreference,
 } from './src/theme';
 
-type AppScreen = 'Main' | 'ChatGit' | 'Settings' | 'Privacy' | 'Terms';
+type AppScreen = 'Main' | 'ChatGit' | 'Browser' | 'Settings' | 'Privacy' | 'Terms';
 type Screen = AppScreen | 'Onboarding';
 
 const DRAWER_WIDTH = 280;
@@ -154,6 +155,8 @@ export default function App() {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [appearancePreference, setAppearancePreference] =
     useState<AppearancePreference>('system');
+  const [recentBrowserTargetUrls, setRecentBrowserTargetUrls] = useState<string[]>([]);
+  const [pendingBrowserTargetUrl, setPendingBrowserTargetUrl] = useState<string | null>(null);
   const [appLifecycleState, setAppLifecycleState] = useState<AppStateStatus>(
     AppState.currentState
   );
@@ -438,7 +441,8 @@ export default function App() {
       nextDefaultEngineSettings: EngineDefaultSettingsMap,
       nextApprovalMode: ApprovalMode,
       nextShowToolCalls: boolean,
-      nextAppearancePreference: AppearancePreference
+      nextAppearancePreference: AppearancePreference,
+      nextRecentBrowserTargetUrls: string[]
     ) => {
       const settingsPath = getAppSettingsPath();
       if (!settingsPath) {
@@ -453,6 +457,7 @@ export default function App() {
         approvalMode: nextApprovalMode,
         showToolCalls: nextShowToolCalls,
         appearancePreference: nextAppearancePreference,
+        recentBrowserTargetUrls: nextRecentBrowserTargetUrls,
       });
 
       try {
@@ -474,6 +479,7 @@ export default function App() {
       setApprovalMode('yolo');
       setShowToolCalls(true);
       setAppearancePreference('system');
+      setRecentBrowserTargetUrls([]);
     };
 
     const loadSettings = async () => {
@@ -517,6 +523,7 @@ export default function App() {
         setApprovalMode(parsed.approvalMode);
         setShowToolCalls(parsed.showToolCalls);
         setAppearancePreference(parsed.appearancePreference);
+        setRecentBrowserTargetUrls(parsed.recentBrowserTargetUrls);
 
         if (parsed.bridgeUrl || parsed.bridgeToken) {
           void saveAppSettings(
@@ -525,7 +532,8 @@ export default function App() {
             parsed.defaultEngineSettings,
             parsed.approvalMode,
             parsed.showToolCalls,
-            parsed.appearancePreference
+            parsed.appearancePreference,
+            parsed.recentBrowserTargetUrls
           );
         }
       } catch {
@@ -753,13 +761,15 @@ export default function App() {
         defaultEngineSettings,
         approvalMode,
         showToolCalls,
-        appearancePreference
+        appearancePreference,
+        recentBrowserTargetUrls
       );
     },
     [
       approvalMode,
       defaultEngineSettings,
       defaultStartCwd,
+      recentBrowserTargetUrls,
       saveAppSettings,
       showToolCalls,
       appearancePreference,
@@ -785,7 +795,8 @@ export default function App() {
         nextDefaultEngineSettings,
         approvalMode,
         showToolCalls,
-        appearancePreference
+        appearancePreference,
+        recentBrowserTargetUrls
       );
     },
     [
@@ -793,6 +804,7 @@ export default function App() {
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
+      recentBrowserTargetUrls,
       saveAppSettings,
       showToolCalls,
       appearancePreference,
@@ -809,13 +821,15 @@ export default function App() {
         defaultEngineSettings,
         normalizedMode,
         showToolCalls,
-        appearancePreference
+        appearancePreference,
+        recentBrowserTargetUrls
       );
     },
     [
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
+      recentBrowserTargetUrls,
       saveAppSettings,
       showToolCalls,
       appearancePreference,
@@ -831,7 +845,8 @@ export default function App() {
         defaultEngineSettings,
         approvalMode,
         nextValue,
-        appearancePreference
+        appearancePreference,
+        recentBrowserTargetUrls
       );
     },
     [
@@ -839,6 +854,7 @@ export default function App() {
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
+      recentBrowserTargetUrls,
       saveAppSettings,
       appearancePreference,
     ]
@@ -854,13 +870,15 @@ export default function App() {
         defaultEngineSettings,
         approvalMode,
         showToolCalls,
-        appearancePreference
+        appearancePreference,
+        recentBrowserTargetUrls
       );
     },
     [
       approvalMode,
       defaultChatEngine,
       defaultEngineSettings,
+      recentBrowserTargetUrls,
       saveAppSettings,
       showToolCalls,
       appearancePreference,
@@ -876,7 +894,8 @@ export default function App() {
         defaultEngineSettings,
         approvalMode,
         showToolCalls,
-        nextPreference
+        nextPreference,
+        recentBrowserTargetUrls
       );
     },
     [
@@ -884,9 +903,45 @@ export default function App() {
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
+      recentBrowserTargetUrls,
       saveAppSettings,
       showToolCalls,
     ]
+  );
+
+  const handleRecentBrowserTargetUrlsChange = useCallback(
+    (nextTargets: string[]) => {
+      setRecentBrowserTargetUrls(nextTargets);
+      void saveAppSettings(
+        defaultStartCwd,
+        defaultChatEngine,
+        defaultEngineSettings,
+        approvalMode,
+        showToolCalls,
+        appearancePreference,
+        nextTargets
+      );
+    },
+    [
+      approvalMode,
+      appearancePreference,
+      defaultChatEngine,
+      defaultEngineSettings,
+      defaultStartCwd,
+      saveAppSettings,
+      showToolCalls,
+    ]
+  );
+
+  const openBrowser = useCallback(
+    (targetUrl?: string | null) => {
+      if (typeof targetUrl === 'string' && targetUrl.trim().length > 0) {
+        setPendingBrowserTargetUrl(targetUrl.trim());
+      }
+      setCurrentScreen('Browser');
+      closeDrawer();
+    },
+    [closeDrawer]
   );
 
   const resetBridgeSessionState = useCallback(() => {
@@ -925,7 +980,8 @@ export default function App() {
         defaultEngineSettings,
         approvalMode,
         showToolCalls,
-        appearancePreference
+        appearancePreference,
+        recentBrowserTargetUrls
       );
       setCurrentScreen(onboardingMode === 'initial' ? 'Main' : onboardingReturnScreen);
       setOnboardingMode('edit');
@@ -941,6 +997,7 @@ export default function App() {
       defaultStartCwd,
       onboardingMode,
       onboardingReturnScreen,
+      recentBrowserTargetUrls,
       resetBridgeSessionState,
       saveAppSettings,
       showToolCalls,
@@ -1107,6 +1164,7 @@ export default function App() {
             bridgeToken={bridgeToken}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
+            onOpenLocalPreview={openBrowser}
             defaultStartCwd={defaultStartCwd}
             defaultChatEngine={defaultChatEngine}
             defaultEngineSettings={defaultEngineSettings}
@@ -1146,8 +1204,21 @@ export default function App() {
             onSwitchBridgeProfile={handleSwitchBridgeProfile}
             onClearSavedBridges={handleClearSavedBridges}
             onOpenDrawer={openDrawer}
+            onOpenBrowser={openBrowser}
             onOpenPrivacy={openPrivacy}
             onOpenTerms={openTerms}
+          />
+        );
+      case 'Browser':
+        return (
+          <BrowserScreen
+            api={activeApi}
+            bridgeUrl={bridgeUrl}
+            onOpenDrawer={openDrawer}
+            recentTargetUrls={recentBrowserTargetUrls}
+            onRecentTargetUrlsChange={handleRecentBrowserTargetUrlsChange}
+            pendingTargetUrl={pendingBrowserTargetUrl}
+            onPendingTargetHandled={() => setPendingBrowserTargetUrl(null)}
           />
         );
       case 'Privacy':
@@ -1174,6 +1245,7 @@ export default function App() {
             bridgeToken={bridgeToken}
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
+            onOpenLocalPreview={openBrowser}
             defaultStartCwd={defaultStartCwd}
             defaultChatEngine={defaultChatEngine}
             defaultEngineSettings={defaultEngineSettings}

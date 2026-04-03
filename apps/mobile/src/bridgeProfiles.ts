@@ -1,8 +1,16 @@
 import * as SecureStore from 'expo-secure-store';
+import { Platform } from 'react-native';
 
 import { normalizeBridgeUrlInput } from './bridgeUrl';
 
 const BRIDGE_PROFILE_STORE_KEY = 'clawdex.bridge-profiles.v1';
+let bridgeProfileStoreMemoryFallback: string | null = null;
+
+interface WebStorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
 
 export interface BridgeProfile {
   id: string;
@@ -70,7 +78,7 @@ export function parseBridgeProfileStore(raw: string | null | undefined): BridgeP
 
 export async function loadBridgeProfileStore(): Promise<BridgeProfileStore> {
   try {
-    const raw = await SecureStore.getItemAsync(BRIDGE_PROFILE_STORE_KEY);
+    const raw = await readBridgeProfileStoreRaw();
     return parseBridgeProfileStore(raw);
   } catch {
     return createEmptyBridgeProfileStore();
@@ -80,13 +88,11 @@ export async function loadBridgeProfileStore(): Promise<BridgeProfileStore> {
 export async function saveBridgeProfileStore(store: BridgeProfileStore): Promise<void> {
   const sanitized = sanitizeBridgeProfileStore(store);
   const raw = JSON.stringify(sanitized);
-  await SecureStore.setItemAsync(BRIDGE_PROFILE_STORE_KEY, raw, {
-    keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
-  });
+  await writeBridgeProfileStoreRaw(raw);
 }
 
 export async function clearBridgeProfileStore(): Promise<void> {
-  await SecureStore.deleteItemAsync(BRIDGE_PROFILE_STORE_KEY);
+  await deleteBridgeProfileStoreRaw();
 }
 
 export function upsertBridgeProfile(
@@ -254,4 +260,96 @@ function normalizeTimestamp(value: unknown): string {
 
 function createBridgeProfileId(): string {
   return `bridge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function readBridgeProfileStoreRaw(): Promise<string | null> {
+  if (Platform.OS === 'web') {
+    return readBridgeProfileStoreRawFromWeb();
+  }
+
+  return SecureStore.getItemAsync(BRIDGE_PROFILE_STORE_KEY);
+}
+
+async function writeBridgeProfileStoreRaw(raw: string): Promise<void> {
+  if (Platform.OS === 'web') {
+    writeBridgeProfileStoreRawToWeb(raw);
+    return;
+  }
+
+  await SecureStore.setItemAsync(BRIDGE_PROFILE_STORE_KEY, raw, {
+    keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+  });
+}
+
+async function deleteBridgeProfileStoreRaw(): Promise<void> {
+  if (Platform.OS === 'web') {
+    deleteBridgeProfileStoreRawFromWeb();
+    return;
+  }
+
+  await SecureStore.deleteItemAsync(BRIDGE_PROFILE_STORE_KEY);
+}
+
+function readBridgeProfileStoreRawFromWeb(): string | null {
+  const storage = getWebStorage();
+  if (!storage) {
+    return bridgeProfileStoreMemoryFallback;
+  }
+
+  try {
+    return storage.getItem(BRIDGE_PROFILE_STORE_KEY);
+  } catch {
+    return bridgeProfileStoreMemoryFallback;
+  }
+}
+
+function writeBridgeProfileStoreRawToWeb(raw: string): void {
+  bridgeProfileStoreMemoryFallback = raw;
+  const storage = getWebStorage();
+  if (!storage) {
+    return;
+  }
+
+  try {
+    storage.setItem(BRIDGE_PROFILE_STORE_KEY, raw);
+  } catch {
+    // Ignore web storage write failures and keep the in-memory fallback.
+  }
+}
+
+function deleteBridgeProfileStoreRawFromWeb(): void {
+  bridgeProfileStoreMemoryFallback = null;
+  const storage = getWebStorage();
+  if (!storage) {
+    return;
+  }
+
+  try {
+    storage.removeItem(BRIDGE_PROFILE_STORE_KEY);
+  } catch {
+    // Ignore web storage delete failures and clear the in-memory fallback.
+  }
+}
+
+function getWebStorage(): WebStorageLike | null {
+  if (typeof globalThis !== 'object' || globalThis === null) {
+    return null;
+  }
+
+  const storage = (
+    globalThis as typeof globalThis & {
+      localStorage?: Partial<WebStorageLike> | undefined;
+    }
+  ).localStorage;
+
+  if (
+    !storage ||
+    typeof storage.getItem !== 'function' ||
+    typeof storage.setItem !== 'function' ||
+    typeof storage.removeItem !== 'function'
+  ) {
+    return null;
+  }
+
+  return storage as WebStorageLike;
 }

@@ -4,10 +4,11 @@ import type {
   EngineDefaultSettingsMap,
   ReasoningEffort,
 } from './api/types';
+import { dedupeRecentPreviewTargets, normalizePreviewTargetInput } from './browserPreview';
 import { normalizeBridgeUrlInput } from './bridgeUrl';
 import type { AppearancePreference } from './theme';
 
-export const APP_SETTINGS_VERSION = 6;
+export const APP_SETTINGS_VERSION = 7;
 
 export function parseAppSettings(raw: string): {
   bridgeUrl: string | null;
@@ -18,6 +19,7 @@ export function parseAppSettings(raw: string): {
   approvalMode: ApprovalMode;
   showToolCalls: boolean;
   appearancePreference: AppearancePreference;
+  recentBrowserTargetUrls: string[];
 } {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
     return {
@@ -29,6 +31,7 @@ export function parseAppSettings(raw: string): {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      recentBrowserTargetUrls: [],
     };
   }
 
@@ -43,6 +46,7 @@ export function parseAppSettings(raw: string): {
         parsedVersion !== 3 &&
         parsedVersion !== 4 &&
         parsedVersion !== 5 &&
+        parsedVersion !== 6 &&
         parsedVersion !== APP_SETTINGS_VERSION)
     ) {
       return {
@@ -54,6 +58,7 @@ export function parseAppSettings(raw: string): {
         approvalMode: 'yolo',
         showToolCalls: true,
         appearancePreference: 'system',
+        recentBrowserTargetUrls: [],
       };
     }
 
@@ -92,6 +97,9 @@ export function parseAppSettings(raw: string): {
         (parsed as { appearancePreference?: unknown }).appearancePreference,
         parsedVersion === 4 ? 'dark' : 'system'
       ),
+      recentBrowserTargetUrls: normalizeBrowserTargetUrls(
+        (parsed as { recentBrowserTargetUrls?: unknown }).recentBrowserTargetUrls
+      ),
     };
   } catch {
     return {
@@ -103,6 +111,7 @@ export function parseAppSettings(raw: string): {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      recentBrowserTargetUrls: [],
     };
   }
 }
@@ -229,6 +238,18 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffort | null {
   }
 
   return null;
+}
+
+function normalizeBrowserTargetUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return dedupeRecentPreviewTargets(
+    value
+      .map((entry) => (typeof entry === 'string' ? normalizePreviewTargetInput(entry) : null))
+      .filter((entry): entry is string => typeof entry === 'string')
+  );
 }
 
 function normalizeStoredApprovalMode(value: unknown): ApprovalMode {

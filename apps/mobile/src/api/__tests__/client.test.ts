@@ -74,6 +74,7 @@ describe('HostBridgeApiClient', () => {
       version: '5.0.4',
       installKind: 'publishedCli',
       selfUpdateSupported: true,
+      safeRestartSupported: true,
       latestVersion: '5.0.5',
       updaterStatus: null,
     });
@@ -101,6 +102,21 @@ describe('HostBridgeApiClient', () => {
     expect(ws.request).toHaveBeenCalledWith('bridge/update/start', {
       version: 'latest',
     });
+    expect(result.ok).toBe(true);
+  });
+
+  it('startBridgeRestart() calls bridge/restart/start', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      ok: true,
+      jobId: 'bridge-restart-1',
+      message: 'scheduled',
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.startBridgeRestart();
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/restart/start');
     expect(result.ok).toBe(true);
   });
 
@@ -488,6 +504,53 @@ describe('HostBridgeApiClient', () => {
         },
       ],
     });
+  });
+
+  it('createBrowserPreviewSession() requests bridge/browser/session/create', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      sessionId: 'preview-1',
+      targetUrl: 'http://127.0.0.1:3000/',
+      previewPort: 8788,
+      bootstrapPath: '/?sid=preview-1&st=secret',
+      createdAt: '2026-01-01T00:00:00Z',
+      lastAccessedAt: '2026-01-01T00:00:00Z',
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.createBrowserPreviewSession('http://127.0.0.1:3000/');
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/browser/session/create', {
+      targetUrl: 'http://127.0.0.1:3000/',
+    });
+    expect(result.previewPort).toBe(8788);
+    expect(result.bootstrapPath).toBe('/?sid=preview-1&st=secret');
+  });
+
+  it('discoverBrowserPreviewTargets() maps bridge/browser/targets/discover', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      scannedAt: '2026-01-01T00:00:00Z',
+      suggestions: [
+        {
+          targetUrl: 'http://127.0.0.1:3000/',
+          port: 3000,
+          label: 'Local dev server on :3000',
+        },
+      ],
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.discoverBrowserPreviewTargets();
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/browser/targets/discover');
+    expect(result.suggestions).toEqual([
+      {
+        targetUrl: 'http://127.0.0.1:3000/',
+        port: 3000,
+        label: 'Local dev server on :3000',
+      },
+    ]);
   });
 
   it('sendChatMessage() starts a turn without waiting for completion', async () => {

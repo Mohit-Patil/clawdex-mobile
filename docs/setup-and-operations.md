@@ -80,16 +80,20 @@ When both CLIs are selected, the bridge starts both backends and merges chat lis
 
 Open the installed mobile app on your phone, then scan the bridge QR. If needed, enter the bridge URL manually (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). The chosen bridge URL is stored on-device and can be changed later in Settings.
 
-### In-app Bridge Update
+### In-app Bridge Maintenance
 
-For published `clawdex-mobile` CLI installs, the mobile Settings screen can start a bridge update safely.
+For secure-launcher installs, the mobile Settings screen can trigger bridge maintenance safely.
 
 - Open `Settings > Bridge Maintenance`
-- Tap `Update bridge`
-- The app will disconnect briefly while a detached helper job stops the current bridge, runs `npm install -g clawdex-mobile@latest`, and starts the bridge again
+- Tap `Restart bridge safely` to stop the current bridge and relaunch it through `scripts/start-bridge-secure.js`
+- The app will disconnect briefly while the detached helper waits for bridge health to recover
+
+Published `clawdex-mobile` CLI installs also expose `Update bridge`.
+
+- `Update bridge` stops the current bridge, runs `npm install -g clawdex-mobile@latest`, and starts the bridge again
 - If the upgrade step fails, the helper attempts to restart the previous bridge automatically
 
-Source checkouts do not expose this button because they need repo-specific update logic that is not safe to automate generically from mobile.
+Source checkouts expose only the restart action because repo-specific update logic is not safe to automate generically from mobile.
 
 ## Local Mobile Development Only
 
@@ -109,6 +113,30 @@ Optional environment variables:
 - `CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD=true` — ignore a bundled bridge binary and build from local Rust sources instead
 - `EXPO_AUTO_REPAIR=true` — auto-repair React Native runtime on `npm run mobile`
 - `EXPO_CLEAR_CACHE=true` — force `expo start --clear` via `npm run mobile`
+
+## Local Browser Preview
+
+The mobile app includes a `Browser` screen that can open loopback-only web apps from the bridge
+machine inside the app itself.
+
+Typical examples:
+
+- `localhost:3000`
+- `127.0.0.1:5173`
+- `3000`
+
+How it works:
+
+- The app creates a short-lived preview session through the bridge RPC API
+- The bridge serves a dedicated preview origin on a separate port
+- HTTP requests, subresources, cookies, and WebSocket/HMR traffic are proxied from the phone to
+  the bridge host's loopback target
+
+Current scope:
+
+- Supports `http://` and `https://` loopback targets only
+- Intended for local web dev servers such as Next.js, Vite, CRA, or simple static servers
+- Does not preview native React Native simulator/device UI directly
 
 ## Teardown / Cleanup
 
@@ -138,6 +166,7 @@ npm run teardown -- --yes
 |---|---|
 | `BRIDGE_HOST` | bind host for rust bridge |
 | `BRIDGE_PORT` | bridge port (default `8787`) |
+| `BRIDGE_PREVIEW_PORT` | browser preview port for proxied localhost web apps (default `BRIDGE_PORT + 1`) |
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query-token auth fallback |
 | `CODEX_CLI_BIN` | codex executable |
@@ -207,6 +236,7 @@ Expected response contains `"status":"ok"`.
 6. Open Git from header and verify status/diff/commit/push behavior
 7. Test attachment menu (`+`) with workspace path + phone file/image
 8. Run long task and verify stop button interrupts run and transcript logs stop
+9. Open `Browser`, enter `localhost:3000` or another active loopback dev port, and verify the page loads inside the app
 
 ## Chat Controls (Workspace, Model, Mode, Approvals)
 

@@ -451,7 +451,28 @@ export interface BridgeCapabilities {
     turnSteer: boolean;
     commandOutputDelta: boolean;
     selfUpdate: boolean;
+    browserPreview: boolean;
   };
+}
+
+export interface BrowserPreviewSession {
+  sessionId: string;
+  targetUrl: string;
+  previewPort: number;
+  bootstrapPath: string;
+  createdAt: string;
+  lastAccessedAt: string;
+}
+
+export interface BrowserPreviewTargetSuggestion {
+  targetUrl: string;
+  port: number;
+  label: string;
+}
+
+export interface BrowserPreviewDiscoveryResponse {
+  scannedAt: string;
+  suggestions: BrowserPreviewTargetSuggestion[];
 }
 
 export type BridgeInstallKind = 'publishedCli' | 'sourceCheckout' | 'unknown';
@@ -471,6 +492,7 @@ export interface BridgeRuntimeInfo {
   version: string;
   installKind: BridgeInstallKind;
   selfUpdateSupported: boolean;
+  safeRestartSupported: boolean;
   latestVersion?: string | null;
   updaterStatus?: BridgeUpdaterStatus | null;
 }
@@ -479,6 +501,13 @@ export interface BridgeUpdateStartResponse {
   ok: boolean;
   jobId: string;
   targetVersion: string;
+  message: string;
+  logPath?: string | null;
+}
+
+export interface BridgeRestartStartResponse {
+  ok: boolean;
+  jobId: string;
   message: string;
   logPath?: string | null;
 }
