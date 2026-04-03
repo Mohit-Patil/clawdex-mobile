@@ -4725,24 +4725,9 @@ async fn handle_preview_http_request(
         );
     }
 
-    let request_target = match resolve_preview_request_target(
-        &session.target_url,
-        &sanitized_path_and_query,
-    ) {
-        Ok(target) => target,
-        Err(error) => {
-            return preview_error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("invalid preview request path: {error}"),
-            );
-        }
-    };
-    let upstream_url = match build_preview_upstream_url(
-        &request_target.target_url,
-        &request_target.path_and_query,
-        false,
-    ) {
-            Ok(url) => url,
+    let request_target =
+        match resolve_preview_request_target(&session.target_url, &sanitized_path_and_query) {
+            Ok(target) => target,
             Err(error) => {
                 return preview_error_response(
                     StatusCode::BAD_REQUEST,
@@ -4750,6 +4735,19 @@ async fn handle_preview_http_request(
                 );
             }
         };
+    let upstream_url = match build_preview_upstream_url(
+        &request_target.target_url,
+        &request_target.path_and_query,
+        false,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid preview request path: {error}"),
+            );
+        }
+    };
 
     let body_bytes = match to_bytes(body, BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES).await {
         Ok(bytes) => bytes,
@@ -4816,8 +4814,8 @@ async fn handle_preview_http_request(
                 );
             }
         };
-        let rewritten_body = rewrite_preview_html_document(&upstream_body)
-            .unwrap_or_else(|| upstream_body.to_vec());
+        let rewritten_body =
+            rewrite_preview_html_document(&upstream_body).unwrap_or_else(|| upstream_body.to_vec());
         let mut response = Response::new(Body::from(rewritten_body));
         *response.status_mut() = status;
         response
@@ -4840,14 +4838,12 @@ async fn handle_preview_http_request(
         }
 
         if name.as_str().eq_ignore_ascii_case(LOCATION.as_str()) {
-            if let Some(rewritten) =
-                rewrite_preview_location_header(
-                    value,
-                    &request_target.target_url,
-                    request_host.as_deref(),
-                    request_target.proxy_path_prefix.as_deref(),
-                )
-            {
+            if let Some(rewritten) = rewrite_preview_location_header(
+                value,
+                &upstream_url,
+                request_host.as_deref(),
+                request_target.proxy_path_prefix.as_deref(),
+            ) {
                 response.headers_mut().append(LOCATION, rewritten);
             }
             continue;
@@ -4867,10 +4863,9 @@ async fn handle_preview_http_request(
     }
 
     if rewrite_html {
-        response.headers_mut().insert(
-            CACHE_CONTROL,
-            HeaderValue::from_static("no-store, private"),
-        );
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store, private"));
         append_vary_header_value(response.headers_mut(), "Cookie");
     }
 
@@ -4894,24 +4889,9 @@ async fn handle_preview_websocket_request(
             Err(response) => return response,
         };
 
-    let request_target = match resolve_preview_request_target(
-        &session.target_url,
-        &sanitized_path_and_query,
-    ) {
-        Ok(target) => target,
-        Err(error) => {
-            return preview_error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("invalid websocket preview path: {error}"),
-            );
-        }
-    };
-    let upstream_url = match build_preview_upstream_url(
-        &request_target.target_url,
-        &request_target.path_and_query,
-        true,
-    ) {
-            Ok(url) => url,
+    let request_target =
+        match resolve_preview_request_target(&session.target_url, &sanitized_path_and_query) {
+            Ok(target) => target,
             Err(error) => {
                 return preview_error_response(
                     StatusCode::BAD_REQUEST,
@@ -4919,6 +4899,19 @@ async fn handle_preview_websocket_request(
                 );
             }
         };
+    let upstream_url = match build_preview_upstream_url(
+        &request_target.target_url,
+        &request_target.path_and_query,
+        true,
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid websocket preview path: {error}"),
+            );
+        }
+    };
 
     let original_headers = parts.headers.clone();
     let mut upstream_request = match upstream_url.as_str().into_client_request() {
@@ -6219,7 +6212,12 @@ async fn resolve_preview_session_from_request(
         ));
     };
 
-    Ok((session, None, params.viewport_preset, params.sanitized_path_and_query))
+    Ok((
+        session,
+        None,
+        params.viewport_preset,
+        params.sanitized_path_and_query,
+    ))
 }
 
 fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
@@ -6357,7 +6355,10 @@ fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn should_rewrite_preview_html_response(headers: &HeaderMap) -> bool {
-    let Some(content_type) = headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()) else {
+    let Some(content_type) = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
         return false;
     };
     let normalized = content_type.to_ascii_lowercase();
@@ -6390,8 +6391,7 @@ fn inject_preview_runtime_script(document: &str) -> String {
         return document.to_string();
     }
 
-    let script_tag =
-        format!(r#"<script src="{BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH}"></script>"#);
+    let script_tag = format!(r#"<script src="{BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH}"></script>"#);
     inject_preview_head_markup(document, &script_tag)
 }
 
@@ -6495,21 +6495,30 @@ fn build_preview_runtime_script() -> String {
 
   if (typeof EventSource === "function") {{
     var OriginalEventSource = EventSource;
-    globalThis.EventSource = function(url, config) {{
-      return new OriginalEventSource(toProxyUrl(url) || url, config);
-    }};
-    globalThis.EventSource.prototype = OriginalEventSource.prototype;
+    globalThis.EventSource = new Proxy(OriginalEventSource, {{
+      construct(target, args, newTarget) {{
+        var url = args[0];
+        var config = args[1];
+        var rewritten = toProxyUrl(url) || url;
+        return config === undefined
+          ? Reflect.construct(target, [rewritten], newTarget)
+          : Reflect.construct(target, [rewritten, config], newTarget);
+      }},
+    }});
   }}
 
   if (typeof WebSocket === "function") {{
     var OriginalWebSocket = WebSocket;
-    globalThis.WebSocket = function(url, protocols) {{
-      var rewritten = toProxyWebSocketUrl(url) || url;
-      return protocols === undefined
-        ? new OriginalWebSocket(rewritten)
-        : new OriginalWebSocket(rewritten, protocols);
-    }};
-    globalThis.WebSocket.prototype = OriginalWebSocket.prototype;
+    globalThis.WebSocket = new Proxy(OriginalWebSocket, {{
+      construct(target, args, newTarget) {{
+        var url = args[0];
+        var protocols = args[1];
+        var rewritten = toProxyWebSocketUrl(url) || url;
+        return protocols === undefined
+          ? Reflect.construct(target, [rewritten], newTarget)
+          : Reflect.construct(target, [rewritten, protocols], newTarget);
+      }},
+    }});
   }}
 
   if (globalThis.navigator && typeof globalThis.navigator.sendBeacon === "function") {{
@@ -6677,10 +6686,9 @@ fn decode_preview_proxy_origin_token(token: &str) -> Result<Url, String> {
     let decoded = general_purpose::URL_SAFE_NO_PAD
         .decode(token)
         .map_err(|error| format!("invalid proxied preview target: {error}"))?;
-    let origin =
-        String::from_utf8(decoded).map_err(|_| "invalid proxied preview target encoding".to_string())?;
-    let mut url =
-        normalize_browser_preview_target_url(&origin).map_err(|error| error.message)?;
+    let origin = String::from_utf8(decoded)
+        .map_err(|_| "invalid proxied preview target encoding".to_string())?;
+    let mut url = normalize_browser_preview_target_url(&origin).map_err(|error| error.message)?;
     url.set_query(None);
     url.set_fragment(None);
     Ok(url)
@@ -6819,17 +6827,21 @@ fn rewrite_preview_request_header(
 
 fn rewrite_preview_location_header(
     value: &HeaderValue,
-    target_url: &Url,
+    current_upstream_url: &Url,
     request_host: Option<&str>,
     proxy_path_prefix: Option<&str>,
 ) -> Option<HeaderValue> {
     let raw = value.to_str().ok()?;
-    let Ok(location_url) = Url::parse(raw) else {
-        return Some(value.clone());
+    let location_url = match Url::parse(raw) {
+        Ok(url) => url,
+        Err(_) => match current_upstream_url.join(raw) {
+            Ok(url) => url,
+            Err(_) => return Some(value.clone()),
+        },
     };
-    if location_url.scheme() != target_url.scheme()
-        || location_url.host_str() != target_url.host_str()
-        || location_url.port_or_known_default() != target_url.port_or_known_default()
+    if location_url.scheme() != current_upstream_url.scheme()
+        || location_url.host_str() != current_upstream_url.host_str()
+        || location_url.port_or_known_default() != current_upstream_url.port_or_known_default()
     {
         return Some(value.clone());
     }
@@ -6837,13 +6849,17 @@ fn rewrite_preview_location_header(
     let request_host = request_host?.trim();
     let path_prefix = proxy_path_prefix.unwrap_or_default();
     let rewritten = format!(
-        "http://{}{}{}{}",
+        "http://{}{}{}{}{}",
         request_host,
         path_prefix,
         location_url.path(),
         location_url
             .query()
             .map(|query| format!("?{query}"))
+            .unwrap_or_default(),
+        location_url
+            .fragment()
+            .map(|fragment| format!("#{fragment}"))
             .unwrap_or_default()
     );
     HeaderValue::from_str(&rewritten).ok()
@@ -9230,7 +9246,10 @@ mod tests {
         assert_eq!(params.session_id.as_deref(), Some("session-1"));
         assert_eq!(params.bootstrap_token.as_deref(), Some("token-1"));
         assert_eq!(params.viewport_preset, Some(PreviewViewportPreset::Desktop));
-        assert_eq!(params.sanitized_path_and_query, "/index.html?foo=bar&baz=qux");
+        assert_eq!(
+            params.sanitized_path_and_query,
+            "/index.html?foo=bar&baz=qux"
+        );
     }
 
     #[test]
@@ -9240,8 +9259,7 @@ mod tests {
             &Url::parse("http://127.0.0.1:3000/").expect("valid root target"),
             &format!(
                 "{}/{}/api/users?limit=5",
-                BROWSER_PREVIEW_PROXY_PREFIX,
-                target_token
+                BROWSER_PREVIEW_PROXY_PREFIX, target_token
             ),
         )
         .expect("proxied preview target");
@@ -9260,7 +9278,7 @@ mod tests {
         let location = HeaderValue::from_static("http://127.0.0.1:4000/auth/login?next=%2Fdash");
         let rewritten = rewrite_preview_location_header(
             &location,
-            &Url::parse("http://127.0.0.1:4000/").expect("valid target"),
+            &Url::parse("http://127.0.0.1:4000/").expect("valid upstream request"),
             Some("100.108.165.85:8788"),
             Some("/__clawdex_proxy__/aGVsbG8"),
         )
@@ -9273,15 +9291,47 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_preview_set_cookie_header_scopes_proxy_backend_cookies() {
-        let cookie = HeaderValue::from_static(
-            "session=abc123; Path=/; Domain=localhost; HttpOnly; SameSite=Lax"
-        );
-        let rewritten = rewrite_preview_set_cookie_header(
-            &cookie,
+    fn rewrite_preview_location_header_rewrites_relative_backend_redirects() {
+        let location = HeaderValue::from_static("/auth/login?next=%2Fdash#top");
+        let rewritten = rewrite_preview_location_header(
+            &location,
+            &Url::parse("http://127.0.0.1:4000/api/session").expect("valid upstream request"),
+            Some("100.108.165.85:8788"),
             Some("/__clawdex_proxy__/aGVsbG8"),
         )
-        .expect("rewritten cookie");
+        .expect("rewritten location");
+
+        assert_eq!(
+            rewritten.to_str().expect("header string"),
+            "http://100.108.165.85:8788/__clawdex_proxy__/aGVsbG8/auth/login?next=%2Fdash#top"
+        );
+    }
+
+    #[test]
+    fn rewrite_preview_location_header_rewrites_relative_query_only_redirects() {
+        let location = HeaderValue::from_static("?tab=2");
+        let rewritten = rewrite_preview_location_header(
+            &location,
+            &Url::parse("http://127.0.0.1:4000/settings/profile").expect("valid upstream request"),
+            Some("100.108.165.85:8788"),
+            Some("/__clawdex_proxy__/aGVsbG8"),
+        )
+        .expect("rewritten location");
+
+        assert_eq!(
+            rewritten.to_str().expect("header string"),
+            "http://100.108.165.85:8788/__clawdex_proxy__/aGVsbG8/settings/profile?tab=2"
+        );
+    }
+
+    #[test]
+    fn rewrite_preview_set_cookie_header_scopes_proxy_backend_cookies() {
+        let cookie = HeaderValue::from_static(
+            "session=abc123; Path=/; Domain=localhost; HttpOnly; SameSite=Lax",
+        );
+        let rewritten =
+            rewrite_preview_set_cookie_header(&cookie, Some("/__clawdex_proxy__/aGVsbG8"))
+                .expect("rewritten cookie");
 
         assert_eq!(
             rewritten.to_str().expect("cookie string"),
@@ -9306,6 +9356,9 @@ mod tests {
         assert!(script.contains("LOOPBACK_HOSTS"));
         assert!(script.contains(BROWSER_PREVIEW_PROXY_PREFIX));
         assert!(script.contains("XMLHttpRequest.prototype.open"));
+        assert!(script.contains("new Proxy(OriginalEventSource"));
+        assert!(script.contains("new Proxy(OriginalWebSocket"));
+        assert!(script.contains("Reflect.construct"));
     }
 
     #[test]
