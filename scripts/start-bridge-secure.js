@@ -579,6 +579,9 @@ async function start() {
   const fileEnv = readEnvFile(secureEnvFile);
   const env = { ...fileEnv, ...process.env };
   const devMode = process.argv.includes("--dev") || env.BRIDGE_RUN_MODE === "dev";
+  if (devMode) {
+    env.BRIDGE_RUN_MODE = "dev";
+  }
   const backgroundMode = process.argv.includes("--background");
   const forceSourceBuild = env.CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD === "true";
   const launch = resolveLaunch(rootDir, env, { devMode, forceSourceBuild });

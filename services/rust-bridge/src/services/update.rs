@@ -36,6 +36,7 @@ pub(crate) struct BridgeRuntimeInfo {
     pub(crate) version: String,
     pub(crate) install_kind: BridgeInstallKind,
     pub(crate) self_update_supported: bool,
+    pub(crate) safe_restart_supported: bool,
     pub(crate) latest_version: Option<String>,
     pub(crate) updater_status: Option<BridgeUpdaterStatus>,
 }
@@ -50,6 +51,44 @@ pub(crate) struct BridgeUpdateStartResponse {
     pub(crate) log_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BridgeRestartStartResponse {
+    pub(crate) ok: bool,
+    pub(crate) job_id: String,
+    pub(crate) message: String,
+    pub(crate) log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeMaintenanceAction {
+    Update,
+    Restart,
+}
+
+impl BridgeMaintenanceAction {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Restart => "restart",
+        }
+    }
+
+    fn job_prefix(self) -> &'static str {
+        match self {
+            Self::Update => "bridge-update",
+            Self::Restart => "bridge-restart",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BridgeMaintenanceJobStart {
+    job_id: String,
+    target_version: String,
+    log_path: Option<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct UpdateService {
     package_root: Option<PathBuf>,
@@ -57,6 +96,8 @@ pub(crate) struct UpdateService {
     status_path: Option<PathBuf>,
     log_path: Option<PathBuf>,
     script_path: Option<PathBuf>,
+    launcher_path: Option<PathBuf>,
+    secure_env_path: Option<PathBuf>,
 }
 
 impl UpdateService {
@@ -75,6 +116,10 @@ impl UpdateService {
         let script_path = package_root
             .as_ref()
             .map(|root| root.join("scripts").join("bridge-self-update.js"));
+        let launcher_path = package_root
+            .as_ref()
+            .map(|root| root.join("scripts").join("start-bridge-secure.js"));
+        let secure_env_path = package_root.as_ref().map(|root| root.join(".env.secure"));
 
         Self {
             package_root,
@@ -82,13 +127,26 @@ impl UpdateService {
             status_path,
             log_path,
             script_path,
+            launcher_path,
+            secure_env_path,
         }
     }
 
+    pub(crate) fn is_safe_restart_supported(&self) -> bool {
+        self.package_root.is_some()
+            && self.script_path.as_ref().is_some_and(|path| path.is_file())
+            && self
+                .launcher_path
+                .as_ref()
+                .is_some_and(|path| path.is_file())
+            && self
+                .secure_env_path
+                .as_ref()
+                .is_some_and(|path| path.is_file())
+    }
+
     pub(crate) fn is_self_update_supported(&self) -> bool {
-        self.install_kind == BridgeInstallKind::PublishedCli
-            && self.package_root.is_some()
-            && self.script_path.as_ref().is_some_and(|path| path.exists())
+        self.install_kind == BridgeInstallKind::PublishedCli && self.is_safe_restart_supported()
     }
 
     pub(crate) async fn runtime_info(&self) -> BridgeRuntimeInfo {
@@ -96,6 +154,7 @@ impl UpdateService {
             version: env!("CARGO_PKG_VERSION").to_string(),
             install_kind: self.install_kind,
             self_update_supported: self.is_self_update_supported(),
+            safe_restart_supported: self.is_safe_restart_supported(),
             latest_version: fetch_latest_npm_version().await,
             updater_status: self.read_status(),
         }
@@ -107,11 +166,68 @@ impl UpdateService {
         bridge_pid: u32,
         now_iso: &str,
     ) -> Result<BridgeUpdateStartResponse, String> {
-        if !self.is_self_update_supported() {
-            return Err(
-                "Bridge self-update is only supported for published clawdex-mobile CLI installs."
+        let job = self.start_job(
+            BridgeMaintenanceAction::Update,
+            version,
+            bridge_pid,
+            now_iso,
+        )?;
+
+        Ok(BridgeUpdateStartResponse {
+            ok: true,
+            job_id: job.job_id,
+            target_version: job.target_version.clone(),
+            message: format!(
+                "Bridge update scheduled for {}. The bridge will disconnect briefly and should restart automatically.",
+                job.target_version
+            ),
+            log_path: job.log_path,
+        })
+    }
+
+    pub(crate) fn start_restart(
+        &self,
+        bridge_pid: u32,
+        now_iso: &str,
+    ) -> Result<BridgeRestartStartResponse, String> {
+        let job = self.start_job(
+            BridgeMaintenanceAction::Restart,
+            env!("CARGO_PKG_VERSION"),
+            bridge_pid,
+            now_iso,
+        )?;
+
+        Ok(BridgeRestartStartResponse {
+            ok: true,
+            job_id: job.job_id,
+            message:
+                "Bridge restart scheduled. The bridge will disconnect briefly and should restart automatically."
                     .to_string(),
-            );
+            log_path: job.log_path,
+        })
+    }
+
+    fn start_job(
+        &self,
+        action: BridgeMaintenanceAction,
+        version: &str,
+        bridge_pid: u32,
+        now_iso: &str,
+    ) -> Result<BridgeMaintenanceJobStart, String> {
+        match action {
+            BridgeMaintenanceAction::Update if !self.is_self_update_supported() => {
+                return Err(
+                    "Bridge self-update is only supported for published clawdex-mobile CLI installs."
+                        .to_string(),
+                );
+            }
+            BridgeMaintenanceAction::Restart if !self.is_safe_restart_supported() => {
+                return Err(
+                    "Bridge safe restart requires a detected clawdex-mobile install with .env.secure and launcher scripts available."
+                        .to_string(),
+                );
+            }
+            _ => {}
         }
 
         let package_root = self
@@ -132,7 +248,7 @@ impl UpdateService {
             .ok_or_else(|| "bridge updater log path is missing".to_string())?;
 
         let target_version = normalize_target_version(version)?;
-        let job_id = create_job_id();
+        let job_id = create_job_id(action.job_prefix());
 
         let log_file = OpenOptions::new()
             .create(true)
@@ -146,6 +262,8 @@ impl UpdateService {
         let mut command = std::process::Command::new(node_command());
         command
             .arg(script_path)
+            .arg("--action")
+            .arg(action.as_arg())
             .arg("--job-id")
             .arg(&job_id)
             .arg("--bridge-pid")
@@ -170,13 +288,9 @@ impl UpdateService {
             .map_err(|error| format!("failed to spawn updater: {error}"))?;
         let _ = child.id();
 
-        Ok(BridgeUpdateStartResponse {
-            ok: true,
+        Ok(BridgeMaintenanceJobStart {
             job_id,
-            target_version: target_version.clone(),
-            message: format!(
-                "Bridge update scheduled for {target_version}. The bridge will disconnect briefly and should restart automatically."
-            ),
+            target_version,
             log_path: Some(log_path.to_string_lossy().to_string()),
         })
     }
@@ -273,9 +387,9 @@ fn normalize_target_version(value: &str) -> Result<String, String> {
     Err("version must be 'latest' or a simple npm package version".to_string())
 }
 
-fn create_job_id() -> String {
+fn create_job_id(prefix: &str) -> String {
     format!(
-        "bridge-update-{}-{}",
+        "{prefix}-{}-{}",
         chrono::Utc::now().timestamp_millis(),
         std::process::id()
     )

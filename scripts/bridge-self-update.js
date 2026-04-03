@@ -10,6 +10,7 @@ const https = require("node:https");
 
 function parseArgs(argv) {
   const parsed = {
+    action: "update",
     jobId: "",
     bridgePid: 0,
     version: "latest",
@@ -26,6 +27,9 @@ function parseArgs(argv) {
     }
 
     switch (flag) {
+      case "--action":
+        parsed.action = value;
+        break;
       case "--job-id":
         parsed.jobId = value;
         break;
@@ -51,6 +55,10 @@ function parseArgs(argv) {
 
   if (!parsed.jobId || !parsed.bridgePid || !parsed.statusPath) {
     throw new Error("missing updater arguments");
+  }
+
+  if (parsed.action !== "update" && parsed.action !== "restart") {
+    throw new Error(`unsupported bridge maintenance action: ${parsed.action}`);
   }
 
   return parsed;
@@ -262,7 +270,7 @@ async function main() {
   const secureEnvBackup = backupSecureEnv(packageRoot, args.jobId);
   const baseStatus = {
     jobId: args.jobId,
-    targetVersion: args.version,
+    targetVersion: args.action === "restart" ? args.version || "current" : args.version,
     startedAt: args.startedAt,
     logPath: args.logPath || null,
   };
@@ -270,7 +278,10 @@ async function main() {
   writeStatus(args.statusPath, {
     ...baseStatus,
     state: "scheduled",
-    message: `Bridge update scheduled for ${args.version}.`,
+    message:
+      args.action === "restart"
+        ? "Bridge restart scheduled."
+        : `Bridge update scheduled for ${args.version}.`,
   });
   await sleep(800);
 
@@ -281,6 +292,37 @@ async function main() {
   });
   killBridgeProcess(args.bridgePid);
   await waitForBridgeExit(args.bridgePid);
+
+  if (args.action === "restart") {
+    try {
+      await restartBridge(
+        packageRoot,
+        args.statusPath,
+        baseStatus,
+        "Starting the bridge process."
+      );
+      writeStatus(args.statusPath, {
+        ...baseStatus,
+        state: "completed",
+        message: "Bridge restarted successfully.",
+        completedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      writeStatus(args.statusPath, {
+        ...baseStatus,
+        state: "failed",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Bridge restart failed and the bridge did not recover automatically.",
+        completedAt: new Date().toISOString(),
+      });
+      process.exitCode = 1;
+    } finally {
+      cleanupSecureEnvBackup(secureEnvBackup);
+    }
+    return;
+  }
 
   let upgraded = false;
   try {
