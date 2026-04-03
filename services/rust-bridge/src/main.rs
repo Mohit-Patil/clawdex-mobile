@@ -4799,6 +4799,8 @@ async fn handle_preview_http_request(
         .get(HOST.as_str())
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let effective_viewport_preset =
+        requested_viewport_preset.or_else(|| read_preview_viewport_preset(&parts.headers));
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let upstream_headers = upstream_response.headers().clone();
@@ -4815,7 +4817,8 @@ async fn handle_preview_http_request(
             }
         };
         let rewritten_body =
-            rewrite_preview_html_document(&upstream_body).unwrap_or_else(|| upstream_body.to_vec());
+            rewrite_preview_html_document(&upstream_body, effective_viewport_preset)
+                .unwrap_or_else(|| upstream_body.to_vec());
         let mut response = Response::new(Body::from(rewritten_body));
         *response.status_mut() = status;
         response
@@ -6156,6 +6159,15 @@ impl PreviewViewportPreset {
             Self::Desktop => "desktop",
         }
     }
+
+    fn viewport_meta_content(self) -> Option<&'static str> {
+        match self {
+            Self::Mobile => None,
+            Self::Desktop => {
+                Some("width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes")
+            }
+        }
+    }
 }
 
 fn parse_preview_viewport_preset(raw: &str) -> Option<PreviewViewportPreset> {
@@ -6354,6 +6366,12 @@ fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
+fn read_preview_viewport_preset(headers: &HeaderMap) -> Option<PreviewViewportPreset> {
+    read_cookie_value(headers, BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME)
+        .as_deref()
+        .and_then(parse_preview_viewport_preset)
+}
+
 fn should_rewrite_preview_html_response(headers: &HeaderMap) -> bool {
     let Some(content_type) = headers
         .get(CONTENT_TYPE)
@@ -6376,14 +6394,54 @@ fn should_rewrite_preview_html_response(headers: &HeaderMap) -> bool {
     }
 }
 
-fn rewrite_preview_html_document(body: &[u8]) -> Option<Vec<u8>> {
+fn rewrite_preview_html_document(
+    body: &[u8],
+    viewport_preset: Option<PreviewViewportPreset>,
+) -> Option<Vec<u8>> {
     if body.len() > BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES {
         return None;
     }
 
     let document = std::str::from_utf8(body).ok()?;
-    let rewritten = inject_preview_runtime_script(document);
+    let document = if let Some(content) =
+        viewport_preset.and_then(PreviewViewportPreset::viewport_meta_content)
+    {
+        inject_preview_viewport_meta(document, content)
+    } else {
+        document.to_string()
+    };
+    let rewritten = inject_preview_runtime_script(&document);
     Some(rewritten.into_bytes())
+}
+
+fn inject_preview_viewport_meta(document: &str, content: &str) -> String {
+    let replacement = format!(r#"<meta name="viewport" content="{content}">"#);
+    let lower = document.to_ascii_lowercase();
+
+    let mut search_start = 0usize;
+    while let Some(meta_start_relative) = lower[search_start..].find("<meta") {
+        let meta_start = search_start + meta_start_relative;
+        let Some(meta_end_relative) = lower[meta_start..].find('>') else {
+            break;
+        };
+        let meta_end = meta_start + meta_end_relative + 1;
+        let normalized_meta_tag = lower[meta_start..meta_end]
+            .split_whitespace()
+            .collect::<String>();
+        if normalized_meta_tag.contains("name=\"viewport\"")
+            || normalized_meta_tag.contains("name='viewport'")
+            || normalized_meta_tag.contains("name=viewport")
+        {
+            let mut rewritten = String::with_capacity(document.len() + replacement.len());
+            rewritten.push_str(&document[..meta_start]);
+            rewritten.push_str(&replacement);
+            rewritten.push_str(&document[meta_end..]);
+            return rewritten;
+        }
+        search_start = meta_end;
+    }
+
+    inject_preview_head_markup(document, &replacement)
 }
 
 fn inject_preview_runtime_script(document: &str) -> String {
@@ -9342,11 +9400,40 @@ mod tests {
     #[test]
     fn rewrite_preview_html_document_injects_runtime_script_without_desktop_mode() {
         let document = b"<html><head><title>Preview</title></head><body>Hello</body></html>";
-        let rewritten = rewrite_preview_html_document(document).expect("rewritten html");
+        let rewritten = rewrite_preview_html_document(document, None).expect("rewritten html");
         let rewritten = String::from_utf8(rewritten).expect("utf8 html");
 
         assert!(rewritten.contains(BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH));
-        assert!(!rewritten.contains("width=1280"));
+        assert!(!rewritten.contains("width=1440"));
+    }
+
+    #[test]
+    fn rewrite_preview_html_document_rewrites_viewport_in_desktop_mode() {
+        let document = b"<html><head><title>Preview</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body>Hello</body></html>";
+        let rewritten =
+            rewrite_preview_html_document(document, Some(PreviewViewportPreset::Desktop))
+                .expect("rewritten html");
+        let rewritten = String::from_utf8(rewritten).expect("utf8 html");
+
+        assert!(rewritten.contains(BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH));
+        assert!(rewritten.contains(
+            "<meta name=\"viewport\" content=\"width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes\">"
+        ));
+        assert_eq!(rewritten.matches("name=\"viewport\"").count(), 1);
+    }
+
+    #[test]
+    fn inject_preview_viewport_meta_inserts_when_missing() {
+        let document = "<html><head><title>Preview</title></head><body>Hello</body></html>";
+        let rewritten = inject_preview_viewport_meta(
+            document,
+            "width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes",
+        );
+
+        assert!(rewritten.contains(
+            "<meta name=\"viewport\" content=\"width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes\">"
+        ));
+        assert!(rewritten.contains("<title>Preview</title>"));
     }
 
     #[test]

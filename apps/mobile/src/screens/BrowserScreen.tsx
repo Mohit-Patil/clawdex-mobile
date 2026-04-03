@@ -11,7 +11,6 @@ import {
 import {
   ActivityIndicator,
   Animated as RNAnimated,
-  type LayoutChangeEvent,
   type NativeSyntheticEvent,
   Platform,
   Pressable,
@@ -21,8 +20,6 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewNavigation } from 'react-native-webview';
 
@@ -66,8 +63,6 @@ type WebViewScrollEvent = NativeSyntheticEvent<
 type ViewportPreset = 'mobile' | 'desktop';
 
 const DESKTOP_PREVIEW_WIDTH = 1440;
-const DESKTOP_PREVIEW_SCALE_MIN = 0.22;
-const DESKTOP_PREVIEW_SCALE_MAX = 1;
 const DESKTOP_PREVIEW_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
@@ -103,11 +98,9 @@ export function BrowserScreen({
   const [capabilitiesError, setCapabilitiesError] = useState<string | null>(null);
   const [supportsBrowserPreview, setSupportsBrowserPreview] = useState(true);
   const [webReloadKey, setWebReloadKey] = useState(0);
+  const [nativeReloadKey, setNativeReloadKey] = useState(0);
   const [bottomBarVisible, setBottomBarVisible] = useState(true);
   const [viewportPreset, setViewportPreset] = useState<ViewportPreset>('mobile');
-  const [desktopViewportSize, setDesktopViewportSize] = useState({ width: 0, height: 0 });
-  const desktopCanvasScale = useSharedValue(1);
-  const desktopCanvasScaleBase = useSharedValue(1);
 
   const previewOrigin = useMemo(
     () =>
@@ -119,15 +112,6 @@ export function BrowserScreen({
     [activeSession?.targetUrl, currentUrl, inputValue]
   );
   const desktopModeEnabled = viewportPreset === 'desktop';
-  const desktopFitScale = useMemo(() => {
-    if (desktopViewportSize.width <= 0) {
-      return 1;
-    }
-    return Math.max(
-      DESKTOP_PREVIEW_SCALE_MIN,
-      Math.min(DESKTOP_PREVIEW_SCALE_MAX, desktopViewportSize.width / DESKTOP_PREVIEW_WIDTH)
-    );
-  }, [desktopViewportSize.width]);
   const iframeStyle = useMemo<CSSProperties>(
     () => ({
       border: 0,
@@ -155,21 +139,6 @@ export function BrowserScreen({
       useNativeDriver: true,
     }).start();
   }, [bottomBarReservedSpace, bottomBarTranslateY, bottomBarVisible, theme.spacing.sm]);
-
-  useEffect(() => {
-    if (!desktopModeEnabled || desktopViewportSize.width <= 0) {
-      return;
-    }
-    desktopCanvasScale.value = desktopFitScale;
-    desktopCanvasScaleBase.value = desktopFitScale;
-  }, [
-    desktopCanvasScale,
-    desktopCanvasScaleBase,
-    desktopFitScale,
-    desktopModeEnabled,
-    desktopViewportSize.width,
-    previewUrl,
-  ]);
 
   const loadBrowserCapabilities = useCallback(async () => {
     try {
@@ -329,6 +298,13 @@ export function BrowserScreen({
     lastScrollYRef.current = 0;
   }, []);
 
+  const handleContentProcessDidTerminate = useCallback(() => {
+    setLoadingPreview(true);
+    setBottomBarVisible(true);
+    lastScrollYRef.current = 0;
+    setNativeReloadKey((value) => value + 1);
+  }, []);
+
   const handleWebViewScroll = useCallback(
     (event: WebViewScrollEvent) => {
       const nextY = event.nativeEvent.contentOffset.y;
@@ -363,10 +339,6 @@ export function BrowserScreen({
   const handleToggleDesktopMode = useCallback(() => {
     const nextPreset: ViewportPreset = viewportPreset === 'desktop' ? 'mobile' : 'desktop';
     setViewportPreset(nextPreset);
-    if (nextPreset === 'desktop') {
-      desktopCanvasScale.value = desktopFitScale;
-      desktopCanvasScaleBase.value = desktopFitScale;
-    }
     setBottomBarVisible(true);
     lastScrollYRef.current = 0;
 
@@ -393,63 +365,7 @@ export function BrowserScreen({
     setTimeout(() => {
       webViewRef.current?.reload();
     }, 0);
-  }, [
-    currentUrl,
-    desktopCanvasScale,
-    desktopCanvasScaleBase,
-    desktopFitScale,
-    previewOrigin,
-    previewUrl,
-    viewportPreset,
-  ]);
-
-  const handleDesktopViewportLayout = useCallback((event: LayoutChangeEvent) => {
-    const { width, height } = event.nativeEvent.layout;
-    if (width <= 0 || height <= 0) {
-      return;
-    }
-    setDesktopViewportSize((current) =>
-      current.width === width && current.height === height ? current : { width, height }
-    );
-  }, []);
-
-  const desktopPinchGesture = useMemo(
-    () =>
-      Gesture.Pinch()
-        .onBegin(() => {
-          desktopCanvasScaleBase.value = desktopCanvasScale.value;
-        })
-        .onUpdate((event) => {
-          const nextScale = desktopCanvasScaleBase.value * event.scale;
-          desktopCanvasScale.value = Math.max(
-            DESKTOP_PREVIEW_SCALE_MIN,
-            Math.min(DESKTOP_PREVIEW_SCALE_MAX, nextScale)
-          );
-        })
-        .onEnd(() => {
-          desktopCanvasScaleBase.value = desktopCanvasScale.value;
-        }),
-    [desktopCanvasScale, desktopCanvasScaleBase]
-  );
-
-  const desktopCanvasWindowStyle = useAnimatedStyle(
-    () => ({
-      width: DESKTOP_PREVIEW_WIDTH * desktopCanvasScale.value,
-      height: desktopViewportSize.height > 0 ? desktopViewportSize.height : 1,
-    }),
-    [desktopViewportSize.height]
-  );
-
-  const desktopCanvasStyle = useAnimatedStyle(
-    () => ({
-      width: DESKTOP_PREVIEW_WIDTH,
-      height:
-        (desktopViewportSize.height > 0 ? desktopViewportSize.height : 1) /
-        desktopCanvasScale.value,
-      transform: [{ scale: desktopCanvasScale.value }],
-    }),
-    [desktopViewportSize.height]
-  );
+  }, [currentUrl, previewOrigin, previewUrl, viewportPreset]);
 
   return (
     <View style={styles.container}>
@@ -558,68 +474,10 @@ export function BrowserScreen({
                     })}
                   </View>
                 )
-              ) : desktopModeEnabled ? (
-                <View style={styles.previewViewport} onLayout={handleDesktopViewportLayout}>
-                  <GestureDetector gesture={desktopPinchGesture}>
-                    <View style={styles.desktopGestureSurface}>
-                      <View style={styles.desktopNativeStage}>
-                        <Animated.View
-                          style={[styles.desktopNativeCanvasWindow, desktopCanvasWindowStyle]}
-                        >
-                          <Animated.View
-                            style={[styles.desktopNativeCanvas, desktopCanvasStyle]}
-                          >
-                            <WebView
-                              key={`${previewUrl}-desktop`}
-                              ref={webViewRef}
-                              source={{ uri: previewUrl }}
-                              originWhitelist={['*']}
-                              javaScriptEnabled
-                              domStorageEnabled
-                              sharedCookiesEnabled
-                              thirdPartyCookiesEnabled
-                              allowsBackForwardNavigationGestures
-                              startInLoadingState
-                              setSupportMultipleWindows={false}
-                              automaticallyAdjustContentInsets={false}
-                              automaticallyAdjustsScrollIndicatorInsets={false}
-                              contentInset={{
-                                top: 0,
-                                left: 0,
-                                right: 0,
-                                bottom: webViewBottomInset,
-                              }}
-                              contentInsetAdjustmentBehavior="never"
-                              contentMode="desktop"
-                              scalesPageToFit={false}
-                              userAgent={nativeUserAgent}
-                              onNavigationStateChange={handleNavigationStateChange}
-                              onShouldStartLoadWithRequest={handleShouldStartLoad}
-                              onLoadStart={() => setLoadingPreview(true)}
-                              onLoadEnd={() => setLoadingPreview(false)}
-                              onScroll={handleWebViewScroll}
-                              onError={(event) =>
-                                setCapabilitiesError(
-                                  event.nativeEvent.description || 'Could not load preview.'
-                                )
-                              }
-                              onHttpError={(event) =>
-                                setCapabilitiesError(
-                                  `Preview returned HTTP ${String(event.nativeEvent.statusCode)}.`
-                                )
-                              }
-                              style={[styles.webView, { width: DESKTOP_PREVIEW_WIDTH }]}
-                            />
-                          </Animated.View>
-                        </Animated.View>
-                      </View>
-                    </View>
-                  </GestureDetector>
-                </View>
               ) : (
                 <View style={styles.previewViewport}>
                   <WebView
-                    key={`${previewUrl}-mobile`}
+                    key={`${previewUrl}-${nativeReloadKey}-${viewportPreset}`}
                     ref={webViewRef}
                     source={{ uri: previewUrl }}
                     originWhitelist={['*']}
@@ -639,12 +497,16 @@ export function BrowserScreen({
                       bottom: webViewBottomInset,
                     }}
                     contentInsetAdjustmentBehavior="never"
-                    contentMode="mobile"
+                    contentMode={desktopModeEnabled ? 'desktop' : 'mobile'}
                     scalesPageToFit
+                    setBuiltInZoomControls
+                    setDisplayZoomControls={false}
+                    userAgent={nativeUserAgent}
                     onNavigationStateChange={handleNavigationStateChange}
                     onShouldStartLoadWithRequest={handleShouldStartLoad}
                     onLoadStart={() => setLoadingPreview(true)}
                     onLoadEnd={() => setLoadingPreview(false)}
+                    onContentProcessDidTerminate={handleContentProcessDidTerminate}
                     onScroll={handleWebViewScroll}
                     onError={(event) =>
                       setCapabilitiesError(
@@ -1034,26 +896,6 @@ const createStyles = (theme: AppTheme) =>
     desktopScrollContent: {
       flexGrow: 1,
       minHeight: '100%',
-    },
-    desktopGestureSurface: {
-      flex: 1,
-      minHeight: '100%',
-      backgroundColor: '#000',
-    },
-    desktopNativeStage: {
-      flex: 1,
-      minHeight: '100%',
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: '#000',
-    },
-    desktopNativeCanvasWindow: {
-      overflow: 'hidden',
-      backgroundColor: '#000',
-    },
-    desktopNativeCanvas: {
-      backgroundColor: theme.colors.bgMain,
-      transformOrigin: 'left top',
     },
     webView: {
       flex: 1,
