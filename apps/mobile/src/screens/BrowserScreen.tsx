@@ -32,7 +32,7 @@ import type {
 import {
   buildBrowserPreviewViewportNavigationUrl,
   buildBrowserPreviewBootstrapUrl,
-  type BrowserPreviewViewportPreset,
+  type BrowserPreviewViewportSpec,
   getBrowserPreviewOrigin,
   isLocalPreviewCandidateUrl,
   isSameOriginUrl,
@@ -62,7 +62,14 @@ type WebViewScrollEvent = NativeSyntheticEvent<
 
 type ViewportPreset = 'mobile' | 'desktop';
 
-const DESKTOP_PREVIEW_WIDTH = 1440;
+const DEFAULT_DESKTOP_VIEWPORT = { width: 1920, height: 1080 };
+const DESKTOP_VIEWPORT_PRESETS = [
+  { label: '1920×1080', width: 1920, height: 1080 },
+  { label: '1366×768', width: 1366, height: 768 },
+  { label: '1440×900', width: 1440, height: 900 },
+  { label: '1512×982', width: 1512, height: 982 },
+  { label: '1728×1117', width: 1728, height: 1117 },
+];
 const DESKTOP_PREVIEW_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
@@ -101,6 +108,12 @@ export function BrowserScreen({
   const [nativeReloadKey, setNativeReloadKey] = useState(0);
   const [bottomBarVisible, setBottomBarVisible] = useState(true);
   const [viewportPreset, setViewportPreset] = useState<ViewportPreset>('mobile');
+  const [desktopViewportSize, setDesktopViewportSize] = useState(DEFAULT_DESKTOP_VIEWPORT);
+  const [desktopViewportDraft, setDesktopViewportDraft] = useState({
+    width: String(DEFAULT_DESKTOP_VIEWPORT.width),
+    height: String(DEFAULT_DESKTOP_VIEWPORT.height),
+  });
+  const [showCustomViewportEditor, setShowCustomViewportEditor] = useState(false);
 
   const previewOrigin = useMemo(
     () =>
@@ -115,12 +128,12 @@ export function BrowserScreen({
   const iframeStyle = useMemo<CSSProperties>(
     () => ({
       border: 0,
-      width: desktopModeEnabled ? `${DESKTOP_PREVIEW_WIDTH}px` : '100%',
+      width: desktopModeEnabled ? `${desktopViewportSize.width}px` : '100%',
       height: '100%',
       display: 'block',
       backgroundColor: theme.colors.bgMain,
     }),
-    [desktopModeEnabled, theme.colors.bgMain]
+    [desktopModeEnabled, desktopViewportSize.width, theme.colors.bgMain]
   );
   const bottomBarInset =
     insets.bottom > 0
@@ -130,7 +143,22 @@ export function BrowserScreen({
   const webViewBottomInset = bottomBarVisible ? bottomBarReservedSpace : 0;
   const nativeUserAgent =
     Platform.OS === 'web' || !desktopModeEnabled ? undefined : DESKTOP_PREVIEW_USER_AGENT;
-  const browserViewportPreset: BrowserPreviewViewportPreset = viewportPreset;
+  const browserViewport = useMemo<BrowserPreviewViewportSpec>(
+    () =>
+      desktopModeEnabled
+        ? {
+            preset: 'desktop',
+            width: desktopViewportSize.width,
+            height: desktopViewportSize.height,
+          }
+        : { preset: 'mobile' },
+    [desktopModeEnabled, desktopViewportSize.height, desktopViewportSize.width]
+  );
+  const desktopViewportLabel = `${desktopViewportSize.width}×${desktopViewportSize.height}`;
+  const desktopViewportMatchesPreset = DESKTOP_VIEWPORT_PRESETS.some(
+    (preset) =>
+      preset.width === desktopViewportSize.width && preset.height === desktopViewportSize.height
+  );
 
   useEffect(() => {
     RNAnimated.timing(bottomBarTranslateY, {
@@ -188,7 +216,7 @@ export function BrowserScreen({
           bridgeUrl,
           session.previewPort,
           session.bootstrapPath,
-          browserViewportPreset
+          browserViewport
         );
         if (!nextPreviewUrl) {
           throw new Error('Could not build preview bootstrap URL.');
@@ -214,7 +242,7 @@ export function BrowserScreen({
         setOpeningPreview(false);
       }
     },
-    [api, bridgeUrl, browserViewportPreset, onRecentTargetUrlsChange, recentTargetUrls]
+    [api, bridgeUrl, browserViewport, onRecentTargetUrlsChange, recentTargetUrls]
   );
 
   useEffect(() => {
@@ -336,36 +364,88 @@ export function BrowserScreen({
     [bottomBarVisible]
   );
 
+  const applyViewportSelection = useCallback(
+    (nextPreset: ViewportPreset, nextDesktopViewport = desktopViewportSize) => {
+      setViewportPreset(nextPreset);
+      setBottomBarVisible(true);
+      lastScrollYRef.current = 0;
+
+      if (nextPreset === 'desktop') {
+        setDesktopViewportSize(nextDesktopViewport);
+        setDesktopViewportDraft({
+          width: String(nextDesktopViewport.width),
+          height: String(nextDesktopViewport.height),
+        });
+      } else {
+        setShowCustomViewportEditor(false);
+      }
+
+      if (!previewUrl) {
+        return;
+      }
+
+      setLoadingPreview(true);
+      const currentPreviewUrl =
+        currentUrl && isSameOriginUrl(currentUrl, previewOrigin) ? currentUrl : previewUrl;
+      const nextPreviewUrl = buildBrowserPreviewViewportNavigationUrl(
+        currentPreviewUrl,
+        previewUrl,
+        nextPreset === 'desktop'
+          ? {
+              preset: 'desktop',
+              width: nextDesktopViewport.width,
+              height: nextDesktopViewport.height,
+            }
+          : { preset: 'mobile' }
+      );
+      if (nextPreviewUrl) {
+        setPreviewUrl(nextPreviewUrl);
+        if (Platform.OS === 'web') {
+          setWebReloadKey((value) => value + 1);
+        }
+        return;
+      }
+
+      setTimeout(() => {
+        webViewRef.current?.reload();
+      }, 0);
+    },
+    [currentUrl, desktopViewportSize, previewOrigin, previewUrl]
+  );
+
   const handleToggleDesktopMode = useCallback(() => {
     const nextPreset: ViewportPreset = viewportPreset === 'desktop' ? 'mobile' : 'desktop';
-    setViewportPreset(nextPreset);
-    setBottomBarVisible(true);
-    lastScrollYRef.current = 0;
+    applyViewportSelection(nextPreset);
+  }, [applyViewportSelection, viewportPreset]);
 
-    if (!previewUrl) {
+  const handleSelectDesktopPreset = useCallback(
+    (viewport: { width: number; height: number }) => {
+      setShowCustomViewportEditor(false);
+      applyViewportSelection('desktop', viewport);
+    },
+    [applyViewportSelection]
+  );
+
+  const handleShowCustomViewportEditor = useCallback(() => {
+    setDesktopViewportDraft({
+      width: String(desktopViewportSize.width),
+      height: String(desktopViewportSize.height),
+    });
+    setShowCustomViewportEditor(true);
+  }, [desktopViewportSize.height, desktopViewportSize.width]);
+
+  const handleApplyDesktopViewport = useCallback(() => {
+    const width = parseDesktopViewportValue(desktopViewportDraft.width);
+    const height = parseDesktopViewportValue(desktopViewportDraft.height);
+
+    if (!width || !height) {
+      setCapabilitiesError('Use desktop viewport values between 320 and 4096.');
       return;
     }
 
-    setLoadingPreview(true);
-    const currentPreviewUrl =
-      currentUrl && isSameOriginUrl(currentUrl, previewOrigin) ? currentUrl : previewUrl;
-    const nextPreviewUrl = buildBrowserPreviewViewportNavigationUrl(
-      currentPreviewUrl,
-      previewUrl,
-      nextPreset
-    );
-    if (nextPreviewUrl) {
-      setPreviewUrl(nextPreviewUrl);
-      if (Platform.OS === 'web') {
-        setWebReloadKey((value) => value + 1);
-      }
-      return;
-    }
-
-    setTimeout(() => {
-      webViewRef.current?.reload();
-    }, 0);
-  }, [currentUrl, previewOrigin, previewUrl, viewportPreset]);
+    setCapabilitiesError(null);
+    applyViewportSelection('desktop', { width, height });
+  }, [applyViewportSelection, desktopViewportDraft.height, desktopViewportDraft.width]);
 
   return (
     <View style={styles.container}>
@@ -421,6 +501,104 @@ export function BrowserScreen({
               </Pressable>
             </View>
           </View>
+          {desktopModeEnabled ? (
+            <View style={styles.viewportTray}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.viewportPresetRow}
+              >
+                {DESKTOP_VIEWPORT_PRESETS.map((preset) => {
+                  const active =
+                    desktopViewportSize.width === preset.width &&
+                    desktopViewportSize.height === preset.height;
+                  return (
+                    <Pressable
+                      key={preset.label}
+                      onPress={() => handleSelectDesktopPreset(preset)}
+                      style={({ pressed }) => [
+                        styles.viewportPresetChip,
+                        active && styles.viewportPresetChipActive,
+                        pressed && styles.viewportPresetChipPressed,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.viewportPresetChipText,
+                          active && styles.viewportPresetChipTextActive,
+                        ]}
+                      >
+                        {preset.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+                <Pressable
+                  onPress={handleShowCustomViewportEditor}
+                  style={({ pressed }) => [
+                    styles.viewportPresetChip,
+                    (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
+                      styles.viewportPresetChipActive,
+                    pressed && styles.viewportPresetChipPressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.viewportPresetChipText,
+                      (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
+                        styles.viewportPresetChipTextActive,
+                    ]}
+                  >
+                    Custom
+                  </Text>
+                </Pressable>
+              </ScrollView>
+              {showCustomViewportEditor ? (
+                <View style={styles.viewportInputRow}>
+                  <View style={styles.viewportField}>
+                    <Text style={styles.viewportFieldLabel}>W</Text>
+                    <TextInput
+                      value={desktopViewportDraft.width}
+                      onChangeText={(value) =>
+                        setDesktopViewportDraft((current) => ({ ...current, width: value }))
+                      }
+                      keyboardType="number-pad"
+                      autoCorrect={false}
+                      autoCapitalize="none"
+                      style={styles.viewportFieldInput}
+                      placeholder="1920"
+                      placeholderTextColor={colors.textMuted}
+                    />
+                  </View>
+                  <View style={styles.viewportField}>
+                    <Text style={styles.viewportFieldLabel}>H</Text>
+                    <TextInput
+                      value={desktopViewportDraft.height}
+                      onChangeText={(value) =>
+                        setDesktopViewportDraft((current) => ({ ...current, height: value }))
+                      }
+                      keyboardType="number-pad"
+                      autoCorrect={false}
+                      autoCapitalize="none"
+                      style={styles.viewportFieldInput}
+                      placeholder="1080"
+                      placeholderTextColor={colors.textMuted}
+                    />
+                  </View>
+                  <Pressable
+                    onPress={handleApplyDesktopViewport}
+                    style={({ pressed }) => [
+                      styles.viewportApplyButton,
+                      pressed && styles.viewportApplyButtonPressed,
+                    ]}
+                  >
+                    <Text style={styles.viewportApplyButtonText}>Apply</Text>
+                  </Pressable>
+                  <Text style={styles.viewportCurrentLabel}>{desktopViewportLabel}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
         </View>
 
         {capabilitiesError ? (
@@ -765,6 +943,14 @@ function getCompactBrowserLabel(rawUrl: string | null | undefined): string {
   }
 }
 
+function parseDesktopViewportValue(raw: string): number | null {
+  const value = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(value) || value < 320 || value > 4096) {
+    return null;
+  }
+  return value;
+}
+
 const createStyles = (theme: AppTheme) =>
   StyleSheet.create({
     container: {
@@ -780,6 +966,90 @@ const createStyles = (theme: AppTheme) =>
       paddingBottom: theme.spacing.sm,
       gap: theme.spacing.sm,
       backgroundColor: theme.colors.transparent,
+    },
+    viewportTray: {
+      gap: theme.spacing.sm,
+    },
+    viewportPresetRow: {
+      gap: theme.spacing.xs,
+      paddingRight: theme.spacing.md,
+    },
+    viewportPresetChip: {
+      minHeight: 30,
+      paddingHorizontal: theme.spacing.md,
+      borderRadius: theme.radius.full,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgItem,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    viewportPresetChipActive: {
+      borderColor: theme.colors.accent,
+      backgroundColor: theme.colors.bgCanvasAccent,
+    },
+    viewportPresetChipPressed: {
+      opacity: 0.86,
+    },
+    viewportPresetChipText: {
+      ...theme.typography.caption,
+      color: theme.colors.textSecondary,
+      fontWeight: '600',
+    },
+    viewportPresetChipTextActive: {
+      color: theme.colors.textPrimary,
+    },
+    viewportInputRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+      flexWrap: 'wrap',
+    },
+    viewportField: {
+      minWidth: 84,
+      paddingHorizontal: theme.spacing.sm,
+      minHeight: 36,
+      borderRadius: theme.radius.full,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgInput,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.xs,
+    },
+    viewportFieldLabel: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      fontWeight: '700',
+    },
+    viewportFieldInput: {
+      minWidth: 34,
+      paddingVertical: 0,
+      flex: 1,
+      ...theme.typography.caption,
+      color: theme.colors.textPrimary,
+      fontWeight: '600',
+    },
+    viewportApplyButton: {
+      minHeight: 36,
+      paddingHorizontal: theme.spacing.md,
+      borderRadius: theme.radius.full,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.colors.accent,
+    },
+    viewportApplyButtonPressed: {
+      backgroundColor: theme.colors.accentPressed,
+    },
+    viewportApplyButtonText: {
+      ...theme.typography.caption,
+      color: theme.colors.accentText,
+      fontWeight: '700',
+    },
+    viewportCurrentLabel: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      fontWeight: '600',
     },
     topBar: {
       flexDirection: 'row',

@@ -67,18 +67,22 @@ describe('browserPreview', () => {
         'http://192.168.1.26:8787',
         8788,
         '/app?sid=preview&st=token',
-        'desktop'
+        { preset: 'desktop', width: 1440, height: 900 }
       )
-    ).toBe('http://192.168.1.26:8788/app?sid=preview&st=token&vp=desktop');
+    ).toBe(
+      'http://192.168.1.26:8788/app?sid=preview&st=token&vp=desktop&vw=1440&vh=900'
+    );
   });
 
   it('updates an existing preview URL with a different viewport preset', () => {
     expect(
       applyBrowserPreviewViewportPreset(
         'http://192.168.1.26:8788/dashboard?foo=bar&vp=mobile',
-        'desktop'
+        { preset: 'desktop', width: 1512, height: 982 }
       )
-    ).toBe('http://192.168.1.26:8788/dashboard?foo=bar&vp=desktop');
+    ).toBe(
+      'http://192.168.1.26:8788/dashboard?foo=bar&vp=desktop&vw=1512&vh=982'
+    );
   });
 
   it('preserves the current preview path while reapplying bootstrap session params', () => {
@@ -86,10 +90,10 @@ describe('browserPreview', () => {
       buildBrowserPreviewViewportNavigationUrl(
         'http://192.168.1.26:8788/settings/profile?tab=2',
         'http://192.168.1.26:8788/?sid=preview&st=token&vp=mobile',
-        'desktop'
+        { preset: 'desktop', width: 1728, height: 1117 }
       )
     ).toBe(
-      'http://192.168.1.26:8788/settings/profile?tab=2&sid=preview&st=token&vp=desktop'
+      'http://192.168.1.26:8788/settings/profile?tab=2&sid=preview&st=token&vp=desktop&vw=1728&vh=1117'
     );
   });
 });

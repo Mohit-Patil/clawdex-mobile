@@ -6,6 +6,47 @@ const LOCAL_PREVIEW_WITHOUT_SCHEME_PATTERN =
 const PORT_ONLY_PATTERN = /^\d{2,5}$/;
 const MAX_RECENT_TARGETS = 8;
 export type BrowserPreviewViewportPreset = 'mobile' | 'desktop';
+export interface BrowserPreviewViewportSpec {
+  preset: BrowserPreviewViewportPreset;
+  width?: number | null;
+  height?: number | null;
+}
+
+const DEFAULT_BROWSER_PREVIEW_VIEWPORT: BrowserPreviewViewportSpec = {
+  preset: 'mobile',
+};
+const MIN_BROWSER_PREVIEW_VIEWPORT_SIZE = 320;
+const MAX_BROWSER_PREVIEW_VIEWPORT_SIZE = 4096;
+
+function normalizeViewportDimension(value: number | null | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const normalized = Math.round(value);
+  if (
+    normalized < MIN_BROWSER_PREVIEW_VIEWPORT_SIZE ||
+    normalized > MAX_BROWSER_PREVIEW_VIEWPORT_SIZE
+  ) {
+    return undefined;
+  }
+
+  return normalized;
+}
+
+export function normalizeBrowserPreviewViewportSpec(
+  viewport: BrowserPreviewViewportSpec | null | undefined
+): BrowserPreviewViewportSpec {
+  if (!viewport || viewport.preset !== 'desktop') {
+    return DEFAULT_BROWSER_PREVIEW_VIEWPORT;
+  }
+
+  return {
+    preset: 'desktop',
+    width: normalizeViewportDimension(viewport.width),
+    height: normalizeViewportDimension(viewport.height),
+  };
+}
 
 export function normalizePreviewTargetInput(value: string): string | null {
   if (typeof value !== 'string') {
@@ -107,7 +148,7 @@ export function buildBrowserPreviewBootstrapUrl(
   bridgeUrl: string,
   previewPort: number,
   bootstrapPath: string,
-  viewportPreset: BrowserPreviewViewportPreset = 'mobile'
+  viewport: BrowserPreviewViewportSpec = DEFAULT_BROWSER_PREVIEW_VIEWPORT
 ): string | null {
   if (typeof bridgeUrl !== 'string' || typeof bootstrapPath !== 'string') {
     return null;
@@ -120,6 +161,7 @@ export function buildBrowserPreviewBootstrapUrl(
   }
 
   try {
+    const normalizedViewport = normalizeBrowserPreviewViewportSpec(viewport);
     const base = new URL(normalizedBridgeUrl);
     base.port = String(previewPort);
     base.pathname = '/';
@@ -130,7 +172,7 @@ export function buildBrowserPreviewBootstrapUrl(
       normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`,
       base.toString()
     );
-    previewUrl.searchParams.set('vp', viewportPreset);
+    applyViewportParams(previewUrl, normalizedViewport);
     return previewUrl.toString();
   } catch {
     return null;
@@ -171,7 +213,7 @@ export function isSameOriginUrl(url: string, origin: string | null | undefined):
 
 export function applyBrowserPreviewViewportPreset(
   rawUrl: string,
-  viewportPreset: BrowserPreviewViewportPreset
+  viewport: BrowserPreviewViewportSpec
 ): string | null {
   if (typeof rawUrl !== 'string') {
     return null;
@@ -179,7 +221,7 @@ export function applyBrowserPreviewViewportPreset(
 
   try {
     const parsed = new URL(rawUrl.trim());
-    parsed.searchParams.set('vp', viewportPreset);
+    applyViewportParams(parsed, normalizeBrowserPreviewViewportSpec(viewport));
     return parsed.toString();
   } catch {
     return null;
@@ -189,27 +231,50 @@ export function applyBrowserPreviewViewportPreset(
 export function buildBrowserPreviewViewportNavigationUrl(
   rawCurrentUrl: string,
   rawBootstrapUrl: string,
-  viewportPreset: BrowserPreviewViewportPreset
+  viewport: BrowserPreviewViewportSpec
 ): string | null {
   if (typeof rawCurrentUrl !== 'string' || typeof rawBootstrapUrl !== 'string') {
     return null;
   }
 
   try {
+    const normalizedViewport = normalizeBrowserPreviewViewportSpec(viewport);
     const current = new URL(rawCurrentUrl.trim());
     const bootstrap = new URL(rawBootstrapUrl.trim());
     const sid = bootstrap.searchParams.get('sid');
     const st = bootstrap.searchParams.get('st');
 
     if (current.origin !== bootstrap.origin || !sid || !st) {
-      return applyBrowserPreviewViewportPreset(rawBootstrapUrl, viewportPreset);
+      return applyBrowserPreviewViewportPreset(rawBootstrapUrl, normalizedViewport);
     }
 
     current.searchParams.set('sid', sid);
     current.searchParams.set('st', st);
-    current.searchParams.set('vp', viewportPreset);
+    applyViewportParams(current, normalizedViewport);
     return current.toString();
   } catch {
-    return applyBrowserPreviewViewportPreset(rawBootstrapUrl, viewportPreset);
+    return applyBrowserPreviewViewportPreset(rawBootstrapUrl, viewport);
   }
+}
+
+function applyViewportParams(url: URL, viewport: BrowserPreviewViewportSpec): void {
+  url.searchParams.set('vp', viewport.preset);
+  if (viewport.preset === 'desktop') {
+    const width = normalizeViewportDimension(viewport.width);
+    const height = normalizeViewportDimension(viewport.height);
+    if (width) {
+      url.searchParams.set('vw', String(width));
+    } else {
+      url.searchParams.delete('vw');
+    }
+    if (height) {
+      url.searchParams.set('vh', String(height));
+    } else {
+      url.searchParams.delete('vh');
+    }
+    return;
+  }
+
+  url.searchParams.delete('vw');
+  url.searchParams.delete('vh');
 }

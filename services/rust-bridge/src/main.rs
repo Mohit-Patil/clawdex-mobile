@@ -4710,7 +4710,7 @@ async fn handle_preview_http_request(
     parts: axum::http::request::Parts,
     body: Body,
 ) -> Response {
-    let (session, bootstrap_token, requested_viewport_preset, sanitized_path_and_query) =
+    let (session, bootstrap_token, requested_viewport, sanitized_path_and_query) =
         match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
         {
             Ok(result) => result,
@@ -4721,7 +4721,7 @@ async fn handle_preview_http_request(
         return preview_bootstrap_redirect_response(
             &sanitized_path_and_query,
             &token,
-            requested_viewport_preset,
+            requested_viewport,
         );
     }
 
@@ -4799,8 +4799,8 @@ async fn handle_preview_http_request(
         .get(HOST.as_str())
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let effective_viewport_preset =
-        requested_viewport_preset.or_else(|| read_preview_viewport_preset(&parts.headers));
+    let effective_viewport =
+        requested_viewport.or_else(|| read_preview_viewport_preset(&parts.headers));
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let upstream_headers = upstream_response.headers().clone();
@@ -4817,7 +4817,7 @@ async fn handle_preview_http_request(
             }
         };
         let rewritten_body =
-            rewrite_preview_html_document(&upstream_body, effective_viewport_preset)
+            rewrite_preview_html_document(&upstream_body, effective_viewport)
                 .unwrap_or_else(|| upstream_body.to_vec());
         let mut response = Response::new(Body::from(rewritten_body));
         *response.status_mut() = status;
@@ -4872,8 +4872,8 @@ async fn handle_preview_http_request(
         append_vary_header_value(response.headers_mut(), "Cookie");
     }
 
-    if let Some(viewport_preset) = requested_viewport_preset {
-        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport_preset) {
+    if let Some(viewport) = requested_viewport {
+        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport) {
             response.headers_mut().append(SET_COOKIE, cookie);
         }
     }
@@ -4885,7 +4885,7 @@ async fn handle_preview_websocket_request(
     state: Arc<AppState>,
     parts: &mut axum::http::request::Parts,
 ) -> Response {
-    let (session, _bootstrap_token, _viewport_preset, sanitized_path_and_query) =
+    let (session, _bootstrap_token, _viewport, sanitized_path_and_query) =
         match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
         {
             Ok(result) => result,
@@ -6142,7 +6142,7 @@ async fn wait_for_shutdown_trigger(shutdown_rx: &mut watch::Receiver<bool>) {
 struct PreviewBootstrapParams {
     session_id: Option<String>,
     bootstrap_token: Option<String>,
-    viewport_preset: Option<PreviewViewportPreset>,
+    viewport: Option<PreviewViewportConfig>,
     sanitized_path_and_query: String,
 }
 
@@ -6152,19 +6152,49 @@ enum PreviewViewportPreset {
     Desktop,
 }
 
-impl PreviewViewportPreset {
-    fn as_cookie_value(self) -> &'static str {
-        match self {
-            Self::Mobile => "mobile",
-            Self::Desktop => "desktop",
+const DEFAULT_PREVIEW_DESKTOP_WIDTH: u32 = 1920;
+const DEFAULT_PREVIEW_DESKTOP_HEIGHT: u32 = 1080;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewViewportConfig {
+    preset: PreviewViewportPreset,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+impl PreviewViewportConfig {
+    fn as_cookie_value(self) -> String {
+        match self.preset {
+            PreviewViewportPreset::Mobile => "mobile".to_string(),
+            PreviewViewportPreset::Desktop => match (self.width, self.height) {
+                (Some(width), Some(height)) => format!("desktop:{width}:{height}"),
+                (Some(width), None) => format!("desktop:{width}"),
+                _ => "desktop".to_string(),
+            },
         }
     }
 
-    fn viewport_meta_content(self) -> Option<&'static str> {
-        match self {
-            Self::Mobile => None,
-            Self::Desktop => {
-                Some("width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes")
+    fn viewport_meta_content(self) -> Option<String> {
+        match self.preset {
+            PreviewViewportPreset::Mobile => None,
+            PreviewViewportPreset::Desktop => {
+                let width = self.width.unwrap_or(DEFAULT_PREVIEW_DESKTOP_WIDTH);
+                let height = self.height.or_else(|| {
+                    if self.width.is_none() {
+                        Some(DEFAULT_PREVIEW_DESKTOP_HEIGHT)
+                    } else {
+                        None
+                    }
+                });
+                let mut parts = vec![format!("width={width}")];
+                if let Some(height) = height {
+                    parts.push(format!("height={height}"));
+                }
+                parts.push("initial-scale=1".to_string());
+                parts.push("minimum-scale=0.1".to_string());
+                parts.push("maximum-scale=5".to_string());
+                parts.push("user-scalable=yes".to_string());
+                Some(parts.join(", "))
             }
         }
     }
@@ -6178,6 +6208,33 @@ fn parse_preview_viewport_preset(raw: &str) -> Option<PreviewViewportPreset> {
     }
 }
 
+fn normalize_preview_viewport_dimension(raw: Option<&str>) -> Option<u32> {
+    let value = raw?.trim().parse::<u32>().ok()?;
+    if !(320..=4096).contains(&value) {
+        return None;
+    }
+    Some(value)
+}
+
+fn build_preview_viewport_config(
+    preset: Option<PreviewViewportPreset>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Option<PreviewViewportConfig> {
+    match preset? {
+        PreviewViewportPreset::Mobile => Some(PreviewViewportConfig {
+            preset: PreviewViewportPreset::Mobile,
+            width: None,
+            height: None,
+        }),
+        PreviewViewportPreset::Desktop => Some(PreviewViewportConfig {
+            preset: PreviewViewportPreset::Desktop,
+            width,
+            height,
+        }),
+    }
+}
+
 async fn resolve_preview_session_from_request(
     preview: &BrowserPreviewService,
     headers: &HeaderMap,
@@ -6186,7 +6243,7 @@ async fn resolve_preview_session_from_request(
     (
         BrowserPreviewResolvedSession,
         Option<String>,
-        Option<PreviewViewportPreset>,
+        Option<PreviewViewportConfig>,
         String,
     ),
     Response,
@@ -6206,7 +6263,7 @@ async fn resolve_preview_session_from_request(
         return Ok((
             session,
             Some(bootstrap_token.to_string()),
-            params.viewport_preset,
+            params.viewport,
             params.sanitized_path_and_query,
         ));
     }
@@ -6227,7 +6284,7 @@ async fn resolve_preview_session_from_request(
     Ok((
         session,
         None,
-        params.viewport_preset,
+        params.viewport,
         params.sanitized_path_and_query,
     ))
 }
@@ -6237,7 +6294,7 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
         return PreviewBootstrapParams {
             session_id: None,
             bootstrap_token: None,
-            viewport_preset: None,
+            viewport: None,
             sanitized_path_and_query: uri
                 .path_and_query()
                 .map(|value| value.as_str().to_string())
@@ -6249,6 +6306,8 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
     let mut session_id = None;
     let mut bootstrap_token = None;
     let mut viewport_preset = None;
+    let mut viewport_width = None;
+    let mut viewport_height = None;
     let mut retained_pairs = Vec::new();
     for (key, value) in parsed.query_pairs() {
         if key == "sid" {
@@ -6261,6 +6320,14 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
         }
         if key == "vp" {
             viewport_preset = parse_preview_viewport_preset(&value);
+            continue;
+        }
+        if key == "vw" {
+            viewport_width = normalize_preview_viewport_dimension(Some(value.as_ref()));
+            continue;
+        }
+        if key == "vh" {
+            viewport_height = normalize_preview_viewport_dimension(Some(value.as_ref()));
             continue;
         }
         retained_pairs.push((key.to_string(), value.to_string()));
@@ -6286,7 +6353,7 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
     PreviewBootstrapParams {
         session_id,
         bootstrap_token,
-        viewport_preset,
+        viewport: build_preview_viewport_config(viewport_preset, viewport_width, viewport_height),
         sanitized_path_and_query,
     }
 }
@@ -6294,7 +6361,7 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
 fn preview_bootstrap_redirect_response(
     sanitized_path_and_query: &str,
     bootstrap_token: &str,
-    viewport_preset: Option<PreviewViewportPreset>,
+    viewport: Option<PreviewViewportConfig>,
 ) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::TEMPORARY_REDIRECT;
@@ -6306,8 +6373,8 @@ fn preview_bootstrap_redirect_response(
     if let Ok(cookie) = build_preview_cookie_header(bootstrap_token) {
         response.headers_mut().append(SET_COOKIE, cookie);
     }
-    if let Some(viewport_preset) = viewport_preset {
-        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport_preset) {
+    if let Some(viewport) = viewport {
+        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport) {
             response.headers_mut().append(SET_COOKIE, cookie);
         }
     }
@@ -6339,11 +6406,11 @@ fn build_preview_cookie_header(bootstrap_token: &str) -> Result<HeaderValue, Str
 }
 
 fn build_preview_viewport_cookie_header(
-    viewport_preset: PreviewViewportPreset,
+    viewport: PreviewViewportConfig,
 ) -> Result<HeaderValue, String> {
     HeaderValue::from_str(&format!(
         "{BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME}={}; Path=/; SameSite=Lax; Max-Age={}",
-        viewport_preset.as_cookie_value(),
+        viewport.as_cookie_value(),
         BROWSER_PREVIEW_SESSION_TTL.as_secs()
     ))
     .map_err(|error| error.to_string())
@@ -6366,10 +6433,23 @@ fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn read_preview_viewport_preset(headers: &HeaderMap) -> Option<PreviewViewportPreset> {
+fn parse_preview_viewport_cookie(raw: &str) -> Option<PreviewViewportConfig> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.split(':');
+    let preset = parse_preview_viewport_preset(parts.next()?)?;
+    let width = normalize_preview_viewport_dimension(parts.next());
+    let height = normalize_preview_viewport_dimension(parts.next());
+    build_preview_viewport_config(Some(preset), width, height)
+}
+
+fn read_preview_viewport_preset(headers: &HeaderMap) -> Option<PreviewViewportConfig> {
     read_cookie_value(headers, BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME)
         .as_deref()
-        .and_then(parse_preview_viewport_preset)
+        .and_then(parse_preview_viewport_cookie)
 }
 
 fn should_rewrite_preview_html_response(headers: &HeaderMap) -> bool {
@@ -6396,7 +6476,7 @@ fn should_rewrite_preview_html_response(headers: &HeaderMap) -> bool {
 
 fn rewrite_preview_html_document(
     body: &[u8],
-    viewport_preset: Option<PreviewViewportPreset>,
+    viewport: Option<PreviewViewportConfig>,
 ) -> Option<Vec<u8>> {
     if body.len() > BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES {
         return None;
@@ -6404,9 +6484,9 @@ fn rewrite_preview_html_document(
 
     let document = std::str::from_utf8(body).ok()?;
     let document = if let Some(content) =
-        viewport_preset.and_then(PreviewViewportPreset::viewport_meta_content)
+        viewport.and_then(PreviewViewportConfig::viewport_meta_content)
     {
-        inject_preview_viewport_meta(document, content)
+        inject_preview_viewport_meta(document, &content)
     } else {
         document.to_string()
     };
@@ -9295,7 +9375,7 @@ mod tests {
 
     #[test]
     fn parse_preview_bootstrap_params_strips_internal_query_fields() {
-        let uri: Uri = "/index.html?sid=session-1&st=token-1&vp=desktop&foo=bar&baz=qux"
+        let uri: Uri = "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&foo=bar&baz=qux"
             .parse()
             .expect("valid uri");
 
@@ -9303,7 +9383,14 @@ mod tests {
 
         assert_eq!(params.session_id.as_deref(), Some("session-1"));
         assert_eq!(params.bootstrap_token.as_deref(), Some("token-1"));
-        assert_eq!(params.viewport_preset, Some(PreviewViewportPreset::Desktop));
+        assert_eq!(
+            params.viewport,
+            Some(PreviewViewportConfig {
+                preset: PreviewViewportPreset::Desktop,
+                width: Some(1728),
+                height: Some(1117),
+            })
+        );
         assert_eq!(
             params.sanitized_path_and_query,
             "/index.html?foo=bar&baz=qux"
@@ -9404,20 +9491,27 @@ mod tests {
         let rewritten = String::from_utf8(rewritten).expect("utf8 html");
 
         assert!(rewritten.contains(BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH));
-        assert!(!rewritten.contains("width=1440"));
+        assert!(!rewritten.contains("width=1920"));
     }
 
     #[test]
     fn rewrite_preview_html_document_rewrites_viewport_in_desktop_mode() {
         let document = b"<html><head><title>Preview</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body>Hello</body></html>";
         let rewritten =
-            rewrite_preview_html_document(document, Some(PreviewViewportPreset::Desktop))
-                .expect("rewritten html");
+            rewrite_preview_html_document(
+                document,
+                Some(PreviewViewportConfig {
+                    preset: PreviewViewportPreset::Desktop,
+                    width: Some(1728),
+                    height: Some(1117),
+                }),
+            )
+            .expect("rewritten html");
         let rewritten = String::from_utf8(rewritten).expect("utf8 html");
 
         assert!(rewritten.contains(BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH));
         assert!(rewritten.contains(
-            "<meta name=\"viewport\" content=\"width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes\">"
+            "<meta name=\"viewport\" content=\"width=1728, height=1117, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes\">"
         ));
         assert_eq!(rewritten.matches("name=\"viewport\"").count(), 1);
     }
@@ -9427,11 +9521,11 @@ mod tests {
         let document = "<html><head><title>Preview</title></head><body>Hello</body></html>";
         let rewritten = inject_preview_viewport_meta(
             document,
-            "width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes",
+            "width=1920, height=1080, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes",
         );
 
         assert!(rewritten.contains(
-            "<meta name=\"viewport\" content=\"width=1440, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes\">"
+            "<meta name=\"viewport\" content=\"width=1920, height=1080, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes\">"
         ));
         assert!(rewritten.contains("<title>Preview</title>"));
     }
