@@ -127,6 +127,7 @@ interface MainScreenProps {
   showToolCalls?: boolean;
   onDefaultStartCwdChange?: (cwd: string | null) => void;
   onChatContextChange?: (chat: Chat | null) => void;
+  onChatOpeningStateChange?: (chatId: string | null) => void;
   pendingOpenChatId?: string | null;
   pendingOpenChatSnapshot?: Chat | null;
   onPendingOpenChatHandled?: () => void;
@@ -498,6 +499,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       showToolCalls = true,
       onDefaultStartCwdChange,
       onChatContextChange,
+      onChatOpeningStateChange,
       pendingOpenChatId,
       pendingOpenChatSnapshot,
       onPendingOpenChatHandled,
@@ -1964,6 +1966,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     useEffect(() => {
       onChatContextChange?.(selectedChat);
     }, [onChatContextChange, selectedChat]);
+
+    useEffect(() => {
+      onChatOpeningStateChange?.(openingChatId);
+    }, [onChatOpeningStateChange, openingChatId]);
 
     useEffect(() => {
       let cancelled = false;

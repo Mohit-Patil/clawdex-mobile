@@ -9,6 +9,7 @@ import {
   Pressable,
   StatusBar,
   StyleSheet,
+  Text,
   type AppStateStatus,
   useColorScheme,
   useWindowDimensions,
@@ -144,6 +145,8 @@ export default function App() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [activeChat, setActiveChat] = useState<Chat | null>(null);
   const [gitChat, setGitChat] = useState<Chat | null>(null);
+  const [chatTransitionChatId, setChatTransitionChatId] = useState<string | null>(null);
+  const [mainOpeningChatId, setMainOpeningChatId] = useState<string | null>(null);
   const [pendingMainChatId, setPendingMainChatId] = useState<string | null>(null);
   const [pendingMainChatSnapshot, setPendingMainChatSnapshot] = useState<Chat | null>(null);
   const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
@@ -170,6 +173,7 @@ export default function App() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const drawerOpenRef = useRef(false);
   const drawerVisibleRef = useRef(false);
+  const chatTransitionRequestIdRef = useRef(0);
   const appLifecycleStateRef = useRef(AppState.currentState);
   const activeUsageStartedAtRef = useRef<number | null>(
     AppState.currentState === 'active' ? Date.now() : null
@@ -609,6 +613,47 @@ export default function App() {
     animateDrawerTo(false);
   }, [animateDrawerTo]);
 
+  const openChatWithTransition = useCallback(
+    async (id: string, snapshot?: Chat | null) => {
+      const requestId = chatTransitionRequestIdRef.current + 1;
+      chatTransitionRequestIdRef.current = requestId;
+      const startedAt = Date.now();
+      setChatTransitionChatId(id);
+      setMainOpeningChatId(id);
+      closeDrawer();
+
+      let nextSnapshot = snapshot && snapshot.id === id ? snapshot : null;
+      if (!nextSnapshot && currentScreen !== 'Main' && api) {
+        try {
+          nextSnapshot = await api.getChat(id);
+        } catch {
+          nextSnapshot = null;
+        }
+      }
+
+      const remainingMs = 220 - (Date.now() - startedAt);
+      if (remainingMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, remainingMs));
+      }
+
+      if (chatTransitionRequestIdRef.current !== requestId) {
+        return;
+      }
+
+      setSelectedChatId(id);
+      setActiveChat(nextSnapshot);
+      setGitChat(null);
+      setCurrentScreen('Main');
+      setPendingMainChatId(id);
+      setPendingMainChatSnapshot(nextSnapshot);
+      setChatTransitionChatId(null);
+      if (nextSnapshot) {
+        setMainOpeningChatId(null);
+      }
+    },
+    [api, closeDrawer, currentScreen]
+  );
+
   const handleChatGitBack = useCallback(() => {
     const chatId = gitChat?.id ?? activeChat?.id ?? selectedChatId;
     const resumeChat =
@@ -617,14 +662,13 @@ export default function App() {
         : activeChat && activeChat.id === chatId
           ? activeChat
           : null;
+    if (chatId) {
+      void openChatWithTransition(chatId, resumeChat);
+      return;
+    }
     setCurrentScreen('Main');
     setGitChat(null);
-    if (chatId) {
-      setSelectedChatId(chatId);
-      setPendingMainChatId(chatId);
-      setPendingMainChatSnapshot(resumeChat);
-    }
-  }, [activeChat, gitChat, selectedChatId]);
+  }, [activeChat, gitChat, openChatWithTransition, selectedChatId]);
 
   const chatGitBackGesture = useMemo(
     () =>
@@ -716,6 +760,11 @@ export default function App() {
 
   const navigate = useCallback(
     (screen: Screen) => {
+      if (screen !== 'Main') {
+        chatTransitionRequestIdRef.current += 1;
+        setChatTransitionChatId(null);
+        setMainOpeningChatId(null);
+      }
       setCurrentScreen(screen);
       closeDrawer();
     },
@@ -730,17 +779,15 @@ export default function App() {
         return;
       }
 
-      setSelectedChatId(id);
-      setGitChat(null);
-      setCurrentScreen('Main');
-      setPendingMainChatId(id);
-      setPendingMainChatSnapshot(null);
-      closeDrawer();
+      void openChatWithTransition(id, null);
     },
-    [activeChat?.id, closeDrawer, currentScreen, selectedChatId]
+    [activeChat?.id, closeDrawer, currentScreen, openChatWithTransition, selectedChatId]
   );
 
   const handleNewChat = useCallback(() => {
+    chatTransitionRequestIdRef.current += 1;
+    setChatTransitionChatId(null);
+    setMainOpeningChatId(null);
     setPendingMainChatId(null);
     setPendingMainChatSnapshot(null);
     setSelectedChatId(null);
@@ -938,6 +985,9 @@ export default function App() {
       if (typeof targetUrl === 'string' && targetUrl.trim().length > 0) {
         setPendingBrowserTargetUrl(targetUrl.trim());
       }
+      chatTransitionRequestIdRef.current += 1;
+      setChatTransitionChatId(null);
+      setMainOpeningChatId(null);
       setCurrentScreen('Browser');
       closeDrawer();
     },
@@ -948,6 +998,8 @@ export default function App() {
       setSelectedChatId(null);
       setActiveChat(null);
       setGitChat(null);
+      setChatTransitionChatId(null);
+      setMainOpeningChatId(null);
       setPendingMainChatId(null);
       setPendingMainChatSnapshot(null);
   }, []);
@@ -1046,6 +1098,9 @@ export default function App() {
   }, [onboardingReturnScreen]);
 
   const handleOpenChatGit = useCallback((chat: Chat) => {
+    chatTransitionRequestIdRef.current += 1;
+    setChatTransitionChatId(null);
+    setMainOpeningChatId(null);
     setGitChat(chat);
     setSelectedChatId(chat.id);
     setCurrentScreen('ChatGit');
@@ -1053,8 +1108,13 @@ export default function App() {
 
   const handleChatContextChange = useCallback((chat: Chat | null) => {
     setActiveChat(chat);
-    setSelectedChatId(chat?.id ?? null);
-  }, []);
+    setSelectedChatId((previous) => {
+      if (chat?.id) {
+        return chat.id;
+      }
+      return mainOpeningChatId ? previous : null;
+    });
+  }, [mainOpeningChatId]);
 
   const handleGitChatUpdated = useCallback((chat: Chat) => {
     setGitChat(chat);
@@ -1069,20 +1129,25 @@ export default function App() {
         : activeChat && activeChat.id === chatId
           ? activeChat
           : null;
+    if (chatId) {
+      void openChatWithTransition(chatId, resumeChat);
+      return;
+    }
     setCurrentScreen('Main');
     setGitChat(null);
-    if (chatId) {
-      setSelectedChatId(chatId);
-      setPendingMainChatId(chatId);
-      setPendingMainChatSnapshot(resumeChat);
-    }
-  }, [activeChat, gitChat, selectedChatId]);
+  }, [activeChat, gitChat, openChatWithTransition, selectedChatId]);
 
   const openPrivacy = useCallback(() => {
+    chatTransitionRequestIdRef.current += 1;
+    setChatTransitionChatId(null);
+    setMainOpeningChatId(null);
     setCurrentScreen('Privacy');
   }, []);
 
   const openTerms = useCallback(() => {
+    chatTransitionRequestIdRef.current += 1;
+    setChatTransitionChatId(null);
+    setMainOpeningChatId(null);
     setCurrentScreen('Terms');
   }, []);
 
@@ -1172,6 +1237,7 @@ export default function App() {
             showToolCalls={showToolCalls}
             onDefaultStartCwdChange={handleDefaultStartCwdChange}
             onChatContextChange={handleChatContextChange}
+            onChatOpeningStateChange={setMainOpeningChatId}
             pendingOpenChatId={pendingMainChatId}
             pendingOpenChatSnapshot={pendingMainChatSnapshot}
             onPendingOpenChatHandled={() => {
@@ -1253,6 +1319,7 @@ export default function App() {
             showToolCalls={showToolCalls}
             onDefaultStartCwdChange={handleDefaultStartCwdChange}
             onChatContextChange={handleChatContextChange}
+            onChatOpeningStateChange={setMainOpeningChatId}
             pendingOpenChatId={pendingMainChatId}
             pendingOpenChatSnapshot={pendingMainChatSnapshot}
             onPendingOpenChatHandled={() => {
@@ -1282,6 +1349,14 @@ export default function App() {
                 ]}
               >
                 {renderScreen()}
+                {chatTransitionChatId || (currentScreen === 'Main' && mainOpeningChatId) ? (
+                  <View style={styles.chatTransitionOverlay}>
+                    <View style={styles.chatTransitionCard}>
+                      <ActivityIndicator size="small" color={theme.colors.textPrimary} />
+                      <Text style={styles.chatTransitionTitle}>Opening chat...</Text>
+                    </View>
+                  </View>
+                ) : null}
               </Animated.View>
             </GestureDetector>
 
@@ -1486,6 +1561,32 @@ const createStyles = (theme: ReturnType<typeof createAppTheme>) =>
       borderCurve: 'continuous',
       shadowColor: theme.colors.shadow,
       shadowOffset: { width: 0, height: 16 },
+    },
+    chatTransitionOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 5,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 28,
+      backgroundColor: theme.colors.bgMain,
+    },
+    chatTransitionCard: {
+      width: '100%',
+      maxWidth: 320,
+      borderRadius: 24,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgElevated,
+      paddingHorizontal: 22,
+      paddingVertical: 24,
+      alignItems: 'center',
+      gap: 10,
+    },
+    chatTransitionTitle: {
+      ...theme.typography.headline,
+      color: theme.colors.textPrimary,
+      fontWeight: '700',
+      textAlign: 'center',
     },
     overlay: {
       ...StyleSheet.absoluteFillObject,
