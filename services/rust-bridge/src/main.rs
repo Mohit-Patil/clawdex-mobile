@@ -21,7 +21,7 @@ use axum::{
     http::{
         header::{
             CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_TYPE, COOKIE, HOST, LOCATION,
-            ORIGIN, REFERER, SET_COOKIE, UPGRADE,
+            ORIGIN, REFERER, SET_COOKIE, UPGRADE, VARY,
         },
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
     },
@@ -75,6 +75,8 @@ const OPENCODE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OPENCODE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const BROWSER_PREVIEW_COOKIE_NAME: &str = "clawdex_preview";
 const BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME: &str = "clawdex_preview_vp";
+const BROWSER_PREVIEW_PROXY_PREFIX: &str = "/__clawdex_proxy__";
+const BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH: &str = "/__clawdex_preview_runtime__.js";
 const BROWSER_PREVIEW_SESSION_TTL: Duration = Duration::from_secs(60 * 60 * 12);
 const BROWSER_PREVIEW_MAX_SESSIONS: usize = 12;
 const BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -4683,11 +4685,24 @@ async fn local_image_handler(
 async fn preview_entry_handler(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let (mut parts, body) = request.into_parts();
 
+    if parts.uri.path() == BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH {
+        return preview_runtime_script_response();
+    }
+
     if is_websocket_upgrade_request(&parts.method, &parts.headers) {
         return handle_preview_websocket_request(state, &mut parts).await;
     }
 
     handle_preview_http_request(state, parts, body).await
+}
+
+fn preview_runtime_script_response() -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/javascript; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(build_preview_runtime_script()))
+        .unwrap_or_else(|_| Response::new(Body::from(String::new())))
 }
 
 async fn handle_preview_http_request(
@@ -4710,8 +4725,23 @@ async fn handle_preview_http_request(
         );
     }
 
-    let upstream_url =
-        match build_preview_upstream_url(&session.target_url, &sanitized_path_and_query, false) {
+    let request_target = match resolve_preview_request_target(
+        &session.target_url,
+        &sanitized_path_and_query,
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid preview request path: {error}"),
+            );
+        }
+    };
+    let upstream_url = match build_preview_upstream_url(
+        &request_target.target_url,
+        &request_target.path_and_query,
+        false,
+    ) {
             Ok(url) => url,
             Err(error) => {
                 return preview_error_response(
@@ -4750,7 +4780,7 @@ async fn handle_preview_http_request(
         }
 
         if let Some(rewritten) =
-            rewrite_preview_request_header(header_name, value, &session.target_url)
+            rewrite_preview_request_header(header_name, value, &request_target.target_url)
         {
             upstream_request = upstream_request.header(name, rewritten);
         }
@@ -4771,12 +4801,10 @@ async fn handle_preview_http_request(
         .get(HOST.as_str())
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let effective_viewport_preset = requested_viewport_preset
-        .or_else(|| read_preview_viewport_preset(&parts.headers));
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let upstream_headers = upstream_response.headers().clone();
-    let rewrite_html = should_rewrite_preview_html_response(&upstream_headers, effective_viewport_preset);
+    let rewrite_html = should_rewrite_preview_html_response(&upstream_headers);
 
     let mut response = if rewrite_html {
         let upstream_body = match upstream_response.bytes().await {
@@ -4788,7 +4816,7 @@ async fn handle_preview_http_request(
                 );
             }
         };
-        let rewritten_body = rewrite_preview_html_document(&upstream_body, effective_viewport_preset)
+        let rewritten_body = rewrite_preview_html_document(&upstream_body)
             .unwrap_or_else(|| upstream_body.to_vec());
         let mut response = Response::new(Body::from(rewritten_body));
         *response.status_mut() = status;
@@ -4804,16 +4832,46 @@ async fn handle_preview_http_request(
             continue;
         }
 
+        if rewrite_html
+            && (name.as_str().eq_ignore_ascii_case("etag")
+                || name.as_str().eq_ignore_ascii_case("last-modified"))
+        {
+            continue;
+        }
+
         if name.as_str().eq_ignore_ascii_case(LOCATION.as_str()) {
             if let Some(rewritten) =
-                rewrite_preview_location_header(value, &session.target_url, request_host.as_deref())
+                rewrite_preview_location_header(
+                    value,
+                    &request_target.target_url,
+                    request_host.as_deref(),
+                    request_target.proxy_path_prefix.as_deref(),
+                )
             {
                 response.headers_mut().append(LOCATION, rewritten);
             }
             continue;
         }
 
+        if name.as_str().eq_ignore_ascii_case(SET_COOKIE.as_str()) {
+            if let Some(rewritten) = rewrite_preview_set_cookie_header(
+                value,
+                request_target.proxy_path_prefix.as_deref(),
+            ) {
+                response.headers_mut().append(SET_COOKIE, rewritten);
+            }
+            continue;
+        }
+
         response.headers_mut().append(name.clone(), value.clone());
+    }
+
+    if rewrite_html {
+        response.headers_mut().insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store, private"),
+        );
+        append_vary_header_value(response.headers_mut(), "Cookie");
     }
 
     if let Some(viewport_preset) = requested_viewport_preset {
@@ -4836,8 +4894,23 @@ async fn handle_preview_websocket_request(
             Err(response) => return response,
         };
 
-    let upstream_url =
-        match build_preview_upstream_url(&session.target_url, &sanitized_path_and_query, true) {
+    let request_target = match resolve_preview_request_target(
+        &session.target_url,
+        &sanitized_path_and_query,
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            return preview_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid websocket preview path: {error}"),
+            );
+        }
+    };
+    let upstream_url = match build_preview_upstream_url(
+        &request_target.target_url,
+        &request_target.path_and_query,
+        true,
+    ) {
             Ok(url) => url,
             Err(error) => {
                 return preview_error_response(
@@ -4871,7 +4944,7 @@ async fn handle_preview_websocket_request(
         }
 
         if let Some(rewritten) =
-            rewrite_preview_request_header(header_name, value, &session.target_url)
+            rewrite_preview_request_header(header_name, value, &request_target.target_url)
         {
             upstream_request.headers_mut().append(name, rewritten);
         }
@@ -6090,15 +6163,6 @@ impl PreviewViewportPreset {
             Self::Desktop => "desktop",
         }
     }
-
-    fn viewport_meta_content(self) -> Option<&'static str> {
-        match self {
-            Self::Mobile => None,
-            Self::Desktop => {
-                Some("width=1280, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes")
-            }
-        }
-    }
 }
 
 fn parse_preview_viewport_preset(raw: &str) -> Option<PreviewViewportPreset> {
@@ -6292,20 +6356,7 @@ fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn read_preview_viewport_preset(headers: &HeaderMap) -> Option<PreviewViewportPreset> {
-    read_cookie_value(headers, BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME)
-        .as_deref()
-        .and_then(parse_preview_viewport_preset)
-}
-
-fn should_rewrite_preview_html_response(
-    headers: &HeaderMap,
-    viewport_preset: Option<PreviewViewportPreset>,
-) -> bool {
-    if viewport_preset != Some(PreviewViewportPreset::Desktop) {
-        return false;
-    }
-
+fn should_rewrite_preview_html_response(headers: &HeaderMap) -> bool {
     let Some(content_type) = headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()) else {
         return false;
     };
@@ -6324,67 +6375,169 @@ fn should_rewrite_preview_html_response(
     }
 }
 
-fn rewrite_preview_html_document(
-    body: &[u8],
-    viewport_preset: Option<PreviewViewportPreset>,
-) -> Option<Vec<u8>> {
-    let content = viewport_preset?.viewport_meta_content()?;
+fn rewrite_preview_html_document(body: &[u8]) -> Option<Vec<u8>> {
     if body.len() > BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES {
         return None;
     }
 
     let document = std::str::from_utf8(body).ok()?;
-    let injected = inject_preview_viewport_meta(document, content);
-    Some(injected.into_bytes())
+    let rewritten = inject_preview_runtime_script(document);
+    Some(rewritten.into_bytes())
 }
 
-fn inject_preview_viewport_meta(document: &str, content: &str) -> String {
-    let replacement = format!(r#"<meta name="viewport" content="{content}">"#);
+fn inject_preview_runtime_script(document: &str) -> String {
+    if document.contains(BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH) {
+        return document.to_string();
+    }
+
+    let script_tag =
+        format!(r#"<script src="{BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH}"></script>"#);
+    inject_preview_head_markup(document, &script_tag)
+}
+
+fn inject_preview_head_markup(document: &str, markup: &str) -> String {
     let lower = document.to_ascii_lowercase();
-
-    let mut search_start = 0usize;
-    while let Some(meta_start_relative) = lower[search_start..].find("<meta") {
-        let meta_start = search_start + meta_start_relative;
-        let Some(meta_end_relative) = lower[meta_start..].find('>') else {
-            break;
-        };
-        let meta_end = meta_start + meta_end_relative + 1;
-        let normalized_meta_tag = lower[meta_start..meta_end]
-            .split_whitespace()
-            .collect::<String>();
-        if normalized_meta_tag.contains("name=\"viewport\"")
-            || normalized_meta_tag.contains("name='viewport'")
-            || normalized_meta_tag.contains("name=viewport")
-        {
-            let mut rewritten = String::with_capacity(document.len() + replacement.len());
-            rewritten.push_str(&document[..meta_start]);
-            rewritten.push_str(&replacement);
-            rewritten.push_str(&document[meta_end..]);
-            return rewritten;
-        }
-        search_start = meta_end;
-    }
-
-    if let Some(head_end) = lower.find("</head>") {
-        let mut rewritten = String::with_capacity(document.len() + replacement.len());
-        rewritten.push_str(&document[..head_end]);
-        rewritten.push_str(&replacement);
-        rewritten.push_str(&document[head_end..]);
-        return rewritten;
-    }
 
     if let Some(head_start) = lower.find("<head") {
         if let Some(head_tag_end_relative) = lower[head_start..].find('>') {
             let insert_at = head_start + head_tag_end_relative + 1;
-            let mut rewritten = String::with_capacity(document.len() + replacement.len());
+            let mut rewritten = String::with_capacity(document.len() + markup.len());
             rewritten.push_str(&document[..insert_at]);
-            rewritten.push_str(&replacement);
+            rewritten.push_str(markup);
             rewritten.push_str(&document[insert_at..]);
             return rewritten;
         }
     }
 
-    format!("{replacement}{document}")
+    if let Some(head_end) = lower.find("</head>") {
+        let mut rewritten = String::with_capacity(document.len() + markup.len());
+        rewritten.push_str(&document[..head_end]);
+        rewritten.push_str(markup);
+        rewritten.push_str(&document[head_end..]);
+        return rewritten;
+    }
+
+    format!("{markup}{document}")
+}
+
+fn build_preview_runtime_script() -> String {
+    format!(
+        r#"(function() {{
+  if (globalThis.__clawdexPreviewRuntimeInstalled) {{
+    return;
+  }}
+  globalThis.__clawdexPreviewRuntimeInstalled = true;
+
+  var LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+  var PROXY_PREFIX = "{proxy_prefix}";
+  var currentOrigin = globalThis.location ? globalThis.location.origin : "";
+  var currentHref = globalThis.location ? globalThis.location.href : currentOrigin;
+  var wsOrigin = currentOrigin.replace(/^http/, "ws");
+
+  function isLoopbackHost(hostname, host) {{
+    return LOOPBACK_HOSTS.has((hostname || "").toLowerCase()) || LOOPBACK_HOSTS.has((host || "").toLowerCase());
+  }}
+
+  function encodeToken(value) {{
+    return btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }}
+
+  function toProxyUrl(input) {{
+    try {{
+      var resolved = input instanceof URL ? new URL(input.toString()) : new URL(String(input), currentHref);
+      if (!/^https?:$/.test(resolved.protocol) || !isLoopbackHost(resolved.hostname, resolved.host)) {{
+        return null;
+      }}
+      var token = encodeToken(resolved.origin);
+      return currentOrigin + PROXY_PREFIX + "/" + token + resolved.pathname + resolved.search + resolved.hash;
+    }} catch (_error) {{
+      return null;
+    }}
+  }}
+
+  function toProxyWebSocketUrl(input) {{
+    try {{
+      var resolved = input instanceof URL ? new URL(input.toString()) : new URL(String(input), currentHref);
+      if (!/^wss?:$/.test(resolved.protocol) || !isLoopbackHost(resolved.hostname, resolved.host)) {{
+        return null;
+      }}
+      var httpOrigin = resolved.origin.replace(/^ws/, "http");
+      var token = encodeToken(httpOrigin);
+      return wsOrigin + PROXY_PREFIX + "/" + token + resolved.pathname + resolved.search + resolved.hash;
+    }} catch (_error) {{
+      return null;
+    }}
+  }}
+
+  if (typeof globalThis.fetch === "function") {{
+    var originalFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = function(input, init) {{
+      var sourceUrl = input && typeof input === "object" && "url" in input ? input.url : input;
+      var rewritten = toProxyUrl(sourceUrl);
+      if (!rewritten) {{
+        return originalFetch(input, init);
+      }}
+      if (typeof Request === "function" && input instanceof Request) {{
+        return originalFetch(new Request(rewritten, input), init);
+      }}
+      return originalFetch(rewritten, init);
+    }};
+  }}
+
+  if (typeof XMLHttpRequest === "function") {{
+    var originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {{
+      var rewritten = toProxyUrl(url);
+      arguments[1] = rewritten || url;
+      return originalOpen.apply(this, arguments);
+    }};
+  }}
+
+  if (typeof EventSource === "function") {{
+    var OriginalEventSource = EventSource;
+    globalThis.EventSource = function(url, config) {{
+      return new OriginalEventSource(toProxyUrl(url) || url, config);
+    }};
+    globalThis.EventSource.prototype = OriginalEventSource.prototype;
+  }}
+
+  if (typeof WebSocket === "function") {{
+    var OriginalWebSocket = WebSocket;
+    globalThis.WebSocket = function(url, protocols) {{
+      var rewritten = toProxyWebSocketUrl(url) || url;
+      return protocols === undefined
+        ? new OriginalWebSocket(rewritten)
+        : new OriginalWebSocket(rewritten, protocols);
+    }};
+    globalThis.WebSocket.prototype = OriginalWebSocket.prototype;
+  }}
+
+  if (globalThis.navigator && typeof globalThis.navigator.sendBeacon === "function") {{
+    var originalSendBeacon = globalThis.navigator.sendBeacon.bind(globalThis.navigator);
+    globalThis.navigator.sendBeacon = function(url, data) {{
+      return originalSendBeacon(toProxyUrl(url) || url, data);
+    }};
+  }}
+
+  if (globalThis.document && typeof globalThis.document.addEventListener === "function") {{
+    globalThis.document.addEventListener("submit", function(event) {{
+      var form = event && event.target;
+      if (!form || typeof form.getAttribute !== "function") {{
+        return;
+      }}
+      var action = form.getAttribute("action");
+      if (!action) {{
+        return;
+      }}
+      var rewritten = toProxyUrl(action);
+      if (rewritten) {{
+        form.setAttribute("action", rewritten);
+      }}
+    }}, true);
+  }}
+}})();"#,
+        proxy_prefix = BROWSER_PREVIEW_PROXY_PREFIX
+    )
 }
 
 fn normalize_browser_preview_target_url(raw: &str) -> Result<Url, BridgeError> {
@@ -6460,6 +6613,77 @@ fn build_preview_bootstrap_path(
             .map(|value| format!("?{value}"))
             .unwrap_or_default()
     )
+}
+
+#[derive(Debug, Clone)]
+struct PreviewRequestTarget {
+    target_url: Url,
+    path_and_query: String,
+    proxy_path_prefix: Option<String>,
+}
+
+fn resolve_preview_request_target(
+    session_target_url: &Url,
+    sanitized_path_and_query: &str,
+) -> Result<PreviewRequestTarget, String> {
+    let parsed = Url::parse(&format!("http://preview{}", sanitized_path_and_query))
+        .map_err(|error| error.to_string())?;
+    let path = parsed.path();
+    let proxy_prefix_with_slash = format!("{BROWSER_PREVIEW_PROXY_PREFIX}/");
+
+    if let Some(proxy_tail) = path.strip_prefix(&proxy_prefix_with_slash) {
+        let mut segments = proxy_tail.splitn(2, '/');
+        let target_token = segments.next().unwrap_or_default().trim();
+        if target_token.is_empty() {
+            return Err("missing proxied preview target".to_string());
+        }
+
+        let target_url = decode_preview_proxy_origin_token(target_token)?;
+        let remainder = segments.next().unwrap_or_default();
+        let proxied_path = if remainder.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{remainder}")
+        };
+        let path_and_query = format!(
+            "{}{}",
+            proxied_path,
+            parsed
+                .query()
+                .map(|value| format!("?{value}"))
+                .unwrap_or_default()
+        );
+
+        return Ok(PreviewRequestTarget {
+            target_url,
+            path_and_query,
+            proxy_path_prefix: Some(format!("{BROWSER_PREVIEW_PROXY_PREFIX}/{target_token}")),
+        });
+    }
+
+    Ok(PreviewRequestTarget {
+        target_url: session_target_url.clone(),
+        path_and_query: sanitized_path_and_query.to_string(),
+        proxy_path_prefix: None,
+    })
+}
+
+#[cfg(test)]
+fn encode_preview_proxy_origin_token(target_origin: &str) -> String {
+    general_purpose::URL_SAFE_NO_PAD.encode(target_origin.as_bytes())
+}
+
+fn decode_preview_proxy_origin_token(token: &str) -> Result<Url, String> {
+    let decoded = general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .map_err(|error| format!("invalid proxied preview target: {error}"))?;
+    let origin =
+        String::from_utf8(decoded).map_err(|_| "invalid proxied preview target encoding".to_string())?;
+    let mut url =
+        normalize_browser_preview_target_url(&origin).map_err(|error| error.message)?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
 }
 
 fn build_preview_upstream_url(
@@ -6597,6 +6821,7 @@ fn rewrite_preview_location_header(
     value: &HeaderValue,
     target_url: &Url,
     request_host: Option<&str>,
+    proxy_path_prefix: Option<&str>,
 ) -> Option<HeaderValue> {
     let raw = value.to_str().ok()?;
     let Ok(location_url) = Url::parse(raw) else {
@@ -6610,9 +6835,11 @@ fn rewrite_preview_location_header(
     }
 
     let request_host = request_host?.trim();
+    let path_prefix = proxy_path_prefix.unwrap_or_default();
     let rewritten = format!(
-        "http://{}{}{}",
+        "http://{}{}{}{}",
         request_host,
+        path_prefix,
         location_url.path(),
         location_url
             .query()
@@ -6620,6 +6847,86 @@ fn rewrite_preview_location_header(
             .unwrap_or_default()
     );
     HeaderValue::from_str(&rewritten).ok()
+}
+
+fn rewrite_preview_set_cookie_header(
+    value: &HeaderValue,
+    proxy_path_prefix: Option<&str>,
+) -> Option<HeaderValue> {
+    let raw = value.to_str().ok()?;
+    let mut segments = raw.split(';');
+    let cookie_pair = segments.next()?.trim();
+    if cookie_pair.is_empty() {
+        return None;
+    }
+
+    let mut rewritten_segments = vec![cookie_pair.to_string()];
+    let mut saw_path = false;
+
+    for segment in segments {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("domain=") {
+            continue;
+        }
+
+        if lower.starts_with("path=") {
+            saw_path = true;
+            let raw_path = trimmed[5..].trim();
+            if let Some(path_prefix) = proxy_path_prefix {
+                let normalized_path = if raw_path.starts_with('/') {
+                    format!("{path_prefix}{raw_path}")
+                } else {
+                    format!("{path_prefix}/{raw_path}")
+                };
+                rewritten_segments.push(format!("Path={normalized_path}"));
+            } else {
+                rewritten_segments.push(trimmed.to_string());
+            }
+            continue;
+        }
+
+        rewritten_segments.push(trimmed.to_string());
+    }
+
+    if !saw_path {
+        if let Some(path_prefix) = proxy_path_prefix {
+            rewritten_segments.push(format!("Path={path_prefix}/"));
+        }
+    }
+
+    HeaderValue::from_str(&rewritten_segments.join("; ")).ok()
+}
+
+fn append_vary_header_value(headers: &mut HeaderMap, token: &str) {
+    let normalized_token = token.trim();
+    if normalized_token.is_empty() {
+        return;
+    }
+
+    let existing = headers
+        .get(VARY)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let has_token = existing
+        .split(',')
+        .any(|segment| segment.trim().eq_ignore_ascii_case(normalized_token));
+    if has_token {
+        return;
+    }
+
+    let merged = if existing.trim().is_empty() {
+        normalized_token.to_string()
+    } else {
+        format!("{existing}, {normalized_token}")
+    };
+    if let Ok(value) = HeaderValue::from_str(&merged) {
+        headers.insert(VARY, value);
+    }
 }
 
 fn target_origin_string(target_url: &Url) -> String {
@@ -8927,30 +9234,95 @@ mod tests {
     }
 
     #[test]
-    fn inject_preview_viewport_meta_replaces_existing_tag_even_with_attr_spacing() {
-        let document = concat!(
-            "<!doctype html><html><head>",
-            "<meta charset=\"utf-8\">",
-            "<meta content='width=device-width, initial-scale=1' name = 'viewport'>",
-            "<title>Preview</title></head><body></body></html>"
+    fn resolve_preview_request_target_decodes_proxied_loopback_origin() {
+        let target_token = encode_preview_proxy_origin_token("http://127.0.0.1:4000");
+        let target = resolve_preview_request_target(
+            &Url::parse("http://127.0.0.1:3000/").expect("valid root target"),
+            &format!(
+                "{}/{}/api/users?limit=5",
+                BROWSER_PREVIEW_PROXY_PREFIX,
+                target_token
+            ),
+        )
+        .expect("proxied preview target");
+
+        let expected_prefix = format!("{}/{}", BROWSER_PREVIEW_PROXY_PREFIX, target_token);
+        assert_eq!(target.target_url.as_str(), "http://127.0.0.1:4000/");
+        assert_eq!(target.path_and_query, "/api/users?limit=5");
+        assert_eq!(
+            target.proxy_path_prefix.as_deref(),
+            Some(expected_prefix.as_str())
         );
-
-        let rewritten = inject_preview_viewport_meta(document, "width=1280, initial-scale=1");
-
-        assert_eq!(rewritten.matches("name=\"viewport\"").count(), 1);
-        assert!(rewritten.contains("width=1280, initial-scale=1"));
-        assert!(!rewritten.contains("device-width"));
     }
 
     #[test]
-    fn inject_preview_viewport_meta_inserts_when_missing() {
-        let document = "<html><head><title>Preview</title></head><body>Hello</body></html>";
+    fn rewrite_preview_location_header_keeps_proxy_prefix_for_local_backend_redirects() {
+        let location = HeaderValue::from_static("http://127.0.0.1:4000/auth/login?next=%2Fdash");
+        let rewritten = rewrite_preview_location_header(
+            &location,
+            &Url::parse("http://127.0.0.1:4000/").expect("valid target"),
+            Some("100.108.165.85:8788"),
+            Some("/__clawdex_proxy__/aGVsbG8"),
+        )
+        .expect("rewritten location");
 
-        let rewritten = inject_preview_viewport_meta(document, "width=1280, initial-scale=1");
+        assert_eq!(
+            rewritten.to_str().expect("header string"),
+            "http://100.108.165.85:8788/__clawdex_proxy__/aGVsbG8/auth/login?next=%2Fdash"
+        );
+    }
 
-        assert!(rewritten.contains(
-            "<title>Preview</title><meta name=\"viewport\" content=\"width=1280, initial-scale=1\"></head>"
-        ));
+    #[test]
+    fn rewrite_preview_set_cookie_header_scopes_proxy_backend_cookies() {
+        let cookie = HeaderValue::from_static(
+            "session=abc123; Path=/; Domain=localhost; HttpOnly; SameSite=Lax"
+        );
+        let rewritten = rewrite_preview_set_cookie_header(
+            &cookie,
+            Some("/__clawdex_proxy__/aGVsbG8"),
+        )
+        .expect("rewritten cookie");
+
+        assert_eq!(
+            rewritten.to_str().expect("cookie string"),
+            "session=abc123; Path=/__clawdex_proxy__/aGVsbG8/; HttpOnly; SameSite=Lax"
+        );
+    }
+
+    #[test]
+    fn rewrite_preview_html_document_injects_runtime_script_without_desktop_mode() {
+        let document = b"<html><head><title>Preview</title></head><body>Hello</body></html>";
+        let rewritten = rewrite_preview_html_document(document).expect("rewritten html");
+        let rewritten = String::from_utf8(rewritten).expect("utf8 html");
+
+        assert!(rewritten.contains(BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH));
+        assert!(!rewritten.contains("width=1280"));
+    }
+
+    #[test]
+    fn build_preview_runtime_script_includes_loopback_proxy_runtime() {
+        let script = build_preview_runtime_script();
+
+        assert!(script.contains("LOOPBACK_HOSTS"));
+        assert!(script.contains(BROWSER_PREVIEW_PROXY_PREFIX));
+        assert!(script.contains("XMLHttpRequest.prototype.open"));
+    }
+
+    #[test]
+    fn append_vary_header_value_adds_cookie_without_duplication() {
+        let mut headers = HeaderMap::new();
+        headers.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+
+        append_vary_header_value(&mut headers, "Cookie");
+        append_vary_header_value(&mut headers, "cookie");
+
+        assert_eq!(
+            headers
+                .get(VARY)
+                .and_then(|value| value.to_str().ok())
+                .expect("vary header"),
+            "Accept-Encoding, Cookie"
+        );
     }
 
     #[test]

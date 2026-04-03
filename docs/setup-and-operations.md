@@ -131,12 +131,21 @@ How it works:
 - The bridge serves a dedicated preview origin on a separate port
 - HTTP requests, subresources, cookies, and WebSocket/HMR traffic are proxied from the phone to
   the bridge host's loopback target
+- Browser runtime calls to other loopback origins on the host are also rewritten through the
+  preview origin for `fetch`, XHR, `EventSource`, `WebSocket`, and form submissions
 
 Current scope:
 
 - Supports `http://` and `https://` loopback targets only
 - Intended for local web dev servers such as Next.js, Vite, CRA, or simple static servers
+- Separate local frontend/backend ports can work together inside the preview as long as the app
+  reaches the backend through normal browser APIs or form posts
+- Hard-coded absolute localhost asset URLs outside those browser APIs may still need a same-origin
+  dev proxy in the app itself
 - Does not preview native React Native simulator/device UI directly
+
+For a concise list of supported cases and known limitations, see
+`docs/browser-preview-limitations.md`.
 
 ## Teardown / Cleanup
 

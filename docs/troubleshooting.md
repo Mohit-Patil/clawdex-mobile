@@ -43,6 +43,8 @@ npm run stop:services
 
 - The in-app browser only supports loopback targets from the bridge host: `localhost`, `127.0.0.1`, or `::1`.
 - Use entries like `localhost:3000`, `127.0.0.1:5173`, or just a port number.
+- If a separate local API runs on another port, make sure the app reaches it through `fetch`, XHR, `EventSource`, `WebSocket`, or a normal form post so the preview runtime can rewrite it through the bridge.
+- See `docs/browser-preview-limitations.md` for the current support boundaries and known caveats.
 - If Browser reports preview is unavailable, check whether `BRIDGE_PREVIEW_PORT` is already in use on the host.
 - By default the preview server binds to `BRIDGE_PORT + 1`.
 - Restart the bridge after changing `BRIDGE_PREVIEW_PORT`.
