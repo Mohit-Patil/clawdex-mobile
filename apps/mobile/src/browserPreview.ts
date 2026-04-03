@@ -5,6 +5,7 @@ const LOCAL_PREVIEW_WITHOUT_SCHEME_PATTERN =
   /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:[/?#].*)?$/i;
 const PORT_ONLY_PATTERN = /^\d{2,5}$/;
 const MAX_RECENT_TARGETS = 8;
+export type BrowserPreviewViewportPreset = 'mobile' | 'desktop';
 
 export function normalizePreviewTargetInput(value: string): string | null {
   if (typeof value !== 'string') {
@@ -105,7 +106,8 @@ export function pushRecentPreviewTarget(
 export function buildBrowserPreviewBootstrapUrl(
   bridgeUrl: string,
   previewPort: number,
-  bootstrapPath: string
+  bootstrapPath: string,
+  viewportPreset: BrowserPreviewViewportPreset = 'mobile'
 ): string | null {
   if (typeof bridgeUrl !== 'string' || typeof bootstrapPath !== 'string') {
     return null;
@@ -124,10 +126,12 @@ export function buildBrowserPreviewBootstrapUrl(
     base.search = '';
     base.hash = '';
 
-    return new URL(
+    const previewUrl = new URL(
       normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`,
       base.toString()
-    ).toString();
+    );
+    previewUrl.searchParams.set('vp', viewportPreset);
+    return previewUrl.toString();
   } catch {
     return null;
   }
@@ -162,5 +166,50 @@ export function isSameOriginUrl(url: string, origin: string | null | undefined):
     return new URL(url).origin === origin;
   } catch {
     return false;
+  }
+}
+
+export function applyBrowserPreviewViewportPreset(
+  rawUrl: string,
+  viewportPreset: BrowserPreviewViewportPreset
+): string | null {
+  if (typeof rawUrl !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(rawUrl.trim());
+    parsed.searchParams.set('vp', viewportPreset);
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function buildBrowserPreviewViewportNavigationUrl(
+  rawCurrentUrl: string,
+  rawBootstrapUrl: string,
+  viewportPreset: BrowserPreviewViewportPreset
+): string | null {
+  if (typeof rawCurrentUrl !== 'string' || typeof rawBootstrapUrl !== 'string') {
+    return null;
+  }
+
+  try {
+    const current = new URL(rawCurrentUrl.trim());
+    const bootstrap = new URL(rawBootstrapUrl.trim());
+    const sid = bootstrap.searchParams.get('sid');
+    const st = bootstrap.searchParams.get('st');
+
+    if (current.origin !== bootstrap.origin || !sid || !st) {
+      return applyBrowserPreviewViewportPreset(rawBootstrapUrl, viewportPreset);
+    }
+
+    current.searchParams.set('sid', sid);
+    current.searchParams.set('st', st);
+    current.searchParams.set('vp', viewportPreset);
+    return current.toString();
+  } catch {
+    return applyBrowserPreviewViewportPreset(rawBootstrapUrl, viewportPreset);
   }
 }

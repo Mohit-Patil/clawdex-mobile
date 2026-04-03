@@ -20,8 +20,8 @@ use axum::{
     },
     http::{
         header::{
-            CACHE_CONTROL, CONNECTION, CONTENT_TYPE, COOKIE, HOST, LOCATION, ORIGIN, REFERER,
-            SET_COOKIE, UPGRADE,
+            CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_TYPE, COOKIE, HOST, LOCATION,
+            ORIGIN, REFERER, SET_COOKIE, UPGRADE,
         },
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
     },
@@ -74,9 +74,11 @@ const OPENCODE_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const OPENCODE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OPENCODE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const BROWSER_PREVIEW_COOKIE_NAME: &str = "clawdex_preview";
+const BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME: &str = "clawdex_preview_vp";
 const BROWSER_PREVIEW_SESSION_TTL: Duration = Duration::from_secs(60 * 60 * 12);
 const BROWSER_PREVIEW_MAX_SESSIONS: usize = 12;
 const BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const BROWSER_PREVIEW_DISCOVERY_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const BROWSER_PREVIEW_DISCOVERY_PORTS: &[u16] =
     &[3000, 3001, 4173, 4200, 4321, 5000, 5173, 8000, 8080, 8081];
@@ -4693,7 +4695,7 @@ async fn handle_preview_http_request(
     parts: axum::http::request::Parts,
     body: Body,
 ) -> Response {
-    let (session, bootstrap_token, sanitized_path_and_query) =
+    let (session, bootstrap_token, requested_viewport_preset, sanitized_path_and_query) =
         match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
         {
             Ok(result) => result,
@@ -4701,7 +4703,11 @@ async fn handle_preview_http_request(
         };
 
     if let Some(token) = bootstrap_token {
-        return preview_bootstrap_redirect_response(&sanitized_path_and_query, &token);
+        return preview_bootstrap_redirect_response(
+            &sanitized_path_and_query,
+            &token,
+            requested_viewport_preset,
+        );
     }
 
     let upstream_url =
@@ -4765,11 +4771,33 @@ async fn handle_preview_http_request(
         .get(HOST.as_str())
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let effective_viewport_preset = requested_viewport_preset
+        .or_else(|| read_preview_viewport_preset(&parts.headers));
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let upstream_headers = upstream_response.headers().clone();
-    let mut response = Response::new(Body::from_stream(upstream_response.bytes_stream()));
-    *response.status_mut() = status;
+    let rewrite_html = should_rewrite_preview_html_response(&upstream_headers, effective_viewport_preset);
+
+    let mut response = if rewrite_html {
+        let upstream_body = match upstream_response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return preview_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("failed to read preview document: {error}"),
+                );
+            }
+        };
+        let rewritten_body = rewrite_preview_html_document(&upstream_body, effective_viewport_preset)
+            .unwrap_or_else(|| upstream_body.to_vec());
+        let mut response = Response::new(Body::from(rewritten_body));
+        *response.status_mut() = status;
+        response
+    } else {
+        let mut response = Response::new(Body::from_stream(upstream_response.bytes_stream()));
+        *response.status_mut() = status;
+        response
+    };
 
     for (name, value) in upstream_headers.iter() {
         if should_skip_preview_response_header(name.as_str()) {
@@ -4788,6 +4816,12 @@ async fn handle_preview_http_request(
         response.headers_mut().append(name.clone(), value.clone());
     }
 
+    if let Some(viewport_preset) = requested_viewport_preset {
+        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport_preset) {
+            response.headers_mut().append(SET_COOKIE, cookie);
+        }
+    }
+
     response
 }
 
@@ -4795,7 +4829,7 @@ async fn handle_preview_websocket_request(
     state: Arc<AppState>,
     parts: &mut axum::http::request::Parts,
 ) -> Response {
-    let (session, _bootstrap_token, sanitized_path_and_query) =
+    let (session, _bootstrap_token, _viewport_preset, sanitized_path_and_query) =
         match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
         {
             Ok(result) => result,
@@ -6039,14 +6073,55 @@ async fn wait_for_shutdown_trigger(shutdown_rx: &mut watch::Receiver<bool>) {
 struct PreviewBootstrapParams {
     session_id: Option<String>,
     bootstrap_token: Option<String>,
+    viewport_preset: Option<PreviewViewportPreset>,
     sanitized_path_and_query: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewViewportPreset {
+    Mobile,
+    Desktop,
+}
+
+impl PreviewViewportPreset {
+    fn as_cookie_value(self) -> &'static str {
+        match self {
+            Self::Mobile => "mobile",
+            Self::Desktop => "desktop",
+        }
+    }
+
+    fn viewport_meta_content(self) -> Option<&'static str> {
+        match self {
+            Self::Mobile => None,
+            Self::Desktop => {
+                Some("width=1280, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes")
+            }
+        }
+    }
+}
+
+fn parse_preview_viewport_preset(raw: &str) -> Option<PreviewViewportPreset> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "mobile" => Some(PreviewViewportPreset::Mobile),
+        "desktop" => Some(PreviewViewportPreset::Desktop),
+        _ => None,
+    }
 }
 
 async fn resolve_preview_session_from_request(
     preview: &BrowserPreviewService,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<(BrowserPreviewResolvedSession, Option<String>, String), Response> {
+) -> Result<
+    (
+        BrowserPreviewResolvedSession,
+        Option<String>,
+        Option<PreviewViewportPreset>,
+        String,
+    ),
+    Response,
+> {
     let params = parse_preview_bootstrap_params(uri);
     if let (Some(session_id), Some(bootstrap_token)) = (
         params.session_id.as_deref(),
@@ -6062,6 +6137,7 @@ async fn resolve_preview_session_from_request(
         return Ok((
             session,
             Some(bootstrap_token.to_string()),
+            params.viewport_preset,
             params.sanitized_path_and_query,
         ));
     }
@@ -6079,7 +6155,7 @@ async fn resolve_preview_session_from_request(
         ));
     };
 
-    Ok((session, None, params.sanitized_path_and_query))
+    Ok((session, None, params.viewport_preset, params.sanitized_path_and_query))
 }
 
 fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
@@ -6087,6 +6163,7 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
         return PreviewBootstrapParams {
             session_id: None,
             bootstrap_token: None,
+            viewport_preset: None,
             sanitized_path_and_query: uri
                 .path_and_query()
                 .map(|value| value.as_str().to_string())
@@ -6097,6 +6174,7 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
 
     let mut session_id = None;
     let mut bootstrap_token = None;
+    let mut viewport_preset = None;
     let mut retained_pairs = Vec::new();
     for (key, value) in parsed.query_pairs() {
         if key == "sid" {
@@ -6105,6 +6183,10 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
         }
         if key == "st" {
             bootstrap_token = Some(value.to_string());
+            continue;
+        }
+        if key == "vp" {
+            viewport_preset = parse_preview_viewport_preset(&value);
             continue;
         }
         retained_pairs.push((key.to_string(), value.to_string()));
@@ -6130,6 +6212,7 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
     PreviewBootstrapParams {
         session_id,
         bootstrap_token,
+        viewport_preset,
         sanitized_path_and_query,
     }
 }
@@ -6137,6 +6220,7 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
 fn preview_bootstrap_redirect_response(
     sanitized_path_and_query: &str,
     bootstrap_token: &str,
+    viewport_preset: Option<PreviewViewportPreset>,
 ) -> Response {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::TEMPORARY_REDIRECT;
@@ -6147,6 +6231,11 @@ fn preview_bootstrap_redirect_response(
     );
     if let Ok(cookie) = build_preview_cookie_header(bootstrap_token) {
         response.headers_mut().append(SET_COOKIE, cookie);
+    }
+    if let Some(viewport_preset) = viewport_preset {
+        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport_preset) {
+            response.headers_mut().append(SET_COOKIE, cookie);
+        }
     }
     response
         .headers_mut()
@@ -6175,6 +6264,17 @@ fn build_preview_cookie_header(bootstrap_token: &str) -> Result<HeaderValue, Str
     .map_err(|error| error.to_string())
 }
 
+fn build_preview_viewport_cookie_header(
+    viewport_preset: PreviewViewportPreset,
+) -> Result<HeaderValue, String> {
+    HeaderValue::from_str(&format!(
+        "{BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME}={}; Path=/; SameSite=Lax; Max-Age={}",
+        viewport_preset.as_cookie_value(),
+        BROWSER_PREVIEW_SESSION_TTL.as_secs()
+    ))
+    .map_err(|error| error.to_string())
+}
+
 fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw_cookie = headers.get(COOKIE)?.to_str().ok()?;
     for segment in raw_cookie.split(';') {
@@ -6190,6 +6290,101 @@ fn read_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn read_preview_viewport_preset(headers: &HeaderMap) -> Option<PreviewViewportPreset> {
+    read_cookie_value(headers, BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME)
+        .as_deref()
+        .and_then(parse_preview_viewport_preset)
+}
+
+fn should_rewrite_preview_html_response(
+    headers: &HeaderMap,
+    viewport_preset: Option<PreviewViewportPreset>,
+) -> bool {
+    if viewport_preset != Some(PreviewViewportPreset::Desktop) {
+        return false;
+    }
+
+    let Some(content_type) = headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let normalized = content_type.to_ascii_lowercase();
+    if !normalized.contains("text/html") && !normalized.contains("application/xhtml+xml") {
+        return false;
+    }
+
+    match headers
+        .get(CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_ascii_lowercase())
+    {
+        Some(value) if !value.is_empty() && value != "identity" => false,
+        _ => true,
+    }
+}
+
+fn rewrite_preview_html_document(
+    body: &[u8],
+    viewport_preset: Option<PreviewViewportPreset>,
+) -> Option<Vec<u8>> {
+    let content = viewport_preset?.viewport_meta_content()?;
+    if body.len() > BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES {
+        return None;
+    }
+
+    let document = std::str::from_utf8(body).ok()?;
+    let injected = inject_preview_viewport_meta(document, content);
+    Some(injected.into_bytes())
+}
+
+fn inject_preview_viewport_meta(document: &str, content: &str) -> String {
+    let replacement = format!(r#"<meta name="viewport" content="{content}">"#);
+    let lower = document.to_ascii_lowercase();
+
+    let mut search_start = 0usize;
+    while let Some(meta_start_relative) = lower[search_start..].find("<meta") {
+        let meta_start = search_start + meta_start_relative;
+        let Some(meta_end_relative) = lower[meta_start..].find('>') else {
+            break;
+        };
+        let meta_end = meta_start + meta_end_relative + 1;
+        let normalized_meta_tag = lower[meta_start..meta_end]
+            .split_whitespace()
+            .collect::<String>();
+        if normalized_meta_tag.contains("name=\"viewport\"")
+            || normalized_meta_tag.contains("name='viewport'")
+            || normalized_meta_tag.contains("name=viewport")
+        {
+            let mut rewritten = String::with_capacity(document.len() + replacement.len());
+            rewritten.push_str(&document[..meta_start]);
+            rewritten.push_str(&replacement);
+            rewritten.push_str(&document[meta_end..]);
+            return rewritten;
+        }
+        search_start = meta_end;
+    }
+
+    if let Some(head_end) = lower.find("</head>") {
+        let mut rewritten = String::with_capacity(document.len() + replacement.len());
+        rewritten.push_str(&document[..head_end]);
+        rewritten.push_str(&replacement);
+        rewritten.push_str(&document[head_end..]);
+        return rewritten;
+    }
+
+    if let Some(head_start) = lower.find("<head") {
+        if let Some(head_tag_end_relative) = lower[head_start..].find('>') {
+            let insert_at = head_start + head_tag_end_relative + 1;
+            let mut rewritten = String::with_capacity(document.len() + replacement.len());
+            rewritten.push_str(&document[..insert_at]);
+            rewritten.push_str(&replacement);
+            rewritten.push_str(&document[insert_at..]);
+            return rewritten;
+        }
+    }
+
+    format!("{replacement}{document}")
 }
 
 fn normalize_browser_preview_target_url(raw: &str) -> Result<Url, BridgeError> {
@@ -6315,6 +6510,7 @@ fn should_skip_preview_request_header(name: &str) -> bool {
             | "connection"
             | "upgrade"
             | "content-length"
+            | "accept-encoding"
             | "transfer-encoding"
             | "proxy-connection"
     )
@@ -6339,6 +6535,7 @@ fn should_skip_preview_response_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "connection"
+            | "content-length"
             | "keep-alive"
             | "proxy-authenticate"
             | "proxy-authorization"
@@ -6356,7 +6553,9 @@ fn filter_preview_cookie_header(value: &HeaderValue) -> Option<HeaderValue> {
         .filter_map(|segment| {
             let trimmed = segment.trim();
             let (cookie_name, _) = trimmed.split_once('=')?;
-            if cookie_name.trim() == BROWSER_PREVIEW_COOKIE_NAME {
+            if cookie_name.trim() == BROWSER_PREVIEW_COOKIE_NAME
+                || cookie_name.trim() == BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME
+            {
                 return None;
             }
             Some(trimmed.to_string())
@@ -8711,6 +8910,47 @@ mod tests {
             updater,
             preview,
         })
+    }
+
+    #[test]
+    fn parse_preview_bootstrap_params_strips_internal_query_fields() {
+        let uri: Uri = "/index.html?sid=session-1&st=token-1&vp=desktop&foo=bar&baz=qux"
+            .parse()
+            .expect("valid uri");
+
+        let params = parse_preview_bootstrap_params(&uri);
+
+        assert_eq!(params.session_id.as_deref(), Some("session-1"));
+        assert_eq!(params.bootstrap_token.as_deref(), Some("token-1"));
+        assert_eq!(params.viewport_preset, Some(PreviewViewportPreset::Desktop));
+        assert_eq!(params.sanitized_path_and_query, "/index.html?foo=bar&baz=qux");
+    }
+
+    #[test]
+    fn inject_preview_viewport_meta_replaces_existing_tag_even_with_attr_spacing() {
+        let document = concat!(
+            "<!doctype html><html><head>",
+            "<meta charset=\"utf-8\">",
+            "<meta content='width=device-width, initial-scale=1' name = 'viewport'>",
+            "<title>Preview</title></head><body></body></html>"
+        );
+
+        let rewritten = inject_preview_viewport_meta(document, "width=1280, initial-scale=1");
+
+        assert_eq!(rewritten.matches("name=\"viewport\"").count(), 1);
+        assert!(rewritten.contains("width=1280, initial-scale=1"));
+        assert!(!rewritten.contains("device-width"));
+    }
+
+    #[test]
+    fn inject_preview_viewport_meta_inserts_when_missing() {
+        let document = "<html><head><title>Preview</title></head><body>Hello</body></html>";
+
+        let rewritten = inject_preview_viewport_meta(document, "width=1280, initial-scale=1");
+
+        assert!(rewritten.contains(
+            "<title>Preview</title><meta name=\"viewport\" content=\"width=1280, initial-scale=1\"></head>"
+        ));
     }
 
     #[test]

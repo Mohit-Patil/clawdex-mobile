@@ -30,7 +30,9 @@ import type {
   BrowserPreviewTargetSuggestion,
 } from '../api/types';
 import {
+  buildBrowserPreviewViewportNavigationUrl,
   buildBrowserPreviewBootstrapUrl,
+  type BrowserPreviewViewportPreset,
   getBrowserPreviewOrigin,
   isLocalPreviewCandidateUrl,
   isSameOriginUrl,
@@ -57,6 +59,12 @@ type WebViewScrollEvent = NativeSyntheticEvent<
     };
   }>
 >;
+
+type ViewportPreset = 'mobile' | 'desktop';
+
+const DESKTOP_PREVIEW_WIDTH = 1280;
+const DESKTOP_PREVIEW_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
 export function BrowserScreen({
   api,
@@ -91,6 +99,7 @@ export function BrowserScreen({
   const [supportsBrowserPreview, setSupportsBrowserPreview] = useState(true);
   const [webReloadKey, setWebReloadKey] = useState(0);
   const [bottomBarVisible, setBottomBarVisible] = useState(true);
+  const [viewportPreset, setViewportPreset] = useState<ViewportPreset>('mobile');
 
   const previewOrigin = useMemo(
     () =>
@@ -101,21 +110,26 @@ export function BrowserScreen({
     () => getCompactBrowserLabel(currentUrl ?? activeSession?.targetUrl ?? inputValue),
     [activeSession?.targetUrl, currentUrl, inputValue]
   );
+  const desktopModeEnabled = viewportPreset === 'desktop';
   const iframeStyle = useMemo<CSSProperties>(
     () => ({
       border: 0,
-      width: '100%',
+      width: desktopModeEnabled ? `${DESKTOP_PREVIEW_WIDTH}px` : '100%',
       height: '100%',
       display: 'block',
       backgroundColor: theme.colors.bgMain,
     }),
-    [theme.colors.bgMain]
+    [desktopModeEnabled, theme.colors.bgMain]
   );
   const bottomBarInset =
     insets.bottom > 0
       ? Math.max(insets.bottom - theme.spacing.md, theme.spacing.xs)
       : theme.spacing.xs;
   const bottomBarReservedSpace = bottomBarInset + 58;
+  const webViewBottomInset = bottomBarVisible ? bottomBarReservedSpace : 0;
+  const nativeUserAgent =
+    Platform.OS === 'web' || !desktopModeEnabled ? undefined : DESKTOP_PREVIEW_USER_AGENT;
+  const browserViewportPreset: BrowserPreviewViewportPreset = viewportPreset;
 
   useEffect(() => {
     Animated.timing(bottomBarTranslateY, {
@@ -172,7 +186,8 @@ export function BrowserScreen({
         const nextPreviewUrl = buildBrowserPreviewBootstrapUrl(
           bridgeUrl,
           session.previewPort,
-          session.bootstrapPath
+          session.bootstrapPath,
+          browserViewportPreset
         );
         if (!nextPreviewUrl) {
           throw new Error('Could not build preview bootstrap URL.');
@@ -198,7 +213,7 @@ export function BrowserScreen({
         setOpeningPreview(false);
       }
     },
-    [api, bridgeUrl, onRecentTargetUrlsChange, recentTargetUrls]
+    [api, bridgeUrl, browserViewportPreset, onRecentTargetUrlsChange, recentTargetUrls]
   );
 
   useEffect(() => {
@@ -313,6 +328,37 @@ export function BrowserScreen({
     [bottomBarVisible]
   );
 
+  const handleToggleDesktopMode = useCallback(() => {
+    const nextPreset: ViewportPreset = viewportPreset === 'desktop' ? 'mobile' : 'desktop';
+    setViewportPreset(nextPreset);
+    setBottomBarVisible(true);
+    lastScrollYRef.current = 0;
+
+    if (!previewUrl) {
+      return;
+    }
+
+    setLoadingPreview(true);
+    const currentPreviewUrl =
+      currentUrl && isSameOriginUrl(currentUrl, previewOrigin) ? currentUrl : previewUrl;
+    const nextPreviewUrl = buildBrowserPreviewViewportNavigationUrl(
+      currentPreviewUrl,
+      previewUrl,
+      nextPreset
+    );
+    if (nextPreviewUrl) {
+      setPreviewUrl(nextPreviewUrl);
+      if (Platform.OS === 'web') {
+        setWebReloadKey((value) => value + 1);
+      }
+      return;
+    }
+
+    setTimeout(() => {
+      webViewRef.current?.reload();
+    }, 0);
+  }, [currentUrl, previewOrigin, previewUrl, viewportPreset]);
+
   return (
     <View style={styles.container}>
       <SafeAreaView edges={['top']} style={styles.safeArea}>
@@ -389,53 +435,80 @@ export function BrowserScreen({
                 },
               ]}
             >
-              {Platform.OS === 'web'
-                ? createElement('iframe', {
-                    key: `${previewUrl}-${webReloadKey}`,
-                    src: previewUrl,
-                    title: pageTitle?.trim() || siteLabel,
-                    style: iframeStyle,
-                    onLoad: () => setLoadingPreview(false),
-                  })
-                : (
-                    <WebView
-                      ref={webViewRef}
-                      source={{ uri: previewUrl }}
-                      originWhitelist={['*']}
-                      javaScriptEnabled
-                      domStorageEnabled
-                      sharedCookiesEnabled
-                      thirdPartyCookiesEnabled
-                      allowsBackForwardNavigationGestures
-                      startInLoadingState
-                      setSupportMultipleWindows={false}
-                      automaticallyAdjustContentInsets={false}
-                      automaticallyAdjustsScrollIndicatorInsets={false}
-                      contentInset={{
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: bottomBarVisible ? bottomBarReservedSpace : 0,
-                      }}
-                      contentInsetAdjustmentBehavior="never"
-                      onNavigationStateChange={handleNavigationStateChange}
-                      onShouldStartLoadWithRequest={handleShouldStartLoad}
-                      onLoadStart={() => setLoadingPreview(true)}
-                      onLoadEnd={() => setLoadingPreview(false)}
-                      onScroll={handleWebViewScroll}
-                      onError={(event) =>
-                        setCapabilitiesError(
-                          event.nativeEvent.description || 'Could not load preview.'
-                        )
-                      }
-                      onHttpError={(event) =>
-                        setCapabilitiesError(
-                          `Preview returned HTTP ${String(event.nativeEvent.statusCode)}.`
-                        )
-                      }
-                      style={styles.webView}
-                    />
-                  )}
+              {Platform.OS === 'web' ? (
+                desktopModeEnabled ? (
+                  <ScrollView
+                    horizontal
+                    style={styles.previewViewport}
+                    contentContainerStyle={styles.desktopScrollContent}
+                    showsHorizontalScrollIndicator
+                    bounces={false}
+                    directionalLockEnabled
+                    nestedScrollEnabled
+                  >
+                    {createElement('iframe', {
+                      key: `${previewUrl}-${webReloadKey}-desktop`,
+                      src: previewUrl,
+                      title: pageTitle?.trim() || siteLabel,
+                      style: iframeStyle,
+                      onLoad: () => setLoadingPreview(false),
+                    })}
+                  </ScrollView>
+                ) : (
+                  <View style={styles.previewViewport}>
+                    {createElement('iframe', {
+                      key: `${previewUrl}-${webReloadKey}-mobile`,
+                      src: previewUrl,
+                      title: pageTitle?.trim() || siteLabel,
+                      style: iframeStyle,
+                      onLoad: () => setLoadingPreview(false),
+                    })}
+                  </View>
+                )
+              ) : (
+                <View style={styles.previewViewport}>
+                  <WebView
+                    ref={webViewRef}
+                    source={{ uri: previewUrl }}
+                    originWhitelist={['*']}
+                    javaScriptEnabled
+                    domStorageEnabled
+                    sharedCookiesEnabled
+                    thirdPartyCookiesEnabled
+                    allowsBackForwardNavigationGestures
+                    startInLoadingState
+                    setSupportMultipleWindows={false}
+                    automaticallyAdjustContentInsets={false}
+                    automaticallyAdjustsScrollIndicatorInsets={false}
+                    contentInset={{
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      bottom: webViewBottomInset,
+                    }}
+                    contentInsetAdjustmentBehavior="never"
+                    contentMode={desktopModeEnabled ? 'desktop' : 'mobile'}
+                    scalesPageToFit={!desktopModeEnabled}
+                    userAgent={nativeUserAgent}
+                    onNavigationStateChange={handleNavigationStateChange}
+                    onShouldStartLoadWithRequest={handleShouldStartLoad}
+                    onLoadStart={() => setLoadingPreview(true)}
+                    onLoadEnd={() => setLoadingPreview(false)}
+                    onScroll={handleWebViewScroll}
+                    onError={(event) =>
+                      setCapabilitiesError(
+                        event.nativeEvent.description || 'Could not load preview.'
+                      )
+                    }
+                    onHttpError={(event) =>
+                      setCapabilitiesError(
+                        `Preview returned HTTP ${String(event.nativeEvent.statusCode)}.`
+                      )
+                    }
+                    style={styles.webView}
+                  />
+                </View>
+              )}
               {loadingPreview ? (
                 <View style={styles.loadingOverlay}>
                   <ActivityIndicator color={colors.textPrimary} />
@@ -550,6 +623,20 @@ export function BrowserScreen({
               ]}
             >
               <Ionicons name="chevron-forward" size={22} color={colors.textPrimary} />
+            </Pressable>
+            <Pressable
+              onPress={handleToggleDesktopMode}
+              style={({ pressed }) => [
+                styles.bottomNavButton,
+                desktopModeEnabled && styles.bottomNavButtonActive,
+                pressed && styles.iconButtonPressed,
+              ]}
+            >
+              <Ionicons
+                name={desktopModeEnabled ? 'phone-portrait-outline' : 'desktop-outline'}
+                size={20}
+                color={colors.textPrimary}
+              />
             </Pressable>
             <Pressable
               onPress={handleReload}
@@ -788,6 +875,15 @@ const createStyles = (theme: AppTheme) =>
       overflow: 'hidden',
       backgroundColor: theme.colors.bgMain,
     },
+    previewViewport: {
+      flex: 1,
+      minHeight: 0,
+      overflow: 'hidden',
+    },
+    desktopScrollContent: {
+      flexGrow: 1,
+      minHeight: '100%',
+    },
     webView: {
       flex: 1,
       backgroundColor: theme.colors.bgMain,
@@ -925,7 +1021,7 @@ const createStyles = (theme: AppTheme) =>
     bottomBar: {
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'space-around',
+      justifyContent: 'space-between',
       borderRadius: 24,
       borderWidth: 1,
       borderColor: theme.colors.borderLight,
@@ -934,11 +1030,16 @@ const createStyles = (theme: AppTheme) =>
       paddingVertical: theme.spacing.xs,
     },
     bottomNavButton: {
-      width: 52,
+      width: 46,
       height: 38,
       borderRadius: 19,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    bottomNavButtonActive: {
+      backgroundColor: theme.colors.bgCanvasAccent,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
     },
     bottomNavButtonPrimary: {
       width: 46,
