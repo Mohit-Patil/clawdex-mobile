@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -102,6 +102,13 @@ function writeStatus(statusPath, payload) {
   fs.writeFileSync(statusPath, `${JSON.stringify(nextPayload, null, 2)}\n`);
 }
 
+function formatHostForUrl(host) {
+  if (host.includes(":") && !host.startsWith("[")) {
+    return `[${host}]`;
+  }
+  return host;
+}
+
 function backupSecureEnv(packageRoot, jobId) {
   const secureEnvPath = path.join(packageRoot, ".env.secure");
   if (!fs.existsSync(secureEnvPath)) {
@@ -174,23 +181,51 @@ function killBridgeProcess(pid) {
   }
 }
 
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function forceKillBridgeProcess(pid) {
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+    });
+    if (result.error && result.error.code !== "ENOENT") {
+      throw result.error;
+    }
+    return;
+  }
+
+  process.kill(pid, "SIGKILL");
+}
+
 async function waitForBridgeExit(pid) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      process.kill(pid, 0);
-    } catch {
+    if (!isProcessAlive(pid)) {
       return;
     }
     await sleep(250);
   }
 
-  if (process.platform !== "win32") {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
+  try {
+    forceKillBridgeProcess(pid);
+  } catch {
+    return;
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!isProcessAlive(pid)) {
       return;
     }
+    await sleep(250);
   }
+
+  throw new Error("bridge process did not exit in time");
 }
 
 function startBridge(packageRoot, logPath) {
@@ -217,7 +252,7 @@ async function waitForHealth(envFilePath, timeoutMs) {
   const secureEnv = readEnvFile(envFilePath);
   const host = secureEnv.BRIDGE_HOST || "127.0.0.1";
   const port = secureEnv.BRIDGE_PORT || "8787";
-  const url = new URL(`http://${host}:${port}/health`);
+  const url = new URL(`http://${formatHostForUrl(host)}:${port}/health`);
   const client = url.protocol === "https:" ? https : http;
   const startedAt = Date.now();
 
