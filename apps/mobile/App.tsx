@@ -699,7 +699,7 @@ export default function App() {
       Gesture.Pan()
         .enabled(
           currentScreen !== 'ChatGit' &&
-            currentScreen !== 'Settings'
+            (currentScreen !== 'Settings' || settingsAllowsDrawerGesture)
         )
         .activeOffsetX(12)
         .failOffsetY([-18, 18])
@@ -760,76 +760,6 @@ export default function App() {
       drawerDragStartOffset,
       drawerGestureDidSettle,
       drawerOffset,
-      ensureDrawerVisible,
-      handleDrawerSettled,
-      settingsAllowsDrawerGesture,
-    ]
-  );
-
-  const settingsDrawerEdgeGesture = useMemo(
-    () =>
-      Gesture.Pan()
-        .enabled(currentScreen === 'Settings' && settingsAllowsDrawerGesture && !drawerVisible)
-        .activeOffsetX(12)
-        .failOffsetY([-18, 18])
-        .onStart(() => {
-          drawerGestureDidSettle.value = false;
-          cancelAnimation(drawerOffset);
-          drawerDragStartOffset.value = drawerOffset.value;
-          runOnJS(dismissKeyboard)();
-          runOnJS(ensureDrawerVisible)();
-        })
-        .onUpdate((event) => {
-          drawerOffset.value = applyDrawerRubberBand(
-            drawerDragStartOffset.value + event.translationX
-          );
-        })
-        .onEnd((event) => {
-          drawerGestureDidSettle.value = true;
-          const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
-          const shouldOpen = shouldSettleDrawerOpen(
-            nextOffset,
-            event.velocityX,
-            drawerDragStartOffset.value
-          );
-          drawerOffset.value = withSpring(
-            shouldOpen ? 0 : -DRAWER_WIDTH,
-            buildDrawerSpringConfig(event.velocityX),
-            (finished) => {
-              if (finished) {
-                runOnJS(handleDrawerSettled)(shouldOpen);
-              }
-            }
-          );
-        })
-        .onFinalize((event) => {
-          if (drawerGestureDidSettle.value) {
-            return;
-          }
-          drawerGestureDidSettle.value = true;
-          const nextOffset = clampDrawerOffset(drawerOffset.value);
-          const shouldOpen = shouldSettleDrawerOpen(
-            nextOffset,
-            event.velocityX,
-            drawerDragStartOffset.value
-          );
-          drawerOffset.value = withSpring(
-            shouldOpen ? 0 : -DRAWER_WIDTH,
-            buildDrawerSpringConfig(event.velocityX),
-            (finished) => {
-              if (finished) {
-                runOnJS(handleDrawerSettled)(shouldOpen);
-              }
-            }
-          );
-        }),
-    [
-      currentScreen,
-      dismissKeyboard,
-      drawerDragStartOffset,
-      drawerGestureDidSettle,
-      drawerOffset,
-      drawerVisible,
       ensureDrawerVisible,
       handleDrawerSettled,
       settingsAllowsDrawerGesture,
@@ -1560,14 +1490,6 @@ export default function App() {
               </GestureDetector>
             ) : null}
 
-            {currentScreen === 'Settings' && settingsAllowsDrawerGesture ? (
-              <GestureDetector gesture={settingsDrawerEdgeGesture}>
-                <View
-                  pointerEvents={drawerVisible && drawerCapturesTouches ? 'none' : 'auto'}
-                  style={styles.edgeSwipeZone}
-                />
-              </GestureDetector>
-            ) : null}
           </View>
         </SafeAreaProvider>
       </GestureHandlerRootView>

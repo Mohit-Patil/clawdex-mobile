@@ -157,6 +157,33 @@ describe('HostBridgeWsClient', () => {
     expect(listener).toHaveBeenNthCalledWith(2, false);
   });
 
+  it('disconnect() ignores a late onopen from a socket that was still opening', () => {
+    const client = new HostBridgeWsClient('http://localhost:8787');
+    const listener = jest.fn();
+    client.onStatus(listener);
+
+    client.connect();
+    const firstSocket = latestMockSocket();
+
+    client.disconnect();
+    expect(firstSocket.close).toHaveBeenCalledTimes(1);
+    expect(client.isConnected).toBe(false);
+
+    firstSocket.simulateOpen();
+
+    expect(client.isConnected).toBe(false);
+    expect(listener.mock.calls).toEqual([[false]]);
+
+    client.connect();
+    const secondSocket = latestMockSocket();
+    expect(secondSocket).not.toBe(firstSocket);
+
+    secondSocket.simulateOpen();
+
+    expect(client.isConnected).toBe(true);
+    expect(listener.mock.calls).toEqual([[false], [true]]);
+  });
+
   it('waitForTurnCompletion resolves from cached completion events', async () => {
     const client = new HostBridgeWsClient('http://localhost:8787');
     client.connect();

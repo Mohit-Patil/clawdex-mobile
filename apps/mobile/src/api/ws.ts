@@ -52,10 +52,12 @@ export class HostBridgeWsClient {
   private static readonly TURN_COMPLETION_TTL_MS = 5 * 60 * 1000;
   private static readonly RECENT_EVENT_ID_CACHE_SIZE = 4096;
   private socket: WebSocket | null = null;
+  private pendingSocket: WebSocket | null = null;
   private connected = false;
   private shouldReconnect = false;
   private reconnectAttempts = 0;
   private connectPromise: Promise<void> | null = null;
+  private connectGeneration = 0;
 
   private readonly eventListeners = new Set<EventListener>();
   private readonly statusListeners = new Set<StatusListener>();
@@ -90,7 +92,8 @@ export class HostBridgeWsClient {
       return;
     }
 
-    const promise = this.openSocket();
+    const generation = ++this.connectGeneration;
+    const promise = this.openSocket(generation);
     this.connectPromise = promise;
     void promise.catch(() => {
       // Connection errors are surfaced through status listeners and retries.
@@ -99,14 +102,23 @@ export class HostBridgeWsClient {
 
   disconnect(): void {
     this.shouldReconnect = false;
+    this.connectGeneration += 1;
 
-    if (!this.socket) {
+    const pendingSocket = this.pendingSocket;
+    this.pendingSocket = null;
+    const socket = this.socket;
+    this.socket = null;
+    this.connectPromise = null;
+
+    if (!socket && !pendingSocket) {
       this.emitStatus(false);
       return;
     }
 
-    this.socket.close();
-    this.socket = null;
+    if (pendingSocket && pendingSocket !== socket) {
+      pendingSocket.close();
+    }
+    socket?.close();
     this.emitStatus(false);
     this.rejectAllPending(new Error('Bridge websocket disconnected'));
   }
@@ -306,7 +318,7 @@ export class HostBridgeWsClient {
     }
   }
 
-  private async openSocket(): Promise<void> {
+  private async openSocket(generation: number): Promise<void> {
     try {
       await new Promise<void>((resolve, reject) => {
         const WebSocketCtor = globalThis.WebSocket as unknown as ReactNativeWebSocketConstructor;
@@ -323,11 +335,26 @@ export class HostBridgeWsClient {
                 },
               })
             : new WebSocketCtor(socketUrl);
+        this.pendingSocket = socket;
 
         let settled = false;
 
         socket.onopen = () => {
+          if (
+            generation !== this.connectGeneration ||
+            !this.shouldReconnect ||
+            this.pendingSocket !== socket
+          ) {
+            socket.close();
+            if (!settled) {
+              settled = true;
+              reject(new Error('Bridge websocket open ignored after disconnect'));
+            }
+            return;
+          }
+
           settled = true;
+          this.pendingSocket = null;
           this.socket = socket;
           this.reconnectAttempts = 0;
           this.emitStatus(true);
@@ -338,11 +365,17 @@ export class HostBridgeWsClient {
         };
 
         socket.onclose = () => {
-          this.socket = null;
-          this.emitStatus(false);
-          this.rejectAllPending(new Error('Bridge websocket closed'));
+          if (this.pendingSocket === socket) {
+            this.pendingSocket = null;
+          }
 
-          if (this.shouldReconnect) {
+          if (this.socket === socket) {
+            this.socket = null;
+            this.emitStatus(false);
+            this.rejectAllPending(new Error('Bridge websocket closed'));
+          }
+
+          if (this.shouldReconnect && generation === this.connectGeneration) {
             this.scheduleReconnect();
           }
 
@@ -383,7 +416,8 @@ export class HostBridgeWsClient {
       if (!this.shouldReconnect || this.socket || this.connectPromise) {
         return;
       }
-      const promise = this.openSocket();
+      const generation = ++this.connectGeneration;
+      const promise = this.openSocket(generation);
       this.connectPromise = promise;
       void promise.catch(() => {
         // Retried connect failures are handled by subsequent retries.
