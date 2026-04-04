@@ -12,8 +12,16 @@ import {
   Text,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import type { PurchasesOffering, PurchasesPackage } from 'react-native-purchases';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import Animated, {
+  Easing,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
 import type {
@@ -48,7 +56,6 @@ import {
 import {
   getTipJarUnavailableReason,
   isTipPaywallTemplateAvailable,
-  getTipOfferingSummary,
   getTipTierDescription,
   getTipTierMeta,
   getTipTierTitle,
@@ -89,6 +96,7 @@ interface SettingsScreenProps {
   onSwitchBridgeProfile?: (profileId: string) => void | Promise<void>;
   onClearSavedBridges?: () => void | Promise<void>;
   onOpenDrawer: () => void;
+  onDrawerGestureEnabledChange?: (enabled: boolean) => void;
   onOpenBrowser?: () => void;
   onOpenPrivacy: () => void;
   onOpenTerms: () => void;
@@ -103,6 +111,14 @@ type SettingsRoute =
   | 'appearance'
   | 'tips'
   | 'legal';
+
+const SETTINGS_BACK_GESTURE_DISTANCE = 56;
+const SETTINGS_BACK_GESTURE_VELOCITY = 900;
+const SETTINGS_BACK_EDGE_WIDTH = 28;
+const SETTINGS_ROUTE_TRANSITION_OFFSET = 18;
+const SETTINGS_ROUTE_TRANSITION_MS = 220;
+
+type SettingsRouteTransitionDirection = 'forward' | 'backward';
 
 export function SettingsScreen({
   api,
@@ -126,12 +142,14 @@ export function SettingsScreen({
   onSwitchBridgeProfile,
   onClearSavedBridges,
   onOpenDrawer,
+  onDrawerGestureEnabledChange,
   onOpenBrowser,
   onOpenPrivacy,
   onOpenTerms,
 }: SettingsScreenProps) {
   const theme = useAppTheme();
   const { colors } = theme;
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const transcriptSwitchTrackColor = theme.isDark ? colors.borderLight : 'rgba(95, 105, 118, 0.32)';
   const transcriptSwitchActiveColor = theme.isDark ? colors.accent : '#4F5D6D';
@@ -173,10 +191,24 @@ export function SettingsScreen({
   const [tipPurchasingPackageId, setTipPurchasingPackageId] = useState<string | null>(null);
   const [tipPaywallOpening, setTipPaywallOpening] = useState(false);
   const [route, setRoute] = useState<SettingsRoute>('home');
+  const [routeTransitionDirection, setRouteTransitionDirection] =
+    useState<SettingsRouteTransitionDirection>('forward');
+  const routeContentTranslateX = useSharedValue(0);
+  const routeContentOpacity = useSharedValue(1);
+  const handleReturnToSettingsHome = useCallback(() => {
+    setRouteTransitionDirection('backward');
+    setRoute('home');
+  }, []);
+  const navigateToRoute = useCallback((nextRoute: Exclude<SettingsRoute, 'home'>) => {
+    setRouteTransitionDirection('forward');
+    setRoute(nextRoute);
+  }, []);
 
   const availableEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
     ? bridgeCapabilities.availableEngines
-    : ['codex'];
+    : defaultChatEngine
+      ? [defaultChatEngine]
+      : ['codex'];
   const normalizedDefaultChatEngine = availableEngines.includes(defaultChatEngine ?? 'codex')
     ? (defaultChatEngine ?? 'codex')
     : availableEngines[0] ?? 'codex';
@@ -268,41 +300,15 @@ export function SettingsScreen({
               : route === 'legal'
                 ? ('document-text-outline' as const)
                 : ('settings' as const);
-  const bridgeStatusLabel = healthyAt ? 'Connected' : 'Offline';
-  const bridgeStatusColor = healthyAt ? colors.statusComplete : colors.textMuted;
   const chatDefaultsSummary = normalizedDefaultModelId
     ? `${defaultEngineLabel} · ${defaultModelLabel} · ${defaultEffortLabel}`
     : `${defaultEngineLabel} · Server default`;
   const appearanceSummary = `Current theme: ${appearancePreferenceLabel}`;
-  const accountSummary = accountLoading
-    ? 'Loading account details…'
-    : accountError
-      ? 'Account details unavailable'
-      : [
-          formatAccountType(account),
-          account?.planType ? formatPlanType(account.planType) : null,
-          account?.email ?? null,
-        ]
-          .filter(Boolean)
-          .join(' · ');
-  const usageLimitsSummary = rateLimitsLoading
-    ? 'Loading usage limits…'
-    : usageLimitBadges.length > 0
-      ? usageLimitBadges
-          .map((limit) => `${limit.label === 'weekly' ? 'Weekly' : limit.label} ${limit.remainingPercent}%`)
-          .join(' · ')
-      : rateLimitsError
-        ? 'Usage limit data unavailable'
-        : 'No usage limit data yet';
-  const bridgeSummary = [
-    bridgeProfileName,
-    bridgeRuntime?.version ? `Bridge ${bridgeRuntime.version}` : null,
-    bridgeStatusLabel,
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  const accountSummary = 'View account type, email, and bridge auth details';
+  const usageLimitsSummary = 'View weekly usage and reset times';
+  const bridgeSummary = 'Manage profiles, maintenance, engines, and health';
   const tipJarSummary = isTipJarAvailable()
-    ? getTipOfferingSummary(tipOffering, tipPackages.length)
+    ? 'Support development with a one-time tip'
     : 'Configure RevenueCat to enable tips';
   const nativeTipPaywallAvailable = isTipPaywallTemplateAvailable();
   const shouldShowManualTipTierList = !nativeTipPaywallAvailable || tipActionError !== null;
@@ -310,6 +316,46 @@ export function SettingsScreen({
   const legalSummary = 'Privacy details and terms of service';
   const canRateOnAppStore =
     Platform.OS === 'ios' && canOpenAppStoreWriteReviewPage();
+  const shouldLoadChatSettings = route === 'chat';
+  const shouldLoadAccountSettings = route === 'account';
+  const shouldLoadLimitsSettings = route === 'limits';
+  const shouldLoadBridgeSettings = route === 'bridge';
+
+  useEffect(() => {
+    onDrawerGestureEnabledChange?.(route === 'home');
+  }, [onDrawerGestureEnabledChange, route]);
+
+  useEffect(
+    () => () => {
+      onDrawerGestureEnabledChange?.(true);
+    },
+    [onDrawerGestureEnabledChange]
+  );
+
+  useEffect(() => {
+    const directionMultiplier = routeTransitionDirection === 'forward' ? 1 : -1;
+    routeContentTranslateX.value =
+      directionMultiplier * SETTINGS_ROUTE_TRANSITION_OFFSET;
+    routeContentOpacity.value = 0;
+    routeContentTranslateX.value = withTiming(0, {
+      duration: SETTINGS_ROUTE_TRANSITION_MS,
+      easing: Easing.out(Easing.cubic),
+    });
+    routeContentOpacity.value = withTiming(1, {
+      duration: SETTINGS_ROUTE_TRANSITION_MS,
+      easing: Easing.out(Easing.quad),
+    });
+  }, [
+    route,
+    routeContentOpacity,
+    routeContentTranslateX,
+    routeTransitionDirection,
+  ]);
+
+  const routeContentAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: routeContentOpacity.value,
+    transform: [{ translateX: routeContentTranslateX.value }],
+  }));
 
   const checkHealth = useCallback(async () => {
     try {
@@ -413,42 +459,85 @@ export function SettingsScreen({
 
   useEffect(() => {
     const t = setTimeout(() => {
-      void checkHealth();
-      void loadBridgeCapabilities();
-      void loadBridgeRuntime();
-      void refreshModelOptions();
-      void loadAccount();
-      void loadRateLimits();
+      if (shouldLoadBridgeSettings) {
+        void checkHealth();
+        void loadBridgeCapabilities();
+        void loadBridgeRuntime();
+      }
+      if (shouldLoadChatSettings) {
+        void loadBridgeCapabilities();
+        void refreshModelOptions();
+      }
+      if (shouldLoadAccountSettings) {
+        void loadAccount();
+      }
+      if (shouldLoadLimitsSettings) {
+        void loadRateLimits();
+      }
     }, 0);
     return () => clearTimeout(t);
-  }, [checkHealth, loadAccount, loadBridgeCapabilities, loadBridgeRuntime, loadRateLimits, refreshModelOptions]);
+  }, [
+    checkHealth,
+    loadAccount,
+    loadBridgeCapabilities,
+    loadBridgeRuntime,
+    loadRateLimits,
+    refreshModelOptions,
+    shouldLoadAccountSettings,
+    shouldLoadBridgeSettings,
+    shouldLoadChatSettings,
+    shouldLoadLimitsSettings,
+  ]);
 
   useEffect(
     () =>
       ws.onStatus((connected) => {
         setWsConnected(connected);
         if (connected) {
-          void loadBridgeCapabilities();
-          void loadBridgeRuntime();
-          void loadAccount();
-          void loadRateLimits();
+          if (shouldLoadBridgeSettings) {
+            void checkHealth();
+            void loadBridgeCapabilities();
+            void loadBridgeRuntime();
+          }
+          if (shouldLoadChatSettings) {
+            void loadBridgeCapabilities();
+            void refreshModelOptions();
+          }
+          if (shouldLoadAccountSettings) {
+            void loadAccount();
+          }
+          if (shouldLoadLimitsSettings) {
+            void loadRateLimits();
+          }
         }
       }),
-    [loadAccount, loadBridgeCapabilities, loadBridgeRuntime, loadRateLimits, ws]
+    [
+      checkHealth,
+      loadAccount,
+      loadBridgeCapabilities,
+      loadBridgeRuntime,
+      loadRateLimits,
+      refreshModelOptions,
+      shouldLoadAccountSettings,
+      shouldLoadBridgeSettings,
+      shouldLoadChatSettings,
+      shouldLoadLimitsSettings,
+      ws,
+    ]
   );
 
   useEffect(
     () =>
       ws.onEvent((event) => {
-        if (event.method === 'account/rateLimits/updated') {
+        if (event.method === 'account/rateLimits/updated' && shouldLoadLimitsSettings) {
           void loadRateLimits();
         }
 
-        if (event.method === 'account/updated') {
+        if (event.method === 'account/updated' && shouldLoadAccountSettings) {
           void loadAccount();
         }
       }),
-    [loadAccount, loadRateLimits, ws]
+    [loadAccount, loadRateLimits, shouldLoadAccountSettings, shouldLoadLimitsSettings, ws]
   );
 
   useEffect(() => {
@@ -648,8 +737,8 @@ export function SettingsScreen({
       return;
     }
 
-    setRoute('tips');
-  }, [handleOpenTipPaywall, nativeTipPaywallAvailable, setRoute]);
+    navigateToRoute('tips');
+  }, [handleOpenTipPaywall, nativeTipPaywallAvailable, navigateToRoute]);
 
   const handleOpenAppStoreReview = useCallback(() => {
     void (async () => {
@@ -921,34 +1010,27 @@ export function SettingsScreen({
 
   const renderHomeContent = () => (
     <>
-      <Text style={styles.sectionLabel}>Overview</Text>
+      <Text style={styles.sectionLabel}>Preferences</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-        <Row label="Bridge" value={bridgeStatusLabel} valueColor={bridgeStatusColor} />
-        <Row label="Profile" value={bridgeProfileName} />
-        <Row label="Account" value={formatAccountType(account)} isLast />
-      </BlurView>
-
-      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Preferences</Text>
-      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-        <MenuEntry
-          icon="sparkles-outline"
-          title="Chat Preferences"
-          description={chatDefaultsSummary}
-          onPress={() => setRoute('chat')}
-        />
-        <MenuEntry
-          icon="color-palette-outline"
-          title="Appearance"
-          description={appearanceSummary}
-          onPress={() => setRoute('appearance')}
-          isLast={!showCodexUsageLimits}
-        />
+          <MenuEntry
+            icon="sparkles-outline"
+            title="Chat Preferences"
+            description={chatDefaultsSummary}
+            onPress={() => navigateToRoute('chat')}
+          />
+          <MenuEntry
+            icon="color-palette-outline"
+            title="Appearance"
+            description={appearanceSummary}
+            onPress={() => navigateToRoute('appearance')}
+            isLast={!showCodexUsageLimits}
+          />
         {showCodexUsageLimits ? (
           <MenuEntry
             icon="speedometer-outline"
             title="Codex Usage Limits"
             description={usageLimitsSummary}
-            onPress={() => setRoute('limits')}
+            onPress={() => navigateToRoute('limits')}
             isLast
           />
         ) : null}
@@ -959,14 +1041,14 @@ export function SettingsScreen({
         <MenuEntry
           icon="person-circle-outline"
           title="Account & Auth"
-          description={accountSummary || 'Signed out'}
-          onPress={() => setRoute('account')}
+          description={accountSummary}
+          onPress={() => navigateToRoute('account')}
         />
         <MenuEntry
           icon="server-outline"
           title="Bridge & Servers"
           description={bridgeSummary}
-          onPress={() => setRoute('bridge')}
+          onPress={() => navigateToRoute('bridge')}
         />
         <MenuEntry
           icon="globe-outline"
@@ -999,7 +1081,7 @@ export function SettingsScreen({
           icon="document-text-outline"
           title="Legal"
           description={legalSummary}
-          onPress={() => setRoute('legal')}
+          onPress={() => navigateToRoute('legal')}
           isLast
         />
       </BlurView>
@@ -1615,20 +1697,37 @@ export function SettingsScreen({
     }
   };
 
+  const settingsBackGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(route !== 'home')
+        .activeOffsetX(12)
+        .failOffsetY([-18, 18])
+        .onEnd((event) => {
+          if (
+            event.translationX > SETTINGS_BACK_GESTURE_DISTANCE ||
+            event.velocityX > SETTINGS_BACK_GESTURE_VELOCITY
+          ) {
+            runOnJS(handleReturnToSettingsHome)();
+          }
+        }),
+    [handleReturnToSettingsHome, route]
+  );
+
   return (
     <View style={styles.container}>
       <LinearGradient
         colors={[colors.bgMain, colors.bgMain, colors.bgMain]}
         style={StyleSheet.absoluteFill}
       />
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView edges={['top']} style={styles.safeArea}>
         <View style={styles.header}>
           {route === 'home' ? (
             <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
               <Ionicons name="menu" size={22} color={colors.textPrimary} />
             </Pressable>
           ) : (
-            <Pressable onPress={() => setRoute('home')} hitSlop={8} style={styles.menuBtn}>
+            <Pressable onPress={handleReturnToSettingsHome} hitSlop={8} style={styles.menuBtn}>
               <Ionicons name="chevron-back" size={22} color={colors.textPrimary} />
             </Pressable>
           )}
@@ -1636,10 +1735,27 @@ export function SettingsScreen({
           <Text style={styles.headerTitle}>{headerTitle}</Text>
         </View>
 
-        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
-          {renderBodyContent()}
+        <ScrollView
+          style={styles.body}
+          contentContainerStyle={[
+            styles.bodyContent,
+            { paddingBottom: theme.spacing.xl + insets.bottom },
+          ]}
+          alwaysBounceVertical
+          contentInsetAdjustmentBehavior="never"
+          keyboardDismissMode="on-drag"
+          scrollIndicatorInsets={{ bottom: theme.spacing.xl + insets.bottom }}
+        >
+          <Animated.View style={[styles.routeContent, routeContentAnimatedStyle]}>
+            {renderBodyContent()}
+          </Animated.View>
         </ScrollView>
       </SafeAreaView>
+      {route !== 'home' ? (
+        <GestureDetector gesture={settingsBackGesture}>
+          <View style={styles.backSwipeZone} />
+        </GestureDetector>
+      ) : null}
 
       <SelectionSheet
         visible={engineModalVisible}
@@ -1945,7 +2061,21 @@ const createStyles = (theme: AppTheme) => {
     menuBtn: { padding: theme.spacing.xs },
     headerTitle: { ...theme.typography.headline, color: theme.colors.textPrimary },
     body: { flex: 1 },
-    bodyContent: { padding: theme.spacing.lg },
+    bodyContent: {
+      flexGrow: 1,
+      padding: theme.spacing.lg,
+    },
+    routeContent: {
+      flexGrow: 1,
+    },
+    backSwipeZone: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      bottom: 0,
+      width: SETTINGS_BACK_EDGE_WIDTH,
+      zIndex: 20,
+    },
     card: {
       borderRadius: theme.radius.md,
       borderWidth: StyleSheet.hairlineWidth,

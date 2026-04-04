@@ -149,6 +149,7 @@ export default function App() {
   const [mainOpeningChatId, setMainOpeningChatId] = useState<string | null>(null);
   const [pendingMainChatId, setPendingMainChatId] = useState<string | null>(null);
   const [pendingMainChatSnapshot, setPendingMainChatSnapshot] = useState<Chat | null>(null);
+  const [settingsAllowsDrawerGesture, setSettingsAllowsDrawerGesture] = useState(true);
   const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
   const [defaultChatEngine, setDefaultChatEngine] = useState<ChatEngine>('codex');
   const [defaultEngineSettings, setDefaultEngineSettings] = useState<EngineDefaultSettingsMap>(
@@ -187,6 +188,7 @@ export default function App() {
   const contentShiftOpen = Math.min(DRAWER_WIDTH - 12, screenWidth * 0.74);
   const drawerOffset = useSharedValue(-DRAWER_WIDTH);
   const drawerDragStartOffset = useSharedValue(-DRAWER_WIDTH);
+  const drawerGestureDidSettle = useSharedValue(true);
 
   const screenFrameAnimatedStyle = useAnimatedStyle(() => {
     const progress = getDrawerOpenProgress(drawerOffset.value);
@@ -690,10 +692,14 @@ export default function App() {
   const openDrawerGesture = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(currentScreen !== 'ChatGit')
+        .enabled(
+          currentScreen !== 'ChatGit' &&
+            currentScreen !== 'Settings'
+        )
         .activeOffsetX(12)
         .failOffsetY([-18, 18])
         .onStart(() => {
+          drawerGestureDidSettle.value = false;
           cancelAnimation(drawerOffset);
           drawerDragStartOffset.value = drawerOffset.value;
           runOnJS(dismissKeyboard)();
@@ -705,7 +711,29 @@ export default function App() {
           );
         })
         .onEnd((event) => {
+          drawerGestureDidSettle.value = true;
           const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
+          const shouldOpen = shouldSettleDrawerOpen(
+            nextOffset,
+            event.velocityX,
+            drawerDragStartOffset.value
+          );
+          drawerOffset.value = withSpring(
+            shouldOpen ? 0 : -DRAWER_WIDTH,
+            buildDrawerSpringConfig(event.velocityX),
+            (finished) => {
+              if (finished) {
+                runOnJS(handleDrawerSettled)(shouldOpen);
+              }
+            }
+          );
+        })
+        .onFinalize((event) => {
+          if (drawerGestureDidSettle.value) {
+            return;
+          }
+          drawerGestureDidSettle.value = true;
+          const nextOffset = clampDrawerOffset(drawerOffset.value);
           const shouldOpen = shouldSettleDrawerOpen(
             nextOffset,
             event.velocityX,
@@ -725,21 +753,26 @@ export default function App() {
       currentScreen,
       dismissKeyboard,
       drawerDragStartOffset,
+      drawerGestureDidSettle,
       drawerOffset,
       ensureDrawerVisible,
       handleDrawerSettled,
+      settingsAllowsDrawerGesture,
     ]
   );
 
-  const visibleDrawerGesture = useMemo(
+  const settingsDrawerEdgeGesture = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(drawerVisible)
-        .activeOffsetX([-8, 8])
+        .enabled(currentScreen === 'Settings' && settingsAllowsDrawerGesture && !drawerVisible)
+        .activeOffsetX(12)
         .failOffsetY([-18, 18])
-        .onBegin(() => {
+        .onStart(() => {
+          drawerGestureDidSettle.value = false;
           cancelAnimation(drawerOffset);
           drawerDragStartOffset.value = drawerOffset.value;
+          runOnJS(dismissKeyboard)();
+          runOnJS(ensureDrawerVisible)();
         })
         .onUpdate((event) => {
           drawerOffset.value = applyDrawerRubberBand(
@@ -747,6 +780,7 @@ export default function App() {
           );
         })
         .onEnd((event) => {
+          drawerGestureDidSettle.value = true;
           const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
           const shouldOpen = shouldSettleDrawerOpen(
             nextOffset,
@@ -762,8 +796,109 @@ export default function App() {
               }
             }
           );
+        })
+        .onFinalize((event) => {
+          if (drawerGestureDidSettle.value) {
+            return;
+          }
+          drawerGestureDidSettle.value = true;
+          const nextOffset = clampDrawerOffset(drawerOffset.value);
+          const shouldOpen = shouldSettleDrawerOpen(
+            nextOffset,
+            event.velocityX,
+            drawerDragStartOffset.value
+          );
+          drawerOffset.value = withSpring(
+            shouldOpen ? 0 : -DRAWER_WIDTH,
+            buildDrawerSpringConfig(event.velocityX),
+            (finished) => {
+              if (finished) {
+                runOnJS(handleDrawerSettled)(shouldOpen);
+              }
+            }
+          );
         }),
-    [drawerDragStartOffset, drawerOffset, drawerVisible, handleDrawerSettled]
+    [
+      currentScreen,
+      dismissKeyboard,
+      drawerDragStartOffset,
+      drawerGestureDidSettle,
+      drawerOffset,
+      drawerVisible,
+      ensureDrawerVisible,
+      handleDrawerSettled,
+      settingsAllowsDrawerGesture,
+    ]
+  );
+
+  useEffect(() => {
+    if (currentScreen !== 'Settings' && !settingsAllowsDrawerGesture) {
+      setSettingsAllowsDrawerGesture(true);
+    }
+  }, [currentScreen, settingsAllowsDrawerGesture]);
+
+  const visibleDrawerGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(drawerVisible)
+        .activeOffsetX([-8, 8])
+        .failOffsetY([-18, 18])
+        .onBegin(() => {
+          drawerGestureDidSettle.value = false;
+          cancelAnimation(drawerOffset);
+          drawerDragStartOffset.value = drawerOffset.value;
+        })
+        .onUpdate((event) => {
+          drawerOffset.value = applyDrawerRubberBand(
+            drawerDragStartOffset.value + event.translationX
+          );
+        })
+        .onEnd((event) => {
+          drawerGestureDidSettle.value = true;
+          const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
+          const shouldOpen = shouldSettleDrawerOpen(
+            nextOffset,
+            event.velocityX,
+            drawerDragStartOffset.value
+          );
+          drawerOffset.value = withSpring(
+            shouldOpen ? 0 : -DRAWER_WIDTH,
+            buildDrawerSpringConfig(event.velocityX),
+            (finished) => {
+              if (finished) {
+                runOnJS(handleDrawerSettled)(shouldOpen);
+              }
+            }
+          );
+        })
+        .onFinalize((event) => {
+          if (drawerGestureDidSettle.value) {
+            return;
+          }
+          drawerGestureDidSettle.value = true;
+          const nextOffset = clampDrawerOffset(drawerOffset.value);
+          const shouldOpen = shouldSettleDrawerOpen(
+            nextOffset,
+            event.velocityX,
+            drawerDragStartOffset.value
+          );
+          drawerOffset.value = withSpring(
+            shouldOpen ? 0 : -DRAWER_WIDTH,
+            buildDrawerSpringConfig(event.velocityX),
+            (finished) => {
+              if (finished) {
+                runOnJS(handleDrawerSettled)(shouldOpen);
+              }
+            }
+          );
+        }),
+    [
+      drawerDragStartOffset,
+      drawerGestureDidSettle,
+      drawerOffset,
+      drawerVisible,
+      handleDrawerSettled,
+    ]
   );
 
   const navigate = useCallback(
@@ -1278,6 +1413,7 @@ export default function App() {
             onSwitchBridgeProfile={handleSwitchBridgeProfile}
             onClearSavedBridges={handleClearSavedBridges}
             onOpenDrawer={openDrawer}
+            onDrawerGestureEnabledChange={setSettingsAllowsDrawerGesture}
             onOpenBrowser={openBrowser}
             onOpenPrivacy={openPrivacy}
             onOpenTerms={openTerms}
@@ -1393,6 +1529,15 @@ export default function App() {
 
             {currentScreen === 'ChatGit' ? (
               <GestureDetector gesture={chatGitBackGesture}>
+                <View
+                  pointerEvents={drawerVisible ? 'none' : 'auto'}
+                  style={styles.edgeSwipeZone}
+                />
+              </GestureDetector>
+            ) : null}
+
+            {currentScreen === 'Settings' && settingsAllowsDrawerGesture ? (
+              <GestureDetector gesture={settingsDrawerEdgeGesture}>
                 <View
                   pointerEvents={drawerVisible ? 'none' : 'auto'}
                   style={styles.edgeSwipeZone}

@@ -92,7 +92,7 @@ export function ChatInput({
   const canSend = value.trim().length > 0 && voiceState === 'idle';
   const canStop = Boolean(showStopButton && onStop);
   const showVoiceButton = Boolean(onVoiceToggle);
-  const showSendButton = canSend || isLoading;
+  const showSendButton = canSend || (isLoading && !canStop);
   const inputScrollEnabled = inputHeight >= INPUT_TEXT_MAX_HEIGHT;
   const showVoiceRecordingUi = voiceState === 'recording';
   const showVoiceTranscribingUi = voiceState === 'transcribing';
