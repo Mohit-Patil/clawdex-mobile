@@ -137,7 +137,7 @@ const SUGGESTIONS = [
   'Explain the current codebase structure',
   'Write tests for the main module',
 ];
-const OPEN_CHAT_MIN_LOADING_MS = 500;
+const OPEN_CHAT_MIN_LOADING_MS = 250;
 
 interface ActivityState {
   tone: ActivityTone;

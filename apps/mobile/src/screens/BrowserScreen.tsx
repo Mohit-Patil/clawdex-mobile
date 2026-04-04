@@ -730,12 +730,12 @@ export function BrowserScreen({
               <View style={styles.quickSection}>
                 <View style={styles.sectionHeader}>
                   <Text style={styles.sectionTitle}>Running now</Text>
-                  <Text style={styles.sectionSubtitle}>Detected loopback dev servers.</Text>
+                  <Text style={styles.sectionSubtitle}>Detected local web servers.</Text>
                 </View>
                 {suggestionsLoading ? (
                   <View style={styles.loadingInline}>
                     <ActivityIndicator color={colors.textPrimary} />
-                    <Text style={styles.loadingInlineText}>Scanning common ports…</Text>
+                    <Text style={styles.loadingInlineText}>Scanning local web servers…</Text>
                   </View>
                 ) : suggestions.length > 0 ? (
                   <View style={styles.tileGrid}>
@@ -751,7 +751,7 @@ export function BrowserScreen({
                   </View>
                 ) : (
                   <Text style={styles.emptyStateText}>
-                    No common dev ports responded right now.
+                    No local web servers responded right now.
                   </Text>
                 )}
               </View>

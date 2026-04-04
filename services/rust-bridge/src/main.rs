@@ -31,7 +31,7 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{stream, SinkExt, StreamExt};
 use reqwest::{Client as HttpClient, Method as HttpMethod, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -81,9 +81,7 @@ const BROWSER_PREVIEW_SESSION_TTL: Duration = Duration::from_secs(60 * 60 * 12);
 const BROWSER_PREVIEW_MAX_SESSIONS: usize = 12;
 const BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
-const BROWSER_PREVIEW_DISCOVERY_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
-const BROWSER_PREVIEW_DISCOVERY_PORTS: &[u16] =
-    &[3000, 3001, 4173, 4200, 4321, 5000, 5173, 8000, 8080, 8081];
+const BROWSER_PREVIEW_DISCOVERY_HTTP_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -349,6 +347,7 @@ struct BrowserPreviewResolvedSession {
 }
 
 struct BrowserPreviewService {
+    bridge_port: u16,
     preview_port: u16,
     available: AtomicBool,
     next_session_counter: AtomicU64,
@@ -357,8 +356,9 @@ struct BrowserPreviewService {
 }
 
 impl BrowserPreviewService {
-    fn new(preview_port: u16) -> Self {
+    fn new(bridge_port: u16, preview_port: u16) -> Self {
         Self {
+            bridge_port,
             preview_port,
             available: AtomicBool::new(false),
             next_session_counter: AtomicU64::new(1),
@@ -459,16 +459,30 @@ impl BrowserPreviewService {
     }
 
     async fn discover_targets(&self) -> BrowserPreviewDiscoveryResponse {
-        let mut suggestions = Vec::new();
-        for port in BROWSER_PREVIEW_DISCOVERY_PORTS {
-            if is_loopback_port_reachable(*port).await {
-                suggestions.push(BrowserPreviewDiscoverySuggestion {
-                    target_url: format!("http://127.0.0.1:{port}"),
-                    port: *port,
-                    label: browser_preview_label_for_port(*port),
-                });
-            }
-        }
+        let candidate_ports =
+            discover_loopback_listening_ports(&[self.bridge_port, self.preview_port]).await;
+        let http = self.http.clone();
+        let mut suggestions = stream::iter(candidate_ports.into_iter())
+            .map(|port| {
+                let http = http.clone();
+                async move {
+                    if is_loopback_http_port_reachable(&http, port).await {
+                        Some(BrowserPreviewDiscoverySuggestion {
+                            target_url: format!("http://127.0.0.1:{port}"),
+                            port,
+                            label: browser_preview_label_for_port(port),
+                        })
+                    } else {
+                        None
+                    }
+                }
+            })
+            .buffer_unordered(24)
+            .filter_map(async move |suggestion| suggestion)
+            .collect::<Vec<_>>()
+            .await;
+
+        suggestions.sort_by_key(|suggestion| suggestion.port);
 
         BrowserPreviewDiscoveryResponse {
             scanned_at: now_iso(),
@@ -4473,7 +4487,7 @@ async fn main() {
         config.allow_outside_root_cwd,
     ));
     let updater = Arc::new(UpdateService::discover());
-    let preview = Arc::new(BrowserPreviewService::new(config.preview_port));
+    let preview = Arc::new(BrowserPreviewService::new(config.port, config.preview_port));
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -4816,9 +4830,8 @@ async fn handle_preview_http_request(
                 );
             }
         };
-        let rewritten_body =
-            rewrite_preview_html_document(&upstream_body, effective_viewport)
-                .unwrap_or_else(|| upstream_body.to_vec());
+        let rewritten_body = rewrite_preview_html_document(&upstream_body, effective_viewport)
+            .unwrap_or_else(|| upstream_body.to_vec());
         let mut response = Response::new(Body::from(rewritten_body));
         *response.status_mut() = status;
         response
@@ -6483,13 +6496,12 @@ fn rewrite_preview_html_document(
     }
 
     let document = std::str::from_utf8(body).ok()?;
-    let document = if let Some(content) =
-        viewport.and_then(PreviewViewportConfig::viewport_meta_content)
-    {
-        inject_preview_viewport_meta(document, &content)
-    } else {
-        document.to_string()
-    };
+    let document =
+        if let Some(content) = viewport.and_then(PreviewViewportConfig::viewport_meta_content) {
+            inject_preview_viewport_meta(document, &content)
+        } else {
+            document.to_string()
+        };
     let rewritten = inject_preview_runtime_script(&document);
     Some(rewritten.into_bytes())
 }
@@ -7102,25 +7114,174 @@ fn target_origin_string(target_url: &Url) -> String {
     }
 }
 
-async fn is_loopback_port_reachable(port: u16) -> bool {
-    timeout(
-        BROWSER_PREVIEW_DISCOVERY_CONNECT_TIMEOUT,
-        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+async fn discover_loopback_listening_ports(excluded_ports: &[u16]) -> Vec<u16> {
+    let mut ports = HashSet::new();
+    let excluded: HashSet<u16> = excluded_ports.iter().copied().collect();
+
+    if let Some(output) = read_command_stdout("lsof", &["-nP", "-iTCP", "-sTCP:LISTEN"]).await {
+        collect_ports_from_lsof(&output, &mut ports);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(contents) = fs::read_to_string("/proc/net/tcp").await {
+            collect_ports_from_linux_proc_net(&contents, false, &mut ports);
+        }
+        if let Ok(contents) = fs::read_to_string("/proc/net/tcp6").await {
+            collect_ports_from_linux_proc_net(&contents, true, &mut ports);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(output) = read_command_stdout("netstat", &["-ano", "-p", "tcp"]).await {
+            collect_ports_from_netstat(&output, &mut ports);
+        }
+    }
+
+    let mut result = ports
+        .into_iter()
+        .filter(|port| !excluded.contains(port))
+        .collect::<Vec<_>>();
+    result.sort_unstable();
+    result.dedup();
+    result
+}
+
+async fn read_command_stdout(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn collect_ports_from_lsof(output: &str, ports: &mut HashSet<u16>) {
+    for line in output.lines() {
+        if !line.contains("(LISTEN)") {
+            continue;
+        }
+        let Some(address) = line
+            .split(" TCP ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+        else {
+            continue;
+        };
+        if let Some(port) = parse_listening_socket_port(address) {
+            ports.insert(port);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_ports_from_linux_proc_net(output: &str, is_ipv6: bool, ports: &mut HashSet<u16>) {
+    for line in output.lines().skip(1) {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        if columns.len() < 4 || columns[3] != "0A" {
+            continue;
+        }
+        let Some((address_hex, port_hex)) = columns[1].split_once(':') else {
+            continue;
+        };
+        if !linux_proc_address_is_loopback_or_any(address_hex, is_ipv6) {
+            continue;
+        }
+        if let Ok(port) = u16::from_str_radix(port_hex, 16) {
+            ports.insert(port);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_proc_address_is_loopback_or_any(value: &str, is_ipv6: bool) -> bool {
+    if !is_ipv6 {
+        return matches!(value, "00000000" | "0100007F");
+    }
+
+    matches!(
+        value,
+        "00000000000000000000000000000000"
+            | "00000000000000000000000000000001"
+            | "00000000000000000000000001000000"
     )
-    .await
-    .map(|result| result.is_ok())
-    .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn collect_ports_from_netstat(output: &str, ports: &mut HashSet<u16>) {
+    for line in output.lines() {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        if columns.len() < 4 {
+            continue;
+        }
+        if columns[0] != "TCP" || columns[3] != "LISTENING" {
+            continue;
+        }
+        if let Some(port) = parse_listening_socket_port(columns[1]) {
+            ports.insert(port);
+        }
+    }
+}
+
+fn parse_listening_socket_port(value: &str) -> Option<u16> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = value.strip_prefix('[') {
+        let (host, remainder) = rest.split_once(']')?;
+        let port = remainder.strip_prefix(':')?;
+        if !is_loopback_listen_host(host) {
+            return None;
+        }
+        return port.parse::<u16>().ok();
+    }
+
+    let (host, port) = value.rsplit_once(':')?;
+    if !is_loopback_listen_host(host) {
+        return None;
+    }
+    port.parse::<u16>().ok()
+}
+
+fn is_loopback_listen_host(host: &str) -> bool {
+    matches!(
+        host,
+        "*" | "127.0.0.1" | "0.0.0.0" | "::1" | "::" | "localhost"
+    )
+}
+
+async fn is_loopback_http_port_reachable(http: &HttpClient, port: u16) -> bool {
+    let request = http
+        .get(format!("http://127.0.0.1:{port}/"))
+        .header("accept", "text/html,application/json,*/*");
+    timeout(BROWSER_PREVIEW_DISCOVERY_HTTP_TIMEOUT, request.send())
+        .await
+        .map(|result| result.is_ok())
+        .unwrap_or(false)
 }
 
 fn browser_preview_label_for_port(port: u16) -> String {
     match port {
         3000 => "Local dev server on :3000".to_string(),
         3001 => "Local dev server on :3001".to_string(),
+        3002 => "Local dev server on :3002".to_string(),
+        3003 => "Local dev server on :3003".to_string(),
+        3004 => "Local dev server on :3004".to_string(),
+        3005 => "Local dev server on :3005".to_string(),
         4173 => "Vite preview on :4173".to_string(),
         4200 => "Angular dev server on :4200".to_string(),
         4321 => "Metro / Expo web on :4321".to_string(),
         5000 => "Local dev server on :5000".to_string(),
         5173 => "Vite dev server on :5173".to_string(),
+        5500 => "Live Server on :5500".to_string(),
         8000 => "Local dev server on :8000".to_string(),
         8080 => "Local dev server on :8080".to_string(),
         8081 => "Metro bundler on :8081".to_string(),
@@ -9359,7 +9520,7 @@ mod tests {
             config.allow_outside_root_cwd,
         ));
         let updater = Arc::new(UpdateService::discover());
-        let preview = Arc::new(BrowserPreviewService::new(config.preview_port));
+        let preview = Arc::new(BrowserPreviewService::new(config.port, config.preview_port));
 
         Arc::new(AppState {
             config,
@@ -9375,9 +9536,10 @@ mod tests {
 
     #[test]
     fn parse_preview_bootstrap_params_strips_internal_query_fields() {
-        let uri: Uri = "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&foo=bar&baz=qux"
-            .parse()
-            .expect("valid uri");
+        let uri: Uri =
+            "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&foo=bar&baz=qux"
+                .parse()
+                .expect("valid uri");
 
         let params = parse_preview_bootstrap_params(&uri);
 
@@ -9497,16 +9659,15 @@ mod tests {
     #[test]
     fn rewrite_preview_html_document_rewrites_viewport_in_desktop_mode() {
         let document = b"<html><head><title>Preview</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body>Hello</body></html>";
-        let rewritten =
-            rewrite_preview_html_document(
-                document,
-                Some(PreviewViewportConfig {
-                    preset: PreviewViewportPreset::Desktop,
-                    width: Some(1728),
-                    height: Some(1117),
-                }),
-            )
-            .expect("rewritten html");
+        let rewritten = rewrite_preview_html_document(
+            document,
+            Some(PreviewViewportConfig {
+                preset: PreviewViewportPreset::Desktop,
+                width: Some(1728),
+                height: Some(1117),
+            }),
+        )
+        .expect("rewritten html");
         let rewritten = String::from_utf8(rewritten).expect("utf8 html");
 
         assert!(rewritten.contains(BROWSER_PREVIEW_RUNTIME_SCRIPT_PATH));
@@ -9540,6 +9701,46 @@ mod tests {
         assert!(script.contains("new Proxy(OriginalEventSource"));
         assert!(script.contains("new Proxy(OriginalWebSocket"));
         assert!(script.contains("Reflect.construct"));
+    }
+
+    #[test]
+    fn parse_listening_socket_port_accepts_loopback_and_wildcard_addresses() {
+        assert_eq!(parse_listening_socket_port("127.0.0.1:3002"), Some(3002));
+        assert_eq!(parse_listening_socket_port("0.0.0.0:3003"), Some(3003));
+        assert_eq!(parse_listening_socket_port("*:5500"), Some(5500));
+        assert_eq!(parse_listening_socket_port("[::1]:8080"), Some(8080));
+        assert_eq!(parse_listening_socket_port("[::]:8081"), Some(8081));
+    }
+
+    #[test]
+    fn browser_preview_label_for_port_covers_added_common_ports() {
+        assert_eq!(
+            browser_preview_label_for_port(3002),
+            "Local dev server on :3002"
+        );
+        assert_eq!(
+            browser_preview_label_for_port(3003),
+            "Local dev server on :3003"
+        );
+        assert_eq!(browser_preview_label_for_port(5500), "Live Server on :5500");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn collect_ports_from_linux_proc_net_reads_loopback_and_wildcard_listeners() {
+        let sample = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0BBA 00000000:0000 0A 00000000:00000000 00:00000000 00000000   501        0 0 1 0000000000000000 100 0 0 10 0
+   1: 00000000:0BBB 00000000:0000 0A 00000000:00000000 00:00000000 00000000   501        0 0 1 0000000000000000 100 0 0 10 0
+   2: 0200007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000   501        0 0 1 0000000000000000 100 0 0 10 0
+";
+        let mut ports = HashSet::new();
+
+        collect_ports_from_linux_proc_net(sample, false, &mut ports);
+
+        assert!(ports.contains(&3002));
+        assert!(ports.contains(&3003));
+        assert!(!ports.contains(&5432));
     }
 
     #[test]
