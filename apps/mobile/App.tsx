@@ -706,7 +706,11 @@ export default function App() {
         })
         .onEnd((event) => {
           const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
-          const shouldOpen = shouldSettleDrawerOpen(nextOffset, event.velocityX);
+          const shouldOpen = shouldSettleDrawerOpen(
+            nextOffset,
+            event.velocityX,
+            drawerDragStartOffset.value
+          );
           drawerOffset.value = withSpring(
             shouldOpen ? 0 : -DRAWER_WIDTH,
             buildDrawerSpringConfig(event.velocityX),
@@ -744,7 +748,11 @@ export default function App() {
         })
         .onEnd((event) => {
           const nextOffset = clampDrawerOffset(drawerDragStartOffset.value + event.translationX);
-          const shouldOpen = shouldSettleDrawerOpen(nextOffset, event.velocityX);
+          const shouldOpen = shouldSettleDrawerOpen(
+            nextOffset,
+            event.velocityX,
+            drawerDragStartOffset.value
+          );
           drawerOffset.value = withSpring(
             shouldOpen ? 0 : -DRAWER_WIDTH,
             buildDrawerSpringConfig(event.velocityX),
@@ -1360,32 +1368,28 @@ export default function App() {
               </Animated.View>
             </GestureDetector>
 
-            <View pointerEvents={drawerVisible ? 'auto' : 'none'} style={styles.drawerLayer}>
-              <GestureDetector gesture={visibleDrawerGesture}>
+            <GestureDetector gesture={visibleDrawerGesture}>
+              <View pointerEvents={drawerVisible ? 'auto' : 'none'} style={styles.drawerLayer}>
                 <Animated.View style={[styles.overlay, overlayAnimatedStyle]}>
                   <Pressable style={StyleSheet.absoluteFill} onPress={closeDrawer} />
                 </Animated.View>
-              </GestureDetector>
 
-              <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
-                <Animated.View
-                  style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
-                >
-                  <DrawerContent
-                    api={activeApi}
-                    ws={activeWs}
-                    selectedChatId={selectedChatId}
-                    onSelectChat={handleSelectChat}
-                    onNewChat={handleNewChat}
-                    onNavigate={navigate}
-                  />
+                <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
+                  <Animated.View
+                    style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
+                  >
+                    <DrawerContent
+                      api={activeApi}
+                      ws={activeWs}
+                      selectedChatId={selectedChatId}
+                      onSelectChat={handleSelectChat}
+                      onNewChat={handleNewChat}
+                      onNavigate={navigate}
+                    />
+                  </Animated.View>
                 </Animated.View>
-
-                <GestureDetector gesture={visibleDrawerGesture}>
-                  <View style={styles.drawerDragZone} />
-                </GestureDetector>
-              </Animated.View>
-            </View>
+              </View>
+            </GestureDetector>
 
             {currentScreen === 'ChatGit' ? (
               <GestureDetector gesture={chatGitBackGesture}>
@@ -1516,7 +1520,11 @@ function projectDrawerOffset(value: number, velocityX: number): number {
   return clampDrawerOffset(value + velocityX * DRAWER_VELOCITY_PROJECTION);
 }
 
-function shouldSettleDrawerOpen(value: number, velocityX: number): boolean {
+function shouldSettleDrawerOpen(
+  value: number,
+  velocityX: number,
+  startOffset = -DRAWER_WIDTH
+): boolean {
   'worklet';
   if (velocityX >= DRAWER_SNAP_VELOCITY) {
     return true;
@@ -1526,7 +1534,13 @@ function shouldSettleDrawerOpen(value: number, velocityX: number): boolean {
     return false;
   }
 
-  return getDrawerOpenProgress(projectDrawerOffset(value, velocityX)) >= DRAWER_SNAP_OPEN_PROGRESS;
+  const projectedProgress = getDrawerOpenProgress(projectDrawerOffset(value, velocityX));
+  const startedOpen = getDrawerOpenProgress(startOffset) > 0.5;
+  const settleThreshold = startedOpen
+    ? 1 - DRAWER_SNAP_OPEN_PROGRESS
+    : DRAWER_SNAP_OPEN_PROGRESS;
+
+  return projectedProgress >= settleThreshold;
 }
 
 function buildDrawerSpringConfig(velocityX: number) {
@@ -1607,14 +1621,6 @@ const createStyles = (theme: ReturnType<typeof createAppTheme>) =>
     },
     drawerContentShell: {
       flex: 1,
-    },
-    drawerDragZone: {
-      position: 'absolute',
-      top: 0,
-      right: 0,
-      bottom: 0,
-      width: 20,
-      zIndex: 25,
     },
     edgeSwipeZone: {
       position: 'absolute',
