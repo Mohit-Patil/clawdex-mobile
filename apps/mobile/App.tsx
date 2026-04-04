@@ -6,7 +6,6 @@ import {
   AppState,
   ActivityIndicator,
   Keyboard,
-  Pressable,
   StatusBar,
   StyleSheet,
   Text,
@@ -150,6 +149,7 @@ export default function App() {
   const [pendingMainChatId, setPendingMainChatId] = useState<string | null>(null);
   const [pendingMainChatSnapshot, setPendingMainChatSnapshot] = useState<Chat | null>(null);
   const [settingsAllowsDrawerGesture, setSettingsAllowsDrawerGesture] = useState(true);
+  const [drawerCapturesTouches, setDrawerCapturesTouches] = useState(false);
   const [defaultStartCwd, setDefaultStartCwd] = useState<string | null>(null);
   const [defaultChatEngine, setDefaultChatEngine] = useState<ChatEngine>('codex');
   const [defaultEngineSettings, setDefaultEngineSettings] = useState<EngineDefaultSettingsMap>(
@@ -174,6 +174,7 @@ export default function App() {
   const [drawerVisible, setDrawerVisible] = useState(false);
   const drawerOpenRef = useRef(false);
   const drawerVisibleRef = useRef(false);
+  const drawerCapturesTouchesRef = useRef(false);
   const chatTransitionRequestIdRef = useRef(0);
   const appLifecycleStateRef = useRef(AppState.currentState);
   const activeUsageStartedAtRef = useRef<number | null>(
@@ -578,7 +579,9 @@ export default function App() {
     (isOpen: boolean) => {
       drawerOpenRef.current = isOpen;
       drawerVisibleRef.current = isOpen;
+      drawerCapturesTouchesRef.current = isOpen;
       setDrawerVisible(isOpen);
+      setDrawerCapturesTouches(isOpen);
     },
     []
   );
@@ -593,6 +596,8 @@ export default function App() {
         dismissKeyboard();
       }
 
+      drawerCapturesTouchesRef.current = shouldOpen;
+      setDrawerCapturesTouches(shouldOpen);
       ensureDrawerVisible();
       drawerOffset.value = withSpring(
         shouldOpen ? 0 : -DRAWER_WIDTH,
@@ -899,6 +904,22 @@ export default function App() {
       drawerVisible,
       handleDrawerSettled,
     ]
+  );
+
+  const visibleDrawerOverlayGesture = useMemo(
+    () =>
+      Gesture.Race(
+        Gesture.Tap()
+          .enabled(drawerVisible)
+          .maxDistance(8)
+          .onEnd((_event, success) => {
+            if (success) {
+              runOnJS(closeDrawer)();
+            }
+          }),
+        visibleDrawerGesture
+      ),
+    [closeDrawer, drawerVisible, visibleDrawerGesture]
   );
 
   const navigate = useCallback(
@@ -1504,12 +1525,15 @@ export default function App() {
               </Animated.View>
             </GestureDetector>
 
-            <GestureDetector gesture={visibleDrawerGesture}>
-              <View pointerEvents={drawerVisible ? 'auto' : 'none'} style={styles.drawerLayer}>
-                <Animated.View style={[styles.overlay, overlayAnimatedStyle]}>
-                  <Pressable style={StyleSheet.absoluteFill} onPress={closeDrawer} />
-                </Animated.View>
+            <View
+              pointerEvents={drawerVisible && drawerCapturesTouches ? 'auto' : 'none'}
+              style={styles.drawerLayer}
+            >
+              <GestureDetector gesture={visibleDrawerOverlayGesture}>
+                <Animated.View style={[styles.overlay, overlayAnimatedStyle]} />
+              </GestureDetector>
 
+              <GestureDetector gesture={visibleDrawerGesture}>
                 <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
                   <Animated.View
                     style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
@@ -1524,13 +1548,13 @@ export default function App() {
                     />
                   </Animated.View>
                 </Animated.View>
-              </View>
-            </GestureDetector>
+              </GestureDetector>
+            </View>
 
             {currentScreen === 'ChatGit' ? (
               <GestureDetector gesture={chatGitBackGesture}>
                 <View
-                  pointerEvents={drawerVisible ? 'none' : 'auto'}
+                  pointerEvents={drawerVisible && drawerCapturesTouches ? 'none' : 'auto'}
                   style={styles.edgeSwipeZone}
                 />
               </GestureDetector>
@@ -1539,7 +1563,7 @@ export default function App() {
             {currentScreen === 'Settings' && settingsAllowsDrawerGesture ? (
               <GestureDetector gesture={settingsDrawerEdgeGesture}>
                 <View
-                  pointerEvents={drawerVisible ? 'none' : 'auto'}
+                  pointerEvents={drawerVisible && drawerCapturesTouches ? 'none' : 'auto'}
                   style={styles.edgeSwipeZone}
                 />
               </GestureDetector>
