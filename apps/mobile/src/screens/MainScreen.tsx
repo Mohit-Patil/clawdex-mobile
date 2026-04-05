@@ -171,6 +171,8 @@ type AttachmentMenuAction =
   | 'phone-camera'
   | null;
 
+type WorkspacePickerPurpose = 'default-start' | 'git-checkout-destination';
+
 interface ThreadContextUsage {
   totalTokens: number | null;
   lastTokens: number | null;
@@ -236,10 +238,13 @@ const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
 const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
 const AGENT_THREADS_SYNC_INTERVAL_MS = 10_000;
 const CONTEXT_WINDOW_BASELINE_TOKENS = 5_000;
+const CHAT_DRAFTS_FILE = 'chat-drafts.json';
+const CHAT_DRAFTS_VERSION = 1;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 const CHAT_MODEL_PREFERENCES_VERSION = 1;
 const CHAT_PLAN_SNAPSHOTS_FILE = 'chat-plan-snapshots.json';
 const CHAT_PLAN_SNAPSHOTS_VERSION = 1;
+const CHAT_NEW_DRAFT_KEY = '__new_chat__';
 const STREAMING_SCROLL_THROTTLE_MS = 48;
 const PLAN_IMPLEMENTATION_TITLE = 'Implement this plan?';
 const PLAN_IMPLEMENTATION_YES = 'Yes, implement this plan';
@@ -527,7 +532,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const openingChatStartedAtRef = useRef<number>(
       initialPendingSnapshot || !pendingOpenChatId ? 0 : Date.now()
     );
+    const initialDraftScopeKey = getDraftScopeKey(initialPendingSnapshot?.id ?? pendingOpenChatId);
     const [draft, setDraft] = useState('');
+    const [draftOwnerKey, setDraftOwnerKey] = useState(initialDraftScopeKey);
+    const [chatDraftsLoaded, setChatDraftsLoaded] = useState(false);
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -574,6 +582,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
     const [stoppingTurn, setStoppingTurn] = useState(false);
     const [workspaceModalVisible, setWorkspaceModalVisible] = useState(false);
+    const [workspacePickerPurpose, setWorkspacePickerPurpose] =
+      useState<WorkspacePickerPurpose>('default-start');
     const [workspaceRoots, setWorkspaceRoots] = useState<WorkspaceSummary[]>([]);
     const [workspaceBridgeRoot, setWorkspaceBridgeRoot] = useState<string | null>(null);
     const [loadingWorkspaceRoots, setLoadingWorkspaceRoots] = useState(false);
@@ -584,6 +594,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [workspaceBrowseEntries, setWorkspaceBrowseEntries] = useState<FileSystemEntry[]>([]);
     const [loadingWorkspaceBrowse, setLoadingWorkspaceBrowse] = useState(false);
     const [workspaceBrowseError, setWorkspaceBrowseError] = useState<string | null>(null);
+    const [resumeGitCheckoutAfterWorkspacePicker, setResumeGitCheckoutAfterWorkspacePicker] =
+      useState(false);
+    const [gitCheckoutModalVisible, setGitCheckoutModalVisible] = useState(false);
+    const [gitCheckoutRepoUrl, setGitCheckoutRepoUrl] = useState('');
+    const [gitCheckoutParentPath, setGitCheckoutParentPath] = useState<string | null>(null);
+    const [gitCheckoutDirectoryName, setGitCheckoutDirectoryName] = useState('');
+    const [gitCheckoutDirectoryNameEdited, setGitCheckoutDirectoryNameEdited] =
+      useState(false);
+    const [gitCheckoutError, setGitCheckoutError] = useState<string | null>(null);
+    const [gitCheckoutCloning, setGitCheckoutCloning] = useState(false);
     const [chatTitleMenuVisible, setChatTitleMenuVisible] = useState(false);
     const [agentThreadMenuVisible, setAgentThreadMenuVisible] = useState(false);
     const [modelModalVisible, setModelModalVisible] = useState(false);
@@ -631,6 +651,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [threadContextUsage, setThreadContextUsage] = useState<ThreadContextUsage | null>(
       null
     );
+    const chatDraftsRef = useRef<Record<string, string>>({});
+    const draftPersistenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [planPanelCollapsedByThread, setPlanPanelCollapsedByThread] = useState<
       Record<string, boolean>
     >({});
@@ -831,6 +853,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const chatPlanSnapshotsRef = useRef<Record<string, ActivePlanState>>({});
     const [, setChatPlanSnapshotsLoaded] = useState(false);
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
+    const draftScopeKey = getDraftScopeKey(selectedChatId);
     const persistedDefaultChatEngine = resolveChatEngine(defaultChatEngine ?? 'codex');
     const availableNewChatEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
       ? bridgeCapabilities.availableEngines
@@ -1130,6 +1153,39 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       []
     );
 
+    const saveChatDrafts = useCallback(async (nextDrafts: Record<string, string>) => {
+      const draftsPath = getChatDraftsPath();
+      if (!draftsPath) {
+        return;
+      }
+
+      const payload = JSON.stringify({
+        version: CHAT_DRAFTS_VERSION,
+        entries: nextDrafts,
+      });
+
+      try {
+        await FileSystem.writeAsStringAsync(draftsPath, payload);
+      } catch {
+        // Best effort persistence only.
+      }
+    }, []);
+
+    const scheduleChatDraftsPersist = useCallback(
+      (nextDrafts: Record<string, string>) => {
+        const existingTimer = draftPersistenceTimeoutRef.current;
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+        }
+
+        draftPersistenceTimeoutRef.current = setTimeout(() => {
+          draftPersistenceTimeoutRef.current = null;
+          void saveChatDrafts(nextDrafts);
+        }, 180);
+      },
+      [saveChatDrafts]
+    );
+
     const saveChatPlanSnapshots = useCallback(
       async (nextSnapshots: Record<string, ActivePlanState>) => {
         const snapshotsPath = getChatPlanSnapshotsPath();
@@ -1150,6 +1206,86 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       },
       []
     );
+
+    useEffect(() => {
+      let cancelled = false;
+
+      const load = async () => {
+        const draftsPath = getChatDraftsPath();
+        if (!draftsPath) {
+          if (!cancelled) {
+            setChatDraftsLoaded(true);
+          }
+          return;
+        }
+
+        try {
+          const raw = await FileSystem.readAsStringAsync(draftsPath);
+          if (cancelled) {
+            return;
+          }
+
+          chatDraftsRef.current = parseChatDrafts(raw);
+        } catch {
+          if (!cancelled) {
+            chatDraftsRef.current = {};
+          }
+        } finally {
+          if (!cancelled) {
+            setChatDraftsLoaded(true);
+          }
+        }
+      };
+
+      void load();
+      return () => {
+        cancelled = true;
+      };
+    }, []);
+
+    useEffect(() => {
+      if (!chatDraftsLoaded) {
+        return;
+      }
+
+      const resolvedOwnerKey = draftOwnerKey === draftScopeKey ? draftOwnerKey : draftScopeKey;
+      const nextDraft = chatDraftsRef.current[resolvedOwnerKey] ?? '';
+      if (draftOwnerKey !== draftScopeKey) {
+        setDraftOwnerKey(draftScopeKey);
+      }
+      setDraft((previous) => (previous === nextDraft ? previous : nextDraft));
+    }, [chatDraftsLoaded, draftOwnerKey, draftScopeKey]);
+
+    useEffect(() => {
+      if (!chatDraftsLoaded) {
+        return;
+      }
+
+      const previousDraft = chatDraftsRef.current[draftOwnerKey] ?? '';
+      if (previousDraft === draft) {
+        return;
+      }
+
+      const nextDrafts = { ...chatDraftsRef.current };
+      if (draft.trim().length > 0) {
+        nextDrafts[draftOwnerKey] = draft;
+      } else {
+        delete nextDrafts[draftOwnerKey];
+      }
+      chatDraftsRef.current = nextDrafts;
+      scheduleChatDraftsPersist(nextDrafts);
+    }, [chatDraftsLoaded, draft, draftOwnerKey, scheduleChatDraftsPersist]);
+
+    useEffect(() => {
+      return () => {
+        const existingTimer = draftPersistenceTimeoutRef.current;
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          draftPersistenceTimeoutRef.current = null;
+        }
+        void saveChatDrafts(chatDraftsRef.current);
+      };
+    }, [saveChatDrafts]);
 
     const rememberChatPlanSnapshot = useCallback(
       (chatId: string, plan: ActivePlanState | null) => {
@@ -2148,7 +2284,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setSelectedCollaborationMode('default');
       openingChatStartedAtRef.current = 0;
       setOpeningChatId(null);
-      setDraft('');
       setError(null);
       setSelectedServiceTier(undefined);
       setActiveCommands([]);
@@ -2247,19 +2382,81 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [api, workspaceBridgeRoot]
     );
 
+    const openWorkspacePicker = useCallback(
+      (
+        purpose: WorkspacePickerPurpose,
+        initialPathOverride?: string | null
+      ) => {
+        const initialPath =
+          normalizeWorkspacePath(initialPathOverride) ??
+          preferredStartCwd ??
+          workspaceBrowsePath ??
+          workspaceBridgeRoot ??
+          null;
+        setWorkspacePickerPurpose(purpose);
+        setWorkspaceModalVisible(true);
+        void refreshWorkspaceRoots();
+        void browseWorkspacePath(initialPath);
+      },
+      [
+        browseWorkspacePath,
+        preferredStartCwd,
+        refreshWorkspaceRoots,
+        workspaceBridgeRoot,
+        workspaceBrowsePath,
+      ]
+    );
+
     const openWorkspaceModal = useCallback(() => {
-      const initialPath =
-        preferredStartCwd ?? workspaceBrowsePath ?? workspaceBridgeRoot ?? null;
-      setWorkspaceModalVisible(true);
-      void refreshWorkspaceRoots();
-      void browseWorkspacePath(initialPath);
+      setResumeGitCheckoutAfterWorkspacePicker(false);
+      openWorkspacePicker('default-start');
+    }, [openWorkspacePicker]);
+
+    const openGitCheckoutModal = useCallback((initialParentPath?: string | null) => {
+      const defaultParentPath =
+        normalizeWorkspacePath(initialParentPath) ??
+        preferredStartCwd ??
+        workspaceBrowsePath ??
+        workspaceBridgeRoot ??
+        null;
+      setGitCheckoutRepoUrl('');
+      setGitCheckoutDirectoryName('');
+      setGitCheckoutDirectoryNameEdited(false);
+      setGitCheckoutParentPath(defaultParentPath);
+      setGitCheckoutError(null);
+      setGitCheckoutCloning(false);
+      setResumeGitCheckoutAfterWorkspacePicker(false);
+      setGitCheckoutModalVisible(true);
+      void refreshWorkspaceRoots().then((response) => {
+        const bridgeRoot = normalizeWorkspacePath(response?.bridgeRoot);
+        if (bridgeRoot) {
+          setGitCheckoutParentPath((current) => current ?? bridgeRoot);
+        }
+      });
     }, [
-      browseWorkspacePath,
       preferredStartCwd,
       refreshWorkspaceRoots,
       workspaceBridgeRoot,
       workspaceBrowsePath,
     ]);
+
+    const closeGitCheckoutModal = useCallback(() => {
+      if (gitCheckoutCloning) {
+        return;
+      }
+      setGitCheckoutModalVisible(false);
+      setGitCheckoutError(null);
+      setResumeGitCheckoutAfterWorkspacePicker(false);
+    }, [gitCheckoutCloning]);
+
+    const openGitCheckoutDestinationPicker = useCallback(() => {
+      setResumeGitCheckoutAfterWorkspacePicker(true);
+      setGitCheckoutModalVisible(false);
+      openWorkspacePicker(
+        'git-checkout-destination',
+        gitCheckoutParentPath ?? preferredStartCwd ?? workspaceBridgeRoot ?? null
+      );
+    }, [gitCheckoutParentPath, openWorkspacePicker, preferredStartCwd, workspaceBridgeRoot]);
 
     const refreshAgentThreads = useCallback(
       async (
@@ -2356,7 +2553,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
       setWorkspaceModalVisible(false);
-    }, [loadingWorkspaceBrowse, loadingWorkspaceRoots]);
+      if (
+        workspacePickerPurpose === 'git-checkout-destination' &&
+        resumeGitCheckoutAfterWorkspacePicker
+      ) {
+        setResumeGitCheckoutAfterWorkspacePicker(false);
+        setGitCheckoutModalVisible(true);
+      }
+    }, [
+      loadingWorkspaceBrowse,
+      loadingWorkspaceRoots,
+      resumeGitCheckoutAfterWorkspacePicker,
+      workspacePickerPurpose,
+    ]);
 
     useEffect(() => {
       if (!selectedChatId) {
@@ -2422,14 +2631,92 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       };
     }, [refreshAgentThreads]);
 
-    const selectDefaultWorkspace = useCallback(
+    const handleWorkspaceSelection = useCallback(
       (cwd: string | null) => {
-        onDefaultStartCwdChange?.(normalizeWorkspacePath(cwd));
+        const normalizedPath = normalizeWorkspacePath(cwd);
         setWorkspaceBrowseError(null);
+
+        if (workspacePickerPurpose === 'git-checkout-destination') {
+          setGitCheckoutParentPath(normalizedPath);
+          setResumeGitCheckoutAfterWorkspacePicker(false);
+          setWorkspaceModalVisible(false);
+          setGitCheckoutModalVisible(true);
+          return;
+        }
+
+        onDefaultStartCwdChange?.(normalizedPath);
         setWorkspaceModalVisible(false);
       },
-      [onDefaultStartCwdChange]
+      [onDefaultStartCwdChange, workspacePickerPurpose]
     );
+
+    const handleGitCheckoutRepoUrlChange = useCallback(
+      (value: string) => {
+        setGitCheckoutRepoUrl(value);
+        setGitCheckoutError(null);
+        if (!gitCheckoutDirectoryNameEdited) {
+          setGitCheckoutDirectoryName(deriveCloneDirectoryName(value) ?? '');
+        }
+      },
+      [gitCheckoutDirectoryNameEdited]
+    );
+
+    const handleGitCheckoutDirectoryNameChange = useCallback((value: string) => {
+      setGitCheckoutDirectoryName(value);
+      setGitCheckoutDirectoryNameEdited(value.trim().length > 0);
+      setGitCheckoutError(null);
+    }, []);
+
+    const submitGitCheckout = useCallback(async () => {
+      const url = gitCheckoutRepoUrl.trim();
+      const directoryName = normalizeCloneDirectoryName(gitCheckoutDirectoryName);
+      if (!url) {
+        setGitCheckoutError('Paste an HTTPS or SSH repository URL first.');
+        return;
+      }
+      if (!directoryName) {
+        setGitCheckoutError('Choose a valid folder name for the cloned repo.');
+        return;
+      }
+
+      let parentPath = normalizeWorkspacePath(gitCheckoutParentPath) ?? workspaceBridgeRoot;
+      if (!parentPath) {
+        const response = await refreshWorkspaceRoots();
+        parentPath = normalizeWorkspacePath(response?.bridgeRoot);
+      }
+      if (!parentPath) {
+        setGitCheckoutError('Choose where the repository should be cloned.');
+        return;
+      }
+
+      try {
+        setGitCheckoutCloning(true);
+        setGitCheckoutError(null);
+        const cloned = await api.gitClone({
+          url,
+          parentPath,
+          directoryName,
+        });
+        const clonedPath = normalizeWorkspacePath(cloned.cwd) ?? joinWorkspacePath(parentPath, directoryName);
+        onDefaultStartCwdChange?.(clonedPath);
+        setWorkspaceBrowsePath(clonedPath);
+        setWorkspaceBrowseParentPath(parentPath);
+        setWorkspaceBrowseError(null);
+        setGitCheckoutModalVisible(false);
+      } catch (err) {
+        setGitCheckoutError((err as Error).message);
+      } finally {
+        setGitCheckoutCloning(false);
+      }
+    }, [
+      api,
+      gitCheckoutDirectoryName,
+      gitCheckoutParentPath,
+      gitCheckoutRepoUrl,
+      onDefaultStartCwdChange,
+      refreshWorkspaceRoots,
+      workspaceBridgeRoot,
+    ]);
 
     const refreshModelOptions = useCallback(async () => {
       setLoadingModels(true);
@@ -6859,6 +7146,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const headerTitle = isOpeningChat ? 'Opening chat' : selectedChat?.title?.trim() || 'New chat';
     const defaultStartWorkspaceLabel =
       preferredStartCwd ?? 'Bridge default workspace';
+    const gitCheckoutDestinationLabel =
+      gitCheckoutParentPath ?? workspaceBridgeRoot ?? 'Bridge default workspace';
+    const gitCheckoutTargetPath =
+      gitCheckoutParentPath && normalizeCloneDirectoryName(gitCheckoutDirectoryName)
+        ? joinWorkspacePath(
+            gitCheckoutParentPath,
+            normalizeCloneDirectoryName(gitCheckoutDirectoryName) ?? ''
+          )
+        : null;
     const spawnedAgentCount = selectorAgentCount;
     const selectedChatIsSubAgent = Boolean(selectedChat?.parentThreadId);
     const showAgentThreadChip =
@@ -7595,7 +7891,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         <WorkspacePickerModal
           visible={workspaceModalVisible}
-          selectedPath={preferredStartCwd}
+          selectedPath={
+            workspacePickerPurpose === 'git-checkout-destination'
+              ? gitCheckoutParentPath
+              : preferredStartCwd
+          }
           bridgeRoot={workspaceBridgeRoot}
           recentWorkspaces={workspaceRoots}
           currentPath={workspaceBrowsePath}
@@ -7605,9 +7905,143 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           loadingEntries={loadingWorkspaceBrowse}
           error={workspaceBrowseError}
           onBrowsePath={(path) => void browseWorkspacePath(path)}
-          onSelectPath={selectDefaultWorkspace}
+          onSelectPath={handleWorkspaceSelection}
+          actionLabel={
+            workspacePickerPurpose === 'default-start' ? 'Clone repository here' : null
+          }
+          actionDescription={
+            workspacePickerPurpose === 'default-start'
+              ? 'Use the folder you already have selected or open as the destination for a fresh checkout.'
+              : null
+          }
+          onActionPress={
+            workspacePickerPurpose === 'default-start'
+              ? (path) => {
+                  setWorkspaceModalVisible(false);
+                  openGitCheckoutModal(path);
+                }
+              : undefined
+          }
           onClose={closeWorkspaceModal}
         />
+
+        <Modal
+          visible={gitCheckoutModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeGitCheckoutModal}
+        >
+          <View style={styles.renameModalBackdrop}>
+            <KeyboardAvoidingView
+              style={styles.renameModalKeyboardAvoider}
+              behavior={Platform.OS === 'ios' ? 'position' : 'height'}
+              keyboardVerticalOffset={
+                Platform.OS === 'ios'
+                  ? Math.max(theme.spacing.xl * 2, safeAreaInsets.bottom + theme.spacing.md)
+                  : 0
+              }
+            >
+              <View style={styles.renameModalKeyboardContent}>
+                <View style={styles.renameModalCard}>
+                  <Text style={styles.renameModalTitle}>Git checkout</Text>
+                  <Text style={styles.gitCheckoutHint}>
+                    Paste an SSH or HTTPS repository URL, choose where to clone it, then start
+                    the new chat in that workspace.
+                  </Text>
+                  <TextInput
+                    value={gitCheckoutRepoUrl}
+                    onChangeText={handleGitCheckoutRepoUrlChange}
+                    keyboardAppearance={theme.keyboardAppearance}
+                    placeholder="git@github.com:org/repo.git"
+                    placeholderTextColor={theme.colors.textMuted}
+                    style={styles.renameModalInput}
+                    autoFocus
+                    editable={!gitCheckoutCloning}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="next"
+                  />
+                  <Pressable
+                    onPress={openGitCheckoutDestinationPicker}
+                    style={({ pressed }) => [
+                      styles.gitCheckoutPathButton,
+                      pressed && styles.gitCheckoutPathButtonPressed,
+                    ]}
+                    disabled={gitCheckoutCloning}
+                  >
+                    <Ionicons
+                      name="folder-open-outline"
+                      size={16}
+                      color={theme.colors.textMuted}
+                    />
+                    <View style={styles.gitCheckoutPathCopy}>
+                      <Text style={styles.gitCheckoutPathLabel}>Clone into</Text>
+                      <Text style={styles.gitCheckoutPathValue} numberOfLines={1}>
+                        {gitCheckoutDestinationLabel}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={14} color={theme.colors.textMuted} />
+                  </Pressable>
+                  <TextInput
+                    value={gitCheckoutDirectoryName}
+                    onChangeText={handleGitCheckoutDirectoryNameChange}
+                    keyboardAppearance={theme.keyboardAppearance}
+                    placeholder="repo-folder"
+                    placeholderTextColor={theme.colors.textMuted}
+                    style={styles.renameModalInput}
+                    editable={!gitCheckoutCloning}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="done"
+                    onSubmitEditing={() => void submitGitCheckout()}
+                  />
+                  {gitCheckoutTargetPath ? (
+                    <Text style={styles.gitCheckoutSummary} numberOfLines={2}>
+                      {`Will clone into ${gitCheckoutTargetPath}`}
+                    </Text>
+                  ) : null}
+                  {gitCheckoutError ? (
+                    <Text style={styles.gitCheckoutErrorText}>{gitCheckoutError}</Text>
+                  ) : null}
+                  <View style={styles.renameModalActions}>
+                    <Pressable
+                      onPress={closeGitCheckoutModal}
+                      style={({ pressed }) => [
+                        styles.renameModalButton,
+                        styles.renameModalButtonSecondary,
+                        pressed && styles.renameModalButtonPressed,
+                      ]}
+                      disabled={gitCheckoutCloning}
+                    >
+                      <Text style={styles.renameModalButtonSecondaryText}>Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => void submitGitCheckout()}
+                      style={({ pressed }) => [
+                        styles.renameModalButton,
+                        styles.renameModalButtonPrimary,
+                        pressed && styles.renameModalButtonPrimaryPressed,
+                        (!gitCheckoutRepoUrl.trim() ||
+                          !normalizeCloneDirectoryName(gitCheckoutDirectoryName) ||
+                          gitCheckoutCloning) &&
+                          styles.renameModalButtonDisabled,
+                      ]}
+                      disabled={
+                        !gitCheckoutRepoUrl.trim() ||
+                        !normalizeCloneDirectoryName(gitCheckoutDirectoryName) ||
+                        gitCheckoutCloning
+                      }
+                    >
+                      <Text style={styles.renameModalButtonPrimaryText}>
+                        {gitCheckoutCloning ? 'Cloning...' : 'Clone and use'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </View>
+            </KeyboardAvoidingView>
+          </View>
+        </Modal>
 
         <SelectionSheet
           visible={modelModalVisible}
@@ -9313,6 +9747,52 @@ function normalizeAttachmentPath(value: string | null | undefined): string | nul
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function normalizeCloneDirectoryName(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '.' || trimmed === '..') {
+    return null;
+  }
+  if (/[\\/]/.test(trimmed)) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+function deriveCloneDirectoryName(url: string | null | undefined): string | null {
+  if (typeof url !== 'string') {
+    return null;
+  }
+
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) {
+    return null;
+  }
+
+  const lastSlash = trimmed.lastIndexOf('/');
+  const lastColon = trimmed.lastIndexOf(':');
+  const splitIndex = Math.max(lastSlash, lastColon);
+  const candidate = (splitIndex >= 0 ? trimmed.slice(splitIndex + 1) : trimmed).replace(
+    /\.git$/i,
+    ''
+  );
+
+  return normalizeCloneDirectoryName(candidate);
+}
+
+function joinWorkspacePath(parentPath: string, child: string): string {
+  const separator =
+    parentPath.includes('\\') && !parentPath.includes('/') ? '\\' : '/';
+  if (parentPath.endsWith('/') || parentPath.endsWith('\\')) {
+    return `${parentPath}${child}`;
+  }
+  return `${parentPath}${separator}${child}`;
+}
+
 function toMentionInput(path: string): MentionInput {
   const segments = path.split(/[\\/]/).filter(Boolean);
   const name = segments[segments.length - 1] ?? path;
@@ -9545,6 +10025,15 @@ function getChatModelPreferencesPath(): string | null {
   return `${base}${CHAT_MODEL_PREFERENCES_FILE}`;
 }
 
+function getChatDraftsPath(): string | null {
+  const base = FileSystem.documentDirectory;
+  if (typeof base !== 'string' || base.trim().length === 0) {
+    return null;
+  }
+
+  return `${base}${CHAT_DRAFTS_FILE}`;
+}
+
 function getChatPlanSnapshotsPath(): string | null {
   const base = FileSystem.documentDirectory;
   if (typeof base !== 'string' || base.trim().length === 0) {
@@ -9552,6 +10041,44 @@ function getChatPlanSnapshotsPath(): string | null {
   }
 
   return `${base}${CHAT_PLAN_SNAPSHOTS_FILE}`;
+}
+
+function parseChatDrafts(raw: string): Record<string, string> {
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const parsedRecord = toRecord(parsed);
+    if (!parsedRecord || parsedRecord.version !== CHAT_DRAFTS_VERSION) {
+      return {};
+    }
+
+    const entries = toRecord(parsedRecord.entries);
+    if (!entries) {
+      return {};
+    }
+
+    const result: Record<string, string> = {};
+    for (const [rawKey, value] of Object.entries(entries)) {
+      const normalizedKey = getDraftScopeKey(rawKey);
+      const text = readString(value)?.replace(/\r\n/g, '\n');
+      if (!text || text.length === 0) {
+        continue;
+      }
+      result[normalizedKey] = text;
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function getDraftScopeKey(threadId: string | null | undefined): string {
+  const normalized = threadId?.trim();
+  return normalized && normalized.length > 0 ? normalized : CHAT_NEW_DRAFT_KEY;
 }
 
 function parseChatModelPreferences(raw: string): Record<string, ChatModelPreference> {
@@ -11026,8 +11553,14 @@ const createStyles = (theme: AppTheme) => {
   renameModalBackdrop: {
     flex: 1,
     backgroundColor: theme.colors.overlayBackdrop,
-    justifyContent: 'center',
     paddingHorizontal: theme.spacing.lg,
+  },
+  renameModalKeyboardAvoider: {
+    flex: 1,
+  },
+  renameModalKeyboardContent: {
+    flex: 1,
+    justifyContent: 'center',
   },
   workspaceModalLoading: {
     ...theme.typography.caption,
@@ -11118,6 +11651,46 @@ const createStyles = (theme: AppTheme) => {
     paddingHorizontal: theme.spacing.md,
     paddingVertical: theme.spacing.sm,
     fontSize: 15,
+  },
+  gitCheckoutHint: {
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
+    lineHeight: 18,
+  },
+  gitCheckoutPathButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    borderRadius: 10,
+    backgroundColor: theme.colors.bgMain,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+  },
+  gitCheckoutPathButtonPressed: {
+    opacity: 0.85,
+  },
+  gitCheckoutPathCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  gitCheckoutPathLabel: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+  },
+  gitCheckoutPathValue: {
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
+    fontWeight: '600',
+  },
+  gitCheckoutSummary: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+  },
+  gitCheckoutErrorText: {
+    ...theme.typography.caption,
+    color: theme.colors.error,
   },
   attachmentListColumn: {
     gap: theme.spacing.xs,

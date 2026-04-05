@@ -29,6 +29,10 @@ interface WorkspacePickerModalProps {
   error?: string | null;
   onBrowsePath: (path: string | null) => void;
   onSelectPath: (path: string | null) => void;
+  actionLabel?: string | null;
+  actionDescription?: string | null;
+  actionDisabled?: boolean;
+  onActionPress?: (path: string | null) => void;
   onClose: () => void;
 }
 
@@ -51,6 +55,10 @@ export function WorkspacePickerModal({
   error = null,
   onBrowsePath,
   onSelectPath,
+  actionLabel = null,
+  actionDescription = null,
+  actionDisabled = false,
+  onActionPress,
   onClose,
 }: WorkspacePickerModalProps) {
   const theme = useAppTheme();
@@ -103,6 +111,10 @@ export function WorkspacePickerModal({
   const handleCommitSelection = (path: string | null) => {
     setPendingSelectionPath(path);
     onSelectPath(path);
+  };
+
+  const handleActionPress = () => {
+    onActionPress?.(pendingSelectionPath ?? currentPath ?? bridgeRoot);
   };
 
   return (
@@ -166,6 +178,38 @@ export function WorkspacePickerModal({
                   returnKeyType="search"
                 />
               </View>
+
+              {actionLabel && onActionPress ? (
+                <Pressable
+                  onPress={handleActionPress}
+                  disabled={actionDisabled}
+                  style={({ pressed }) => [
+                    styles.actionCard,
+                    actionDisabled && styles.buttonDisabled,
+                    pressed && !actionDisabled && styles.pressed,
+                  ]}
+                >
+                  <View style={styles.actionIconWrap}>
+                    <Ionicons
+                      name="git-branch-outline"
+                      size={16}
+                      color={theme.colors.textSecondary}
+                    />
+                  </View>
+                  <View style={styles.actionCopy}>
+                    <Text style={styles.actionTitle}>{actionLabel}</Text>
+                    <Text style={styles.actionSubtitle} numberOfLines={2}>
+                      {actionDescription ??
+                        'Clone into the selected or currently open folder and start the chat there.'}
+                    </Text>
+                  </View>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={14}
+                    color={theme.colors.textMuted}
+                  />
+                </Pressable>
+              ) : null}
 
               <View style={styles.sectionHeader}>
                 <Text style={styles.sectionTitle}>Recent Directories</Text>
@@ -662,6 +706,45 @@ const createStyles = (theme: AppTheme) => {
     flex: 1,
     ...theme.typography.body,
     paddingVertical: 0,
+  },
+  actionCard: {
+    minHeight: 60,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  actionIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.bgInput,
+    borderWidth: 1,
+    borderColor: theme.colors.borderLight,
+  },
+  actionCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  actionTitle: {
+    ...theme.typography.body,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+    color: theme.colors.textPrimary,
+  },
+  actionSubtitle: {
+    ...theme.typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
+    color: theme.colors.textSecondary,
   },
   breadcrumbRow: {
     flexDirection: 'row',

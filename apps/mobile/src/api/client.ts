@@ -24,6 +24,8 @@ import type {
   CreateChatRequest,
   Chat,
   ChatSummary,
+  GitCloneRequest,
+  GitCloneResponse,
   GitCommitRequest,
   GitCommitResponse,
   GitDiffResponse,
@@ -855,6 +857,23 @@ export class HostBridgeApiClient {
     return this.ws.request<GitHistoryResponse>('bridge/git/history', {
       cwd: normalizedCwd ?? null,
       limit,
+    });
+  }
+
+  gitClone(body: GitCloneRequest): Promise<GitCloneResponse> {
+    const url = body.url.trim();
+    const directoryName = body.directoryName.trim();
+    if (!url) {
+      return Promise.reject(new Error('url must not be empty'));
+    }
+    if (!directoryName) {
+      return Promise.reject(new Error('directoryName must not be empty'));
+    }
+
+    return this.ws.request<GitCloneResponse>('bridge/git/clone', {
+      url,
+      parentPath: normalizeCwd(body.parentPath) ?? null,
+      directoryName,
     });
   }
 

@@ -289,6 +289,21 @@ export interface GitHistoryResponse {
   cwd?: string;
 }
 
+export interface GitCloneRequest {
+  url: string;
+  parentPath?: string | null;
+  directoryName: string;
+}
+
+export interface GitCloneResponse {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  cloned: boolean;
+  cwd?: string;
+  url: string;
+}
+
 export interface GitFileRequest {
   path: string;
   cwd?: string;

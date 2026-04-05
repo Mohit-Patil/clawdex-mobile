@@ -4217,6 +4217,17 @@ struct GitHistoryResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GitCloneResponse {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    cloned: bool,
+    cwd: String,
+    url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GitStageResponse {
     code: Option<i32>,
     stdout: String,
@@ -4286,6 +4297,14 @@ struct GitQueryRequest {
 struct GitHistoryRequest {
     cwd: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCloneRequest {
+    url: String,
+    parent_path: Option<String>,
+    directory_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5417,6 +5436,31 @@ async fn handle_bridge_method(
                 .get_history(request.cwd.as_deref(), request.limit)
                 .await?;
             serde_json::to_value(history).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/git/clone" => {
+            let request: GitCloneRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let GitCloneRequest {
+                url,
+                parent_path,
+                directory_name,
+            } = request;
+
+            if url.trim().is_empty() {
+                return Err(BridgeError::invalid_params("url must not be empty"));
+            }
+            if directory_name.trim().is_empty() {
+                return Err(BridgeError::invalid_params(
+                    "directoryName must not be empty",
+                ));
+            }
+
+            let cloned = state
+                .git
+                .clone_repo(&url, parent_path.as_deref(), &directory_name)
+                .await?;
+            serde_json::to_value(cloned).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/git/stage" => {
             let request: GitFileRequest =

@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::{
-    normalize_path, BridgeError, GitCommitResponse, GitDiffResponse, GitHistoryCommit,
-    GitHistoryResponse, GitPushResponse, GitStageAllResponse, GitStageResponse, GitStatusEntry,
-    GitStatusResponse, GitUnstageAllResponse, GitUnstageResponse,
+    normalize_path, BridgeError, GitCloneResponse, GitCommitResponse, GitDiffResponse,
+    GitHistoryCommit, GitHistoryResponse, GitPushResponse, GitStageAllResponse, GitStageResponse,
+    GitStatusEntry, GitStatusResponse, GitUnstageAllResponse, GitUnstageResponse,
 };
 
 use super::TerminalService;
@@ -235,6 +235,54 @@ impl GitService {
         Ok(GitHistoryResponse {
             commits: parse_git_history(&result.stdout),
             cwd: repo_path.to_string_lossy().to_string(),
+        })
+    }
+
+    pub(crate) async fn clone_repo(
+        &self,
+        repository_url: &str,
+        raw_parent_path: Option<&str>,
+        directory_name: &str,
+    ) -> Result<GitCloneResponse, BridgeError> {
+        let parent_path = self.resolve_repo_path(raw_parent_path)?;
+        if !parent_path.exists() {
+            return Err(BridgeError::invalid_params(
+                "destination parent path must exist",
+            ));
+        }
+        if !parent_path.is_dir() {
+            return Err(BridgeError::invalid_params(
+                "destination parent path must be a directory",
+            ));
+        }
+
+        let normalized_directory_name = resolve_clone_directory_name(directory_name)?;
+        let destination_path = normalize_path(&parent_path.join(&normalized_directory_name));
+        if destination_path.exists() {
+            return Err(BridgeError::invalid_params(
+                "destination path already exists",
+            ));
+        }
+
+        let args = vec![
+            "clone".to_string(),
+            "--".to_string(),
+            repository_url.trim().to_string(),
+            normalized_directory_name,
+        ];
+
+        let result = self
+            .terminal
+            .execute_binary("git", &args, parent_path.clone(), None)
+            .await?;
+
+        Ok(GitCloneResponse {
+            code: result.code,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            cloned: result.code == Some(0),
+            cwd: destination_path.to_string_lossy().to_string(),
+            url: repository_url.trim().to_string(),
         })
     }
 
@@ -711,11 +759,47 @@ fn resolve_repo_relative_path(raw_path: &str, repo_path: &Path) -> Result<String
     Ok(relative.to_string_lossy().to_string())
 }
 
+fn resolve_clone_directory_name(raw_name: &str) -> Result<String, BridgeError> {
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty() {
+        return Err(BridgeError::invalid_params(
+            "directoryName must not be empty",
+        ));
+    }
+
+    let requested = PathBuf::from(trimmed);
+    if requested.is_absolute() {
+        return Err(BridgeError::invalid_params(
+            "directoryName must be a folder name, not a path",
+        ));
+    }
+
+    let mut components = requested.components();
+    let Some(component) = components.next() else {
+        return Err(BridgeError::invalid_params(
+            "directoryName must not be empty",
+        ));
+    };
+    if components.next().is_some() {
+        return Err(BridgeError::invalid_params(
+            "directoryName must be a single folder name",
+        ));
+    }
+    if !matches!(component, std::path::Component::Normal(_)) {
+        return Err(BridgeError::invalid_params(
+            "directoryName must be a valid folder name",
+        ));
+    }
+
+    Ok(trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         parse_git_history, parse_porcelain_status_entries, parse_status_has_upstream,
-        resolve_git_cwd, resolve_repo_relative_path, select_default_remote_name,
+        resolve_clone_directory_name, resolve_git_cwd, resolve_repo_relative_path,
+        select_default_remote_name,
     };
     use std::path::{Path, PathBuf};
 
@@ -767,6 +851,20 @@ mod tests {
 
         let error =
             resolve_repo_relative_path("../outside.txt", repo).expect_err("reject escape path");
+        assert_eq!(error.code, -32602);
+    }
+
+    #[test]
+    fn resolves_clone_directory_name_from_single_segment() {
+        let resolved =
+            resolve_clone_directory_name("my-repo").expect("resolve single directory name");
+        assert_eq!(resolved, "my-repo");
+    }
+
+    #[test]
+    fn rejects_nested_clone_directory_name() {
+        let error = resolve_clone_directory_name("nested/repo")
+            .expect_err("reject nested clone directory name");
         assert_eq!(error.code, -32602);
     }
 
