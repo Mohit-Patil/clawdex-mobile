@@ -7048,7 +7048,7 @@ fn preview_overview_shell_response(
 <html>
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes">
+    <meta id="viewport-meta" name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes">
     <style>
       html, body {{
         margin: 0;
@@ -7061,9 +7061,8 @@ fn preview_overview_shell_response(
         -webkit-overflow-scrolling: touch;
       }}
       #shell {{
-        position: relative;
-        width: 100%;
-        min-height: 100vh;
+        width: {desktop_width}px;
+        min-height: {desktop_height}px;
         overflow: visible;
       }}
       #frame {{
@@ -7072,7 +7071,6 @@ fn preview_overview_shell_response(
         min-height: {desktop_height}px;
         border: 0;
         background: #fff;
-        transform-origin: top left;
       }}
     </style>
   </head>
@@ -7084,6 +7082,7 @@ fn preview_overview_shell_response(
       (function() {{
         var frame = document.getElementById('frame');
         var shell = document.getElementById('shell');
+        var viewportMeta = document.getElementById('viewport-meta');
         var desktopWidth = {desktop_width};
         var minimumDesktopHeight = {desktop_height};
         var frameSrc = {frame_src_json};
@@ -7095,6 +7094,7 @@ fn preview_overview_shell_response(
         var frameMutationObserver = null;
         var frameCleanupCallbacks = [];
         var measureFrameQueued = false;
+        var initialFitApplied = false;
 
         function currentFrameWindow() {{
           try {{
@@ -7186,18 +7186,37 @@ fn preview_overview_shell_response(
           window.ReactNativeWebView.postMessage(nextStateJson);
         }}
 
-        function applyLayout() {{
-          var contentHeight = Math.max(lastMeasuredHeight || minimumDesktopHeight, minimumDesktopHeight);
-          var viewportWidth = Math.max(window.innerWidth || 0, 1);
-          var viewportHeight = Math.max(window.innerHeight || 0, 1);
+        function applyInitialFit(contentHeight) {{
+          if (initialFitApplied || !viewportMeta) {{
+            return;
+          }}
+          var viewportWidth = Math.max(
+            (window.visualViewport && window.visualViewport.width) || window.innerWidth || 0,
+            1
+          );
+          var viewportHeight = Math.max(
+            (window.visualViewport && window.visualViewport.height) || window.innerHeight || 0,
+            1
+          );
           var scale = Math.min(1, viewportWidth / desktopWidth, viewportHeight / contentHeight);
-          var scaledWidth = Math.max(1, Math.round(desktopWidth * scale));
-          var scaledHeight = Math.max(1, Math.round(contentHeight * scale));
-          shell.style.width = scaledWidth + 'px';
-          shell.style.height = scaledHeight + 'px';
+          viewportMeta.setAttribute(
+            'content',
+            'width=' +
+              desktopWidth +
+              ', initial-scale=' +
+              scale +
+              ', minimum-scale=' +
+              scale +
+              ', maximum-scale=5, user-scalable=yes'
+          );
+          initialFitApplied = true;
+        }}
+
+        function applyLayout(contentHeight) {{
+          shell.style.width = desktopWidth + 'px';
+          shell.style.height = contentHeight + 'px';
           frame.style.width = desktopWidth + 'px';
           frame.style.height = contentHeight + 'px';
-          frame.style.transform = 'scale(' + scale + ')';
         }}
 
         function measureFrameHeight() {{
@@ -7223,7 +7242,8 @@ fn preview_overview_shell_response(
           if (height !== lastMeasuredHeight) {{
             lastMeasuredHeight = height;
           }}
-          applyLayout();
+          applyLayout(height);
+          applyInitialFit(height);
           postState();
         }}
 
@@ -7319,11 +7339,6 @@ fn preview_overview_shell_response(
           setTimeout(queueMeasureFrameHeight, 400);
         }});
 
-        window.addEventListener('resize', function() {{
-          applyLayout();
-          postState();
-        }});
-
         window.__clawdexDesktopFrame = {{
           goBack: function() {{
             var win = currentFrameWindow();
@@ -7347,7 +7362,7 @@ fn preview_overview_shell_response(
           }},
         }};
 
-        applyLayout();
+        applyLayout(minimumDesktopHeight);
         frame.src = frameSrc;
       }})();
     </script>
