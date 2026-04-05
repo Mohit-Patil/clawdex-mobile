@@ -36,6 +36,7 @@ import {
   getBrowserPreviewOrigin,
   isLocalPreviewCandidateUrl,
   isSameOriginUrl,
+  mapBrowserPreviewNavigationUrlToTargetUrl,
   normalizePreviewTargetInput,
   pushRecentPreviewTarget,
 } from '../browserPreview';
@@ -94,6 +95,9 @@ export function BrowserScreen({
   );
   const [activeSession, setActiveSession] = useState<BrowserPreviewSession | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [currentPreviewNavigationUrl, setCurrentPreviewNavigationUrl] = useState<string | null>(
+    null
+  );
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
   const [pageTitle, setPageTitle] = useState<string | null>(null);
   const [canGoBack, setCanGoBack] = useState(false);
@@ -225,6 +229,7 @@ export function BrowserScreen({
         setInputValue(normalizedTarget);
         setActiveSession(session);
         setPreviewUrl(nextPreviewUrl);
+        setCurrentPreviewNavigationUrl(nextPreviewUrl);
         setCurrentUrl(normalizedTarget);
         setPageTitle(null);
         setCanGoBack(false);
@@ -255,17 +260,29 @@ export function BrowserScreen({
     onPendingTargetHandled?.();
   }, [onPendingTargetHandled, openPreview, pendingTargetUrl]);
 
-  const handleNavigationStateChange = useCallback((navigation: WebViewNavigation) => {
-    const nextUrl = navigation.url || null;
-    setCurrentUrl(nextUrl);
-    if (nextUrl) {
-      setInputValue(nextUrl);
-    }
-    setPageTitle(navigation.title || null);
-    setCanGoBack(navigation.canGoBack);
-    setCanGoForward(navigation.canGoForward);
-    setLoadingPreview(navigation.loading);
-  }, []);
+  const handleNavigationStateChange = useCallback(
+    (navigation: WebViewNavigation) => {
+      const nextUrl = navigation.url || null;
+      setCurrentPreviewNavigationUrl(nextUrl);
+      const nextDisplayUrl =
+        nextUrl && activeSession?.targetUrl
+          ? mapBrowserPreviewNavigationUrlToTargetUrl(
+              nextUrl,
+              previewOrigin,
+              activeSession.targetUrl
+            ) ?? nextUrl
+          : nextUrl;
+      setCurrentUrl(nextDisplayUrl);
+      if (nextDisplayUrl) {
+        setInputValue(nextDisplayUrl);
+      }
+      setPageTitle(navigation.title || null);
+      setCanGoBack(navigation.canGoBack);
+      setCanGoForward(navigation.canGoForward);
+      setLoadingPreview(navigation.loading);
+    },
+    [activeSession?.targetUrl, previewOrigin]
+  );
 
   const handleShouldStartLoad = useCallback(
     (request: { url: string }) => {
@@ -317,6 +334,7 @@ export function BrowserScreen({
   const handleShowStartPage = useCallback(() => {
     setPreviewUrl(null);
     setActiveSession(null);
+    setCurrentPreviewNavigationUrl(null);
     setCurrentUrl(null);
     setPageTitle(null);
     setCanGoBack(false);
@@ -386,7 +404,9 @@ export function BrowserScreen({
 
       setLoadingPreview(true);
       const currentPreviewUrl =
-        currentUrl && isSameOriginUrl(currentUrl, previewOrigin) ? currentUrl : previewUrl;
+        currentPreviewNavigationUrl && isSameOriginUrl(currentPreviewNavigationUrl, previewOrigin)
+          ? currentPreviewNavigationUrl
+          : previewUrl;
       const nextPreviewUrl = buildBrowserPreviewViewportNavigationUrl(
         currentPreviewUrl,
         previewUrl,
@@ -410,7 +430,7 @@ export function BrowserScreen({
         webViewRef.current?.reload();
       }, 0);
     },
-    [currentUrl, desktopViewportSize, previewOrigin, previewUrl]
+    [currentPreviewNavigationUrl, desktopViewportSize, previewOrigin, previewUrl]
   );
 
   const handleToggleDesktopMode = useCallback(() => {

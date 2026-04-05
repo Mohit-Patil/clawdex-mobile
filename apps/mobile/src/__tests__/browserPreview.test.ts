@@ -4,6 +4,7 @@ import {
   buildBrowserPreviewBootstrapUrl,
   dedupeRecentPreviewTargets,
   extractLocalPreviewUrls,
+  mapBrowserPreviewNavigationUrlToTargetUrl,
   normalizePreviewTargetInput,
   pushRecentPreviewTarget,
 } from '../browserPreview';
@@ -95,5 +96,25 @@ describe('browserPreview', () => {
     ).toBe(
       'http://192.168.1.26:8788/settings/profile?tab=2&sid=preview&st=token&vp=desktop&vw=1728&vh=1117'
     );
+  });
+
+  it('maps a preview navigation URL back to the original target URL for display', () => {
+    expect(
+      mapBrowserPreviewNavigationUrlToTargetUrl(
+        'http://100.108.165.85:8788/dashboard?sid=preview&st=token&vp=mobile',
+        'http://100.108.165.85:8788',
+        'http://127.0.0.1:3000/'
+      )
+    ).toBe('http://127.0.0.1:3000/dashboard');
+  });
+
+  it('maps proxied backend preview navigation URLs back to their loopback origin', () => {
+    expect(
+      mapBrowserPreviewNavigationUrlToTargetUrl(
+        'http://100.108.165.85:8788/__clawdex_proxy__/aHR0cDovLzEyNy4wLjAuMTozMDAz/api/waitlist?source=landing',
+        'http://100.108.165.85:8788',
+        'http://127.0.0.1:3000/'
+      )
+    ).toBe('http://127.0.0.1:3003/api/waitlist?source=landing');
   });
 });

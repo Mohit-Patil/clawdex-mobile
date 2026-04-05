@@ -1,4 +1,6 @@
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+const BROWSER_PREVIEW_PROXY_PREFIX = '/__clawdex_proxy__';
+const BROWSER_PREVIEW_INTERNAL_QUERY_KEYS = ['sid', 'st', 'vp', 'vw', 'vh'];
 const LOCAL_PREVIEW_URL_PATTERN =
   /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:[^\s<>"')\]]*)?/gi;
 const LOCAL_PREVIEW_WITHOUT_SCHEME_PATTERN =
@@ -255,6 +257,91 @@ export function buildBrowserPreviewViewportNavigationUrl(
   } catch {
     return applyBrowserPreviewViewportPreset(rawBootstrapUrl, viewport);
   }
+}
+
+export function mapBrowserPreviewNavigationUrlToTargetUrl(
+  rawNavigationUrl: string,
+  rawPreviewOrigin: string | null | undefined,
+  rawSessionTargetUrl: string | null | undefined
+): string | null {
+  if (
+    typeof rawNavigationUrl !== 'string' ||
+    typeof rawPreviewOrigin !== 'string' ||
+    typeof rawSessionTargetUrl !== 'string'
+  ) {
+    return null;
+  }
+
+  try {
+    const navigationUrl = new URL(rawNavigationUrl.trim());
+    const previewOrigin = new URL(rawPreviewOrigin.trim());
+    const sessionTargetUrl = new URL(rawSessionTargetUrl.trim());
+    if (navigationUrl.origin !== previewOrigin.origin) {
+      return navigationUrl.toString();
+    }
+
+    const mappedUrl = resolvePreviewDisplayUrl(navigationUrl, sessionTargetUrl);
+    for (const key of BROWSER_PREVIEW_INTERNAL_QUERY_KEYS) {
+      mappedUrl.searchParams.delete(key);
+    }
+    if (!mappedUrl.pathname) {
+      mappedUrl.pathname = '/';
+    }
+    return mappedUrl.toString();
+  } catch {
+    return null;
+  }
+}
+
+function resolvePreviewDisplayUrl(navigationUrl: URL, sessionTargetUrl: URL): URL {
+  const proxyPrefixWithSlash = `${BROWSER_PREVIEW_PROXY_PREFIX}/`;
+  if (!navigationUrl.pathname.startsWith(proxyPrefixWithSlash)) {
+    const mappedUrl = new URL(sessionTargetUrl.toString());
+    mappedUrl.pathname = navigationUrl.pathname || '/';
+    mappedUrl.search = navigationUrl.search;
+    mappedUrl.hash = navigationUrl.hash;
+    return mappedUrl;
+  }
+
+  const proxyTail = navigationUrl.pathname.slice(proxyPrefixWithSlash.length);
+  const segments = proxyTail.split('/');
+  const targetToken = segments.shift()?.trim() ?? '';
+  const decodedOrigin = decodeBrowserPreviewProxyOriginToken(targetToken);
+  const mappedUrl = decodedOrigin ? new URL(decodedOrigin) : new URL(sessionTargetUrl.toString());
+  const remainderPath = segments.join('/');
+  mappedUrl.pathname = remainderPath ? `/${remainderPath}` : '/';
+  mappedUrl.search = navigationUrl.search;
+  mappedUrl.hash = navigationUrl.hash;
+  return mappedUrl;
+}
+
+function decodeBrowserPreviewProxyOriginToken(value: string): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+  const base64 = normalized + padding;
+
+  try {
+    if (typeof globalThis.atob === 'function') {
+      return globalThis.atob(base64);
+    }
+
+    const bufferLike = globalThis as typeof globalThis & {
+      Buffer?: {
+        from(input: string, encoding: string): { toString(encoding: string): string };
+      };
+    };
+    if (bufferLike.Buffer) {
+      return bufferLike.Buffer.from(base64, 'base64').toString('utf8');
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 function applyViewportParams(url: URL, viewport: BrowserPreviewViewportSpec): void {
