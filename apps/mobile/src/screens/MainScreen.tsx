@@ -56,6 +56,7 @@ import type {
   RpcNotification,
   RunEvent,
   Chat,
+  ChatStatus,
   ChatSummary,
   ModelOption,
   MentionInput,
@@ -3495,7 +3496,23 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return;
         }
 
+        const nowIso = new Date().toISOString();
+        setSending(false);
+        setCreating(false);
         setActiveTurnId(turnId);
+        setSelectedChat((prev) => {
+          if (!prev || prev.id !== threadId) {
+            return prev;
+          }
+
+          return {
+            ...prev,
+            status: 'running',
+            updatedAt: nowIso,
+            statusUpdatedAt: nowIso,
+            lastError: undefined,
+          };
+        });
         if (stopRequestedRef.current) {
           void interruptActiveTurn(threadId, turnId);
         }
@@ -3792,8 +3809,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               if (!baseChat) {
                 return prev;
               }
+              const nowIso = new Date().toISOString();
               return {
                 ...baseChat,
+                status: 'running',
+                updatedAt: nowIso,
+                statusUpdatedAt: nowIso,
+                lastError: undefined,
+                lastMessagePreview:
+                  normalizeChatMessageMatchContent(optimisticMessage.content).slice(0, 120) ||
+                  baseChat.lastMessagePreview,
                 messages: [...baseChat.messages, optimisticMessage],
               };
             });
@@ -4647,8 +4672,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             if (!baseChat) {
               return prev;
             }
+            const nowIso = new Date().toISOString();
             return {
               ...baseChat,
+              status: 'running',
+              updatedAt: nowIso,
+              statusUpdatedAt: nowIso,
+              lastError: undefined,
+              lastMessagePreview:
+                normalizeChatMessageMatchContent(optimisticMessage.content).slice(0, 120) ||
+                baseChat.lastMessagePreview,
               messages: [...baseChat.messages, optimisticMessage],
             };
           });
@@ -6091,6 +6124,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const interruptedByUser = status === 'interrupted' && stopRequestedRef.current;
           const turnError = toRecord(turn?.error) ?? toRecord(params?.error);
           const turnErrorMessage = readString(turnError?.message);
+          const terminalStatus: ChatStatus =
+            status === 'failed' || (status === 'interrupted' && !interruptedByUser)
+              ? 'error'
+              : 'complete';
+          const terminalStatusAt = new Date().toISOString();
 
           setActiveCommands([]);
           setStreamingText(null);
@@ -6102,6 +6140,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (!completedTurnId || completedTurnId === activeTurnIdRef.current) {
             setActiveTurnId(null);
           }
+          setSelectedChat((prev) => {
+            if (!prev || prev.id !== threadId) {
+              return prev;
+            }
+
+            return {
+              ...prev,
+              status: terminalStatus,
+              updatedAt: terminalStatusAt,
+              statusUpdatedAt: terminalStatusAt,
+              lastError:
+                terminalStatus === 'error' ? turnErrorMessage ?? status ?? undefined : undefined,
+            };
+          });
           setStoppingTurn(false);
           stopRequestedRef.current = false;
           hadCommandRef.current = false;
