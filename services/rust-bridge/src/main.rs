@@ -4768,19 +4768,58 @@ async fn handle_preview_http_request(
     parts: axum::http::request::Parts,
     body: Body,
 ) -> Response {
-    let (session, bootstrap_token, requested_viewport, sanitized_path_and_query) =
+    let resolved_request =
         match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
         {
             Ok(result) => result,
             Err(response) => return response,
         };
+    let session = resolved_request.session;
+    let bootstrap_session_id = resolved_request.bootstrap_session_id;
+    let bootstrap_token = resolved_request.bootstrap_token;
+    let requested_viewport = resolved_request.requested_viewport;
+    let requested_shell_mode = resolved_request.requested_shell_mode;
+    let raw_frame = resolved_request.raw_frame;
+    let sanitized_path_and_query = resolved_request.sanitized_path_and_query;
 
-    if let Some(token) = bootstrap_token {
-        return preview_bootstrap_redirect_response(
-            &sanitized_path_and_query,
-            &token,
-            requested_viewport,
-        );
+    if let (Some(session_id), Some(token), Some(shell_mode)) = (
+        bootstrap_session_id.as_deref(),
+        bootstrap_token.as_deref(),
+        requested_shell_mode,
+    ) {
+        if !raw_frame {
+            let viewport = requested_viewport.unwrap_or(PreviewViewportConfig {
+                preset: PreviewViewportPreset::Desktop,
+                width: Some(DEFAULT_PREVIEW_DESKTOP_WIDTH),
+                height: Some(DEFAULT_PREVIEW_DESKTOP_HEIGHT),
+            });
+            let mut response = match shell_mode {
+                PreviewShellMode::Desktop => preview_desktop_shell_response(
+                    &sanitized_path_and_query,
+                    viewport,
+                    Some(session_id),
+                    Some(token),
+                ),
+                PreviewShellMode::Overview => preview_overview_shell_response(
+                    &sanitized_path_and_query,
+                    viewport,
+                    Some(session_id),
+                    Some(token),
+                ),
+            };
+            append_preview_bootstrap_headers(&mut response, Some(token), requested_viewport);
+            return response;
+        }
+    }
+
+    if let Some(token) = bootstrap_token.as_deref() {
+        if !raw_frame {
+            return preview_bootstrap_redirect_response(
+                &sanitized_path_and_query,
+                token,
+                requested_viewport,
+            );
+        }
     }
 
     let request_target =
@@ -4859,6 +4898,31 @@ async fn handle_preview_http_request(
         .map(str::to_string);
     let effective_viewport =
         requested_viewport.or_else(|| read_preview_viewport_preset(&parts.headers));
+    let effective_shell_mode = requested_shell_mode;
+
+    if let Some(shell_mode) = effective_shell_mode {
+        if !raw_frame {
+            let viewport = effective_viewport.unwrap_or(PreviewViewportConfig {
+                preset: PreviewViewportPreset::Desktop,
+                width: Some(DEFAULT_PREVIEW_DESKTOP_WIDTH),
+                height: Some(DEFAULT_PREVIEW_DESKTOP_HEIGHT),
+            });
+            return match shell_mode {
+                PreviewShellMode::Desktop => preview_desktop_shell_response(
+                    &sanitized_path_and_query,
+                    viewport,
+                    None,
+                    None,
+                ),
+                PreviewShellMode::Overview => preview_overview_shell_response(
+                    &sanitized_path_and_query,
+                    viewport,
+                    None,
+                    None,
+                ),
+            };
+        }
+    }
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let upstream_headers = upstream_response.headers().clone();
@@ -4929,11 +4993,11 @@ async fn handle_preview_http_request(
         append_vary_header_value(response.headers_mut(), "Cookie");
     }
 
-    if let Some(viewport) = requested_viewport {
-        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport) {
-            response.headers_mut().append(SET_COOKIE, cookie);
-        }
-    }
+    append_preview_bootstrap_headers(
+        &mut response,
+        bootstrap_token.as_deref(),
+        requested_viewport,
+    );
 
     response
 }
@@ -4942,12 +5006,14 @@ async fn handle_preview_websocket_request(
     state: Arc<AppState>,
     parts: &mut axum::http::request::Parts,
 ) -> Response {
-    let (session, _bootstrap_token, _viewport, sanitized_path_and_query) =
+    let resolved_request =
         match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
         {
             Ok(result) => result,
             Err(response) => return response,
         };
+    let session = resolved_request.session;
+    let sanitized_path_and_query = resolved_request.sanitized_path_and_query;
 
     let request_target =
         match resolve_preview_request_target(&session.target_url, &sanitized_path_and_query) {
@@ -6235,7 +6301,15 @@ struct PreviewBootstrapParams {
     session_id: Option<String>,
     bootstrap_token: Option<String>,
     viewport: Option<PreviewViewportConfig>,
+    shell_mode: Option<PreviewShellMode>,
+    raw_frame: bool,
     sanitized_path_and_query: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewShellMode {
+    Desktop,
+    Overview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6300,6 +6374,14 @@ fn parse_preview_viewport_preset(raw: &str) -> Option<PreviewViewportPreset> {
     }
 }
 
+fn parse_preview_shell_mode(raw: &str) -> Option<PreviewShellMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "desktop" => Some(PreviewShellMode::Desktop),
+        "overview" => Some(PreviewShellMode::Overview),
+        _ => None,
+    }
+}
+
 fn normalize_preview_viewport_dimension(raw: Option<&str>) -> Option<u32> {
     let value = raw?.trim().parse::<u32>().ok()?;
     if !(320..=4096).contains(&value) {
@@ -6327,19 +6409,22 @@ fn build_preview_viewport_config(
     }
 }
 
+#[derive(Debug)]
+struct ResolvedPreviewRequest {
+    session: BrowserPreviewResolvedSession,
+    bootstrap_session_id: Option<String>,
+    bootstrap_token: Option<String>,
+    requested_viewport: Option<PreviewViewportConfig>,
+    requested_shell_mode: Option<PreviewShellMode>,
+    raw_frame: bool,
+    sanitized_path_and_query: String,
+}
+
 async fn resolve_preview_session_from_request(
     preview: &BrowserPreviewService,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<
-    (
-        BrowserPreviewResolvedSession,
-        Option<String>,
-        Option<PreviewViewportConfig>,
-        String,
-    ),
-    Response,
-> {
+) -> Result<ResolvedPreviewRequest, Response> {
     let params = parse_preview_bootstrap_params(uri);
     if let (Some(session_id), Some(bootstrap_token)) = (
         params.session_id.as_deref(),
@@ -6352,12 +6437,15 @@ async fn resolve_preview_session_from_request(
             ));
         };
 
-        return Ok((
+        return Ok(ResolvedPreviewRequest {
             session,
-            Some(bootstrap_token.to_string()),
-            params.viewport,
-            params.sanitized_path_and_query,
-        ));
+            bootstrap_session_id: Some(session_id.to_string()),
+            bootstrap_token: Some(bootstrap_token.to_string()),
+            requested_viewport: params.viewport,
+            requested_shell_mode: params.shell_mode,
+            raw_frame: params.raw_frame,
+            sanitized_path_and_query: params.sanitized_path_and_query,
+        });
     }
 
     let Some(cookie_token) = read_cookie_value(headers, BROWSER_PREVIEW_COOKIE_NAME) else {
@@ -6373,12 +6461,15 @@ async fn resolve_preview_session_from_request(
         ));
     };
 
-    Ok((
+    Ok(ResolvedPreviewRequest {
         session,
-        None,
-        params.viewport,
-        params.sanitized_path_and_query,
-    ))
+        bootstrap_session_id: None,
+        bootstrap_token: None,
+        requested_viewport: params.viewport,
+        requested_shell_mode: params.shell_mode,
+        raw_frame: params.raw_frame,
+        sanitized_path_and_query: params.sanitized_path_and_query,
+    })
 }
 
 fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
@@ -6387,6 +6478,8 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
             session_id: None,
             bootstrap_token: None,
             viewport: None,
+            shell_mode: None,
+            raw_frame: false,
             sanitized_path_and_query: uri
                 .path_and_query()
                 .map(|value| value.as_str().to_string())
@@ -6400,6 +6493,8 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
     let mut viewport_preset = None;
     let mut viewport_width = None;
     let mut viewport_height = None;
+    let mut shell_mode = None;
+    let mut raw_frame = false;
     let mut retained_pairs = Vec::new();
     for (key, value) in parsed.query_pairs() {
         if key == "sid" {
@@ -6412,14 +6507,26 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
         }
         if key == "vp" {
             viewport_preset = parse_preview_viewport_preset(&value);
+            retained_pairs.push((key.to_string(), value.to_string()));
             continue;
         }
         if key == "vw" {
             viewport_width = normalize_preview_viewport_dimension(Some(value.as_ref()));
+            retained_pairs.push((key.to_string(), value.to_string()));
             continue;
         }
         if key == "vh" {
             viewport_height = normalize_preview_viewport_dimension(Some(value.as_ref()));
+            retained_pairs.push((key.to_string(), value.to_string()));
+            continue;
+        }
+        if key == "shell" {
+            shell_mode = parse_preview_shell_mode(&value);
+            retained_pairs.push((key.to_string(), value.to_string()));
+            continue;
+        }
+        if key == "frame" {
+            raw_frame = value == "1";
             continue;
         }
         retained_pairs.push((key.to_string(), value.to_string()));
@@ -6446,6 +6553,8 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
         session_id,
         bootstrap_token,
         viewport: build_preview_viewport_config(viewport_preset, viewport_width, viewport_height),
+        shell_mode,
+        raw_frame,
         sanitized_path_and_query,
     }
 }
@@ -6474,6 +6583,69 @@ fn preview_bootstrap_redirect_response(
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store, private"));
     response
+}
+
+fn append_preview_bootstrap_headers(
+    response: &mut Response,
+    bootstrap_token: Option<&str>,
+    viewport: Option<PreviewViewportConfig>,
+) {
+    if let Some(token) = bootstrap_token {
+        if let Ok(cookie) = build_preview_cookie_header(token) {
+            response.headers_mut().append(SET_COOKIE, cookie);
+        }
+    }
+
+    if let Some(viewport) = viewport {
+        if let Ok(cookie) = build_preview_viewport_cookie_header(viewport) {
+            response.headers_mut().append(SET_COOKIE, cookie);
+        }
+    }
+}
+
+fn build_preview_shell_frame_src(
+    sanitized_path_and_query: &str,
+    bootstrap_session_id: Option<&str>,
+    bootstrap_token: Option<&str>,
+) -> String {
+    let Ok(mut parsed) = Url::parse(&format!("http://preview{sanitized_path_and_query}")) else {
+        return if sanitized_path_and_query.contains('?') {
+            format!("{sanitized_path_and_query}&frame=1")
+        } else {
+            format!("{sanitized_path_and_query}?frame=1")
+        };
+    };
+
+    {
+        let mut query_pairs = parsed.query_pairs_mut();
+        query_pairs.append_pair("frame", "1");
+        if let Some(session_id) = bootstrap_session_id {
+            query_pairs.append_pair("sid", session_id);
+        }
+        if let Some(token) = bootstrap_token {
+            query_pairs.append_pair("st", token);
+        }
+    }
+
+    format!(
+        "{}{}",
+        parsed.path(),
+        parsed
+            .query()
+            .map(|value| format!("?{value}"))
+            .unwrap_or_default()
+    )
+}
+
+fn build_preview_shell_request_key(
+    bootstrap_session_id: Option<&str>,
+    bootstrap_token: Option<&str>,
+) -> Option<String> {
+    Some(format!(
+        "{}:{}",
+        bootstrap_session_id?,
+        bootstrap_token?
+    ))
 }
 
 fn preview_error_response(status: StatusCode, message: &str) -> Response {
@@ -6542,6 +6714,653 @@ fn read_preview_viewport_preset(headers: &HeaderMap) -> Option<PreviewViewportCo
     read_cookie_value(headers, BROWSER_PREVIEW_VIEWPORT_COOKIE_NAME)
         .as_deref()
         .and_then(parse_preview_viewport_cookie)
+}
+
+fn preview_desktop_shell_response(
+    sanitized_path_and_query: &str,
+    viewport: PreviewViewportConfig,
+    bootstrap_session_id: Option<&str>,
+    bootstrap_token: Option<&str>,
+) -> Response {
+    let desktop_width = viewport.width.unwrap_or(DEFAULT_PREVIEW_DESKTOP_WIDTH);
+    let desktop_height = viewport.height.unwrap_or(DEFAULT_PREVIEW_DESKTOP_HEIGHT);
+    let frame_src =
+        build_preview_shell_frame_src(sanitized_path_and_query, bootstrap_session_id, bootstrap_token);
+    let frame_src_json = serde_json::to_string(&frame_src).unwrap_or_else(|_| "\"/\"".to_string());
+    let shell_request_key_json =
+        serde_json::to_string(&build_preview_shell_request_key(bootstrap_session_id, bootstrap_token))
+            .unwrap_or_else(|_| "null".to_string());
+    let body = format!(
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no">
+    <style>
+      html, body {{
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+        background: #000;
+      }}
+      body {{
+        overflow: auto;
+        -webkit-overflow-scrolling: touch;
+      }}
+      #shell {{
+        width: {desktop_width}px;
+        min-height: {desktop_height}px;
+      }}
+      #frame {{
+        display: block;
+        width: {desktop_width}px;
+        min-height: {desktop_height}px;
+        border: 0;
+        background: #fff;
+      }}
+    </style>
+  </head>
+  <body>
+    <div id="shell">
+      <iframe id="frame" title="Desktop preview"></iframe>
+    </div>
+    <script>
+      (function() {{
+        var frame = document.getElementById('frame');
+        var shell = document.getElementById('shell');
+        var minimumDesktopHeight = {desktop_height};
+        var frameSrc = {frame_src_json};
+        var lastMeasuredHeight = 0;
+        var lastPostedStateJson = '';
+        var knownHistory = [];
+        var knownHistoryIndex = -1;
+        var frameResizeObserver = null;
+        var frameMutationObserver = null;
+        var frameCleanupCallbacks = [];
+        var measureFrameQueued = false;
+
+        function currentFrameWindow() {{
+          try {{
+            return frame.contentWindow || null;
+          }} catch (_error) {{
+            return null;
+          }}
+        }}
+
+        function currentFrameDocument() {{
+          try {{
+            return frame.contentDocument || (frame.contentWindow && frame.contentWindow.document) || null;
+          }} catch (_error) {{
+            return null;
+          }}
+        }}
+
+        function cleanupFrameObservers() {{
+          if (frameResizeObserver) {{
+            frameResizeObserver.disconnect();
+            frameResizeObserver = null;
+          }}
+          if (frameMutationObserver) {{
+            frameMutationObserver.disconnect();
+            frameMutationObserver = null;
+          }}
+          while (frameCleanupCallbacks.length > 0) {{
+            var callback = frameCleanupCallbacks.pop();
+            try {{
+              callback();
+            }} catch (_error) {{}}
+          }}
+        }}
+
+        function syncHistory(rawUrl) {{
+          if (!rawUrl) {{
+            return;
+          }}
+          if (knownHistoryIndex >= 0 && knownHistory[knownHistoryIndex] === rawUrl) {{
+            return;
+          }}
+          if (knownHistoryIndex > 0 && knownHistory[knownHistoryIndex - 1] === rawUrl) {{
+            knownHistoryIndex -= 1;
+            return;
+          }}
+          if (
+            knownHistoryIndex + 1 < knownHistory.length &&
+            knownHistory[knownHistoryIndex + 1] === rawUrl
+          ) {{
+            knownHistoryIndex += 1;
+            return;
+          }}
+          knownHistory = knownHistory.slice(0, knownHistoryIndex + 1);
+          knownHistory.push(rawUrl);
+          knownHistoryIndex = knownHistory.length - 1;
+        }}
+
+        function postState() {{
+          if (
+            !window.ReactNativeWebView ||
+            typeof window.ReactNativeWebView.postMessage !== 'function'
+          ) {{
+            return;
+          }}
+
+          var rawUrl = '';
+          var title = '';
+          try {{
+            var win = currentFrameWindow();
+            rawUrl = win && win.location ? String(win.location.href) : '';
+          }} catch (_error) {{}}
+          try {{
+            var doc = currentFrameDocument();
+            title = doc ? String(doc.title || '') : '';
+          }} catch (_error) {{}}
+          syncHistory(rawUrl);
+          var nextStateJson = JSON.stringify({{
+            type: 'clawdexDesktopFrameState',
+            shellRequestKey: {shell_request_key_json},
+            rawUrl: rawUrl,
+            title: title,
+            canGoBack: knownHistoryIndex > 0,
+            canGoForward: knownHistoryIndex >= 0 && knownHistoryIndex < knownHistory.length - 1,
+          }});
+          if (nextStateJson === lastPostedStateJson) {{
+            return;
+          }}
+          lastPostedStateJson = nextStateJson;
+          window.ReactNativeWebView.postMessage(nextStateJson);
+        }}
+
+        function measureFrameHeight() {{
+          measureFrameQueued = false;
+          var doc = currentFrameDocument();
+          var height = minimumDesktopHeight;
+          if (doc && doc.documentElement) {{
+            var html = doc.documentElement;
+            var body = doc.body;
+            html.style.overflow = 'hidden';
+            if (body) {{
+              body.style.overflow = 'hidden';
+            }}
+            height = Math.max(
+              minimumDesktopHeight,
+              html.scrollHeight || 0,
+              html.offsetHeight || 0,
+              body ? body.scrollHeight || 0 : 0,
+              body ? body.offsetHeight || 0 : 0
+            );
+          }}
+
+          if (height !== lastMeasuredHeight) {{
+            lastMeasuredHeight = height;
+            frame.style.height = height + 'px';
+            shell.style.height = height + 'px';
+          }}
+          postState();
+        }}
+
+        function queueMeasureFrameHeight() {{
+          if (measureFrameQueued) {{
+            return;
+          }}
+          measureFrameQueued = true;
+          window.requestAnimationFrame(function() {{
+            measureFrameHeight();
+          }});
+        }}
+
+        function installFrameObservers() {{
+          cleanupFrameObservers();
+          var win = currentFrameWindow();
+          var doc = currentFrameDocument();
+          if (!win || !doc) {{
+            return;
+          }}
+
+          function addFrameListener(target, eventName, handler, options) {{
+            if (!target || typeof target.addEventListener !== 'function') {{
+              return;
+            }}
+            target.addEventListener(eventName, handler, options);
+            frameCleanupCallbacks.push(function() {{
+              try {{
+                target.removeEventListener(eventName, handler, options);
+              }} catch (_error) {{}}
+            }});
+          }}
+
+          if (typeof ResizeObserver === 'function') {{
+            frameResizeObserver = new ResizeObserver(function() {{
+              queueMeasureFrameHeight();
+            }});
+            if (doc.documentElement) {{
+              frameResizeObserver.observe(doc.documentElement);
+            }}
+            if (doc.body) {{
+              frameResizeObserver.observe(doc.body);
+            }}
+          }}
+
+          if (typeof MutationObserver === 'function' && doc.head) {{
+            frameMutationObserver = new MutationObserver(function() {{
+              postState();
+            }});
+            frameMutationObserver.observe(doc.head, {{
+              childList: true,
+              subtree: true,
+              characterData: true,
+            }});
+          }}
+
+          addFrameListener(win, 'load', queueMeasureFrameHeight, {{ passive: true }});
+          addFrameListener(win, 'pageshow', queueMeasureFrameHeight, {{ passive: true }});
+          addFrameListener(win, 'hashchange', postState, {{ passive: true }});
+          addFrameListener(win, 'popstate', postState, {{ passive: true }});
+
+          if (doc.fonts && typeof doc.fonts.ready === 'object' && typeof doc.fonts.ready.then === 'function') {{
+            doc.fonts.ready.then(queueMeasureFrameHeight).catch(function() {{}});
+          }}
+
+          if (!win.__clawdexDesktopFramePatched && win.history) {{
+            win.__clawdexDesktopFramePatched = true;
+            var originalPushState = typeof win.history.pushState === 'function' ? win.history.pushState.bind(win.history) : null;
+            var originalReplaceState = typeof win.history.replaceState === 'function' ? win.history.replaceState.bind(win.history) : null;
+            if (originalPushState) {{
+              win.history.pushState = function() {{
+                var result = originalPushState.apply(null, arguments);
+                postState();
+                queueMeasureFrameHeight();
+                return result;
+              }};
+            }}
+            if (originalReplaceState) {{
+              win.history.replaceState = function() {{
+                var result = originalReplaceState.apply(null, arguments);
+                postState();
+                queueMeasureFrameHeight();
+                return result;
+              }};
+            }}
+          }}
+        }}
+
+        frame.addEventListener('load', function() {{
+          installFrameObservers();
+          queueMeasureFrameHeight();
+          setTimeout(queueMeasureFrameHeight, 120);
+          setTimeout(queueMeasureFrameHeight, 400);
+        }});
+
+        window.__clawdexDesktopFrame = {{
+          goBack: function() {{
+            var win = currentFrameWindow();
+            if (win) {{
+              win.history.back();
+            }}
+          }},
+          goForward: function() {{
+            var win = currentFrameWindow();
+            if (win) {{
+              win.history.forward();
+            }}
+          }},
+          reload: function() {{
+            var win = currentFrameWindow();
+            if (win) {{
+              win.location.reload();
+            }} else {{
+              frame.src = frame.src;
+            }}
+          }},
+        }};
+
+        shell.style.height = minimumDesktopHeight + 'px';
+        frame.style.height = minimumDesktopHeight + 'px';
+        frame.src = frameSrc;
+      }})();
+    </script>
+  </body>
+</html>"#
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store, private")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| Response::new(Body::from(String::new())))
+}
+
+fn preview_overview_shell_response(
+    sanitized_path_and_query: &str,
+    viewport: PreviewViewportConfig,
+    bootstrap_session_id: Option<&str>,
+    bootstrap_token: Option<&str>,
+) -> Response {
+    let desktop_width = viewport.width.unwrap_or(DEFAULT_PREVIEW_DESKTOP_WIDTH);
+    let desktop_height = viewport.height.unwrap_or(DEFAULT_PREVIEW_DESKTOP_HEIGHT);
+    let frame_src =
+        build_preview_shell_frame_src(sanitized_path_and_query, bootstrap_session_id, bootstrap_token);
+    let frame_src_json = serde_json::to_string(&frame_src).unwrap_or_else(|_| "\"/\"".to_string());
+    let shell_request_key_json =
+        serde_json::to_string(&build_preview_shell_request_key(bootstrap_session_id, bootstrap_token))
+            .unwrap_or_else(|_| "null".to_string());
+    let body = format!(
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes">
+    <style>
+      html, body {{
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+        background: #000;
+      }}
+      body {{
+        overflow: auto;
+        -webkit-overflow-scrolling: touch;
+      }}
+      #shell {{
+        position: relative;
+        width: 100%;
+        min-height: 100vh;
+        overflow: visible;
+      }}
+      #frame {{
+        display: block;
+        width: {desktop_width}px;
+        min-height: {desktop_height}px;
+        border: 0;
+        background: #fff;
+        transform-origin: top left;
+      }}
+    </style>
+  </head>
+  <body>
+    <div id="shell">
+      <iframe id="frame" title="Overview preview"></iframe>
+    </div>
+    <script>
+      (function() {{
+        var frame = document.getElementById('frame');
+        var shell = document.getElementById('shell');
+        var desktopWidth = {desktop_width};
+        var minimumDesktopHeight = {desktop_height};
+        var frameSrc = {frame_src_json};
+        var lastMeasuredHeight = minimumDesktopHeight;
+        var lastPostedStateJson = '';
+        var knownHistory = [];
+        var knownHistoryIndex = -1;
+        var frameResizeObserver = null;
+        var frameMutationObserver = null;
+        var frameCleanupCallbacks = [];
+        var measureFrameQueued = false;
+
+        function currentFrameWindow() {{
+          try {{
+            return frame.contentWindow || null;
+          }} catch (_error) {{
+            return null;
+          }}
+        }}
+
+        function currentFrameDocument() {{
+          try {{
+            return frame.contentDocument || (frame.contentWindow && frame.contentWindow.document) || null;
+          }} catch (_error) {{
+            return null;
+          }}
+        }}
+
+        function cleanupFrameObservers() {{
+          if (frameResizeObserver) {{
+            frameResizeObserver.disconnect();
+            frameResizeObserver = null;
+          }}
+          if (frameMutationObserver) {{
+            frameMutationObserver.disconnect();
+            frameMutationObserver = null;
+          }}
+          while (frameCleanupCallbacks.length > 0) {{
+            var callback = frameCleanupCallbacks.pop();
+            try {{
+              callback();
+            }} catch (_error) {{}}
+          }}
+        }}
+
+        function syncHistory(rawUrl) {{
+          if (!rawUrl) {{
+            return;
+          }}
+          if (knownHistoryIndex >= 0 && knownHistory[knownHistoryIndex] === rawUrl) {{
+            return;
+          }}
+          if (knownHistoryIndex > 0 && knownHistory[knownHistoryIndex - 1] === rawUrl) {{
+            knownHistoryIndex -= 1;
+            return;
+          }}
+          if (
+            knownHistoryIndex + 1 < knownHistory.length &&
+            knownHistory[knownHistoryIndex + 1] === rawUrl
+          ) {{
+            knownHistoryIndex += 1;
+            return;
+          }}
+          knownHistory = knownHistory.slice(0, knownHistoryIndex + 1);
+          knownHistory.push(rawUrl);
+          knownHistoryIndex = knownHistory.length - 1;
+        }}
+
+        function postState() {{
+          if (
+            !window.ReactNativeWebView ||
+            typeof window.ReactNativeWebView.postMessage !== 'function'
+          ) {{
+            return;
+          }}
+
+          var rawUrl = '';
+          var title = '';
+          try {{
+            var win = currentFrameWindow();
+            rawUrl = win && win.location ? String(win.location.href) : '';
+          }} catch (_error) {{}}
+          try {{
+            var doc = currentFrameDocument();
+            title = doc ? String(doc.title || '') : '';
+          }} catch (_error) {{}}
+          syncHistory(rawUrl);
+          var nextStateJson = JSON.stringify({{
+            type: 'clawdexDesktopFrameState',
+            shellRequestKey: {shell_request_key_json},
+            rawUrl: rawUrl,
+            title: title,
+            canGoBack: knownHistoryIndex > 0,
+            canGoForward: knownHistoryIndex >= 0 && knownHistoryIndex < knownHistory.length - 1,
+          }});
+          if (nextStateJson === lastPostedStateJson) {{
+            return;
+          }}
+          lastPostedStateJson = nextStateJson;
+          window.ReactNativeWebView.postMessage(nextStateJson);
+        }}
+
+        function applyLayout() {{
+          var contentHeight = Math.max(lastMeasuredHeight || minimumDesktopHeight, minimumDesktopHeight);
+          var viewportWidth = Math.max(window.innerWidth || 0, 1);
+          var viewportHeight = Math.max(window.innerHeight || 0, 1);
+          var scale = Math.min(1, viewportWidth / desktopWidth, viewportHeight / contentHeight);
+          var scaledWidth = Math.max(1, Math.round(desktopWidth * scale));
+          var scaledHeight = Math.max(1, Math.round(contentHeight * scale));
+          shell.style.width = scaledWidth + 'px';
+          shell.style.height = scaledHeight + 'px';
+          frame.style.width = desktopWidth + 'px';
+          frame.style.height = contentHeight + 'px';
+          frame.style.transform = 'scale(' + scale + ')';
+        }}
+
+        function measureFrameHeight() {{
+          measureFrameQueued = false;
+          var doc = currentFrameDocument();
+          var height = minimumDesktopHeight;
+          if (doc && doc.documentElement) {{
+            var html = doc.documentElement;
+            var body = doc.body;
+            html.style.overflow = 'hidden';
+            if (body) {{
+              body.style.overflow = 'hidden';
+            }}
+            height = Math.max(
+              minimumDesktopHeight,
+              html.scrollHeight || 0,
+              html.offsetHeight || 0,
+              body ? body.scrollHeight || 0 : 0,
+              body ? body.offsetHeight || 0 : 0
+            );
+          }}
+
+          if (height !== lastMeasuredHeight) {{
+            lastMeasuredHeight = height;
+          }}
+          applyLayout();
+          postState();
+        }}
+
+        function queueMeasureFrameHeight() {{
+          if (measureFrameQueued) {{
+            return;
+          }}
+          measureFrameQueued = true;
+          window.requestAnimationFrame(function() {{
+            measureFrameHeight();
+          }});
+        }}
+
+        function installFrameObservers() {{
+          cleanupFrameObservers();
+          var win = currentFrameWindow();
+          var doc = currentFrameDocument();
+          if (!win || !doc) {{
+            return;
+          }}
+
+          function addFrameListener(target, eventName, handler, options) {{
+            if (!target || typeof target.addEventListener !== 'function') {{
+              return;
+            }}
+            target.addEventListener(eventName, handler, options);
+            frameCleanupCallbacks.push(function() {{
+              try {{
+                target.removeEventListener(eventName, handler, options);
+              }} catch (_error) {{}}
+            }});
+          }}
+
+          if (typeof ResizeObserver === 'function') {{
+            frameResizeObserver = new ResizeObserver(function() {{
+              queueMeasureFrameHeight();
+            }});
+            if (doc.documentElement) {{
+              frameResizeObserver.observe(doc.documentElement);
+            }}
+            if (doc.body) {{
+              frameResizeObserver.observe(doc.body);
+            }}
+          }}
+
+          if (typeof MutationObserver === 'function' && doc.head) {{
+            frameMutationObserver = new MutationObserver(function() {{
+              postState();
+            }});
+            frameMutationObserver.observe(doc.head, {{
+              childList: true,
+              subtree: true,
+              characterData: true,
+            }});
+          }}
+
+          addFrameListener(win, 'load', queueMeasureFrameHeight, {{ passive: true }});
+          addFrameListener(win, 'pageshow', queueMeasureFrameHeight, {{ passive: true }});
+          addFrameListener(win, 'hashchange', postState, {{ passive: true }});
+          addFrameListener(win, 'popstate', postState, {{ passive: true }});
+
+          if (doc.fonts && typeof doc.fonts.ready === 'object' && typeof doc.fonts.ready.then === 'function') {{
+            doc.fonts.ready.then(queueMeasureFrameHeight).catch(function() {{}});
+          }}
+
+          if (!win.__clawdexDesktopFramePatched && win.history) {{
+            win.__clawdexDesktopFramePatched = true;
+            var originalPushState = typeof win.history.pushState === 'function' ? win.history.pushState.bind(win.history) : null;
+            var originalReplaceState = typeof win.history.replaceState === 'function' ? win.history.replaceState.bind(win.history) : null;
+            if (originalPushState) {{
+              win.history.pushState = function() {{
+                var result = originalPushState.apply(null, arguments);
+                postState();
+                queueMeasureFrameHeight();
+                return result;
+              }};
+            }}
+            if (originalReplaceState) {{
+              win.history.replaceState = function() {{
+                var result = originalReplaceState.apply(null, arguments);
+                postState();
+                queueMeasureFrameHeight();
+                return result;
+              }};
+            }}
+          }}
+        }}
+
+        frame.addEventListener('load', function() {{
+          installFrameObservers();
+          queueMeasureFrameHeight();
+          setTimeout(queueMeasureFrameHeight, 120);
+          setTimeout(queueMeasureFrameHeight, 400);
+        }});
+
+        window.addEventListener('resize', function() {{
+          applyLayout();
+          postState();
+        }});
+
+        window.__clawdexDesktopFrame = {{
+          goBack: function() {{
+            var win = currentFrameWindow();
+            if (win) {{
+              win.history.back();
+            }}
+          }},
+          goForward: function() {{
+            var win = currentFrameWindow();
+            if (win) {{
+              win.history.forward();
+            }}
+          }},
+          reload: function() {{
+            var win = currentFrameWindow();
+            if (win) {{
+              win.location.reload();
+            }} else {{
+              frame.src = frame.src;
+            }}
+          }},
+        }};
+
+        applyLayout();
+        frame.src = frameSrc;
+      }})();
+    </script>
+  </body>
+</html>"#
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store, private")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| Response::new(Body::from(String::new())))
 }
 
 fn should_rewrite_preview_html_response(headers: &HeaderMap) -> bool {
@@ -9614,7 +10433,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_preview_bootstrap_params_strips_internal_query_fields() {
+    fn parse_preview_bootstrap_params_keeps_viewport_query_fields() {
         let uri: Uri =
             "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&foo=bar&baz=qux"
                 .parse()
@@ -9634,7 +10453,21 @@ mod tests {
         );
         assert_eq!(
             params.sanitized_path_and_query,
-            "/index.html?foo=bar&baz=qux"
+            "/index.html?vp=desktop&vw=1728&vh=1117&foo=bar&baz=qux"
+        );
+    }
+
+    #[test]
+    fn build_preview_shell_frame_src_keeps_bootstrap_session_identity() {
+        let frame_src = build_preview_shell_frame_src(
+            "/index.html?vp=desktop&vw=1728&vh=1117",
+            Some("session-1"),
+            Some("token-1"),
+        );
+
+        assert_eq!(
+            frame_src,
+            "/index.html?vp=desktop&vw=1728&vh=1117&frame=1&sid=session-1&st=token-1"
         );
     }
 

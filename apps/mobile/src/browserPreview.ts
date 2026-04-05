@@ -1,6 +1,6 @@
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 const BROWSER_PREVIEW_PROXY_PREFIX = '/__clawdex_proxy__';
-const BROWSER_PREVIEW_INTERNAL_QUERY_KEYS = ['sid', 'st', 'vp', 'vw', 'vh'];
+const BROWSER_PREVIEW_INTERNAL_QUERY_KEYS = ['sid', 'st', 'vp', 'vw', 'vh', 'shell', 'frame'];
 const LOCAL_PREVIEW_URL_PATTERN =
   /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:[^\s<>"')\]]*)?/gi;
 const LOCAL_PREVIEW_WITHOUT_SCHEME_PATTERN =
@@ -176,6 +176,46 @@ export function buildBrowserPreviewBootstrapUrl(
     );
     applyViewportParams(previewUrl, normalizedViewport);
     return previewUrl.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function applyBrowserPreviewShellMode(
+  rawUrl: string,
+  shellMode: 'desktop' | 'overview' | null
+): string | null {
+  if (typeof rawUrl !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(rawUrl.trim());
+    parsed.searchParams.delete('frame');
+    if (shellMode) {
+      parsed.searchParams.set('shell', shellMode);
+    } else {
+      parsed.searchParams.delete('shell');
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function getBrowserPreviewShellRequestKey(rawUrl: string | null | undefined): string | null {
+  if (typeof rawUrl !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(rawUrl.trim());
+    const sid = parsed.searchParams.get('sid');
+    const st = parsed.searchParams.get('st');
+    if (!sid || !st) {
+      return null;
+    }
+    return `${sid}:${st}`;
   } catch {
     return null;
   }

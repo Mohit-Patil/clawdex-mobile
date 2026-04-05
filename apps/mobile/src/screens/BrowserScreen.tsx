@@ -11,7 +11,9 @@ import {
 import {
   ActivityIndicator,
   Animated as RNAnimated,
+  KeyboardAvoidingView,
   type LayoutChangeEvent,
+  Modal,
   type NativeSyntheticEvent,
   Platform,
   Pressable,
@@ -35,9 +37,10 @@ import type {
   BrowserPreviewTargetSuggestion,
 } from '../api/types';
 import {
-  buildBrowserPreviewViewportNavigationUrl,
+  applyBrowserPreviewShellMode,
   buildBrowserPreviewBootstrapUrl,
   type BrowserPreviewViewportSpec,
+  getBrowserPreviewShellRequestKey,
   getBrowserPreviewOrigin,
   isLocalPreviewCandidateUrl,
   isSameOriginUrl,
@@ -67,6 +70,14 @@ type WebViewScrollEvent = NativeSyntheticEvent<
 >;
 
 type ViewportPreset = 'mobile' | 'desktop' | 'overview';
+type DesktopFrameMessage = {
+  type: 'clawdexDesktopFrameState';
+  shellRequestKey?: string | null;
+  rawUrl?: string;
+  title?: string;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+};
 
 const DEFAULT_DESKTOP_VIEWPORT = { width: 1920, height: 1080 };
 const DESKTOP_VIEWPORT_PRESETS = [
@@ -98,14 +109,13 @@ export function BrowserScreen({
   const lastDesktopFitKeyRef = useRef<string | null>(null);
   const overviewHeightLockedRef = useRef(false);
   const lastScrollYRef = useRef(0);
+  const previewRequestIdRef = useRef(0);
   const [inputValue, setInputValue] = useState(
     recentTargetUrls[0] ?? 'http://127.0.0.1:3000'
   );
   const [activeSession, setActiveSession] = useState<BrowserPreviewSession | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [currentPreviewNavigationUrl, setCurrentPreviewNavigationUrl] = useState<string | null>(
-    null
-  );
+  const [, setCurrentPreviewNavigationUrl] = useState<string | null>(null);
   const [currentUrl, setCurrentUrl] = useState<string | null>(null);
   const [pageTitle, setPageTitle] = useState<string | null>(null);
   const [canGoBack, setCanGoBack] = useState(false);
@@ -126,13 +136,21 @@ export function BrowserScreen({
     height: String(DEFAULT_DESKTOP_VIEWPORT.height),
   });
   const [showCustomViewportEditor, setShowCustomViewportEditor] = useState(false);
+  const [showViewportMenu, setShowViewportMenu] = useState(false);
   const [nativePreviewLayout, setNativePreviewLayout] = useState({ width: 0, height: 0 });
-  const [overviewContentHeight, setOverviewContentHeight] = useState<number | null>(null);
+  const [overviewMetrics, setOverviewMetrics] = useState<{
+    previewUrl: string;
+    height: number;
+  } | null>(null);
 
   const previewOrigin = useMemo(
     () =>
       activeSession ? getBrowserPreviewOrigin(bridgeUrl, activeSession.previewPort) : null,
     [activeSession, bridgeUrl]
+  );
+  const currentShellRequestKey = useMemo(
+    () => getBrowserPreviewShellRequestKey(previewUrl),
+    [previewUrl]
   );
   const siteLabel = useMemo(
     () => getCompactBrowserLabel(currentUrl ?? activeSession?.targetUrl ?? inputValue),
@@ -140,6 +158,15 @@ export function BrowserScreen({
   );
   const desktopModeEnabled = viewportPreset !== 'mobile';
   const desktopOverviewEnabled = viewportPreset === 'overview';
+  const nativeOverviewShellEnabled = Platform.OS === 'ios' && viewportPreset === 'overview';
+  const nativeShellMode: 'desktop' | 'overview' | null =
+    Platform.OS !== 'ios'
+      ? null
+      : viewportPreset === 'desktop'
+        ? 'desktop'
+        : viewportPreset === 'overview'
+          ? 'overview'
+          : null;
   const iframeStyle = useMemo<CSSProperties>(
     () => ({
       border: 0,
@@ -157,7 +184,9 @@ export function BrowserScreen({
   const bottomBarReservedSpace = bottomBarInset + 58;
   const webViewBottomInset = bottomBarVisible ? bottomBarReservedSpace : 0;
   const nativeUserAgent =
-    Platform.OS === 'web' || !desktopModeEnabled ? undefined : DESKTOP_PREVIEW_USER_AGENT;
+    Platform.OS === 'web' || Platform.OS === 'ios' || !desktopModeEnabled
+      ? undefined
+      : DESKTOP_PREVIEW_USER_AGENT;
   const nativeContentMode =
     Platform.OS === 'ios'
       ? undefined
@@ -180,11 +209,19 @@ export function BrowserScreen({
     (preset) =>
       preset.width === desktopViewportSize.width && preset.height === desktopViewportSize.height
   );
+  const overviewContentHeight =
+    desktopOverviewEnabled &&
+    !nativeOverviewShellEnabled &&
+    previewUrl &&
+    overviewMetrics?.previewUrl === previewUrl
+      ? overviewMetrics.height
+      : null;
   const desktopCanvasHeight =
     desktopOverviewEnabled && overviewContentHeight
       ? Math.max(desktopViewportSize.height, overviewContentHeight)
       : desktopViewportSize.height;
-  const overviewReady = !desktopOverviewEnabled || overviewContentHeight !== null;
+  const overviewReady =
+    nativeOverviewShellEnabled || !desktopOverviewEnabled || overviewContentHeight !== null;
   const desktopMinimumZoomScale =
     Platform.OS === 'ios' && nativePreviewLayout.width > 0
       ? Math.min(
@@ -203,7 +240,7 @@ export function BrowserScreen({
   useEffect(() => {
     overviewHeightLockedRef.current = false;
     lastDesktopFitKeyRef.current = null;
-    setOverviewContentHeight(null);
+    setOverviewMetrics(null);
   }, [desktopViewportSize.height, desktopViewportSize.width, previewUrl, viewportPreset]);
 
   useEffect(() => {
@@ -217,17 +254,15 @@ export function BrowserScreen({
   useEffect(() => {
     if (
       Platform.OS !== 'ios' ||
-      !desktopModeEnabled ||
+      !desktopOverviewEnabled ||
+      nativeOverviewShellEnabled ||
       !previewUrl ||
+      loadingPreview ||
       nativePreviewLayout.width <= 0 ||
       nativePreviewLayout.height <= 0 ||
       !overviewReady
     ) {
       lastDesktopFitKeyRef.current = null;
-      return;
-    }
-
-    if (desktopOverviewEnabled && lastDesktopFitKeyRef.current) {
       return;
     }
 
@@ -244,23 +279,8 @@ export function BrowserScreen({
       return;
     }
 
-      lastDesktopFitKeyRef.current = fitKey;
+    lastDesktopFitKeyRef.current = fitKey;
     const timeout = setTimeout(() => {
-      const targetRectWidth =
-        desktopInitialZoomScale > 0
-          ? nativePreviewLayout.width / desktopInitialZoomScale
-          : desktopViewportSize.width;
-      const targetRectHeight =
-        desktopInitialZoomScale > 0
-          ? nativePreviewLayout.height / desktopInitialZoomScale
-          : desktopCanvasHeight;
-      desktopScrollViewRef.current?.scrollResponderZoomTo({
-        x: 0,
-        y: 0,
-        width: Math.min(targetRectWidth, desktopViewportSize.width),
-        height: Math.min(targetRectHeight, desktopCanvasHeight),
-        animated: false,
-      });
       desktopScrollViewRef.current?.scrollTo({ x: 0, y: 0, animated: false });
       setTimeout(() => {
         desktopScrollViewRef.current?.scrollTo({ x: 0, y: 0, animated: false });
@@ -272,10 +292,11 @@ export function BrowserScreen({
 
     return () => clearTimeout(timeout);
   }, [
-    desktopModeEnabled,
     desktopCanvasHeight,
     desktopInitialZoomScale,
     desktopOverviewEnabled,
+    nativeOverviewShellEnabled,
+    loadingPreview,
     overviewReady,
     viewportPreset,
     desktopViewportSize.height,
@@ -316,33 +337,56 @@ export function BrowserScreen({
     void loadSuggestions();
   }, [loadBrowserCapabilities, loadSuggestions]);
 
-  const openPreview = useCallback(
-    async (rawTarget: string) => {
+  const startPreviewSession = useCallback(
+    async (rawTarget: string, viewport: BrowserPreviewViewportSpec) => {
       const normalizedTarget = normalizePreviewTargetInput(rawTarget);
       if (!normalizedTarget) {
-        setCapabilitiesError('Use a loopback URL like localhost:3000 or just enter a port.');
-        return;
+        throw new Error('Use a loopback URL like localhost:3000 or just enter a port.');
       }
 
+      const session = await api.createBrowserPreviewSession(normalizedTarget);
+      const nextPreviewUrl = buildBrowserPreviewBootstrapUrl(
+        bridgeUrl,
+        session.previewPort,
+        session.bootstrapPath,
+        viewport
+      );
+      if (!nextPreviewUrl) {
+        throw new Error('Could not build preview bootstrap URL.');
+      }
+
+      return {
+        normalizedTarget,
+        session,
+        nextPreviewUrl,
+      };
+    },
+    [api, bridgeUrl]
+  );
+
+  const openPreview = useCallback(
+    async (rawTarget: string) => {
+      const requestId = previewRequestIdRef.current + 1;
+      previewRequestIdRef.current = requestId;
       setOpeningPreview(true);
       setLoadingPreview(true);
       setCapabilitiesError(null);
       try {
-        const session = await api.createBrowserPreviewSession(normalizedTarget);
-        const nextPreviewUrl = buildBrowserPreviewBootstrapUrl(
-          bridgeUrl,
-          session.previewPort,
-          session.bootstrapPath,
+        const { normalizedTarget, session, nextPreviewUrl } = await startPreviewSession(
+          rawTarget,
           browserViewport
         );
-        if (!nextPreviewUrl) {
-          throw new Error('Could not build preview bootstrap URL.');
+        if (previewRequestIdRef.current !== requestId) {
+          return;
         }
+        const resolvedPreviewUrl =
+          applyBrowserPreviewShellMode(nextPreviewUrl, nativeShellMode) ??
+          nextPreviewUrl;
 
         setInputValue(normalizedTarget);
         setActiveSession(session);
-        setPreviewUrl(nextPreviewUrl);
-        setCurrentPreviewNavigationUrl(nextPreviewUrl);
+        setPreviewUrl(resolvedPreviewUrl);
+        setCurrentPreviewNavigationUrl(resolvedPreviewUrl);
         setCurrentUrl(normalizedTarget);
         setPageTitle(null);
         setCanGoBack(false);
@@ -350,17 +394,29 @@ export function BrowserScreen({
         setBottomBarVisible(true);
         lastScrollYRef.current = 0;
         setWebReloadKey((value) => value + 1);
+        setNativeReloadKey((value) => value + 1);
         onRecentTargetUrlsChange(pushRecentPreviewTarget(recentTargetUrls, normalizedTarget));
       } catch (error) {
+        if (previewRequestIdRef.current !== requestId) {
+          return;
+        }
         setLoadingPreview(false);
         setCapabilitiesError(
           error instanceof Error ? error.message : 'Could not open local preview.'
         );
       } finally {
-        setOpeningPreview(false);
+        if (previewRequestIdRef.current === requestId) {
+          setOpeningPreview(false);
+        }
       }
     },
-    [api, bridgeUrl, browserViewport, onRecentTargetUrlsChange, recentTargetUrls]
+    [
+      browserViewport,
+      nativeShellMode,
+      onRecentTargetUrlsChange,
+      recentTargetUrls,
+      startPreviewSession,
+    ]
   );
 
   useEffect(() => {
@@ -375,6 +431,10 @@ export function BrowserScreen({
 
   const handleNavigationStateChange = useCallback(
     (navigation: WebViewNavigation) => {
+      if (nativeShellMode) {
+        return;
+      }
+
       const nextUrl = navigation.url || null;
       setCurrentPreviewNavigationUrl(nextUrl);
       const nextDisplayUrl =
@@ -394,8 +454,50 @@ export function BrowserScreen({
       setCanGoForward(navigation.canGoForward);
       setLoadingPreview(navigation.loading);
     },
-    [activeSession?.targetUrl, previewOrigin]
+    [activeSession?.targetUrl, nativeShellMode, previewOrigin]
   );
+
+  const handleDesktopFrameMessage = useCallback(
+    (event: WebViewMessageEvent) => {
+      let payload: DesktopFrameMessage | null = null;
+      try {
+        payload = JSON.parse(event.nativeEvent.data) as DesktopFrameMessage;
+      } catch {
+        return;
+      }
+
+      if (!payload || payload.type !== 'clawdexDesktopFrameState' || !activeSession?.targetUrl) {
+        return;
+      }
+      if (currentShellRequestKey && payload.shellRequestKey !== currentShellRequestKey) {
+        return;
+      }
+
+      const rawUrl = typeof payload.rawUrl === 'string' && payload.rawUrl ? payload.rawUrl : null;
+      const nextDisplayUrl =
+        rawUrl && previewOrigin
+          ? mapBrowserPreviewNavigationUrlToTargetUrl(
+              rawUrl,
+              previewOrigin,
+              activeSession.targetUrl
+            ) ?? rawUrl
+          : activeSession.targetUrl;
+      setCurrentPreviewNavigationUrl(rawUrl);
+      setCurrentUrl(nextDisplayUrl);
+      setInputValue(nextDisplayUrl);
+      setPageTitle(typeof payload.title === 'string' ? payload.title : null);
+      setCanGoBack(Boolean(payload.canGoBack));
+      setCanGoForward(Boolean(payload.canGoForward));
+      setLoadingPreview(false);
+    },
+    [activeSession?.targetUrl, currentShellRequestKey, previewOrigin]
+  );
+
+  const executeDesktopFrameCommand = useCallback((command: 'goBack' | 'goForward' | 'reload') => {
+    webViewRef.current?.injectJavaScript(
+      `window.__clawdexDesktopFrame && window.__clawdexDesktopFrame.${command} && window.__clawdexDesktopFrame.${command}(); true;`
+    );
+  }, []);
 
   const handleShouldStartLoad = useCallback(
     (request: { url: string }) => {
@@ -441,10 +543,34 @@ export function BrowserScreen({
       return;
     }
 
+    if (nativeShellMode) {
+      executeDesktopFrameCommand('reload');
+      return;
+    }
+
     webViewRef.current?.reload();
-  }, [loadSuggestions, previewUrl]);
+  }, [executeDesktopFrameCommand, loadSuggestions, nativeShellMode, previewUrl]);
+
+  const handleGoBackPress = useCallback(() => {
+    if (nativeShellMode) {
+      executeDesktopFrameCommand('goBack');
+      return;
+    }
+
+    webViewRef.current?.goBack();
+  }, [executeDesktopFrameCommand, nativeShellMode]);
+
+  const handleGoForwardPress = useCallback(() => {
+    if (nativeShellMode) {
+      executeDesktopFrameCommand('goForward');
+      return;
+    }
+
+    webViewRef.current?.goForward();
+  }, [executeDesktopFrameCommand, nativeShellMode]);
 
   const handleShowStartPage = useCallback(() => {
+    previewRequestIdRef.current += 1;
     setPreviewUrl(null);
     setActiveSession(null);
     setCurrentPreviewNavigationUrl(null);
@@ -458,11 +584,16 @@ export function BrowserScreen({
   }, []);
 
   const handleContentProcessDidTerminate = useCallback(() => {
+    if (nativeShellMode) {
+      setLoadingPreview(false);
+      return;
+    }
+
     setLoadingPreview(true);
     setBottomBarVisible(true);
     lastScrollYRef.current = 0;
     setNativeReloadKey((value) => value + 1);
-  }, []);
+  }, [nativeShellMode]);
 
   const handleWebViewScroll = useCallback(
     (event: WebViewScrollEvent) => {
@@ -511,7 +642,7 @@ export function BrowserScreen({
 
   const handleOverviewMessage = useCallback(
     (event: WebViewMessageEvent) => {
-      if (!desktopOverviewEnabled) {
+      if (!desktopOverviewEnabled || nativeOverviewShellEnabled) {
         return;
       }
 
@@ -530,20 +661,26 @@ export function BrowserScreen({
         }
 
         const normalizedHeight = Math.max(desktopViewportSize.height, nextHeight);
-        setOverviewContentHeight((current) => {
+        setOverviewMetrics((current) => {
           if (overviewHeightLockedRef.current) {
             return current;
           }
-          if (current === normalizedHeight) {
+          if (current?.previewUrl === previewUrl && current.height === normalizedHeight) {
             return current;
           }
-          return current ? Math.max(current, normalizedHeight) : normalizedHeight;
+          return {
+            previewUrl: previewUrl ?? '',
+            height:
+              current?.previewUrl === previewUrl
+                ? Math.max(current.height, normalizedHeight)
+                : normalizedHeight,
+          };
         });
       } catch {
         return;
       }
     },
-    [desktopOverviewEnabled, desktopViewportSize.height]
+    [desktopOverviewEnabled, desktopViewportSize.height, nativeOverviewShellEnabled]
   );
 
   const overviewInjectedJavaScript = useMemo(
@@ -611,68 +748,135 @@ export function BrowserScreen({
 
   const applyViewportSelection = useCallback(
     (nextPreset: ViewportPreset, nextDesktopViewport = desktopViewportSize) => {
-      setViewportPreset(nextPreset);
-      setBottomBarVisible(true);
-      lastScrollYRef.current = 0;
-
-      if (nextPreset !== 'mobile') {
-        setDesktopViewportSize(nextDesktopViewport);
-        setDesktopViewportDraft({
-          width: String(nextDesktopViewport.width),
-          height: String(nextDesktopViewport.height),
-        });
-      } else {
-        setShowCustomViewportEditor(false);
-      }
-
-      if (!previewUrl) {
-        return;
-      }
-
-      setLoadingPreview(true);
-      const currentPreviewUrl =
-        currentPreviewNavigationUrl && isSameOriginUrl(currentPreviewNavigationUrl, previewOrigin)
-          ? currentPreviewNavigationUrl
-          : previewUrl;
-      const nextPreviewUrl = buildBrowserPreviewViewportNavigationUrl(
-        currentPreviewUrl,
-        previewUrl,
+      const requestId = previewRequestIdRef.current + 1;
+      previewRequestIdRef.current = requestId;
+      const nextViewport =
         nextPreset !== 'mobile'
           ? {
-              preset: 'desktop',
+              preset: 'desktop' as const,
               width: nextDesktopViewport.width,
               height: nextDesktopViewport.height,
             }
-          : { preset: 'mobile' }
-      );
-      if (nextPreviewUrl) {
-        setPreviewUrl(nextPreviewUrl);
-        if (Platform.OS === 'web') {
-          setWebReloadKey((value) => value + 1);
+          : { preset: 'mobile' as const };
+      const reloadTarget =
+        currentUrl ?? activeSession?.targetUrl ?? inputValue;
+      const commitViewportSelectionState = () => {
+        setViewportPreset(nextPreset);
+        setBottomBarVisible(true);
+        lastScrollYRef.current = 0;
+        lastDesktopFitKeyRef.current = null;
+        overviewHeightLockedRef.current = false;
+        setOverviewMetrics(null);
+        setCurrentPreviewNavigationUrl(null);
+        setPageTitle(null);
+        setCanGoBack(false);
+        setCanGoForward(false);
+
+        if (nextPreset !== 'mobile') {
+          setDesktopViewportSize(nextDesktopViewport);
+          setDesktopViewportDraft({
+            width: String(nextDesktopViewport.width),
+            height: String(nextDesktopViewport.height),
+          });
+        } else {
+          setShowCustomViewportEditor(false);
         }
+      };
+
+      if (!previewUrl) {
+        commitViewportSelectionState();
         return;
       }
 
-      setTimeout(() => {
-        webViewRef.current?.reload();
-      }, 0);
+      const normalizedReloadTarget = normalizePreviewTargetInput(reloadTarget);
+      if (!normalizedReloadTarget) {
+        commitViewportSelectionState();
+        return;
+      }
+
+      setOpeningPreview(true);
+      setLoadingPreview(true);
+      setCapabilitiesError(null);
+      void startPreviewSession(normalizedReloadTarget, nextViewport)
+        .then(({ normalizedTarget, session, nextPreviewUrl }) => {
+          if (previewRequestIdRef.current !== requestId) {
+            return;
+          }
+          const nextShellMode: 'desktop' | 'overview' | null =
+            Platform.OS !== 'ios'
+              ? null
+              : nextPreset === 'desktop'
+                ? 'desktop'
+                : nextPreset === 'overview'
+                  ? 'overview'
+                  : null;
+          const resolvedPreviewUrl =
+            applyBrowserPreviewShellMode(nextPreviewUrl, nextShellMode) ?? nextPreviewUrl;
+          commitViewportSelectionState();
+          setInputValue(normalizedTarget);
+          setActiveSession(session);
+          setPreviewUrl(resolvedPreviewUrl);
+          setCurrentPreviewNavigationUrl(resolvedPreviewUrl);
+          setCurrentUrl(normalizedTarget);
+          setPageTitle(null);
+          setCanGoBack(false);
+          setCanGoForward(false);
+          setWebReloadKey((value) => value + 1);
+          setNativeReloadKey((value) => value + 1);
+        })
+        .catch((error) => {
+          if (previewRequestIdRef.current !== requestId) {
+            return;
+          }
+          setLoadingPreview(false);
+          setCapabilitiesError(
+            error instanceof Error ? error.message : 'Could not reload local preview.'
+          );
+        })
+        .finally(() => {
+          if (previewRequestIdRef.current === requestId) {
+            setOpeningPreview(false);
+          }
+        });
     },
-    [currentPreviewNavigationUrl, desktopViewportSize, previewOrigin, previewUrl]
+    [activeSession?.targetUrl, currentUrl, desktopViewportSize, inputValue, previewUrl, startPreviewSession]
   );
 
   const handleSelectDesktopPreset = useCallback(
     (viewport: { width: number; height: number }) => {
+      setDesktopViewportSize(viewport);
+      setDesktopViewportDraft({
+        width: String(viewport.width),
+        height: String(viewport.height),
+      });
       setShowCustomViewportEditor(false);
-      applyViewportSelection(viewportPreset === 'mobile' ? 'desktop' : viewportPreset, viewport);
+      setShowViewportMenu(false);
+      if (viewportPreset !== 'mobile' && previewUrl) {
+        applyViewportSelection(viewportPreset, viewport);
+      }
     },
-    [applyViewportSelection, viewportPreset]
+    [applyViewportSelection, previewUrl, viewportPreset]
   );
+
+  const handleOpenViewportMenu = useCallback(() => {
+    setDesktopViewportDraft({
+      width: String(desktopViewportSize.width),
+      height: String(desktopViewportSize.height),
+    });
+    setShowViewportMenu(true);
+  }, [desktopViewportSize.height, desktopViewportSize.width]);
+
+  const handleCloseViewportMenu = useCallback(() => {
+    setShowViewportMenu(false);
+    setShowCustomViewportEditor(false);
+  }, []);
 
   const handleShowCustomViewportEditor = useCallback(() => {
     setDesktopViewportDraft({
       width: String(desktopViewportSize.width),
       height: String(desktopViewportSize.height),
     });
+    setShowViewportMenu(true);
     setShowCustomViewportEditor(true);
   }, [desktopViewportSize.height, desktopViewportSize.width]);
 
@@ -686,14 +890,18 @@ export function BrowserScreen({
     }
 
     setCapabilitiesError(null);
-    applyViewportSelection(
-      viewportPreset === 'mobile' ? 'desktop' : viewportPreset,
-      { width, height }
-    );
+    setDesktopViewportSize({ width, height });
+    setDesktopViewportDraft({ width: String(width), height: String(height) });
+    setShowCustomViewportEditor(false);
+    setShowViewportMenu(false);
+    if (viewportPreset !== 'mobile' && previewUrl) {
+      applyViewportSelection(viewportPreset, { width, height });
+    }
   }, [
     applyViewportSelection,
     desktopViewportDraft.height,
     desktopViewportDraft.width,
+    previewUrl,
     viewportPreset,
   ]);
 
@@ -753,10 +961,11 @@ export function BrowserScreen({
           </View>
           {previewUrl ? (
             <View style={styles.viewportTray}>
-              <View style={styles.viewportRowSection}>
+              <View style={styles.viewportModeRow}>
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
+                  style={styles.viewportModeScroller}
                   contentContainerStyle={styles.viewportPresetRow}
                 >
                   {([
@@ -784,108 +993,34 @@ export function BrowserScreen({
                     </Pressable>
                   ))}
                 </ScrollView>
+                <Pressable
+                  onPress={handleOpenViewportMenu}
+                  style={({ pressed }) => [
+                    styles.viewportSettingsButton,
+                    (desktopModeEnabled || showViewportMenu) && styles.viewportPresetChipActive,
+                    pressed && styles.viewportPresetChipPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="options-outline"
+                    size={14}
+                    color={
+                      desktopModeEnabled || showViewportMenu
+                        ? colors.textPrimary
+                        : colors.textSecondary
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.viewportPresetChipText,
+                      (desktopModeEnabled || showViewportMenu) &&
+                        styles.viewportPresetChipTextActive,
+                    ]}
+                  >
+                    {desktopViewportLabel}
+                  </Text>
+                </Pressable>
               </View>
-              {desktopModeEnabled ? (
-                <>
-                  <View style={styles.viewportRowSection}>
-                    <ScrollView
-                      key={`desktop-presets-${viewportPreset}`}
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.viewportPresetRow}
-                    >
-                      {DESKTOP_VIEWPORT_PRESETS.map((preset) => {
-                        const active =
-                          desktopViewportSize.width === preset.width &&
-                          desktopViewportSize.height === preset.height;
-                        return (
-                          <Pressable
-                            key={preset.label}
-                            onPress={() => handleSelectDesktopPreset(preset)}
-                            style={({ pressed }) => [
-                              styles.viewportPresetChip,
-                              active && styles.viewportPresetChipActive,
-                              pressed && styles.viewportPresetChipPressed,
-                            ]}
-                          >
-                            <Text
-                              style={[
-                                styles.viewportPresetChipText,
-                                active && styles.viewportPresetChipTextActive,
-                              ]}
-                            >
-                              {preset.label}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                      <Pressable
-                        onPress={handleShowCustomViewportEditor}
-                        style={({ pressed }) => [
-                          styles.viewportPresetChip,
-                          (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
-                            styles.viewportPresetChipActive,
-                          pressed && styles.viewportPresetChipPressed,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.viewportPresetChipText,
-                            (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
-                              styles.viewportPresetChipTextActive,
-                          ]}
-                        >
-                          Custom
-                        </Text>
-                      </Pressable>
-                    </ScrollView>
-                  </View>
-                  {showCustomViewportEditor ? (
-                    <View style={styles.viewportInputRow}>
-                      <View style={styles.viewportField}>
-                        <Text style={styles.viewportFieldLabel}>W</Text>
-                        <TextInput
-                          value={desktopViewportDraft.width}
-                          onChangeText={(value) =>
-                            setDesktopViewportDraft((current) => ({ ...current, width: value }))
-                          }
-                          keyboardType="number-pad"
-                          autoCorrect={false}
-                          autoCapitalize="none"
-                          style={styles.viewportFieldInput}
-                          placeholder="1920"
-                          placeholderTextColor={colors.textMuted}
-                        />
-                      </View>
-                      <View style={styles.viewportField}>
-                        <Text style={styles.viewportFieldLabel}>H</Text>
-                        <TextInput
-                          value={desktopViewportDraft.height}
-                          onChangeText={(value) =>
-                            setDesktopViewportDraft((current) => ({ ...current, height: value }))
-                          }
-                          keyboardType="number-pad"
-                          autoCorrect={false}
-                          autoCapitalize="none"
-                          style={styles.viewportFieldInput}
-                          placeholder="1080"
-                          placeholderTextColor={colors.textMuted}
-                        />
-                      </View>
-                      <Pressable
-                        onPress={handleApplyDesktopViewport}
-                        style={({ pressed }) => [
-                          styles.viewportApplyButton,
-                          pressed && styles.viewportApplyButtonPressed,
-                        ]}
-                      >
-                        <Text style={styles.viewportApplyButtonText}>Apply</Text>
-                      </Pressable>
-                      <Text style={styles.viewportCurrentLabel}>{desktopViewportLabel}</Text>
-                    </View>
-                  ) : null}
-                </>
-              ) : null}
             </View>
           ) : null}
         </View>
@@ -899,6 +1034,124 @@ export function BrowserScreen({
             message="This bridge did not start its preview server. Check bridge logs for preview port conflicts."
           />
         ) : null}
+
+        <Modal
+          visible={showViewportMenu}
+          transparent
+          animationType="fade"
+          onRequestClose={handleCloseViewportMenu}
+        >
+          <Pressable style={styles.viewportMenuBackdrop} onPress={handleCloseViewportMenu}>
+            <KeyboardAvoidingView
+              behavior={Platform.OS === 'ios' ? 'position' : undefined}
+              style={styles.viewportMenuKeyboardLayer}
+            >
+              <Pressable style={styles.viewportMenuCard} onPress={() => {}}>
+                <View style={styles.viewportMenuHeader}>
+                  <Text style={styles.viewportMenuTitle}>Viewport</Text>
+                  <Text style={styles.viewportMenuSubtitle}>
+                    Applies to Desktop and Overview.
+                  </Text>
+                </View>
+                <View style={styles.viewportMenuPresetGrid}>
+                  {DESKTOP_VIEWPORT_PRESETS.map((preset) => {
+                    const active =
+                      desktopViewportSize.width === preset.width &&
+                      desktopViewportSize.height === preset.height;
+                    return (
+                      <Pressable
+                        key={preset.label}
+                        onPress={() => handleSelectDesktopPreset(preset)}
+                        style={({ pressed }) => [
+                          styles.viewportPresetChip,
+                          styles.viewportMenuPresetChip,
+                          active && styles.viewportPresetChipActive,
+                          pressed && styles.viewportPresetChipPressed,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.viewportPresetChipText,
+                            active && styles.viewportPresetChipTextActive,
+                          ]}
+                        >
+                          {preset.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                  <Pressable
+                    onPress={handleShowCustomViewportEditor}
+                    style={({ pressed }) => [
+                      styles.viewportPresetChip,
+                      styles.viewportMenuPresetChip,
+                      (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
+                        styles.viewportPresetChipActive,
+                      pressed && styles.viewportPresetChipPressed,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.viewportPresetChipText,
+                        (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
+                          styles.viewportPresetChipTextActive,
+                      ]}
+                    >
+                      Custom
+                    </Text>
+                  </Pressable>
+                </View>
+                {showCustomViewportEditor ? (
+                  <View style={styles.viewportInputRow}>
+                    <View style={styles.viewportField}>
+                      <Text style={styles.viewportFieldLabel}>W</Text>
+                      <TextInput
+                        value={desktopViewportDraft.width}
+                        onChangeText={(value) =>
+                          setDesktopViewportDraft((current) => ({ ...current, width: value }))
+                        }
+                        keyboardType="number-pad"
+                        autoCorrect={false}
+                        autoCapitalize="none"
+                        style={styles.viewportFieldInput}
+                        placeholder="1920"
+                        placeholderTextColor={colors.textMuted}
+                      />
+                    </View>
+                    <View style={styles.viewportField}>
+                      <Text style={styles.viewportFieldLabel}>H</Text>
+                      <TextInput
+                        value={desktopViewportDraft.height}
+                        onChangeText={(value) =>
+                          setDesktopViewportDraft((current) => ({ ...current, height: value }))
+                        }
+                        keyboardType="number-pad"
+                        autoCorrect={false}
+                        autoCapitalize="none"
+                        style={styles.viewportFieldInput}
+                        placeholder="1080"
+                        placeholderTextColor={colors.textMuted}
+                      />
+                    </View>
+                    <Pressable
+                      onPress={handleApplyDesktopViewport}
+                      style={({ pressed }) => [
+                        styles.viewportApplyButton,
+                        pressed && styles.viewportApplyButtonPressed,
+                      ]}
+                    >
+                      <Text style={styles.viewportApplyButtonText}>Apply</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Text style={styles.viewportCurrentLabel}>
+                    Current viewport: {desktopViewportLabel}
+                  </Text>
+                )}
+              </Pressable>
+            </KeyboardAvoidingView>
+          </Pressable>
+        </Modal>
 
         <View style={styles.contentArea}>
           {previewUrl ? (
@@ -946,8 +1199,56 @@ export function BrowserScreen({
                   style={styles.previewViewport}
                   onLayout={handleNativePreviewViewportLayout}
                 >
-                  {desktopOverviewEnabled ? (
+                  {nativeShellMode ? (
+                    <View style={styles.previewViewport}>
+                      <WebView
+                        key={`${previewUrl}-${nativeReloadKey}-${viewportPreset}`}
+                        ref={webViewRef}
+                        source={{ uri: previewUrl }}
+                        originWhitelist={['*']}
+                        javaScriptEnabled
+                        domStorageEnabled
+                        sharedCookiesEnabled
+                        thirdPartyCookiesEnabled
+                        allowsBackForwardNavigationGestures
+                        startInLoadingState
+                        setSupportMultipleWindows={false}
+                        automaticallyAdjustContentInsets={false}
+                        automaticallyAdjustsScrollIndicatorInsets={false}
+                        contentInset={{
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          bottom: webViewBottomInset,
+                        }}
+                        contentInsetAdjustmentBehavior="never"
+                        contentMode={nativeContentMode}
+                        scalesPageToFit={false}
+                        setBuiltInZoomControls
+                        setDisplayZoomControls={false}
+                        userAgent={nativeUserAgent}
+                        onMessage={handleDesktopFrameMessage}
+                        onNavigationStateChange={handleNavigationStateChange}
+                        onShouldStartLoadWithRequest={handleShouldStartLoad}
+                        onLoadStart={() => setLoadingPreview(true)}
+                        onLoadEnd={() => setLoadingPreview(false)}
+                        onContentProcessDidTerminate={handleContentProcessDidTerminate}
+                        onError={(event) =>
+                          setCapabilitiesError(
+                            event.nativeEvent.description || 'Could not load preview.'
+                          )
+                        }
+                        onHttpError={(event) =>
+                          setCapabilitiesError(
+                            `Preview returned HTTP ${String(event.nativeEvent.statusCode)}.`
+                          )
+                        }
+                        style={styles.webView}
+                      />
+                    </View>
+                  ) : desktopOverviewEnabled ? (
                     <ScrollView
+                      key={`${previewUrl}-${nativeReloadKey}-${viewportPreset}-shell`}
                       ref={desktopScrollViewRef}
                       style={styles.previewViewport}
                       contentContainerStyle={styles.desktopNativeScrollContent}
@@ -1017,33 +1318,39 @@ export function BrowserScreen({
                               `Preview returned HTTP ${String(event.nativeEvent.statusCode)}.`
                             )
                           }
-                          style={styles.desktopNativeWebView}
+                          style={[
+                            styles.desktopNativeWebView,
+                            {
+                              width: desktopViewportSize.width,
+                              height: desktopCanvasHeight,
+                            },
+                          ]}
                         />
                       </View>
                     </ScrollView>
                   ) : (
                     <ScrollView
-                      ref={desktopScrollViewRef}
+                      key={`${previewUrl}-${nativeReloadKey}-${viewportPreset}-shell`}
                       style={styles.previewViewport}
-                      contentContainerStyle={styles.desktopNativeScrollContent}
+                      contentContainerStyle={styles.desktopLiveScrollContent}
                       horizontal
                       showsHorizontalScrollIndicator
                       showsVerticalScrollIndicator={false}
                       bounces={false}
                       alwaysBounceHorizontal={false}
                       alwaysBounceVertical={false}
-                      directionalLockEnabled={false}
-                      pinchGestureEnabled={Platform.OS === 'ios'}
-                      minimumZoomScale={desktopMinimumZoomScale}
-                      maximumZoomScale={3}
-                      bouncesZoom={false}
+                      directionalLockEnabled
+                      nestedScrollEnabled
                     >
                       <View
                         style={[
                           styles.desktopNativeCanvas,
                           {
                             width: desktopViewportSize.width,
-                            height: desktopCanvasHeight,
+                            height:
+                              nativePreviewLayout.height > 0
+                                ? nativePreviewLayout.height
+                                : undefined,
                           },
                         ]}
                       >
@@ -1069,7 +1376,7 @@ export function BrowserScreen({
                           }}
                           contentInsetAdjustmentBehavior="never"
                           contentMode={nativeContentMode}
-                          scalesPageToFit
+                          scalesPageToFit={false}
                           setBuiltInZoomControls
                           setDisplayZoomControls={false}
                           userAgent={nativeUserAgent}
@@ -1089,7 +1396,16 @@ export function BrowserScreen({
                               `Preview returned HTTP ${String(event.nativeEvent.statusCode)}.`
                             )
                           }
-                          style={styles.desktopNativeWebView}
+                          style={[
+                            styles.desktopNativeWebView,
+                            {
+                              width: desktopViewportSize.width,
+                              height:
+                                nativePreviewLayout.height > 0
+                                  ? nativePreviewLayout.height
+                                  : undefined,
+                            },
+                          ]}
                         />
                       </View>
                     </ScrollView>
@@ -1143,7 +1459,8 @@ export function BrowserScreen({
                   />
                 </View>
               )}
-              {loadingPreview || (desktopOverviewEnabled && !overviewReady) ? (
+              {loadingPreview ||
+              (desktopOverviewEnabled && !nativeOverviewShellEnabled && !overviewReady) ? (
                 <View style={styles.loadingOverlay}>
                   <ActivityIndicator color={colors.textPrimary} />
                   <Text style={styles.loadingText}>Loading preview</Text>
@@ -1237,7 +1554,7 @@ export function BrowserScreen({
         >
           <View style={styles.bottomBar}>
             <Pressable
-              onPress={() => webViewRef.current?.goBack()}
+              onPress={handleGoBackPress}
               disabled={Platform.OS === 'web' || !canGoBack}
               style={({ pressed }) => [
                 styles.bottomNavButton,
@@ -1248,7 +1565,7 @@ export function BrowserScreen({
               <Ionicons name="chevron-back" size={22} color={colors.textPrimary} />
             </Pressable>
             <Pressable
-              onPress={() => webViewRef.current?.goForward()}
+              onPress={handleGoForwardPress}
               disabled={Platform.OS === 'web' || !canGoForward}
               style={({ pressed }) => [
                 styles.bottomNavButton,
@@ -1397,13 +1714,16 @@ const createStyles = (theme: AppTheme) =>
       backgroundColor: theme.colors.transparent,
     },
     viewportTray: {
-      gap: theme.spacing.sm,
       paddingBottom: theme.spacing.sm,
       flexShrink: 0,
     },
-    viewportRowSection: {
-      minHeight: 34,
-      justifyContent: 'center',
+    viewportModeRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+    },
+    viewportModeScroller: {
+      flex: 1,
     },
     viewportPresetRow: {
       gap: theme.spacing.xs,
@@ -1435,6 +1755,56 @@ const createStyles = (theme: AppTheme) =>
     },
     viewportPresetChipTextActive: {
       color: theme.colors.textPrimary,
+    },
+    viewportSettingsButton: {
+      minHeight: 30,
+      paddingHorizontal: theme.spacing.md,
+      borderRadius: theme.radius.full,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgItem,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.xs,
+    },
+    viewportMenuBackdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0, 0, 0, 0.48)',
+      justifyContent: 'center',
+      paddingHorizontal: theme.spacing.md,
+    },
+    viewportMenuKeyboardLayer: {
+      width: '100%',
+    },
+    viewportMenuCard: {
+      borderRadius: theme.radius.lg,
+      borderWidth: 1,
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgElevated,
+      padding: theme.spacing.lg,
+      gap: theme.spacing.md,
+    },
+    viewportMenuHeader: {
+      gap: theme.spacing.xs,
+    },
+    viewportMenuTitle: {
+      ...theme.typography.body,
+      color: theme.colors.textPrimary,
+      fontWeight: '700',
+    },
+    viewportMenuSubtitle: {
+      ...theme.typography.caption,
+      color: theme.colors.textSecondary,
+      lineHeight: 18,
+    },
+    viewportMenuPresetGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: theme.spacing.xs,
+    },
+    viewportMenuPresetChip: {
+      minWidth: 96,
     },
     viewportInputRow: {
       flexDirection: 'row',
@@ -1604,6 +1974,9 @@ const createStyles = (theme: AppTheme) =>
       flexGrow: 1,
       minHeight: '100%',
     },
+    desktopLiveScrollContent: {
+      minHeight: '100%',
+    },
     desktopNativeScrollContent: {
       flexGrow: 1,
       alignItems: 'flex-start',
@@ -1612,9 +1985,9 @@ const createStyles = (theme: AppTheme) =>
     desktopNativeCanvas: {
       alignSelf: 'flex-start',
       backgroundColor: theme.colors.bgMain,
+      overflow: 'hidden',
     },
     desktopNativeWebView: {
-      flex: 1,
       backgroundColor: theme.colors.bgMain,
     },
     webView: {

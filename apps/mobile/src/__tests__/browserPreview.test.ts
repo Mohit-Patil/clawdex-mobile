@@ -4,6 +4,7 @@ import {
   buildBrowserPreviewBootstrapUrl,
   dedupeRecentPreviewTargets,
   extractLocalPreviewUrls,
+  getBrowserPreviewShellRequestKey,
   mapBrowserPreviewNavigationUrlToTargetUrl,
   normalizePreviewTargetInput,
   pushRecentPreviewTarget,
@@ -96,6 +97,14 @@ describe('browserPreview', () => {
     ).toBe(
       'http://192.168.1.26:8788/settings/profile?tab=2&sid=preview&st=token&vp=desktop&vw=1728&vh=1117'
     );
+  });
+
+  it('builds a stable shell request key from preview bootstrap params', () => {
+    expect(
+      getBrowserPreviewShellRequestKey(
+        'http://192.168.1.26:8788/?sid=preview-session&st=preview-token&vp=desktop&vw=1728&vh=1117&shell=overview'
+      )
+    ).toBe('preview-session:preview-token');
   });
 
   it('maps a preview navigation URL back to the original target URL for display', () => {
