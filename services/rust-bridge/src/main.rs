@@ -4199,6 +4199,24 @@ struct GitDiffResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GitHistoryCommit {
+    hash: String,
+    short_hash: String,
+    subject: String,
+    author_name: String,
+    authored_at: String,
+    ref_names: Vec<String>,
+    is_head: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GitHistoryResponse {
+    commits: Vec<GitHistoryCommit>,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GitStageResponse {
     code: Option<i32>,
     stdout: String,
@@ -4261,6 +4279,13 @@ struct GitPushResponse {
 #[serde(rename_all = "camelCase")]
 struct GitQueryRequest {
     cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHistoryRequest {
+    cwd: Option<String>,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5382,6 +5407,16 @@ async fn handle_bridge_method(
                     .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
             let diff = state.git.get_diff(request.cwd.as_deref()).await?;
             serde_json::to_value(diff).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/git/history" => {
+            let request: GitHistoryRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let history = state
+                .git
+                .get_history(request.cwd.as_deref(), request.limit)
+                .await?;
+            serde_json::to_value(history).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/git/stage" => {
             let request: GitFileRequest =

@@ -15,6 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type {
   Chat,
+  GitHistoryCommit,
   GitDiffResponse,
   GitStatusFile,
   GitStatusResponse,
@@ -37,6 +38,7 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
   const [activeChat, setActiveChat] = useState(chat);
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
   const [diff, setDiff] = useState<GitDiffResponse | null>(null);
+  const [history, setHistory] = useState<GitHistoryCommit[]>([]);
   const [commitMessage, setCommitMessage] = useState('chore: checkpoint');
   const [workspaceDraft, setWorkspaceDraft] = useState(chat.cwd ?? '');
   const [loading, setLoading] = useState(true);
@@ -79,12 +81,14 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
   const refresh = useCallback(async () => {
     try {
       setLoading(true);
-      const [nextStatus, nextDiff] = await Promise.all([
+      const [nextStatus, nextDiff, nextHistory] = await Promise.all([
         api.gitStatus(requestedCwd),
         api.gitDiff(requestedCwd),
+        api.gitHistory(requestedCwd, 12),
       ]);
       setStatus(nextStatus);
       setDiff(nextDiff);
+      setHistory(nextHistory.commits);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -303,10 +307,31 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
     () => parseAheadCount(status?.raw ?? ''),
     [status?.raw]
   );
+  const behindCount = useMemo(
+    () => parseBehindCount(status?.raw ?? ''),
+    [status?.raw]
+  );
   const hasUpstream = useMemo(
     () => parseHasUpstream(status?.raw ?? ''),
     [status?.raw]
   );
+  const upstreamBranch = useMemo(
+    () => parseUpstreamBranch(status?.raw ?? ''),
+    [status?.raw]
+  );
+  const stagedCount = useMemo(
+    () => changedFiles.filter((entry) => entry.staged).length,
+    [changedFiles]
+  );
+  const unstagedCount = useMemo(
+    () => changedFiles.filter((entry) => entry.unstaged).length,
+    [changedFiles]
+  );
+  const untrackedCount = useMemo(
+    () => changedFiles.filter((entry) => entry.untracked).length,
+    [changedFiles]
+  );
+  const latestCommit = history[0] ?? null;
   const canPush = aheadCount > 0;
   const canPublishBranch = !hasUpstream && isPublishableBranch(status?.branch);
   const showPushAction = canPush || canPublishBranch;
@@ -502,35 +527,81 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
         ) : (
           <>
             <View style={styles.card}>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Branch</Text>
-                <Text style={styles.infoValue}>{status?.branch ?? '—'}</Text>
-              </View>
-              <View style={styles.separator} />
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Status</Text>
-                <Text
-                  style={[styles.infoValue, status?.clean ? styles.clean : styles.dirty]}
+              <View style={styles.branchHeaderRow}>
+                <View style={styles.branchBadge}>
+                  <Ionicons
+                    name="git-branch-outline"
+                    size={14}
+                    color={theme.colors.textPrimary}
+                  />
+                  <Text style={styles.branchBadgeText}>{status?.branch ?? '—'}</Text>
+                </View>
+                <View
+                  style={[
+                    styles.repoStateBadge,
+                    status?.clean ? styles.repoStateBadgeClean : styles.repoStateBadgeDirty,
+                  ]}
                 >
-                  {status?.clean ? 'clean' : 'changes'}
-                </Text>
+                  <Text style={styles.repoStateBadgeText}>
+                    {status?.clean ? 'Clean' : 'Changes'}
+                  </Text>
+                </View>
               </View>
-              {isPublishableBranch(status?.branch) ? (
+              <View style={styles.statsGrid}>
+                <View style={styles.statTile}>
+                  <Text style={styles.statTileLabel}>Changed</Text>
+                  <Text style={styles.statTileValue}>{changedFiles.length}</Text>
+                </View>
+                <View style={styles.statTile}>
+                  <Text style={styles.statTileLabel}>Staged</Text>
+                  <Text style={styles.statTileValue}>{stagedCount}</Text>
+                </View>
+                <View style={styles.statTile}>
+                  <Text style={styles.statTileLabel}>Unstaged</Text>
+                  <Text style={styles.statTileValue}>{unstagedCount}</Text>
+                </View>
+                <View style={styles.statTile}>
+                  <Text style={styles.statTileLabel}>Untracked</Text>
+                  <Text style={styles.statTileValue}>{untrackedCount}</Text>
+                </View>
+                <View style={styles.statTile}>
+                  <Text style={styles.statTileLabel}>Ahead</Text>
+                  <Text style={styles.statTileValue}>{aheadCount}</Text>
+                </View>
+                <View style={styles.statTile}>
+                  <Text style={styles.statTileLabel}>Behind</Text>
+                  <Text style={styles.statTileValue}>{behindCount}</Text>
+                </View>
+              </View>
+              {(upstreamBranch || latestCommit || isPublishableBranch(status?.branch)) ? (
                 <>
                   <View style={styles.separator} />
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Published</Text>
-                    <Text style={styles.infoValue}>{hasUpstream ? 'Yes' : 'No'}</Text>
-                  </View>
-                </>
-              ) : null}
-              {canPush ? (
-                <>
-                  <View style={styles.separator} />
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Ahead</Text>
-                    <Text style={styles.infoValue}>{aheadCount}</Text>
-                  </View>
+                  {upstreamBranch ? (
+                    <View style={styles.infoRow}>
+                      <Text style={styles.infoLabel}>Upstream</Text>
+                      <Text style={styles.infoValue}>{upstreamBranch}</Text>
+                    </View>
+                  ) : null}
+                  {isPublishableBranch(status?.branch) ? (
+                    <View style={styles.infoRow}>
+                      <Text style={styles.infoLabel}>Published</Text>
+                      <Text style={styles.infoValue}>{hasUpstream ? 'Yes' : 'No'}</Text>
+                    </View>
+                  ) : null}
+                  {latestCommit ? (
+                    <View style={styles.latestCommitBlock}>
+                      <View style={styles.latestCommitHeader}>
+                        <Text style={styles.latestCommitLabel}>Latest commit</Text>
+                        <Text style={styles.latestCommitHash}>{latestCommit.shortHash}</Text>
+                      </View>
+                      <Text style={styles.latestCommitSubject}>{latestCommit.subject}</Text>
+                      <Text style={styles.latestCommitMeta}>
+                        {latestCommit.authorName}
+                        {' · '}
+                        {formatRelativeTime(latestCommit.authoredAt)}
+                      </Text>
+                    </View>
+                  ) : null}
                 </>
               ) : null}
             </View>
@@ -576,6 +647,54 @@ export function GitScreen({ api, chat, onBack, onChatUpdated }: GitScreenProps) 
                 </Text>
               </Pressable>
             ) : null}
+
+            <Text style={styles.sectionLabel}>Recent commits</Text>
+            <View style={styles.card}>
+              {history.length === 0 ? (
+                <Text style={styles.emptyFilesText}>No commit history available.</Text>
+              ) : (
+                <View style={styles.historyList}>
+                  {history.map((commit, index) => (
+                    <View
+                      key={commit.hash}
+                      style={[
+                        styles.historyEntry,
+                        index < history.length - 1 && styles.historyEntryBorder,
+                      ]}
+                    >
+                      <View style={styles.historyEntryHeader}>
+                        <Text style={styles.historyEntrySubject}>{commit.subject}</Text>
+                        <View style={styles.historyHashBadge}>
+                          <Text style={styles.historyHashBadgeText}>{commit.shortHash}</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.historyEntryMeta}>
+                        {commit.authorName}
+                        {' · '}
+                        {formatRelativeTime(commit.authoredAt)}
+                      </Text>
+                      {commit.refNames.length > 0 ? (
+                        <View style={styles.historyRefRow}>
+                          {commit.refNames.map((refName) => (
+                            <View
+                              key={`${commit.hash}:${refName}`}
+                              style={[
+                                styles.historyRefChip,
+                                commit.isHead &&
+                                  (refName === 'HEAD' || refName.startsWith('HEAD ->')) &&
+                                  styles.historyRefChipHead,
+                              ]}
+                            >
+                              <Text style={styles.historyRefChipText}>{refName}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      ) : null}
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
 
             <View style={styles.filesHeaderRow}>
               <Text style={[styles.sectionLabel, styles.sectionLabelResetMargin]}>
@@ -991,6 +1110,75 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     backgroundColor: theme.colors.bgItem,
     gap: theme.spacing.sm,
   },
+  branchHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.spacing.sm,
+  },
+  branchBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 7,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.bgInput,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+    flexShrink: 1,
+  },
+  branchBadgeText: {
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  repoStateBadge: {
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 7,
+    borderRadius: theme.radius.full,
+  },
+  repoStateBadgeClean: {
+    backgroundColor: 'rgba(86, 182, 92, 0.18)',
+  },
+  repoStateBadgeDirty: {
+    backgroundColor: 'rgba(239, 68, 68, 0.18)',
+  },
+  repoStateBadgeText: {
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.sm,
+  },
+  statTile: {
+    minWidth: 92,
+    flexGrow: 1,
+    backgroundColor: theme.colors.bgInput,
+    borderRadius: theme.radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    gap: 2,
+  },
+  statTileLabel: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  statTileValue: {
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
+    fontSize: 16,
+  },
   sectionLabel: {
     ...theme.typography.caption,
     textTransform: 'uppercase',
@@ -1066,6 +1254,96 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
   },
   dirty: {
     color: theme.colors.statusError,
+  },
+  latestCommitBlock: {
+    gap: 4,
+  },
+  latestCommitHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.spacing.sm,
+  },
+  latestCommitLabel: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  latestCommitHash: {
+    ...theme.typography.mono,
+    color: theme.colors.textMuted,
+    fontSize: 12,
+  },
+  latestCommitSubject: {
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
+    fontWeight: '600',
+  },
+  latestCommitMeta: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+  },
+  historyList: {
+    gap: 0,
+  },
+  historyEntry: {
+    paddingVertical: theme.spacing.sm,
+    gap: theme.spacing.xs,
+  },
+  historyEntryBorder: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.colors.borderLight,
+  },
+  historyEntryHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: theme.spacing.sm,
+  },
+  historyEntrySubject: {
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
+    fontWeight: '600',
+    flex: 1,
+  },
+  historyEntryMeta: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+  },
+  historyHashBadge: {
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 4,
+    borderRadius: theme.radius.sm,
+    backgroundColor: theme.colors.bgInput,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+  },
+  historyHashBadgeText: {
+    ...theme.typography.mono,
+    color: theme.colors.textSecondary,
+    fontSize: 11,
+  },
+  historyRefRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: theme.spacing.xs,
+  },
+  historyRefChip: {
+    paddingHorizontal: theme.spacing.xs,
+    paddingVertical: 4,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.bgInput,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+  },
+  historyRefChipHead: {
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgCanvasAccent,
+  },
+  historyRefChipText: {
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
   },
   filesCard: {
     backgroundColor: theme.colors.bgItem,
@@ -1461,6 +1739,24 @@ function parseAheadCount(rawStatus: string): number {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function parseBehindCount(rawStatus: string): number {
+  const header = rawStatus
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('## '));
+  if (!header) {
+    return 0;
+  }
+
+  const match = header.match(/\bbehind\s+(\d+)\b/i);
+  if (!match) {
+    return 0;
+  }
+
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function parseHasUpstream(rawStatus: string): boolean {
   const header = rawStatus
     .split('\n')
@@ -1469,9 +1765,62 @@ function parseHasUpstream(rawStatus: string): boolean {
   return header?.includes('...') ?? false;
 }
 
+function parseUpstreamBranch(rawStatus: string): string | null {
+  const header = rawStatus
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('## '));
+  if (!header) {
+    return null;
+  }
+
+  const normalized = header.replace(/^##\s+/, '');
+  const upstreamSection = normalized.split('...')[1] ?? '';
+  const upstream = upstreamSection.split('[')[0]?.trim() ?? '';
+  return upstream || null;
+}
+
 function isPublishableBranch(branch: string | null | undefined): boolean {
   const normalized = branch?.trim();
   return Boolean(normalized && normalized !== 'unknown' && !normalized.startsWith('HEAD'));
+}
+
+function formatRelativeTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return value;
+  }
+
+  const deltaSeconds = Math.round((timestamp - Date.now()) / 1000);
+  const absoluteSeconds = Math.abs(deltaSeconds);
+
+  if (absoluteSeconds < 60) {
+    return deltaSeconds >= 0 ? 'in a moment' : 'just now';
+  }
+
+  const chosen: { unit: Intl.RelativeTimeFormatUnit; seconds: number } =
+    absoluteSeconds < 60 * 60
+      ? { unit: 'minute', seconds: 60 }
+      : absoluteSeconds < 60 * 60 * 24
+        ? { unit: 'hour', seconds: 60 * 60 }
+        : absoluteSeconds < 60 * 60 * 24 * 7
+          ? { unit: 'day', seconds: 60 * 60 * 24 }
+          : absoluteSeconds < 60 * 60 * 24 * 30
+            ? { unit: 'week', seconds: 60 * 60 * 24 * 7 }
+            : absoluteSeconds < 60 * 60 * 24 * 365
+              ? { unit: 'month', seconds: 60 * 60 * 24 * 30 }
+              : { unit: 'year', seconds: 60 * 60 * 24 * 365 };
+
+  const valueInUnit = Math.round(deltaSeconds / chosen.seconds);
+  try {
+    return new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(
+      valueInUnit,
+      chosen.unit
+    );
+  } catch {
+    const label = Math.abs(valueInUnit) === 1 ? chosen.unit : `${chosen.unit}s`;
+    return valueInUnit < 0 ? `${Math.abs(valueInUnit)} ${label} ago` : `in ${valueInUnit} ${label}`;
+  }
 }
 
 function formatDiffLineNumber(value: number | null): string {

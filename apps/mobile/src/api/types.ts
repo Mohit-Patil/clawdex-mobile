@@ -274,6 +274,21 @@ export interface GitDiffResponse {
   cwd?: string;
 }
 
+export interface GitHistoryCommit {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  authorName: string;
+  authoredAt: string;
+  refNames: string[];
+  isHead: boolean;
+}
+
+export interface GitHistoryResponse {
+  commits: GitHistoryCommit[];
+  cwd?: string;
+}
+
 export interface GitFileRequest {
   path: string;
   cwd?: string;

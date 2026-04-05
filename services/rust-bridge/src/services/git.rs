@@ -4,9 +4,9 @@ use std::{
 };
 
 use crate::{
-    normalize_path, BridgeError, GitCommitResponse, GitDiffResponse, GitPushResponse,
-    GitStageAllResponse, GitStageResponse, GitStatusEntry, GitStatusResponse,
-    GitUnstageAllResponse, GitUnstageResponse,
+    normalize_path, BridgeError, GitCommitResponse, GitDiffResponse, GitHistoryCommit,
+    GitHistoryResponse, GitPushResponse, GitStageAllResponse, GitStageResponse, GitStatusEntry,
+    GitStatusResponse, GitUnstageAllResponse, GitUnstageResponse,
 };
 
 use super::TerminalService;
@@ -192,6 +192,48 @@ impl GitService {
 
         Ok(GitDiffResponse {
             diff: diff_output,
+            cwd: repo_path.to_string_lossy().to_string(),
+        })
+    }
+
+    pub(crate) async fn get_history(
+        &self,
+        raw_cwd: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<GitHistoryResponse, BridgeError> {
+        let repo_path = self.resolve_repo_path(raw_cwd)?;
+        let history_limit = limit.unwrap_or(12).clamp(1, 30);
+        let args = vec![
+            "-C".to_string(),
+            repo_path.to_string_lossy().to_string(),
+            "log".to_string(),
+            "--first-parent".to_string(),
+            "--decorate=short".to_string(),
+            "--date=iso-strict".to_string(),
+            format!("--max-count={history_limit}"),
+            "--pretty=format:%H\x1f%h\x1f%an\x1f%aI\x1f%D\x1f%s\x1e".to_string(),
+            "HEAD".to_string(),
+        ];
+
+        let result = self
+            .terminal
+            .execute_binary("git", &args, repo_path.clone(), None)
+            .await?;
+
+        if result.code != Some(0) {
+            return Err(BridgeError::server(
+                &(if !result.stderr.is_empty() {
+                    result.stderr
+                } else if !result.stdout.is_empty() {
+                    result.stdout
+                } else {
+                    "git log failed".to_string()
+                }),
+            ));
+        }
+
+        Ok(GitHistoryResponse {
+            commits: parse_git_history(&result.stdout),
             cwd: repo_path.to_string_lossy().to_string(),
         })
     }
@@ -549,6 +591,49 @@ fn parse_status_has_upstream(raw: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn parse_git_history(raw: &str) -> Vec<GitHistoryCommit> {
+    raw.split('\x1e')
+        .filter_map(|record| {
+            let trimmed = record.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let mut parts = trimmed.split('\x1f');
+            let hash = parts.next()?.trim().to_string();
+            let short_hash = parts.next().unwrap_or_default().trim().to_string();
+            let author_name = parts.next().unwrap_or_default().trim().to_string();
+            let authored_at = parts.next().unwrap_or_default().trim().to_string();
+            let refs_raw = parts.next().unwrap_or_default().trim().to_string();
+            let subject = parts.next().unwrap_or_default().trim().to_string();
+
+            if hash.is_empty() || short_hash.is_empty() || subject.is_empty() {
+                return None;
+            }
+
+            let ref_names = refs_raw
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let is_head = ref_names
+                .iter()
+                .any(|entry| entry == "HEAD" || entry.starts_with("HEAD ->"));
+
+            Some(GitHistoryCommit {
+                hash,
+                short_hash,
+                subject,
+                author_name,
+                authored_at,
+                ref_names,
+                is_head,
+            })
+        })
+        .collect()
+}
+
 fn select_default_remote_name(raw: &str) -> Option<String> {
     let remotes = raw
         .lines()
@@ -629,8 +714,8 @@ fn resolve_repo_relative_path(raw_path: &str, repo_path: &Path) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_porcelain_status_entries, parse_status_has_upstream, resolve_git_cwd,
-        resolve_repo_relative_path, select_default_remote_name,
+        parse_git_history, parse_porcelain_status_entries, parse_status_has_upstream,
+        resolve_git_cwd, resolve_repo_relative_path, select_default_remote_name,
     };
     use std::path::{Path, PathBuf};
 
@@ -728,5 +813,28 @@ mod tests {
             Some("backup".to_string())
         );
         assert_eq!(select_default_remote_name(""), None);
+    }
+
+    #[test]
+    fn parses_git_history_records() {
+        let raw = concat!(
+            "abc123\x1fabc123\x1fMohit\x1f2026-04-05T10:00:00+05:30\x1fHEAD -> feat/test, origin/feat/test\x1fAdd history card\x1e",
+            "def456\x1fdef456\x1fMohit\x1f2026-04-04T09:00:00+05:30\x1forigin/main\x1fPrevious commit\x1e"
+        );
+
+        let commits = parse_git_history(raw);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].hash, "abc123");
+        assert_eq!(commits[0].subject, "Add history card");
+        assert!(commits[0].is_head);
+        assert_eq!(
+            commits[0].ref_names,
+            vec![
+                "HEAD -> feat/test".to_string(),
+                "origin/feat/test".to_string()
+            ]
+        );
+        assert_eq!(commits[1].subject, "Previous commit");
+        assert!(!commits[1].is_head);
     }
 }

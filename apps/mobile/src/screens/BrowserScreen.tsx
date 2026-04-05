@@ -753,133 +753,137 @@ export function BrowserScreen({
           </View>
           {previewUrl ? (
             <View style={styles.viewportTray}>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.viewportPresetRow}
-              >
-                {([
-                  { key: 'mobile', label: 'Mobile' },
-                  { key: 'desktop', label: 'Desktop' },
-                  { key: 'overview', label: 'Overview' },
-                ] as const).map((mode) => (
-                  <Pressable
-                    key={mode.key}
-                    onPress={() => applyViewportSelection(mode.key)}
-                    style={({ pressed }) => [
-                      styles.viewportPresetChip,
-                      viewportPreset === mode.key && styles.viewportPresetChipActive,
-                      pressed && styles.viewportPresetChipPressed,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.viewportPresetChipText,
-                        viewportPreset === mode.key && styles.viewportPresetChipTextActive,
-                      ]}
-                    >
-                      {mode.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-              {desktopModeEnabled ? (
-                <>
-              <ScrollView
-                key={`desktop-presets-${viewportPreset}`}
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.viewportPresetRow}
-              >
-                {DESKTOP_VIEWPORT_PRESETS.map((preset) => {
-                  const active =
-                    desktopViewportSize.width === preset.width &&
-                    desktopViewportSize.height === preset.height;
-                  return (
+              <View style={styles.viewportRowSection}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.viewportPresetRow}
+                >
+                  {([
+                    { key: 'mobile', label: 'Mobile' },
+                    { key: 'desktop', label: 'Desktop' },
+                    { key: 'overview', label: 'Overview' },
+                  ] as const).map((mode) => (
                     <Pressable
-                      key={preset.label}
-                      onPress={() => handleSelectDesktopPreset(preset)}
+                      key={mode.key}
+                      onPress={() => applyViewportSelection(mode.key)}
                       style={({ pressed }) => [
                         styles.viewportPresetChip,
-                        active && styles.viewportPresetChipActive,
+                        viewportPreset === mode.key && styles.viewportPresetChipActive,
                         pressed && styles.viewportPresetChipPressed,
                       ]}
                     >
                       <Text
                         style={[
                           styles.viewportPresetChipText,
-                          active && styles.viewportPresetChipTextActive,
+                          viewportPreset === mode.key && styles.viewportPresetChipTextActive,
                         ]}
                       >
-                        {preset.label}
+                        {mode.label}
                       </Text>
                     </Pressable>
-                  );
-                })}
-                <Pressable
-                  onPress={handleShowCustomViewportEditor}
-                  style={({ pressed }) => [
-                    styles.viewportPresetChip,
-                    (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
-                      styles.viewportPresetChipActive,
-                    pressed && styles.viewportPresetChipPressed,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.viewportPresetChipText,
-                      (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
-                        styles.viewportPresetChipTextActive,
-                    ]}
-                  >
-                    Custom
-                  </Text>
-                </Pressable>
-              </ScrollView>
-              {showCustomViewportEditor ? (
-                <View style={styles.viewportInputRow}>
-                  <View style={styles.viewportField}>
-                    <Text style={styles.viewportFieldLabel}>W</Text>
-                    <TextInput
-                      value={desktopViewportDraft.width}
-                      onChangeText={(value) =>
-                        setDesktopViewportDraft((current) => ({ ...current, width: value }))
-                      }
-                      keyboardType="number-pad"
-                      autoCorrect={false}
-                      autoCapitalize="none"
-                      style={styles.viewportFieldInput}
-                      placeholder="1920"
-                      placeholderTextColor={colors.textMuted}
-                    />
+                  ))}
+                </ScrollView>
+              </View>
+              {desktopModeEnabled ? (
+                <>
+                  <View style={styles.viewportRowSection}>
+                    <ScrollView
+                      key={`desktop-presets-${viewportPreset}`}
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.viewportPresetRow}
+                    >
+                      {DESKTOP_VIEWPORT_PRESETS.map((preset) => {
+                        const active =
+                          desktopViewportSize.width === preset.width &&
+                          desktopViewportSize.height === preset.height;
+                        return (
+                          <Pressable
+                            key={preset.label}
+                            onPress={() => handleSelectDesktopPreset(preset)}
+                            style={({ pressed }) => [
+                              styles.viewportPresetChip,
+                              active && styles.viewportPresetChipActive,
+                              pressed && styles.viewportPresetChipPressed,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.viewportPresetChipText,
+                                active && styles.viewportPresetChipTextActive,
+                              ]}
+                            >
+                              {preset.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                      <Pressable
+                        onPress={handleShowCustomViewportEditor}
+                        style={({ pressed }) => [
+                          styles.viewportPresetChip,
+                          (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
+                            styles.viewportPresetChipActive,
+                          pressed && styles.viewportPresetChipPressed,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.viewportPresetChipText,
+                            (showCustomViewportEditor || !desktopViewportMatchesPreset) &&
+                              styles.viewportPresetChipTextActive,
+                          ]}
+                        >
+                          Custom
+                        </Text>
+                      </Pressable>
+                    </ScrollView>
                   </View>
-                  <View style={styles.viewportField}>
-                    <Text style={styles.viewportFieldLabel}>H</Text>
-                    <TextInput
-                      value={desktopViewportDraft.height}
-                      onChangeText={(value) =>
-                        setDesktopViewportDraft((current) => ({ ...current, height: value }))
-                      }
-                      keyboardType="number-pad"
-                      autoCorrect={false}
-                      autoCapitalize="none"
-                      style={styles.viewportFieldInput}
-                      placeholder="1080"
-                      placeholderTextColor={colors.textMuted}
-                    />
-                  </View>
-                  <Pressable
-                    onPress={handleApplyDesktopViewport}
-                    style={({ pressed }) => [
-                      styles.viewportApplyButton,
-                      pressed && styles.viewportApplyButtonPressed,
-                    ]}
-                  >
-                    <Text style={styles.viewportApplyButtonText}>Apply</Text>
-                  </Pressable>
-                  <Text style={styles.viewportCurrentLabel}>{desktopViewportLabel}</Text>
-                </View>
-              ) : null}
+                  {showCustomViewportEditor ? (
+                    <View style={styles.viewportInputRow}>
+                      <View style={styles.viewportField}>
+                        <Text style={styles.viewportFieldLabel}>W</Text>
+                        <TextInput
+                          value={desktopViewportDraft.width}
+                          onChangeText={(value) =>
+                            setDesktopViewportDraft((current) => ({ ...current, width: value }))
+                          }
+                          keyboardType="number-pad"
+                          autoCorrect={false}
+                          autoCapitalize="none"
+                          style={styles.viewportFieldInput}
+                          placeholder="1920"
+                          placeholderTextColor={colors.textMuted}
+                        />
+                      </View>
+                      <View style={styles.viewportField}>
+                        <Text style={styles.viewportFieldLabel}>H</Text>
+                        <TextInput
+                          value={desktopViewportDraft.height}
+                          onChangeText={(value) =>
+                            setDesktopViewportDraft((current) => ({ ...current, height: value }))
+                          }
+                          keyboardType="number-pad"
+                          autoCorrect={false}
+                          autoCapitalize="none"
+                          style={styles.viewportFieldInput}
+                          placeholder="1080"
+                          placeholderTextColor={colors.textMuted}
+                        />
+                      </View>
+                      <Pressable
+                        onPress={handleApplyDesktopViewport}
+                        style={({ pressed }) => [
+                          styles.viewportApplyButton,
+                          pressed && styles.viewportApplyButtonPressed,
+                        ]}
+                      >
+                        <Text style={styles.viewportApplyButtonText}>Apply</Text>
+                      </Pressable>
+                      <Text style={styles.viewportCurrentLabel}>{desktopViewportLabel}</Text>
+                    </View>
+                  ) : null}
                 </>
               ) : null}
             </View>
@@ -954,10 +958,10 @@ export function BrowserScreen({
                       alwaysBounceHorizontal={false}
                       alwaysBounceVertical={false}
                       directionalLockEnabled={false}
-                      pinchGestureEnabled={false}
+                      pinchGestureEnabled={Platform.OS === 'ios'}
                       scrollEnabled
                       minimumZoomScale={desktopMinimumZoomScale}
-                      maximumZoomScale={desktopMinimumZoomScale}
+                      maximumZoomScale={3}
                       bouncesZoom={false}
                     >
                       <View
@@ -983,18 +987,18 @@ export function BrowserScreen({
                           setSupportMultipleWindows={false}
                           automaticallyAdjustContentInsets={false}
                           automaticallyAdjustsScrollIndicatorInsets={false}
-                        contentInset={{
-                          top: 0,
-                          left: 0,
-                          right: 0,
-                          bottom: webViewBottomInset,
-                        }}
-                        contentInsetAdjustmentBehavior="never"
-                        injectedJavaScript={overviewInjectedJavaScript}
-                        onMessage={handleOverviewMessage}
-                        scrollEnabled
-                        contentMode={nativeContentMode}
-                        scalesPageToFit
+                          contentInset={{
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            bottom: webViewBottomInset,
+                          }}
+                          contentInsetAdjustmentBehavior="never"
+                          injectedJavaScript={overviewInjectedJavaScript}
+                          onMessage={handleOverviewMessage}
+                          scrollEnabled={false}
+                          contentMode={nativeContentMode}
+                          scalesPageToFit
                           setBuiltInZoomControls
                           setDisplayZoomControls={false}
                           userAgent={nativeUserAgent}
@@ -1394,9 +1398,12 @@ const createStyles = (theme: AppTheme) =>
     },
     viewportTray: {
       gap: theme.spacing.sm,
-      paddingBottom: theme.spacing.xs,
+      paddingBottom: theme.spacing.sm,
       flexShrink: 0,
-      zIndex: 2,
+    },
+    viewportRowSection: {
+      minHeight: 34,
+      justifyContent: 'center',
     },
     viewportPresetRow: {
       gap: theme.spacing.xs,

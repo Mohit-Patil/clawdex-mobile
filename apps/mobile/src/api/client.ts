@@ -27,6 +27,7 @@ import type {
   GitCommitRequest,
   GitCommitResponse,
   GitDiffResponse,
+  GitHistoryResponse,
   GitFileRequest,
   GitPushResponse,
   GitStageAllResponse,
@@ -846,6 +847,14 @@ export class HostBridgeApiClient {
     const normalizedCwd = normalizeCwd(cwd);
     return this.ws.request<GitDiffResponse>('bridge/git/diff', {
       cwd: normalizedCwd ?? null,
+    });
+  }
+
+  gitHistory(cwd?: string, limit = 12): Promise<GitHistoryResponse> {
+    const normalizedCwd = normalizeCwd(cwd);
+    return this.ws.request<GitHistoryResponse>('bridge/git/history', {
+      cwd: normalizedCwd ?? null,
+      limit,
     });
   }
 
