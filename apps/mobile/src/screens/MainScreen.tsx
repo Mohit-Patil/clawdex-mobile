@@ -8075,49 +8075,63 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           animationType="fade"
           onRequestClose={closeRenameModal}
         >
-          <View style={styles.renameModalBackdrop}>
-            <View style={styles.renameModalCard}>
-              <Text style={styles.renameModalTitle}>Rename chat</Text>
-              <TextInput
-                value={renameDraft}
-                onChangeText={setRenameDraft}
-                keyboardAppearance={theme.keyboardAppearance}
-                placeholder="Chat name"
-                placeholderTextColor={theme.colors.textMuted}
-                style={styles.renameModalInput}
-                autoFocus
-                editable={!renaming}
-                maxLength={120}
-              />
-              <View style={styles.renameModalActions}>
-                <Pressable
-                  onPress={closeRenameModal}
-                  style={({ pressed }) => [
-                    styles.renameModalButton,
-                    styles.renameModalButtonSecondary,
-                    pressed && styles.renameModalButtonPressed,
-                  ]}
-                  disabled={renaming}
-                >
-                  <Text style={styles.renameModalButtonSecondaryText}>Cancel</Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => void submitRenameChat()}
-                  style={({ pressed }) => [
-                    styles.renameModalButton,
-                    styles.renameModalButtonPrimary,
-                    pressed && styles.renameModalButtonPrimaryPressed,
-                    (renaming || !renameDraft.trim()) && styles.renameModalButtonDisabled,
-                  ]}
-                  disabled={renaming || !renameDraft.trim()}
-                >
-                  <Text style={styles.renameModalButtonPrimaryText}>
-                    {renaming ? 'Saving...' : 'Save'}
-                  </Text>
-                </Pressable>
+          <KeyboardAvoidingView
+            style={styles.renameModalKeyboardAvoider}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? safeAreaInsets.bottom : 0}
+          >
+            <View style={styles.renameModalBackdrop}>
+              <View
+                style={[
+                  styles.renameModalKeyboardContent,
+                  styles.renameModalKeyboardContentBottom,
+                  { paddingBottom: theme.spacing.md },
+                ]}
+              >
+                <View style={styles.renameModalCard}>
+                  <Text style={styles.renameModalTitle}>Rename chat</Text>
+                  <TextInput
+                    value={renameDraft}
+                    onChangeText={setRenameDraft}
+                    keyboardAppearance={theme.keyboardAppearance}
+                    placeholder="Chat name"
+                    placeholderTextColor={theme.colors.textMuted}
+                    style={styles.renameModalInput}
+                    autoFocus
+                    editable={!renaming}
+                    maxLength={120}
+                  />
+                  <View style={styles.renameModalActions}>
+                    <Pressable
+                      onPress={closeRenameModal}
+                      style={({ pressed }) => [
+                        styles.renameModalButton,
+                        styles.renameModalButtonSecondary,
+                        pressed && styles.renameModalButtonPressed,
+                      ]}
+                      disabled={renaming}
+                    >
+                      <Text style={styles.renameModalButtonSecondaryText}>Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => void submitRenameChat()}
+                      style={({ pressed }) => [
+                        styles.renameModalButton,
+                        styles.renameModalButtonPrimary,
+                        pressed && styles.renameModalButtonPrimaryPressed,
+                        (renaming || !renameDraft.trim()) && styles.renameModalButtonDisabled,
+                      ]}
+                      disabled={renaming || !renameDraft.trim()}
+                    >
+                      <Text style={styles.renameModalButtonPrimaryText}>
+                        {renaming ? 'Saving...' : 'Save'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
               </View>
             </View>
-          </View>
+          </KeyboardAvoidingView>
         </Modal>
 
         <Modal
@@ -11561,6 +11575,9 @@ const createStyles = (theme: AppTheme) => {
   renameModalKeyboardContent: {
     flex: 1,
     justifyContent: 'center',
+  },
+  renameModalKeyboardContentBottom: {
+    justifyContent: 'flex-end',
   },
   workspaceModalLoading: {
     ...theme.typography.caption,

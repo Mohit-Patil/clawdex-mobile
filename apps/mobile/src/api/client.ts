@@ -1038,7 +1038,7 @@ export class HostBridgeApiClient {
       return latest;
     }
 
-    const retryDelaysMs = [150, 300, 500, 800];
+    const retryDelaysMs = [25, 50, 100, 150];
     for (const delayMs of retryDelaysMs) {
       await sleep(delayMs);
       latestSnapshot = await this.readChatSnapshot(id);
