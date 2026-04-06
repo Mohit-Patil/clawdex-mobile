@@ -20,6 +20,35 @@ export function filterDrawerChatsByEngines(
   return chats.filter((chat) => allowedEngines.has(resolveChatEngine(chat.engine)));
 }
 
+export function searchDrawerChats(chats: ChatSummary[], query: string): ChatSummary[] {
+  const terms = normalizeSearchQuery(query);
+  if (terms.length === 0) {
+    return chats;
+  }
+
+  return chats.filter((chat) => {
+    const haystack = [
+      chat.title,
+      chat.lastMessagePreview,
+      chat.cwd,
+      chat.lastError,
+    ]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join('\n')
+      .toLocaleLowerCase();
+
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
 export function isSubAgentChat(chat: ChatSummary): boolean {
   return Boolean(chat.parentThreadId) || chat.sourceKind?.startsWith('subAgent') === true;
+}
+
+function normalizeSearchQuery(query: string): string[] {
+  return query
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter((term) => term.length > 0);
 }

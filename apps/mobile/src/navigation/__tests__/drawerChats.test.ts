@@ -4,6 +4,7 @@ import {
   filterDrawerChats,
   filterDrawerChatsByEngines,
   isSubAgentChat,
+  searchDrawerChats,
 } from '../drawerChats';
 
 function chat(
@@ -93,5 +94,38 @@ describe('drawerChats', () => {
       'codex-implicit',
       'opencode',
     ]);
+  });
+
+  it('searches chats by title, preview, and workspace path', () => {
+    const chats = [
+      chat('title-match', {
+        title: 'Verification of Slowness',
+      }),
+      chat('preview-match', {
+        title: 'Bug triage',
+        lastMessagePreview: 'Bridge connection feels delayed after send',
+      }),
+      chat('cwd-match', {
+        title: 'Untitled',
+        cwd: '/Users/me/projects/clawdex-mobile',
+      }),
+    ];
+
+    expect(searchDrawerChats(chats, 'slowness').map((entry) => entry.id)).toEqual([
+      'title-match',
+    ]);
+    expect(searchDrawerChats(chats, 'delayed send').map((entry) => entry.id)).toEqual([
+      'preview-match',
+    ]);
+    expect(searchDrawerChats(chats, 'clawdex mobile').map((entry) => entry.id)).toEqual([
+      'cwd-match',
+    ]);
+  });
+
+  it('returns all chats for blank queries', () => {
+    const chats = [chat('one'), chat('two')];
+
+    expect(searchDrawerChats(chats, '').map((entry) => entry.id)).toEqual(['one', 'two']);
+    expect(searchDrawerChats(chats, '   ').map((entry) => entry.id)).toEqual(['one', 'two']);
   });
 });

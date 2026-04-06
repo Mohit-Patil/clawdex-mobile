@@ -8,6 +8,7 @@ import {
   SectionList,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -20,6 +21,7 @@ import {
   DEFAULT_DRAWER_CHAT_ENGINES,
   filterDrawerChats,
   filterDrawerChatsByEngines,
+  searchDrawerChats,
 } from './drawerChats';
 import { describeAgentThreadSource } from '../screens/agentThreads';
 import {
@@ -89,6 +91,7 @@ export function DrawerContent({
   const [selectedChatEngines, setSelectedChatEngines] = useState<ChatEngine[]>(() => [
     ...DEFAULT_DRAWER_CHAT_ENGINES,
   ]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [filterMenuVisible, setFilterMenuVisible] = useState(false);
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
   const [runHeartbeatAtByThread, setRunHeartbeatAtByThread] = useState<Record<string, number>>({});
@@ -99,22 +102,33 @@ export function DrawerContent({
   const queuedLoadChatsRef = useRef<{ showRefresh: boolean } | null>(null);
   const scheduledLoadChatsRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const filteredChats = useMemo(
+  const engineFilteredChats = useMemo(
     () => filterDrawerChatsByEngines(chats, selectedChatEngines),
     [chats, selectedChatEngines]
   );
+  const filteredChats = useMemo(
+    () => searchDrawerChats(engineFilteredChats, searchQuery),
+    [engineFilteredChats, searchQuery]
+  );
+  const baseChatSections = useMemo(
+    () => buildChatWorkspaceSections(engineFilteredChats),
+    [engineFilteredChats]
+  );
   const chatSections = useMemo(() => buildChatWorkspaceSections(filteredChats), [filteredChats]);
+  const isSearching = searchQuery.trim().length > 0;
   const visibleChatSections = useMemo(
     () =>
-      chatSections.map((section) =>
-        collapsedWorkspaceKeys.has(section.key)
-          ? {
-              ...section,
-              data: [],
-            }
-          : section
-      ),
-    [chatSections, collapsedWorkspaceKeys]
+      isSearching
+        ? chatSections
+        : chatSections.map((section) =>
+            collapsedWorkspaceKeys.has(section.key)
+              ? {
+                  ...section,
+                  data: [],
+                }
+              : section
+          ),
+    [chatSections, collapsedWorkspaceKeys, isSearching]
   );
   const runningChatCount = useMemo(() => {
     const now = Date.now();
@@ -346,21 +360,21 @@ export function DrawerContent({
   }, []);
 
   useEffect(() => {
-    chatSectionsRef.current = chatSections;
-  }, [chatSections]);
+    chatSectionsRef.current = baseChatSections;
+  }, [baseChatSections]);
 
   useEffect(() => {
-    if (chatSections.length === 0 || hasAppliedInitialCollapseRef.current) {
+    if (baseChatSections.length === 0 || hasAppliedInitialCollapseRef.current) {
       return;
     }
 
-    setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(chatSections));
+    setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(baseChatSections));
     hasAppliedInitialCollapseRef.current = true;
-  }, [chatSections]);
+  }, [baseChatSections]);
 
   useEffect(() => {
     setCollapsedWorkspaceKeys((prev) => {
-      const validKeys = new Set(chatSections.map((section) => section.key));
+      const validKeys = new Set(baseChatSections.map((section) => section.key));
       let changed = false;
       const next = new Set<string>();
 
@@ -373,15 +387,16 @@ export function DrawerContent({
       }
 
       const everySectionCollapsed =
-        chatSections.length > 0 && chatSections.every((section) => next.has(section.key));
+        baseChatSections.length > 0 &&
+        baseChatSections.every((section) => next.has(section.key));
       if (everySectionCollapsed) {
-        next.delete(chatSections[0]?.key ?? '');
+        next.delete(baseChatSections[0]?.key ?? '');
         changed = true;
       }
 
       return changed ? next : prev;
     });
-  }, [chatSections]);
+  }, [baseChatSections]);
 
   const filteredChatCount = filteredChats.length;
   const selectedChatEngineSet = useMemo(
@@ -389,6 +404,7 @@ export function DrawerContent({
     [selectedChatEngines]
   );
   const hasFilteredEngines = selectedChatEngines.length < DEFAULT_DRAWER_CHAT_ENGINES.length;
+  const hasActiveFilters = hasFilteredEngines || isSearching;
   const singleSelectedEngine =
     selectedChatEngines.length === 1 ? selectedChatEngines[0] : null;
   const emptyTitle = singleSelectedEngine
@@ -399,6 +415,10 @@ export function DrawerContent({
         singleSelectedEngine === 'codex' ? 'opencode' : 'codex'
       )} back on or start a new ${getChatEngineLabel(singleSelectedEngine)} chat.`
     : 'Start a new chat and it will show up here with live activity.';
+  const resolvedEmptyTitle = isSearching ? 'No matching chats' : emptyTitle;
+  const resolvedEmptyHint = isSearching
+    ? 'Try a different title, keyword, or workspace name.'
+    : emptyHint;
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -428,23 +448,29 @@ export function DrawerContent({
 
   const handleSelectChat = useCallback(
     (chatId: string) => {
-      setFilterMenuVisible(false);
+      if (!isSearching) {
+        setFilterMenuVisible(false);
+      }
       onSelectChat(chatId);
     },
-    [onSelectChat]
+    [isSearching, onSelectChat]
   );
 
   const handleNewChat = useCallback(() => {
-    setFilterMenuVisible(false);
+    if (!isSearching) {
+      setFilterMenuVisible(false);
+    }
     onNewChat();
-  }, [onNewChat]);
+  }, [isSearching, onNewChat]);
 
   const handleNavigate = useCallback(
     (screen: Screen) => {
-      setFilterMenuVisible(false);
+      if (!isSearching) {
+        setFilterMenuVisible(false);
+      }
       onNavigate(screen);
     },
-    [onNavigate]
+    [isSearching, onNavigate]
   );
 
   const toggleChatEngineFilter = useCallback((engine: ChatEngine) => {
@@ -461,6 +487,18 @@ export function DrawerContent({
       return DEFAULT_DRAWER_CHAT_ENGINES.filter((entry) => next.includes(entry));
     });
   }, []);
+
+  const handleToggleFilterMenu = useCallback(() => {
+    if (filterMenuVisible) {
+      if (isSearching) {
+        setSearchQuery('');
+      }
+      setFilterMenuVisible(false);
+      return;
+    }
+
+    setFilterMenuVisible(true);
+  }, [filterMenuVisible, isSearching]);
 
   return (
     <View style={styles.container}>
@@ -541,57 +579,20 @@ export function DrawerContent({
                   accessibilityLabel="Filter chat engines"
                   accessibilityRole="button"
                   hitSlop={6}
-                  onPress={() => setFilterMenuVisible((prev) => !prev)}
+                  onPress={handleToggleFilterMenu}
                   style={({ pressed }) => [
                     styles.filterTriggerButton,
                     filterMenuVisible && styles.filterTriggerButtonOpen,
-                    hasFilteredEngines && styles.filterTriggerButtonActive,
+                    hasActiveFilters && styles.filterTriggerButtonActive,
                     pressed && styles.filterTriggerButtonPressed,
                   ]}
                 >
                   <Ionicons
                     name="funnel-outline"
                     size={14}
-                    color={hasFilteredEngines || filterMenuVisible ? theme.colors.textPrimary : theme.colors.textMuted}
+                    color={hasActiveFilters || filterMenuVisible ? theme.colors.textPrimary : theme.colors.textMuted}
                   />
                 </Pressable>
-                {filterMenuVisible ? (
-                  <View style={styles.filterPopover}>
-                    {CHAT_FILTER_OPTIONS.map((option) => {
-                      const selected = selectedChatEngineSet.has(option.key);
-                      return (
-                        <Pressable
-                          key={option.key}
-                          accessibilityLabel={`Toggle ${option.label} chats`}
-                          accessibilityRole="checkbox"
-                          accessibilityState={{ checked: selected }}
-                          onPress={() => toggleChatEngineFilter(option.key)}
-                          style={({ pressed }) => [
-                            styles.filterPopoverOption,
-                            selected && styles.filterPopoverOptionSelected,
-                            pressed && styles.filterPopoverOptionPressed,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.filterPopoverOptionText,
-                              selected && styles.filterPopoverOptionTextSelected,
-                            ]}
-                          >
-                            {option.label}
-                          </Text>
-                          {selected ? (
-                            <Ionicons
-                              name="checkmark"
-                              size={14}
-                              color={theme.colors.textPrimary}
-                            />
-                          ) : null}
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                ) : null}
               </View>
               <View style={styles.sectionCountBadge}>
                 <Text style={styles.sectionCountText}>
@@ -600,6 +601,78 @@ export function DrawerContent({
               </View>
             </View>
           </View>
+
+          {filterMenuVisible ? (
+            <View style={styles.filterPanel}>
+              <View style={styles.searchField}>
+                <Ionicons name="search" size={16} color={theme.colors.textMuted} />
+                <TextInput
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                  keyboardAppearance={theme.keyboardAppearance}
+                  placeholder="Search chats"
+                  placeholderTextColor={theme.colors.textMuted}
+                  style={styles.searchInput}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="search"
+                  clearButtonMode="never"
+                />
+                {isSearching ? (
+                  <Pressable
+                    accessibilityLabel="Clear chat search"
+                    hitSlop={6}
+                    onPress={() => setSearchQuery('')}
+                    style={({ pressed }) => [
+                      styles.searchClearButton,
+                      pressed && styles.searchClearButtonPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="close"
+                      size={14}
+                      color={theme.colors.textSecondary}
+                    />
+                  </Pressable>
+                ) : null}
+              </View>
+              <View style={styles.filterChipRow}>
+                {CHAT_FILTER_OPTIONS.map((option) => {
+                  const selected = selectedChatEngineSet.has(option.key);
+                  return (
+                    <Pressable
+                      key={option.key}
+                      accessibilityLabel={`Toggle ${option.label} chats`}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: selected }}
+                      onPress={() => toggleChatEngineFilter(option.key)}
+                      style={({ pressed }) => [
+                        styles.filterChip,
+                        selected && styles.filterChipSelected,
+                        pressed && styles.filterChipPressed,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.filterChipText,
+                          selected && styles.filterChipTextSelected,
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                      {selected ? (
+                        <Ionicons
+                          name="checkmark"
+                          size={14}
+                          color={theme.colors.textPrimary}
+                        />
+                      ) : null}
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          ) : null}
 
           {loading ? (
             <View style={styles.emptyStateCard}>
@@ -611,13 +684,13 @@ export function DrawerContent({
             <View style={styles.emptyStateCard}>
               <View style={styles.emptyStateIconWrap}>
                 <Ionicons
-                  name="chatbubbles-outline"
+                  name={isSearching ? 'search-outline' : 'chatbubbles-outline'}
                   size={18}
                   color={theme.colors.textPrimary}
                 />
               </View>
-              <Text style={styles.emptyTitle}>{emptyTitle}</Text>
-              <Text style={styles.emptyHint}>{emptyHint}</Text>
+              <Text style={styles.emptyTitle}>{resolvedEmptyTitle}</Text>
+              <Text style={styles.emptyHint}>{resolvedEmptyHint}</Text>
             </View>
           ) : (
             <SectionList
@@ -627,6 +700,7 @@ export function DrawerContent({
               contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
               stickySectionHeadersEnabled={false}
+              keyboardShouldPersistTaps="handled"
               refreshControl={
                 <RefreshControl
                   refreshing={refreshing}
@@ -637,15 +711,16 @@ export function DrawerContent({
                 />
               }
               renderSectionHeader={({ section }) => {
-                const collapsed = collapsedWorkspaceKeys.has(section.key);
+                const collapsed = !isSearching && collapsedWorkspaceKeys.has(section.key);
                 return (
                   <Pressable
+                    disabled={isSearching}
                     style={({ pressed }) => [
                       styles.workspaceGroupHeader,
                       collapsed
                         ? styles.workspaceGroupHeaderCollapsed
                         : styles.workspaceGroupHeaderExpanded,
-                      pressed && styles.workspaceGroupHeaderPressed,
+                      pressed && !isSearching && styles.workspaceGroupHeaderPressed,
                     ]}
                     onPress={() => toggleWorkspaceSection(section.key)}
                   >
@@ -665,13 +740,15 @@ export function DrawerContent({
                           {formatCompactCount(section.itemCount)}
                         </Text>
                       </View>
-                      <View style={styles.workspaceGroupHeaderMeta}>
-                        <Ionicons
-                          name={collapsed ? 'chevron-forward' : 'chevron-down'}
-                          size={14}
-                          color={theme.colors.textMuted}
-                        />
-                      </View>
+                      {!isSearching ? (
+                        <View style={styles.workspaceGroupHeaderMeta}>
+                          <Ionicons
+                            name={collapsed ? 'chevron-forward' : 'chevron-down'}
+                            size={14}
+                            color={theme.colors.textMuted}
+                          />
+                        </View>
+                      ) : null}
                     </View>
                   </Pressable>
                 );
@@ -1162,47 +1239,76 @@ const createStyles = (theme: AppTheme) => {
   filterTriggerButtonPressed: {
     opacity: 0.9,
   },
-  filterPopover: {
-    position: 'absolute',
-    top: 36,
-    right: 0,
-    width: 156,
+  filterPanel: {
+    marginHorizontal: theme.spacing.lg,
+    marginBottom: theme.spacing.sm,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgElevated,
-    padding: 6,
-    gap: 4,
-    shadowColor: theme.colors.shadow,
-    shadowOpacity: 0.22,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 10,
-    zIndex: 6,
+    padding: theme.spacing.sm,
+    gap: theme.spacing.sm,
   },
-  filterPopoverOption: {
-    minHeight: 34,
-    borderRadius: 10,
-    paddingHorizontal: 10,
+  filterChipRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: theme.spacing.xs + 2,
+  },
+  filterChip: {
+    minHeight: 34,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: theme.radius.full,
+    borderWidth: 1,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: theme.spacing.xs,
   },
-  filterPopoverOptionSelected: {
+  filterChipSelected: {
+    borderColor: theme.colors.borderHighlight,
     backgroundColor: theme.colors.bgInput,
   },
-  filterPopoverOptionPressed: {
+  filterChipPressed: {
     opacity: 0.9,
   },
-  filterPopoverOptionText: {
+  filterChipText: {
     ...theme.typography.body,
     color: theme.colors.textSecondary,
     fontSize: 13,
     fontWeight: '600',
   },
-  filterPopoverOptionTextSelected: {
+  filterChipTextSelected: {
     color: theme.colors.textPrimary,
+  },
+  searchField: {
+    minHeight: 40,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgInput,
+    paddingLeft: theme.spacing.md,
+    paddingRight: theme.spacing.xs,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  searchInput: {
+    flex: 1,
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
+    paddingVertical: 0,
+    fontSize: 14,
+  },
+  searchClearButton: {
+    width: 28,
+    height: 28,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchClearButtonPressed: {
+    backgroundColor: theme.colors.bgItem,
   },
   list: {
     flex: 1,
