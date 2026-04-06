@@ -235,8 +235,11 @@ const CHAT_MESSAGE_PAGE_SIZE = 80;
 const LIKELY_RUNNING_RECENT_UPDATE_MS = 30_000;
 const UNANSWERED_USER_RUNNING_TTL_MS = 90_000;
 const ACTIVE_CHAT_SYNC_INTERVAL_MS = 2_000;
-const IDLE_CHAT_SYNC_INTERVAL_MS = 2_500;
+const IDLE_CHAT_SYNC_INTERVAL_MS = 5_000;
+const BACKGROUND_CHAT_SYNC_INTERVAL_MS = 15_000;
 const AGENT_THREADS_SYNC_INTERVAL_MS = 10_000;
+const AGENT_THREADS_IDLE_SYNC_INTERVAL_MS = 20_000;
+const AGENT_THREADS_BACKGROUND_SYNC_INTERVAL_MS = 30_000;
 const CONTEXT_WINDOW_BASELINE_TOKENS = 5_000;
 const CHAT_DRAFTS_FILE = 'chat-drafts.json';
 const CHAT_DRAFTS_VERSION = 1;
@@ -2578,36 +2581,50 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       void refreshAgentThreads(selectedChatId);
     }, [refreshAgentThreads, selectedChatId]);
 
-    useEffect(() => {
-      if (!selectedChatId) {
-        return;
-      }
+	    useEffect(() => {
+	      if (!selectedChatId) {
+	        return;
+	      }
 
-      let stopped = false;
-      let timer: ReturnType<typeof setTimeout> | null = null;
+	      const hasKnownRelatedAgentThreads =
+	        relatedAgentThreads.length > 0 || Boolean(agentRootThreadId);
+	      let stopped = false;
+	      let timer: ReturnType<typeof setTimeout> | null = null;
 
-      const scheduleNextRefresh = () => {
-        if (stopped) {
-          return;
-        }
+	      const scheduleNextRefresh = () => {
+	        if (stopped) {
+	          return;
+	        }
 
-        timer = setTimeout(() => {
-          const activeChatId = chatIdRef.current;
-          if (appStateRef.current === 'active' && activeChatId === selectedChatId) {
-            void refreshAgentThreads(activeChatId);
-          }
-          scheduleNextRefresh();
-        }, AGENT_THREADS_SYNC_INTERVAL_MS);
-      };
+	        const appIsActive = appStateRef.current === 'active';
+	        const shouldPollFast =
+	          appIsActive &&
+	          (hasKnownRelatedAgentThreads ||
+	            Boolean(activeTurnIdRef.current) ||
+	            runWatchdogUntilRef.current > Date.now());
+	        const intervalMs = !appIsActive
+	          ? AGENT_THREADS_BACKGROUND_SYNC_INTERVAL_MS
+	          : shouldPollFast
+	            ? AGENT_THREADS_SYNC_INTERVAL_MS
+	            : AGENT_THREADS_IDLE_SYNC_INTERVAL_MS;
 
-      scheduleNextRefresh();
+	        timer = setTimeout(() => {
+	          const activeChatId = chatIdRef.current;
+	          if (activeChatId === selectedChatId) {
+	            void refreshAgentThreads(activeChatId);
+	          }
+	          scheduleNextRefresh();
+	        }, intervalMs);
+	      };
+
+	      scheduleNextRefresh();
       return () => {
         stopped = true;
         if (timer) {
           clearTimeout(timer);
-        }
-      };
-    }, [refreshAgentThreads, selectedChatId]);
+	        }
+	      };
+	    }, [agentRootThreadId, refreshAgentThreads, relatedAgentThreads.length, selectedChatId]);
 
     useEffect(() => {
       const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -6869,16 +6886,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
       };
 
-      const scheduleNextSync = () => {
-        if (stopped) {
-          return;
-        }
-        const shouldPollFast =
-          Boolean(activeTurnIdRef.current) || runWatchdogUntilRef.current > Date.now();
-        const intervalMs = shouldPollFast
-          ? ACTIVE_CHAT_SYNC_INTERVAL_MS
-          : IDLE_CHAT_SYNC_INTERVAL_MS;
-        timer = setTimeout(() => {
+	      const scheduleNextSync = () => {
+	        if (stopped) {
+	          return;
+	        }
+	        const appIsActive = appStateRef.current === 'active';
+	        const shouldPollFast =
+	          appIsActive &&
+	          (Boolean(activeTurnIdRef.current) || runWatchdogUntilRef.current > Date.now());
+	        const intervalMs = !appIsActive
+	          ? BACKGROUND_CHAT_SYNC_INTERVAL_MS
+	          : shouldPollFast
+	          ? ACTIVE_CHAT_SYNC_INTERVAL_MS
+	          : IDLE_CHAT_SYNC_INTERVAL_MS;
+	        timer = setTimeout(() => {
           void syncChat().finally(() => {
             scheduleNextSync();
           });

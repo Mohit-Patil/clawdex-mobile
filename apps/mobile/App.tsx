@@ -1471,6 +1471,7 @@ export default function App() {
                     <DrawerContent
                       api={activeApi}
                       ws={activeWs}
+                      active={drawerVisible}
                       selectedChatId={selectedChatId}
                       onSelectChat={handleSelectChat}
                       onNewChat={handleNewChat}

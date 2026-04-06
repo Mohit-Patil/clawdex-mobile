@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
@@ -35,6 +35,7 @@ type Screen = 'Main' | 'Browser' | 'Settings' | 'Privacy' | 'Terms';
 interface DrawerContentProps {
   api: HostBridgeApiClient;
   ws: HostBridgeWsClient;
+  active: boolean;
   selectedChatId: string | null;
   onSelectChat: (id: string) => void;
   onNewChat: () => void;
@@ -45,6 +46,7 @@ const RUN_HEARTBEAT_STALE_MS = 20_000;
 const DRAWER_REFRESH_CONNECTED_MS = 10_000;
 const DRAWER_REFRESH_DISCONNECTED_MS = 5_000;
 const DRAWER_EVENT_REFRESH_DEBOUNCE_MS = 250;
+const DRAWER_OPEN_STALE_REFRESH_MS = 15_000;
 const RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'task_started',
   'agent_reasoning_delta',
@@ -75,9 +77,10 @@ const CHAT_FILTER_OPTIONS: ReadonlyArray<{
   },
 ];
 
-export function DrawerContent({
+export const DrawerContent = memo(function DrawerContentComponent({
   api,
   ws,
+  active,
   selectedChatId,
   onSelectChat,
   onNewChat,
@@ -101,6 +104,8 @@ export function DrawerContent({
   const loadChatsInFlightRef = useRef<Promise<void> | null>(null);
   const queuedLoadChatsRef = useRef<{ showRefresh: boolean } | null>(null);
   const scheduledLoadChatsRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasHydratedOnceRef = useRef(false);
+  const lastLoadedAtRef = useRef(0);
   const styles = useMemo(() => createStyles(theme), [theme]);
   const engineFilteredChats = useMemo(
     () => filterDrawerChatsByEngines(chats, selectedChatEngines),
@@ -165,7 +170,12 @@ export function DrawerContent({
       }
 
       const dedupedChats = dedupeChatsById(filterDrawerChats([...listedChats, ...loadedChats]));
-      setChats(sortChats(dedupedChats));
+      const nextChats = sortChats(dedupedChats);
+      setChats((previous) =>
+        areDrawerChatListsEquivalent(previous, nextChats) ? previous : nextChats
+      );
+      hasHydratedOnceRef.current = true;
+      lastLoadedAtRef.current = Date.now();
       const activeChatIds = new Set(dedupedChats.map((chat) => chat.id));
       setRunHeartbeatAtByThread((prev) => {
         const now = Date.now();
@@ -196,6 +206,10 @@ export function DrawerContent({
 
   const loadChats = useCallback(
     (showRefresh = false) => {
+      if (!active && hasHydratedOnceRef.current) {
+        return Promise.resolve();
+      }
+
       if (showRefresh && scheduledLoadChatsRef.current) {
         clearTimeout(scheduledLoadChatsRef.current);
         scheduledLoadChatsRef.current = null;
@@ -220,11 +234,15 @@ export function DrawerContent({
       loadChatsInFlightRef.current = promise;
       return promise;
     },
-    [loadChatsNow]
+    [active, loadChatsNow]
   );
 
   const scheduleLoadChats = useCallback(
     (delay = DRAWER_EVENT_REFRESH_DEBOUNCE_MS) => {
+      if (!active) {
+        return;
+      }
+
       if (scheduledLoadChatsRef.current) {
         return;
       }
@@ -234,14 +252,26 @@ export function DrawerContent({
         void loadChats();
       }, delay);
     },
-    [loadChats]
+    [active, loadChats]
   );
 
   useEffect(() => {
+    setWsConnected(ws.isConnected);
+    const shouldPrimeHiddenDrawer = !hasHydratedOnceRef.current;
+    const shouldRefreshVisibleDrawer =
+      active && Date.now() - lastLoadedAtRef.current > DRAWER_OPEN_STALE_REFRESH_MS;
+    if (!shouldPrimeHiddenDrawer && !shouldRefreshVisibleDrawer) {
+      return;
+    }
+
     void loadChats();
-  }, [loadChats]);
+  }, [active, loadChats, ws]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
+
     return ws.onEvent((event: RpcNotification) => {
       const threadIdFromEvent = extractThreadId(event);
       const markThreadRunning = (threadId: string | null) => {
@@ -311,18 +341,26 @@ export function DrawerContent({
         scheduleLoadChats();
       }
     });
-  }, [scheduleLoadChats, ws]);
+  }, [active, scheduleLoadChats, ws]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
+
     return ws.onStatus((connected) => {
       setWsConnected(connected);
       if (connected) {
         scheduleLoadChats();
       }
     });
-  }, [scheduleLoadChats, ws]);
+  }, [active, scheduleLoadChats, ws]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
+
     const timer = setInterval(() => {
       setRunHeartbeatAtByThread((prev) => {
         const now = Date.now();
@@ -340,15 +378,31 @@ export function DrawerContent({
     }, 5000);
 
     return () => clearInterval(timer);
-  }, []);
+  }, [active]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
+
     const timer = setInterval(() => {
       scheduleLoadChats();
     }, wsConnected ? DRAWER_REFRESH_CONNECTED_MS : DRAWER_REFRESH_DISCONNECTED_MS);
 
     return () => clearInterval(timer);
-  }, [scheduleLoadChats, wsConnected]);
+  }, [active, scheduleLoadChats, wsConnected]);
+
+  useEffect(() => {
+    if (active) {
+      return;
+    }
+
+    if (scheduledLoadChatsRef.current) {
+      clearTimeout(scheduledLoadChatsRef.current);
+      scheduledLoadChatsRef.current = null;
+    }
+    queuedLoadChatsRef.current = null;
+  }, [active]);
 
   useEffect(() => {
     return () => {
@@ -421,6 +475,10 @@ export function DrawerContent({
     : emptyHint;
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
+
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
         setCollapsedWorkspaceKeys(getDefaultCollapsedWorkspaceKeys(chatSectionsRef.current));
@@ -432,7 +490,7 @@ export function DrawerContent({
     return () => {
       subscription.remove();
     };
-  }, [scheduleLoadChats]);
+  }, [active, scheduleLoadChats]);
 
   const toggleWorkspaceSection = useCallback((sectionKey: string) => {
     setCollapsedWorkspaceKeys((prev) => {
@@ -893,7 +951,7 @@ export function DrawerContent({
       </SafeAreaView>
     </View>
   );
-}
+});
 
 function sortChats(chats: ChatSummary[]): ChatSummary[] {
   return [...chats].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -910,6 +968,40 @@ function dedupeChatsById(chats: ChatSummary[]): ChatSummary[] {
   }
 
   return Array.from(byId.values());
+}
+
+function areDrawerChatListsEquivalent(
+  previous: ChatSummary[],
+  next: ChatSummary[]
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (previous.length !== next.length) {
+    return false;
+  }
+
+  for (let index = 0; index < previous.length; index += 1) {
+    const left = previous[index];
+    const right = next[index];
+    if (
+      left.id !== right.id ||
+      left.title !== right.title ||
+      left.status !== right.status ||
+      left.updatedAt !== right.updatedAt ||
+      left.lastMessagePreview !== right.lastMessagePreview ||
+      left.cwd !== right.cwd ||
+      left.engine !== right.engine ||
+      left.sourceKind !== right.sourceKind ||
+      left.parentThreadId !== right.parentThreadId ||
+      left.subAgentDepth !== right.subAgentDepth ||
+      left.lastError !== right.lastError
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function getDefaultCollapsedWorkspaceKeys(sections: ChatWorkspaceSection[]): Set<string> {
