@@ -1497,9 +1497,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (chatIdRef.current !== queuedThreadId) {
             return;
           }
-          setSelectedChat((prev) =>
-            prev && prev.id === resolvedLatest.id ? resolvedLatest : prev
-          );
+          setSelectedChat((prev) => {
+            if (!prev || prev.id !== resolvedLatest.id) {
+              return prev;
+            }
+            return resolveEquivalentChat(prev, resolvedLatest);
+          });
           if (isChatLikelyRunning(resolvedLatest)) {
             bumpRunWatchdog();
             setActivity((prev) =>
@@ -4384,7 +4387,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             delete autoEnabledPlanTurnIdByThreadRef.current[chatId];
           }
           setSelectedChatId(chatId);
-          setSelectedChat(chat);
+          setSelectedChat((prev) =>
+            prev && prev.id === chat.id ? resolveEquivalentChat(prev, chat) : chat
+          );
           setError(null);
           if (!shouldPreserveRuntimeState) {
             setActiveCommands([]);
@@ -6651,11 +6656,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   if (!prev || prev.id !== summary.id) {
                     return prev;
                   }
-                  return {
-                    ...prev,
-                    ...summary,
-                    messages: prev.messages,
-                  };
+                  return mergeChatSummaryPreservingMessages(prev, summary);
                 });
 
                 const shouldPreserveRunning =
@@ -6810,12 +6811,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             if (!prev || prev.id !== resolvedLatest.id) {
               return resolvedLatest;
             }
-
-            const isUnchanged =
-              prev.updatedAt === resolvedLatest.updatedAt &&
-              prev.messages.length === resolvedLatest.messages.length;
-
-            return isUnchanged ? prev : resolvedLatest;
+            return resolveEquivalentChat(prev, resolvedLatest);
           });
 
           const currentSelectedChat = selectedChatRef.current;
@@ -8956,9 +8952,108 @@ function areChatsEquivalentForTranscript(
   );
 }
 
-function areChatSummaryListsEquivalent(
-  previous: ChatSummary[],
-  next: ChatSummary[]
+function resolveEquivalentChat(previous: Chat, next: Chat): Chat {
+  return areChatsEquivalent(previous, next) ? previous : next;
+}
+
+function mergeChatSummaryPreservingMessages(previous: Chat, summary: ChatSummary): Chat {
+  const next = {
+    ...previous,
+    ...summary,
+    messages: previous.messages,
+  };
+  return areChatsEquivalent(previous, next) ? previous : next;
+}
+
+function areChatsEquivalent(previous: Chat | null, next: Chat | null): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (!previous || !next) {
+    return previous === next;
+  }
+
+  return (
+    areChatSummariesEquivalent(previous, next) &&
+    areChatPlansEquivalent(previous.latestPlan, next.latestPlan) &&
+    areChatPlansEquivalent(previous.latestTurnPlan, next.latestTurnPlan) &&
+    previous.latestTurnStatus === next.latestTurnStatus &&
+    areChatMessagesEquivalent(previous.messages, next.messages)
+  );
+}
+
+function areChatSummariesEquivalent(
+  previous: ChatSummary | null,
+  next: ChatSummary | null
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (!previous || !next) {
+    return previous === next;
+  }
+
+  return (
+    previous.id === next.id &&
+    previous.title === next.title &&
+    previous.status === next.status &&
+    previous.createdAt === next.createdAt &&
+    previous.updatedAt === next.updatedAt &&
+    previous.statusUpdatedAt === next.statusUpdatedAt &&
+    previous.lastMessagePreview === next.lastMessagePreview &&
+    previous.cwd === next.cwd &&
+    previous.engine === next.engine &&
+    previous.modelProvider === next.modelProvider &&
+    previous.agentNickname === next.agentNickname &&
+    previous.agentRole === next.agentRole &&
+    previous.sourceKind === next.sourceKind &&
+    previous.parentThreadId === next.parentThreadId &&
+    previous.subAgentDepth === next.subAgentDepth &&
+    previous.lastRunStartedAt === next.lastRunStartedAt &&
+    previous.lastRunFinishedAt === next.lastRunFinishedAt &&
+    previous.lastRunDurationMs === next.lastRunDurationMs &&
+    previous.lastRunExitCode === next.lastRunExitCode &&
+    previous.lastRunTimedOut === next.lastRunTimedOut &&
+    previous.lastError === next.lastError
+  );
+}
+
+function areChatPlansEquivalent(
+  previous: Chat['latestPlan'],
+  next: Chat['latestPlan']
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (!previous || !next) {
+    return !previous && !next;
+  }
+  if (
+    previous.threadId !== next.threadId ||
+    previous.turnId !== next.turnId ||
+    previous.explanation !== next.explanation ||
+    previous.steps.length !== next.steps.length
+  ) {
+    return false;
+  }
+
+  for (let index = 0; index < previous.steps.length; index += 1) {
+    const previousStep = previous.steps[index];
+    const nextStep = next.steps[index];
+    if (
+      previousStep.step !== nextStep.step ||
+      previousStep.status !== nextStep.status
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areChatMessagesEquivalent(
+  previous: ChatTranscriptMessage[],
+  next: ChatTranscriptMessage[]
 ): boolean {
   if (previous === next) {
     return true;
@@ -8972,17 +9067,66 @@ function areChatSummaryListsEquivalent(
     const right = next[index];
     if (
       left.id !== right.id ||
-      left.title !== right.title ||
-      left.status !== right.status ||
-      left.updatedAt !== right.updatedAt ||
-      left.lastMessagePreview !== right.lastMessagePreview ||
-      left.cwd !== right.cwd ||
-      left.engine !== right.engine ||
-      left.sourceKind !== right.sourceKind ||
-      left.parentThreadId !== right.parentThreadId ||
-      left.subAgentDepth !== right.subAgentDepth ||
-      left.lastError !== right.lastError
+      left.role !== right.role ||
+      left.content !== right.content ||
+      left.createdAt !== right.createdAt ||
+      left.systemKind !== right.systemKind ||
+      !areChatMessageSubAgentMetaEquivalent(left.subAgentMeta, right.subAgentMeta)
     ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areChatMessageSubAgentMetaEquivalent(
+  previous: ChatTranscriptMessage['subAgentMeta'],
+  next: ChatTranscriptMessage['subAgentMeta']
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (!previous || !next) {
+    return !previous && !next;
+  }
+  if (
+    previous.tool !== next.tool ||
+    previous.prompt !== next.prompt ||
+    previous.senderThreadId !== next.senderThreadId ||
+    previous.agentStatus !== next.agentStatus
+  ) {
+    return false;
+  }
+
+  const previousReceiverThreadIds = previous.receiverThreadIds ?? [];
+  const nextReceiverThreadIds = next.receiverThreadIds ?? [];
+  if (previousReceiverThreadIds.length !== nextReceiverThreadIds.length) {
+    return false;
+  }
+
+  for (let index = 0; index < previousReceiverThreadIds.length; index += 1) {
+    if (previousReceiverThreadIds[index] !== nextReceiverThreadIds[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areChatSummaryListsEquivalent(
+  previous: ChatSummary[],
+  next: ChatSummary[]
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (previous.length !== next.length) {
+    return false;
+  }
+
+  for (let index = 0; index < previous.length; index += 1) {
+    if (!areChatSummariesEquivalent(previous[index], next[index])) {
       return false;
     }
   }
