@@ -124,7 +124,23 @@ export function syncVisibleSubAgentStatuses(
     return messages;
   }
 
-  return messages.map((message) => syncSubAgentMessageStatus(message, threadStatuses));
+  let nextMessages: ChatMessage[] | null = null;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    const nextMessage = syncSubAgentMessageStatus(message, threadStatuses);
+
+    if (!nextMessages) {
+      if (nextMessage === message) {
+        continue;
+      }
+      nextMessages = messages.slice(0, index);
+    }
+
+    nextMessages.push(nextMessage);
+  }
+
+  return nextMessages ?? messages;
 }
 
 function syncSubAgentMessageStatus(

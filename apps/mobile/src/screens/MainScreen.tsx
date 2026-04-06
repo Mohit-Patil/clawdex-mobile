@@ -2511,8 +2511,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return related;
           }
 
-          setRelatedAgentThreads(related.threads);
-          setAgentRootThreadId(related.rootThreadId);
+          setRelatedAgentThreads((prev) =>
+            areChatSummaryListsEquivalent(prev, related.threads) ? prev : related.threads
+          );
+          setAgentRootThreadId((prev) =>
+            prev === related.rootThreadId ? prev : related.rootThreadId
+          );
           return related;
         } catch (err) {
           if (agentThreadsRequestRef.current === requestId && options?.showLoading) {
@@ -8916,8 +8920,8 @@ const ChatView = memo(function ChatView({
 
 function areChatViewPropsEqual(previous: ChatViewProps, next: ChatViewProps): boolean {
   return (
-    previous.chat === next.chat &&
-    previous.parentChat === next.parentChat &&
+    areChatsEquivalentForTranscript(previous.chat, next.chat) &&
+    areChatsEquivalentForTranscript(previous.parentChat, next.parentChat) &&
     previous.bridgeUrl === next.bridgeUrl &&
     previous.bridgeToken === next.bridgeToken &&
     previous.onOpenLocalPreview === next.onOpenLocalPreview &&
@@ -8931,6 +8935,59 @@ function areChatViewPropsEqual(previous: ChatViewProps, next: ChatViewProps): bo
     previous.autoScrollStateRef === next.autoScrollStateRef &&
     previous.bottomInset === next.bottomInset
   );
+}
+
+function areChatsEquivalentForTranscript(
+  previous: Chat | null,
+  next: Chat | null
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (!previous || !next) {
+    return previous === next;
+  }
+
+  return (
+    previous.id === next.id &&
+    previous.parentThreadId === next.parentThreadId &&
+    previous.engine === next.engine &&
+    previous.messages === next.messages
+  );
+}
+
+function areChatSummaryListsEquivalent(
+  previous: ChatSummary[],
+  next: ChatSummary[]
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (previous.length !== next.length) {
+    return false;
+  }
+
+  for (let index = 0; index < previous.length; index += 1) {
+    const left = previous[index];
+    const right = next[index];
+    if (
+      left.id !== right.id ||
+      left.title !== right.title ||
+      left.status !== right.status ||
+      left.updatedAt !== right.updatedAt ||
+      left.lastMessagePreview !== right.lastMessagePreview ||
+      left.cwd !== right.cwd ||
+      left.engine !== right.engine ||
+      left.sourceKind !== right.sourceKind ||
+      left.parentThreadId !== right.parentThreadId ||
+      left.subAgentDepth !== right.subAgentDepth ||
+      left.lastError !== right.lastError
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function WorkflowCard({
