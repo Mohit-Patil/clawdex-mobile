@@ -102,6 +102,11 @@ function writeStatus(statusPath, payload) {
   fs.writeFileSync(statusPath, `${JSON.stringify(nextPayload, null, 2)}\n`);
 }
 
+function readNonEmptyEnv(env, key) {
+  const value = env?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
 function formatHostForUrl(host) {
   if (host.includes(":") && !host.startsWith("[")) {
     return `[${host}]`;
@@ -204,6 +209,90 @@ function forceKillBridgeProcess(pid) {
   process.kill(pid, "SIGKILL");
 }
 
+function listMatchingPids(pattern) {
+  const result = spawnSync("ps", ["-ax", "-o", "pid=", "-o", "command="], {
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(\d+)\s+(.*)$/);
+      if (!match) {
+        return null;
+      }
+      return {
+        pid: Number.parseInt(match[1], 10),
+        command: match[2],
+      };
+    })
+    .filter((entry) => entry && Number.isFinite(entry.pid) && pattern.test(entry.command))
+    .map((entry) => entry.pid);
+}
+
+function isOpencodeEnabled(env) {
+  const activeEngine = readNonEmptyEnv(env, "BRIDGE_ACTIVE_ENGINE");
+  const enabledEngines = readNonEmptyEnv(env, "BRIDGE_ENABLED_ENGINES");
+  return [activeEngine, enabledEngines].some((value) =>
+    value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .includes("opencode")
+  );
+}
+
+function buildOpencodeServePattern(port) {
+  const normalizedPort = String(port).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\bopencode(?:\\.cmd|\\.exe)?\\b.*\\bserve\\b.*--port\\s+${normalizedPort}\\b`);
+}
+
+async function stopLingeringOpencodeServer(packageRoot) {
+  const secureEnvPath = path.join(packageRoot, ".env.secure");
+  if (!fs.existsSync(secureEnvPath)) {
+    return;
+  }
+
+  const secureEnv = readEnvFile(secureEnvPath);
+  if (!isOpencodeEnabled(secureEnv)) {
+    return;
+  }
+
+  const opencodePort = readNonEmptyEnv(secureEnv, "BRIDGE_OPENCODE_PORT") || "4090";
+  const pids = listMatchingPids(buildOpencodeServePattern(opencodePort));
+  if (pids.length === 0) {
+    return;
+  }
+
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const stillRunning = pids.filter((pid) => isProcessAlive(pid));
+    if (stillRunning.length === 0) {
+      return;
+    }
+    await sleep(250);
+  }
+
+  for (const pid of pids) {
+    if (!isProcessAlive(pid)) {
+      continue;
+    }
+    try {
+      forceKillBridgeProcess(pid);
+    } catch {}
+  }
+}
+
 async function waitForBridgeExit(pid) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (!isProcessAlive(pid)) {
@@ -285,6 +374,7 @@ async function waitForHealth(envFilePath, timeoutMs) {
 }
 
 async function restartBridge(packageRoot, statusPath, payload, message) {
+  await stopLingeringOpencodeServer(packageRoot);
   writeStatus(statusPath, {
     ...payload,
     state: "starting",

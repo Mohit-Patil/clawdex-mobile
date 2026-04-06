@@ -75,6 +75,7 @@ coverage/
 *.log
 *.pid
 *.seed
+.bridge-update-status.json
 .claude/
 .clawdex-mobile-attachments/
 /app.json
