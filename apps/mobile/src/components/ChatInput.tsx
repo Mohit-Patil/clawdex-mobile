@@ -67,6 +67,8 @@ export function ChatInput({
   const theme = useAppTheme();
   const { colors } = theme;
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const ACTION_BUTTON_HIT_SLOP = 6;
+  const ACTION_BUTTON_PRESS_RETENTION_OFFSET = 8;
   const INPUT_TEXT_LINE_HEIGHT = 20;
   const INPUT_TEXT_VERTICAL_PADDING = Platform.OS === 'ios' ? 2 : 0;
   const INPUT_TEXT_MIN_HEIGHT = 20;
@@ -256,6 +258,8 @@ export function ChatInput({
                     <Pressable
                       onPress={onVoiceToggle}
                       style={[styles.sendBtn, styles.micBtnRecording]}
+                      hitSlop={ACTION_BUTTON_HIT_SLOP}
+                      pressRetentionOffset={ACTION_BUTTON_PRESS_RETENTION_OFFSET}
                     >
                       <Ionicons name="mic" size={14} color={colors.error} />
                     </Pressable>
@@ -263,6 +267,8 @@ export function ChatInput({
                     <Pressable
                       onPress={onVoiceToggle}
                       style={styles.sendBtn}
+                      hitSlop={ACTION_BUTTON_HIT_SLOP}
+                      pressRetentionOffset={ACTION_BUTTON_PRESS_RETENTION_OFFSET}
                     >
                       <Ionicons name="mic-outline" size={14} color={colors.textMuted} />
                     </Pressable>
@@ -273,6 +279,8 @@ export function ChatInput({
                     onPress={onStop}
                     style={styles.sendBtn}
                     disabled={isStopping}
+                    hitSlop={ACTION_BUTTON_HIT_SLOP}
+                    pressRetentionOffset={ACTION_BUTTON_PRESS_RETENTION_OFFSET}
                   >
                     <View style={styles.stopButtonContent}>
                       <Ionicons name="square" size={10} color={colors.textPrimary} />
@@ -289,6 +297,8 @@ export function ChatInput({
                     onPress={canSend ? onSubmit : undefined}
                     style={styles.sendBtn}
                     disabled={!canSend}
+                    hitSlop={ACTION_BUTTON_HIT_SLOP}
+                    pressRetentionOffset={ACTION_BUTTON_PRESS_RETENTION_OFFSET}
                   >
                     {isLoading && !canSend ? (
                       <ActivityIndicator size="small" color={colors.textMuted} />
