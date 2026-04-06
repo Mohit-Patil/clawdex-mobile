@@ -653,6 +653,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
     const accountRateLimitsRef = useRef<AccountRateLimitSnapshot | null>(null);
     accountRateLimitsRef.current = accountRateLimits;
+    const sendingRef = useRef(sending);
+    sendingRef.current = sending;
+    const creatingRef = useRef(creating);
+    creatingRef.current = creating;
+    const stoppingTurnRef = useRef(stoppingTurn);
+    stoppingTurnRef.current = stoppingTurn;
+    const pendingApprovalIdRef = useRef<string | null>(pendingApproval?.id ?? null);
+    pendingApprovalIdRef.current = pendingApproval?.id ?? null;
+    const pendingUserInputRequestIdRef = useRef<string | null>(
+      pendingUserInputRequest?.id ?? null
+    );
+    pendingUserInputRequestIdRef.current = pendingUserInputRequest?.id ?? null;
     const attachmentPickerInProgressRef = useRef(false);
     const [threadContextUsage, setThreadContextUsage] = useState<ThreadContextUsage | null>(
       null
@@ -737,6 +749,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [scrollToBottomReliable]
     );
 
+    const handleJumpToLatest = useCallback(() => {
+      scrollToBottomReliable(true);
+    }, [scrollToBottomReliable]);
+
     const schedulePinnedScrollToBottom = useCallback(
       (animated = true) => {
         const autoScrollState = autoScrollStateRef.current;
@@ -820,6 +836,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     chatIdRef.current = selectedChatId;
     const selectedChatRef = useRef<Chat | null>(selectedChat);
     selectedChatRef.current = selectedChat;
+    const selectedChatIdRef = useRef<string | null>(selectedChatId);
+    selectedChatIdRef.current = selectedChatId;
     const parentChatCacheRef = useRef<Record<string, Chat>>({});
     const agentRootThreadIdRef = useRef<string | null>(agentRootThreadId);
     agentRootThreadIdRef.current = agentRootThreadId;
@@ -1344,7 +1362,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         const normalizedModelId = normalizeModelId(modelId);
         const normalizedEffort = normalizeReasoningEffort(effort);
-        const normalizedServiceTier = toFastModeServiceTier(
+        const normalizedServiceTier = toSelectedServiceTier(
           normalizeServiceTier(serviceTier)
         );
         const previous = chatModelPreferencesRef.current[normalizedChatId];
@@ -1419,7 +1437,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         try {
           const serviceTier = await api.readServiceTierPreference();
           if (!cancelled) {
-            setDefaultServiceTier(toFastModeServiceTier(serviceTier));
+            setDefaultServiceTier(toSelectedServiceTier(serviceTier));
           }
         } catch {
           if (!cancelled) {
@@ -2171,7 +2189,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       const preference = chatModelPreferencesRef.current[chatId];
       setSelectedModelId(preference?.modelId ?? null);
       setSelectedEffort(preference?.effort ?? null);
-      setSelectedServiceTier(toFastModeServiceTier(preference?.serviceTier ?? null));
+      setSelectedServiceTier(toSelectedServiceTier(preference?.serviceTier ?? null));
     }, [chatModelPreferencesLoaded, selectedChatId]);
 
     useEffect(() => {
@@ -2202,7 +2220,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const activeModel =
       selectedModel ?? preferredDefaultModel ?? serverDefaultModel ?? null;
     const activeModelId =
-      selectedModel?.id ?? preferredDefaultModel?.id ?? serverDefaultModelId;
+      selectedModel?.id ??
+      preferredDefaultModel?.id ??
+      serverDefaultModelId;
     const effortPickerModel = effortPickerModelId
       ? modelOptions.find((model) => model.id === effortPickerModelId) ?? null
       : activeModel;
@@ -2212,7 +2232,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const activeModelDefaultEffort = activeModel?.defaultReasoningEffort ?? null;
     const requestedEffort =
       selectedEffort ?? (!selectedChatId ? preferredDefaultEffort : null);
-    const appliedServiceTierForSelectedChat = toFastModeServiceTier(
+    const appliedServiceTierForSelectedChat = toSelectedServiceTier(
       selectedChatId
         ? normalizeServiceTier(
             chatModelPreferencesRef.current[selectedChatId]?.serviceTier ?? null
@@ -5191,6 +5211,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       ]
     );
 
+    const sendMessageContentRef = useRef(sendMessageContent);
+    useEffect(() => {
+      sendMessageContentRef.current = sendMessageContent;
+    }, [sendMessageContent]);
+
     const sendMessage = useCallback(async () => {
       const content = draft.trim();
       if (!content) {
@@ -5442,32 +5467,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
 
         const cannotAutoSend =
-          !selectedChatId ||
-          sending ||
-          creating ||
-          stoppingTurn ||
-          Boolean(activeTurnId) ||
-          Boolean(pendingApproval?.id) ||
-          Boolean(pendingUserInputRequest?.id) ||
-          (selectedChat ? isChatLikelyRunning(selectedChat) : false);
+          !selectedChatIdRef.current ||
+          sendingRef.current ||
+          creatingRef.current ||
+          stoppingTurnRef.current ||
+          Boolean(activeTurnIdRef.current) ||
+          Boolean(pendingApprovalIdRef.current) ||
+          Boolean(pendingUserInputRequestIdRef.current) ||
+          (selectedChatRef.current ? isChatLikelyRunning(selectedChatRef.current) : false);
         if (cannotAutoSend) {
           setDraft(option);
           return;
         }
 
-        void sendMessageContent(option, { allowSlashCommands: false });
+        void sendMessageContentRef.current(option, { allowSlashCommands: false });
       },
-      [
-        creating,
-        activeTurnId,
-        pendingApproval?.id,
-        pendingUserInputRequest?.id,
-        selectedChat,
-        selectedChatId,
-        sendMessageContent,
-        sending,
-        stoppingTurn,
-      ]
+      []
     );
 
     useEffect(() => {
@@ -7288,10 +7303,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         : `${String(spawnedAgentCount)} agents`;
     const showLiveAgentPanel =
       !isOpeningChat && Boolean(selectedChat) && liveAgentRows.length > 0;
-    const agentThreadStatusById = useMemo(
-      () => new Map(relatedAgentThreads.map((chat) => [chat.id, chat.status] as const)),
-      [relatedAgentThreads]
-    );
+    const agentThreadStatusByIdRef = useRef<ReadonlyMap<string, Chat['status']>>(new Map());
+    const agentThreadStatusById = useMemo(() => {
+      const nextMap = new Map(relatedAgentThreads.map((chat) => [chat.id, chat.status] as const));
+      const previousMap = agentThreadStatusByIdRef.current;
+      if (areChatStatusMapsEquivalent(previousMap, nextMap)) {
+        return previousMap;
+      }
+      agentThreadStatusByIdRef.current = nextMap;
+      return nextMap;
+    }, [relatedAgentThreads]);
     const selectedThreadRuntimeSnapshot = selectedChat
       ? threadRuntimeSnapshotsRef.current[selectedChat.id] ?? null
       : null;
@@ -7893,7 +7914,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
                   onInlineOptionSelect={handleInlineOptionSelect}
                   onPinnedAutoScroll={scrollToBottomIfPinned}
-                  onJumpToLatest={() => scrollToBottomReliable(true)}
+                  onJumpToLatest={handleJumpToLatest}
                   onScrollInteractionStart={clearPendingScrollRetries}
                   autoScrollStateRef={autoScrollStateRef}
                   bottomInset={androidComposerReservedInset}
@@ -7947,7 +7968,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
                 onInlineOptionSelect={handleInlineOptionSelect}
                 onPinnedAutoScroll={scrollToBottomIfPinned}
-                onJumpToLatest={() => scrollToBottomReliable(true)}
+                onJumpToLatest={handleJumpToLatest}
                 onScrollInteractionStart={clearPendingScrollRetries}
                 autoScrollStateRef={autoScrollStateRef}
                 bottomInset={chatBottomInset}
@@ -9121,6 +9142,26 @@ function areChatsEquivalentForTranscript(
     previous.engine === next.engine &&
     previous.messages === next.messages
   );
+}
+
+function areChatStatusMapsEquivalent(
+  previous: ReadonlyMap<string, Chat['status']>,
+  next: ReadonlyMap<string, Chat['status']>
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  if (previous.size !== next.size) {
+    return false;
+  }
+
+  for (const [key, value] of previous) {
+    if (next.get(key) !== value) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function resolveEquivalentChat(previous: Chat, next: Chat): Chat {
@@ -10492,7 +10533,7 @@ function normalizeServiceTier(
   return null;
 }
 
-function toFastModeServiceTier(
+function toSelectedServiceTier(
   serviceTier: ServiceTier | null | undefined
 ): ServiceTier | null {
   return serviceTier === 'fast' ? 'fast' : null;
@@ -10503,10 +10544,10 @@ function resolveSelectedServiceTier(
   defaultServiceTier: ServiceTier | null | undefined
 ): ServiceTier | null {
   if (selectedServiceTier !== undefined) {
-    return toFastModeServiceTier(selectedServiceTier);
+    return toSelectedServiceTier(selectedServiceTier);
   }
 
-  return toFastModeServiceTier(defaultServiceTier);
+  return toSelectedServiceTier(defaultServiceTier);
 }
 
 function resolveSteerTargetTurnId(
@@ -10623,7 +10664,7 @@ function parseChatModelPreferences(raw: string): Record<string, ChatModelPrefere
       result[normalizedChatId] = {
         modelId: normalizeModelId(readString(entry.modelId)),
         effort: normalizeReasoningEffort(readString(entry.effort)),
-        serviceTier: toFastModeServiceTier(
+        serviceTier: toSelectedServiceTier(
           normalizeServiceTier(readString(entry.serviceTier))
         ),
         updatedAt: readString(entry.updatedAt) ?? new Date(0).toISOString(),
