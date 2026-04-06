@@ -611,7 +611,13 @@ export class HostBridgeApiClient {
       throw new Error('turn/start did not return turn id');
     }
     options?.onTurnStarted?.(turnId);
-    return this.getChatWithUserMessage(id, turnId, content);
+    return this.getChatWithUserMessage(
+      id,
+      turnId,
+      content,
+      normalizedMentions,
+      normalizedLocalImages
+    );
   }
 
   async steerChatTurn(
@@ -1016,7 +1022,9 @@ export class HostBridgeApiClient {
   private async getChatWithUserMessage(
     id: string,
     turnId: string,
-    content: string
+    content: string,
+    mentions: TurnInputMention[] = [],
+    localImages: TurnInputLocalImage[] = []
   ): Promise<Chat> {
     const normalizedContent = content.trim();
     let latestSnapshot = await this.readChatSnapshot(id);
@@ -1029,11 +1037,13 @@ export class HostBridgeApiClient {
     const hasMatchingTurnMessage = rawThreadHasTurnUserMessage(
       latestSnapshot.rawThread,
       turnId,
-      normalizedContent
+      normalizedContent,
+      mentions,
+      localImages
     );
     const hasFallbackRecentMessage =
       !rawThreadHasTurns(latestSnapshot.rawThread) &&
-      chatHasRecentUserMessage(latest, normalizedContent);
+      chatHasRecentUserMessage(latest, normalizedContent, mentions, localImages);
     if (hasMatchingTurnMessage || hasFallbackRecentMessage) {
       return latest;
     }
@@ -1047,17 +1057,19 @@ export class HostBridgeApiClient {
       const matchedAfterRetry = rawThreadHasTurnUserMessage(
         latestSnapshot.rawThread,
         turnId,
-        normalizedContent
+        normalizedContent,
+        mentions,
+        localImages
       );
       const matchedByFallback =
         !rawThreadHasTurns(latestSnapshot.rawThread) &&
-        chatHasRecentUserMessage(latest, normalizedContent);
+        chatHasRecentUserMessage(latest, normalizedContent, mentions, localImages);
       if (matchedAfterRetry || matchedByFallback) {
         return latest;
       }
     }
 
-    return appendSyntheticUserMessage(latest, normalizedContent);
+    return appendSyntheticUserMessage(latest, normalizedContent, mentions, localImages);
   }
 }
 
@@ -1531,8 +1543,14 @@ function toReasoningEffortOptions(raw: unknown): ModelReasoningEffortOption[] {
   return options;
 }
 
-function chatHasRecentUserMessage(chat: Chat, content: string, tailSize = 8): boolean {
-  const normalized = content.trim();
+function chatHasRecentUserMessage(
+  chat: Chat,
+  content: string,
+  mentions: TurnInputMention[] = [],
+  localImages: TurnInputLocalImage[] = [],
+  tailSize = 8
+): boolean {
+  const normalized = buildExpectedUserMessageContent(content.trim(), mentions, localImages);
   if (!normalized) {
     return true;
   }
@@ -1550,7 +1568,9 @@ function rawThreadHasTurns(rawThread: RawThread): boolean {
 function rawThreadHasTurnUserMessage(
   rawThread: RawThread,
   turnId: string,
-  content: string
+  content: string,
+  mentions: TurnInputMention[] = [],
+  localImages: TurnInputLocalImage[] = []
 ): boolean {
   const normalizedContent = content.trim();
   const normalizedTurnId = turnId.trim();
@@ -1570,7 +1590,13 @@ function rawThreadHasTurnUserMessage(
       return false;
     }
 
-    return extractUserMessageText(record.content).trim() === normalizedContent;
+    return (
+      buildExpectedUserMessageContent(
+        extractUserMessageText(record.content).trim(),
+        extractUserMessageMentions(record.content),
+        extractUserMessageLocalImages(record.content)
+      ) === buildExpectedUserMessageContent(normalizedContent, mentions, localImages)
+    );
   });
 }
 
@@ -1596,8 +1622,79 @@ function extractUserMessageText(value: unknown): string {
     .join('\n');
 }
 
-function appendSyntheticUserMessage(chat: Chat, content: string): Chat {
+function extractUserMessageMentions(value: unknown): TurnInputMention[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const mentions: TurnInputMention[] = [];
+  for (const entry of value) {
+    const record = toRecord(entry);
+    if (!record || readString(record.type) !== 'mention') {
+      continue;
+    }
+
+    const path = readString(record.path)?.trim();
+    if (!path) {
+      continue;
+    }
+
+    mentions.push({
+      type: 'mention',
+      path,
+      name: normalizeMentionName(readString(record.name) ?? undefined, path),
+    });
+  }
+
+  return mentions;
+}
+
+function extractUserMessageLocalImages(value: unknown): TurnInputLocalImage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const images: TurnInputLocalImage[] = [];
+  for (const entry of value) {
+    const record = toRecord(entry);
+    if (!record || readString(record.type) !== 'localImage') {
+      continue;
+    }
+
+    const path = readString(record.path)?.trim();
+    if (!path) {
+      continue;
+    }
+
+    images.push({
+      type: 'localImage',
+      path,
+    });
+  }
+
+  return images;
+}
+
+function buildExpectedUserMessageContent(
+  content: string,
+  mentions: TurnInputMention[] = [],
+  localImages: TurnInputLocalImage[] = []
+): string {
   const normalized = content.trim();
+  const mentionLines = mentions.map((mention) => `[file: ${mention.path}]`);
+  const localImageLines = localImages.map((image) => `[local image: ${image.path}]`);
+  return [normalized, ...mentionLines, ...localImageLines]
+    .filter((part) => part.trim().length > 0)
+    .join('\n');
+}
+
+function appendSyntheticUserMessage(
+  chat: Chat,
+  content: string,
+  mentions: TurnInputMention[] = [],
+  localImages: TurnInputLocalImage[] = []
+): Chat {
+  const normalized = buildExpectedUserMessageContent(content.trim(), mentions, localImages);
   if (!normalized) {
     return chat;
   }

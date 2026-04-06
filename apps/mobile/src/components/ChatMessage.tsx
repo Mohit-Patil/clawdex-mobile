@@ -103,7 +103,10 @@ function ChatMessageComponent({
                 key={`${message.id}-text-${String(index)}`}
                 style={styles.userMessageText}
               >
-                {block.value}
+                {renderUserTextWithMentions(
+                  block.value,
+                  styles.userInlineMentionText
+                )}
               </SelectableMessageText>
             );
           })}
@@ -693,6 +696,15 @@ const createStyles = (theme: AppTheme) => {
     color: theme.colors.textPrimary,
     lineHeight: 20,
   },
+  userInlineMentionText: {
+    color: theme.colors.textSecondary,
+    backgroundColor: theme.colors.bgItem,
+    borderColor: theme.colors.userBubbleBorder,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: 3,
+    overflow: 'hidden',
+  },
   userFileChip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -960,6 +972,44 @@ function SelectableMessageText({ children, ...props }: TextProps): ReactElement 
   );
 }
 
+function renderUserTextWithMentions(
+  value: string,
+  mentionStyle: TextProps['style']
+): Array<string | ReactElement> {
+  const pattern = /(^|[^A-Za-z0-9_])(@[A-Za-z0-9._-]+)/g;
+  const parts: Array<string | ReactElement> = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+
+  while ((match = pattern.exec(value)) !== null) {
+    const prefix = match[1] ?? '';
+    const token = match[2] ?? '';
+    const startIndex = match.index + prefix.length;
+    const prefixStartIndex = match.index;
+
+    if (prefixStartIndex > lastIndex) {
+      parts.push(value.slice(lastIndex, prefixStartIndex));
+    }
+    if (prefix) {
+      parts.push(prefix);
+    }
+    parts.push(
+      <Text key={`mention-${String(key)}`} style={mentionStyle}>
+        {token}
+      </Text>
+    );
+    key += 1;
+    lastIndex = startIndex + token.length;
+  }
+
+  if (lastIndex < value.length) {
+    parts.push(value.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : [value];
+}
+
 function MarkdownImage({
   source,
   accessibilityLabel,
@@ -1060,10 +1110,14 @@ function parseUserMessageBlocks(
 
     const fileMatch = line.match(/^\[file:\s*(.+?)\]$/i);
     if (fileMatch) {
+      const label = toLocalFileReferenceLabel(fileMatch[1]) ?? toPathBasename(fileMatch[1]);
+      if (textContainsMentionLabel(pendingTextLines.join('\n'), label)) {
+        continue;
+      }
       flushTextBlock();
       blocks.push({
         kind: 'file',
-        value: toLocalFileReferenceLabel(fileMatch[1]) ?? toPathBasename(fileMatch[1]),
+        value: label,
       });
       continue;
     }
@@ -1093,6 +1147,20 @@ function toPathBasename(path: string): string {
 
   const basename = normalizedPath.split('/').filter(Boolean).pop();
   return basename && basename.length > 0 ? basename : normalizedPath;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function textContainsMentionLabel(text: string, label: string): boolean {
+  const trimmedLabel = label.trim();
+  if (!trimmedLabel) {
+    return false;
+  }
+
+  const pattern = new RegExp(`(^|[^\\w])@${escapeRegex(trimmedLabel)}(?=$|[^\\w])`, 'i');
+  return pattern.test(text);
 }
 
 function openMarkdownLink(

@@ -580,6 +580,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [attachmentFileCandidates, setAttachmentFileCandidates] = useState<string[]>([]);
     const [loadingAttachmentFileCandidates, setLoadingAttachmentFileCandidates] =
       useState(false);
+    const attachmentFileCandidatesCacheRef = useRef<Record<string, string[]>>({});
+    const attachmentFileCandidatesInFlightRef = useRef<Record<string, Promise<string[]>>>({});
+    const attachmentWorkspaceRef = useRef<string | null>(null);
     const [attachmentPickerBusy, setAttachmentPickerBusy] = useState(false);
     const [uploadingAttachment, setUploadingAttachment] = useState(false);
     const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
@@ -876,11 +879,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const preferredDefaultEffort = normalizeReasoningEffort(pendingEngineDefaults?.effort);
     const activeApprovalPolicy = toApprovalPolicyForMode(approvalMode);
     const attachmentWorkspace = selectedChat?.cwd ?? preferredStartCwd ?? null;
+    attachmentWorkspaceRef.current = attachmentWorkspace;
     const slashQuery = parseSlashQuery(draft);
     const slashSuggestions =
       slashQuery !== null
         ? filterSlashCommands(slashQuery)
         : [];
+    const mentionQuery = parseMentionQuery(draft);
+    const mentionPathSuggestions = useMemo(
+      () =>
+        mentionQuery !== null
+          ? toAttachmentPathSuggestions(
+              attachmentFileCandidates,
+              mentionQuery,
+              pendingMentionPaths
+            )
+          : [],
+      [attachmentFileCandidates, mentionQuery, pendingMentionPaths]
+    );
     const slashSuggestionsMaxHeight = Math.max(
       148,
       Math.min(300, Math.floor(windowHeight * 0.34))
@@ -1016,12 +1032,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
     const composerAttachments = useMemo(() => {
       const next: ComposerAttachmentChip[] = [];
-      for (const path of pendingMentionPaths) {
-        next.push({
-          id: `file:${path}`,
-          label: path,
-        });
-      }
       for (const path of pendingLocalImagePaths) {
         next.push({
           id: `image:${path}`,
@@ -1029,7 +1039,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         });
       }
       return next;
-    }, [pendingLocalImagePaths, pendingMentionPaths]);
+    }, [pendingLocalImagePaths]);
 
     const scheduleRunWatchdogExpiry = useCallback((deadlineMs: number) => {
       const existingTimer = runWatchdogTimerRef.current;
@@ -2857,31 +2867,73 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setError(null);
     }, [selectedChatId]);
 
-    const loadAttachmentFileCandidates = useCallback(async () => {
-      setLoadingAttachmentFileCandidates(true);
-      try {
-        const response = await api.execTerminal({
-          command: 'git ls-files --cached --others --exclude-standard',
-          cwd: attachmentWorkspace ?? undefined,
-          timeoutMs: 15_000,
-        });
-        if (response.code !== 0) {
-          setAttachmentFileCandidates([]);
-          return;
+    const fetchAttachmentFileCandidates = useCallback(
+      async (workspace: string): Promise<string[]> => {
+        try {
+          const response = await api.execTerminal({
+            command: 'git ls-files --cached --others --exclude-standard',
+            cwd: workspace,
+            timeoutMs: 15_000,
+          });
+          if (response.code !== 0) {
+            return [];
+          }
+
+          return response.stdout
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+            .slice(0, 8_000);
+        } catch {
+          return [];
+        }
+      },
+      [api]
+    );
+
+    const loadAttachmentFileCandidates = useCallback(
+      async (workspaceOverride?: string | null) => {
+        const workspace = normalizeWorkspacePath(workspaceOverride ?? attachmentWorkspace);
+        if (!workspace) {
+          if (!attachmentWorkspaceRef.current) {
+            setAttachmentFileCandidates([]);
+            setLoadingAttachmentFileCandidates(false);
+          }
+          return [];
         }
 
-        const lines = response.stdout
-          .split('\n')
-          .map((line) => line.trim())
-          .filter((line) => line.length > 0)
-          .slice(0, 8_000);
-        setAttachmentFileCandidates(lines);
-      } catch {
-        setAttachmentFileCandidates([]);
-      } finally {
-        setLoadingAttachmentFileCandidates(false);
-      }
-    }, [api, attachmentWorkspace]);
+        const cached = attachmentFileCandidatesCacheRef.current[workspace];
+        if (cached) {
+          if (attachmentWorkspaceRef.current === workspace) {
+            setAttachmentFileCandidates(cached);
+            setLoadingAttachmentFileCandidates(false);
+          }
+          return cached;
+        }
+
+        let inFlight = attachmentFileCandidatesInFlightRef.current[workspace];
+        if (!inFlight) {
+          inFlight = fetchAttachmentFileCandidates(workspace).then((lines) => {
+            attachmentFileCandidatesCacheRef.current[workspace] = lines;
+            delete attachmentFileCandidatesInFlightRef.current[workspace];
+            return lines;
+          });
+          attachmentFileCandidatesInFlightRef.current[workspace] = inFlight;
+        }
+
+        if (attachmentWorkspaceRef.current === workspace) {
+          setLoadingAttachmentFileCandidates(true);
+        }
+
+        const lines = await inFlight;
+        if (attachmentWorkspaceRef.current === workspace) {
+          setAttachmentFileCandidates(lines);
+          setLoadingAttachmentFileCandidates(false);
+        }
+        return lines;
+      },
+      [attachmentWorkspace, fetchAttachmentFileCandidates]
+    );
 
     const openAttachmentPathModal = useCallback(() => {
       if (attachmentPickerInProgressRef.current) {
@@ -2890,13 +2942,21 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setAttachmentPathDraft('');
       setAttachmentModalVisible(true);
       setError(null);
-      if (attachmentFileCandidates.length === 0 && !loadingAttachmentFileCandidates) {
-        void loadAttachmentFileCandidates();
-      }
+      void loadAttachmentFileCandidates();
     }, [
-      attachmentFileCandidates.length,
       loadAttachmentFileCandidates,
-      loadingAttachmentFileCandidates,
+    ]);
+
+    useEffect(() => {
+      if (mentionQuery === null || !attachmentWorkspace) {
+        return;
+      }
+
+      void loadAttachmentFileCandidates(attachmentWorkspace);
+    }, [
+      attachmentWorkspace,
+      loadAttachmentFileCandidates,
+      mentionQuery,
     ]);
 
     const closeAttachmentModal = useCallback(() => {
@@ -3144,13 +3204,45 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [addPendingMentionPath]
     );
 
+    const selectMentionSuggestion = useCallback(
+      (path: string) => {
+        if (!addPendingMentionPath(path)) {
+          return;
+        }
+
+        setDraft((current) =>
+          replaceActiveMentionQueryWithSelection(current, toPathBasename(path))
+        );
+      },
+      [addPendingMentionPath]
+    );
+
+    useEffect(() => {
+      setPendingMentionPaths((prev) => {
+        const next = prev.filter((path) => draftContainsMentionLabel(draft, toPathBasename(path)));
+        return next.length === prev.length ? prev : next;
+      });
+    }, [draft]);
+
     useEffect(() => {
       void refreshModelOptions();
     }, [refreshModelOptions]);
 
     useEffect(() => {
-      setAttachmentFileCandidates([]);
-    }, [attachmentWorkspace]);
+      const workspace = normalizeWorkspacePath(attachmentWorkspace);
+      if (!workspace) {
+        setAttachmentFileCandidates([]);
+        setLoadingAttachmentFileCandidates(false);
+        return;
+      }
+
+      const cached = attachmentFileCandidatesCacheRef.current[workspace];
+      setAttachmentFileCandidates(cached ?? []);
+      setLoadingAttachmentFileCandidates(false);
+      if (!cached) {
+        void loadAttachmentFileCandidates(workspace);
+      }
+    }, [attachmentWorkspace, loadAttachmentFileCandidates]);
 
     useEffect(() => {
       if (attachmentMenuVisible || pendingAttachmentMenuAction === null) {
@@ -4764,7 +4856,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
-      const turnMentions = pendingMentionPaths.map((path) => toMentionInput(path));
+      const turnMentions = pendingMentionPaths.map((path) =>
+        toMentionInput(path, preferredStartCwd)
+      );
       const turnLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
       const optimisticContent = toOptimisticUserContent(content, turnMentions, turnLocalImages);
 
@@ -4941,7 +5035,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const resolvedCollaborationMode =
           options?.collaborationMode ?? selectedCollaborationMode;
         const turnMentions =
-          options?.mentions ?? pendingMentionPaths.map((path) => toMentionInput(path));
+          options?.mentions ??
+          pendingMentionPaths.map((path) => toMentionInput(path, selectedChat?.cwd));
         const turnLocalImages =
           options?.localImages ?? pendingLocalImagePaths.map((path) => ({ path }));
         const optimisticContent = toOptimisticUserContent(content, turnMentions, turnLocalImages);
@@ -5124,7 +5219,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         (selectedChat ? isChatLikelyRunning(selectedChat) : false);
 
       if (isTurnBlocked) {
-        const queuedMentions = pendingMentionPaths.map((path) => toMentionInput(path));
+        const queuedMentions = pendingMentionPaths.map((path) =>
+          toMentionInput(path, selectedChat?.cwd)
+        );
         const queuedLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
         setQueuedMessages((prev) => [
           ...prev,
@@ -7373,6 +7470,47 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               );
             })}
           </ScrollView>
+        ) : null}
+        {!showSlashSuggestions && mentionQuery !== null ? (
+          loadingAttachmentFileCandidates && mentionPathSuggestions.length === 0 ? (
+            <View style={styles.inlineMentionStatus}>
+              <Text style={styles.workspaceModalLoading}>Indexing files…</Text>
+            </View>
+          ) : mentionPathSuggestions.length > 0 ? (
+            <ScrollView
+              style={[
+                styles.slashSuggestions,
+                { maxHeight: slashSuggestionsMaxHeight },
+              ]}
+              contentContainerStyle={styles.slashSuggestionsContent}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+            >
+              {mentionPathSuggestions.map((path, index) => (
+                <Pressable
+                  key={`${path}-${String(index)}`}
+                  onPress={() => selectMentionSuggestion(path)}
+                  style={({ pressed }) => [
+                    styles.slashSuggestionItem,
+                    index === mentionPathSuggestions.length - 1 &&
+                      styles.slashSuggestionItemLast,
+                    pressed && styles.slashSuggestionItemPressed,
+                  ]}
+                >
+                  <Text style={styles.slashSuggestionTitle} numberOfLines={1}>
+                    {toPathBasename(path)}
+                  </Text>
+                  <Text style={styles.slashSuggestionSummary} numberOfLines={1}>
+                    {path}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : mentionQuery.trim().length > 0 ? (
+            <View style={styles.inlineMentionStatus}>
+              <Text style={styles.workspaceModalLoading}>No matching files found.</Text>
+            </View>
+          ) : null
         ) : null}
         {overlay && showFloatingActivity ? (
           <View pointerEvents="none" style={styles.activityDock}>
@@ -10062,11 +10200,33 @@ function joinWorkspacePath(parentPath: string, child: string): string {
   return `${parentPath}${separator}${child}`;
 }
 
-function toMentionInput(path: string): MentionInput {
-  const segments = path.split(/[\\/]/).filter(Boolean);
-  const name = segments[segments.length - 1] ?? path;
+function isAbsoluteWorkspacePath(path: string): boolean {
+  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+function resolveMentionPath(path: string, workspace: string | null | undefined): string {
+  const normalizedPath = normalizeAttachmentPath(path);
+  if (!normalizedPath) {
+    return path;
+  }
+  if (isAbsoluteWorkspacePath(normalizedPath)) {
+    return normalizedPath;
+  }
+
+  const normalizedWorkspace = normalizeWorkspacePath(workspace);
+  if (!normalizedWorkspace) {
+    return normalizedPath;
+  }
+
+  return joinWorkspacePath(normalizedWorkspace, normalizedPath);
+}
+
+function toMentionInput(path: string, workspace?: string | null): MentionInput {
+  const resolvedPath = resolveMentionPath(path, workspace);
+  const segments = resolvedPath.split(/[\\/]/).filter(Boolean);
+  const name = segments[segments.length - 1] ?? resolvedPath;
   return {
-    path,
+    path: resolvedPath,
     name,
   };
 }
@@ -10096,7 +10256,21 @@ function countUserMessages(messages: ChatTranscriptMessage[]): number {
 }
 
 function normalizeChatMessageMatchContent(value: string): string {
-  return value.replace(/\r\n/g, '\n').trim();
+  return value
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => !isSyntheticUserAttachmentLine(line))
+    .join('\n')
+    .trim();
+}
+
+function isSyntheticUserAttachmentLine(value: string): boolean {
+  return (
+    /^\[file:\s*(.+?)\]$/i.test(value) ||
+    /^\[local image:\s*(.+?)\]$/i.test(value) ||
+    /^\[image:\s*(.+?)\]$/i.test(value)
+  );
 }
 
 function reconcileChatWithPendingOptimisticMessages(
@@ -10115,15 +10289,19 @@ function reconcileChatWithPendingOptimisticMessages(
 
   const userMessages = chat.messages.filter((message) => message.role === 'user');
   const remainingPendingMessages = pendingMessages.filter((entry) => {
-    const matchedUserMessage = userMessages[entry.userOrdinal - 1];
+    const pendingContent = normalizeChatMessageMatchContent(entry.message.content);
+    const matchedUserMessage =
+      userMessages[entry.userOrdinal - 1] ??
+      userMessages.find(
+        (message) =>
+          normalizeChatMessageMatchContent(message.content) === pendingContent
+      );
+
     if (!matchedUserMessage) {
       return true;
     }
 
-    return (
-      normalizeChatMessageMatchContent(matchedUserMessage.content) !==
-      normalizeChatMessageMatchContent(entry.message.content)
-    );
+    return normalizeChatMessageMatchContent(matchedUserMessage.content) !== pendingContent;
   });
 
   if (remainingPendingMessages.length === 0) {
@@ -10170,8 +10348,11 @@ function toAttachmentPathSuggestions(
 
   const normalizedQuery = query.trim().toLowerCase();
   const selectedSet = new Set(pendingMentionPaths.map((path) => path.trim().toLowerCase()));
-  const startsWithMatches: string[] = [];
-  const containsMatches: string[] = [];
+  const exactBasenameMatches: string[] = [];
+  const basenamePrefixMatches: string[] = [];
+  const basenameContainsMatches: string[] = [];
+  const pathPrefixMatches: string[] = [];
+  const pathContainsMatches: string[] = [];
 
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
@@ -10185,24 +10366,84 @@ function toAttachmentPathSuggestions(
     }
 
     if (!normalizedQuery) {
-      startsWithMatches.push(trimmed);
-      if (startsWithMatches.length >= 8) {
+      pathPrefixMatches.push(trimmed);
+      if (pathPrefixMatches.length >= 8) {
         break;
       }
       continue;
     }
 
+    const basename = toPathBasename(trimmed).toLowerCase();
+
+    if (basename === normalizedQuery) {
+      exactBasenameMatches.push(trimmed);
+      continue;
+    }
+
+    if (basename.startsWith(normalizedQuery)) {
+      basenamePrefixMatches.push(trimmed);
+      continue;
+    }
+
     if (lowered.startsWith(normalizedQuery)) {
-      startsWithMatches.push(trimmed);
+      pathPrefixMatches.push(trimmed);
+      continue;
+    }
+
+    if (basename.includes(normalizedQuery)) {
+      basenameContainsMatches.push(trimmed);
       continue;
     }
 
     if (lowered.includes(`/${normalizedQuery}`) || lowered.includes(normalizedQuery)) {
-      containsMatches.push(trimmed);
+      pathContainsMatches.push(trimmed);
     }
   }
 
-  return [...startsWithMatches, ...containsMatches].slice(0, 8);
+  return [
+    ...exactBasenameMatches,
+    ...basenamePrefixMatches,
+    ...pathPrefixMatches,
+    ...basenameContainsMatches,
+    ...pathContainsMatches,
+  ].slice(0, 8);
+}
+
+function parseMentionQuery(input: string): string | null {
+  const normalized = input.replace(/\r\n/g, '\n');
+  const match = normalized.match(/(?:^|[\s(])@([^\s()]*)$/);
+  if (!match) {
+    return null;
+  }
+
+  return match[1] ?? '';
+}
+
+function replaceActiveMentionQueryWithSelection(input: string, label: string): string {
+  const trimmedLabel = label.trim();
+  if (!trimmedLabel) {
+    return input;
+  }
+
+  return input
+    .replace(/(^|[\s(])@[^\s()]*$/, (_match, prefix: string) => {
+      return `${prefix}@${trimmedLabel} `;
+    })
+    .replace(/[ \t]{2,}/g, ' ');
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function draftContainsMentionLabel(draft: string, label: string): boolean {
+  const trimmedLabel = label.trim();
+  if (!trimmedLabel) {
+    return false;
+  }
+
+  const pattern = new RegExp(`(^|[^\\w])@${escapeRegex(trimmedLabel)}(?=$|[^\\w])`, 'i');
+  return pattern.test(draft);
 }
 
 function normalizeModelId(value: string | null | undefined): string | null {
@@ -11841,6 +12082,10 @@ const createStyles = (theme: AppTheme) => {
   workspaceModalLoading: {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
+  },
+  inlineMentionStatus: {
+    marginHorizontal: theme.spacing.lg,
+    marginBottom: theme.spacing.xs,
   },
   slashSuggestions: {
     marginHorizontal: theme.spacing.lg,
