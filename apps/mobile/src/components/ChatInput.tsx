@@ -336,7 +336,7 @@ const createStyles = (theme: AppTheme) =>
     container: {
       gap: theme.spacing.xs,
       paddingHorizontal: theme.spacing.lg,
-      paddingTop: theme.spacing.sm,
+      paddingTop: theme.spacing.xs + 2,
     },
     row: {
       flexDirection: 'row',
@@ -345,10 +345,10 @@ const createStyles = (theme: AppTheme) =>
     },
     footer: {
       alignItems: 'flex-start',
-      marginTop: 2,
+      marginTop: 1,
     },
     footerPlaceholder: {
-      minHeight: 18,
+      minHeight: 16,
     },
     attachmentList: {
       maxHeight: 34,
@@ -401,13 +401,13 @@ const createStyles = (theme: AppTheme) =>
       borderColor: theme.colors.borderHighlight,
       borderRadius: theme.radius.lg,
       paddingHorizontal: theme.spacing.md,
-      paddingVertical: theme.spacing.xs,
-      minHeight: 40,
+      paddingVertical: 3,
+      minHeight: 38,
       maxHeight: 120,
     },
     inputWrapperVoiceActive: {
-      minHeight: 58,
-      paddingVertical: theme.spacing.sm,
+      minHeight: 54,
+      paddingVertical: theme.spacing.xs + 2,
     },
     input: {
       flex: 1,
@@ -429,7 +429,7 @@ const createStyles = (theme: AppTheme) =>
       flex: 1,
       gap: 2,
       justifyContent: 'center',
-      minHeight: 40,
+      minHeight: 38,
     },
     voiceStatusLabelRow: {
       alignItems: 'center',
