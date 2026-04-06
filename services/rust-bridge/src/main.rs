@@ -7003,6 +7003,7 @@ fn preview_desktop_shell_response(
             }}
           }},
           reload: function() {{
+            lastPostedStateJson = '';
             var win = currentFrameWindow();
             if (win) {{
               win.location.reload();
@@ -7353,6 +7354,7 @@ fn preview_overview_shell_response(
             }}
           }},
           reload: function() {{
+            lastPostedStateJson = '';
             var win = currentFrameWindow();
             if (win) {{
               win.location.reload();
