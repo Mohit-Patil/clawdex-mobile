@@ -8426,7 +8426,6 @@ function ComposeView({
         <BrandMark size={52} />
       </View>
       <Text style={styles.composeTitle}>Let's build</Text>
-      <Text style={styles.composeSubtitle}>clawdex-mobile</Text>
       <Pressable
         style={({ pressed }) => [
           styles.workspaceSelectBtn,
@@ -12187,12 +12186,7 @@ const createStyles = (theme: AppTheme) => {
     fontSize: 28,
     fontWeight: '700',
     color: theme.colors.textPrimary,
-    marginBottom: theme.spacing.xs,
-  },
-  composeSubtitle: {
-    ...theme.typography.body,
-    color: theme.colors.textMuted,
-    marginBottom: theme.spacing.lg,
+    marginBottom: theme.spacing.xl,
   },
   workspaceSelectBtn: {
     width: '100%',

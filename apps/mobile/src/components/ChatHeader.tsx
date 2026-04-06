@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { BrandMark } from './BrandMark';
 import { useAppTheme, type AppTheme } from '../theme';
 
 interface ChatHeaderProps {
@@ -34,7 +33,6 @@ export function ChatHeader({
           <Pressable onPress={onOpenDrawer} hitSlop={8} style={styles.menuBtn}>
             <Ionicons name="menu" size={20} color={colors.textPrimary} />
           </Pressable>
-          <BrandMark size={18} />
           {onOpenTitleMenu ? (
             <Pressable
               onPress={onOpenTitleMenu}
