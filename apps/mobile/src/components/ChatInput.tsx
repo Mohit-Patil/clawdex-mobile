@@ -438,9 +438,9 @@ const createStyles = (theme: AppTheme) =>
       gap: theme.spacing.xs,
     },
     sendBtn: {
-      width: 28,
-      height: 28,
-      borderRadius: 14,
+      width: 36,
+      height: 36,
+      borderRadius: 18,
       backgroundColor: theme.colors.bgItem,
       alignItems: 'center',
       justifyContent: 'center',
@@ -450,8 +450,8 @@ const createStyles = (theme: AppTheme) =>
       borderColor: theme.colors.error,
     },
     stopButtonContent: {
-      width: 20,
-      height: 20,
+      width: 24,
+      height: 24,
       alignItems: 'center',
       justifyContent: 'center',
     },

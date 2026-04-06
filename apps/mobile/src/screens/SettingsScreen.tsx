@@ -2044,7 +2044,6 @@ const createStyles = (theme: AppTheme) => {
   const settingsValueColor = theme.isDark ? theme.colors.textSecondary : '#3F4C5A';
   const settingsPrimaryText = theme.isDark ? theme.colors.textPrimary : '#263341';
   const hintTextColor = theme.isDark ? theme.colors.textMuted : '#556270';
-
   return StyleSheet.create({
     container: { flex: 1, backgroundColor: theme.colors.bgMain },
     safeArea: { flex: 1 },
