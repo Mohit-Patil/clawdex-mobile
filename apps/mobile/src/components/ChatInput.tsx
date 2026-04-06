@@ -40,6 +40,7 @@ interface ChatInputProps {
   safeAreaBottomInset?: number;
   keyboardVisible?: boolean;
   footer?: ReactNode;
+  reserveFooterSpace?: boolean;
 }
 
 export function ChatInput({
@@ -63,6 +64,7 @@ export function ChatInput({
   safeAreaBottomInset = 0,
   keyboardVisible = false,
   footer = null,
+  reserveFooterSpace = false,
 }: ChatInputProps) {
   const theme = useAppTheme();
   const { colors } = theme;
@@ -311,7 +313,16 @@ export function ChatInput({
             ) : null}
           </View>
         </View>
-        {footer ? <View style={styles.footer}>{footer}</View> : null}
+        {footer || reserveFooterSpace ? (
+          <View
+            style={[
+              styles.footer,
+              !footer && styles.footerPlaceholder,
+            ]}
+          >
+            {footer}
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -335,6 +346,9 @@ const createStyles = (theme: AppTheme) =>
     footer: {
       alignItems: 'flex-start',
       marginTop: 2,
+    },
+    footerPlaceholder: {
+      minHeight: 18,
     },
     attachmentList: {
       maxHeight: 34,

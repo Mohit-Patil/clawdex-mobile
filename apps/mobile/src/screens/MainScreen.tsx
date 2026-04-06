@@ -7405,6 +7405,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           onVoiceToggle={canUseVoiceInput ? voiceRecorder.toggleRecording : undefined}
           safeAreaBottomInset={composerSafeAreaBottomInset}
           keyboardVisible={keyboardVisible}
+          reserveFooterSpace={activeChatEngine === 'codex'}
           footer={
             composerUsageLimitBadges.length > 0 ? (
               <ComposerUsageLimits limits={composerUsageLimitBadges} />
@@ -7632,7 +7633,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 ]}
                 onPress={openModelReasoningMenu}
               >
-                <Ionicons name="sparkles-outline" size={13} color={theme.colors.textMuted} />
+                <Ionicons name="sparkles-outline" size={12} color={theme.colors.textMuted} />
                 <Text style={styles.modelChipText} numberOfLines={1}>
                   {modelReasoningLabel}
                 </Text>
@@ -7644,7 +7645,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 ]}
                 onPress={openCollaborationModeMenu}
               >
-                <Ionicons name="map-outline" size={13} color={theme.colors.textMuted} />
+                <Ionicons name="map-outline" size={12} color={theme.colors.textMuted} />
                 <Text style={styles.modelChipText} numberOfLines={1}>
                   {collaborationModeLabel}
                 </Text>
@@ -7659,7 +7660,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     void openAgentThreadSelector();
                   }}
                 >
-                  <Ionicons name="people-outline" size={13} color={theme.colors.textMuted} />
+                  <Ionicons name="people-outline" size={12} color={theme.colors.textMuted} />
                   <Text style={styles.modelChipText} numberOfLines={1}>
                     {agentThreadChipLabel}
                   </Text>
@@ -7679,7 +7680,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               >
                 <Ionicons
                   name={fastModeEnabled ? 'flash' : 'flash-outline'}
-                  size={13}
+                  size={12}
                   color={fastModeEnabled ? theme.colors.textPrimary : theme.colors.textMuted}
                 />
                 <Text
@@ -7754,6 +7755,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
                   onInlineOptionSelect={handleInlineOptionSelect}
                   onPinnedAutoScroll={scrollToBottomIfPinned}
+                  onJumpToLatest={() => scrollToBottomReliable(true)}
                   onScrollInteractionStart={clearPendingScrollRetries}
                   autoScrollStateRef={autoScrollStateRef}
                   bottomInset={androidComposerReservedInset}
@@ -7807,6 +7809,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                 inlineChoicesEnabled={!pendingUserInputRequest && !pendingApproval && !isLoading}
                 onInlineOptionSelect={handleInlineOptionSelect}
                 onPinnedAutoScroll={scrollToBottomIfPinned}
+                onJumpToLatest={() => scrollToBottomReliable(true)}
                 onScrollInteractionStart={clearPendingScrollRetries}
                 autoScrollStateRef={autoScrollStateRef}
                 bottomInset={chatBottomInset}
@@ -8536,6 +8539,7 @@ interface ChatViewProps {
   inlineChoicesEnabled: boolean;
   onInlineOptionSelect: (value: string) => void;
   onPinnedAutoScroll: (animated?: boolean) => void;
+  onJumpToLatest: () => void;
   onScrollInteractionStart: () => void;
   autoScrollStateRef: React.MutableRefObject<AutoScrollState>;
   bottomInset: number;
@@ -8679,12 +8683,14 @@ const ChatView = memo(function ChatView({
   inlineChoicesEnabled,
   onInlineOptionSelect,
   onPinnedAutoScroll,
+  onJumpToLatest,
   onScrollInteractionStart,
   autoScrollStateRef,
   bottomInset,
 }: ChatViewProps) {
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   const transcriptView = useMemo(() => {
     const childVisibleMessages = getVisibleTranscriptMessages(
@@ -8750,7 +8756,11 @@ const ChatView = memo(function ChatView({
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const { contentOffset } = event.nativeEvent;
       const distanceFromBottom = contentOffset.y;
-      autoScrollStateRef.current.shouldStickToBottom = distanceFromBottom <= theme.spacing.xl * 2;
+      const shouldStickToBottom = distanceFromBottom <= theme.spacing.xl * 2;
+      autoScrollStateRef.current.shouldStickToBottom = shouldStickToBottom;
+      setShowJumpToLatest((current) =>
+        current === !shouldStickToBottom ? current : !shouldStickToBottom
+      );
     },
     [autoScrollStateRef, theme.spacing.xl]
   );
@@ -8759,6 +8769,7 @@ const ChatView = memo(function ChatView({
     autoScrollStateRef.current.shouldStickToBottom = true;
     autoScrollStateRef.current.isUserInteracting = false;
     autoScrollStateRef.current.isMomentumScrolling = false;
+    setShowJumpToLatest(false);
   }, [autoScrollStateRef, chat.id]);
   const messageListContentStyle = useMemo(
     () =>
@@ -8909,6 +8920,28 @@ const ChatView = memo(function ChatView({
         windowSize={isLargeChat ? 15 : 11}
         removeClippedSubviews={Platform.OS === 'android'}
       />
+      {showJumpToLatest ? (
+        <Pressable
+          onPress={() => {
+            autoScrollStateRef.current.shouldStickToBottom = true;
+            autoScrollStateRef.current.isUserInteracting = false;
+            autoScrollStateRef.current.isMomentumScrolling = false;
+            setShowJumpToLatest(false);
+            onJumpToLatest();
+          }}
+          style={({ pressed }) => [
+            styles.jumpToLatestButton,
+            { bottom: bottomInset + theme.spacing.xs },
+            pressed && styles.jumpToLatestButtonPressed,
+          ]}
+        >
+          <Ionicons
+            name="arrow-down"
+            size={14}
+            color={theme.colors.textPrimary}
+          />
+        </Pressable>
+      ) : null}
     </View>
   );
 }, areChatViewPropsEqual);
@@ -8926,6 +8959,7 @@ function areChatViewPropsEqual(previous: ChatViewProps, next: ChatViewProps): bo
     previous.inlineChoicesEnabled === next.inlineChoicesEnabled &&
     previous.onInlineOptionSelect === next.onInlineOptionSelect &&
     previous.onPinnedAutoScroll === next.onPinnedAutoScroll &&
+    previous.onJumpToLatest === next.onJumpToLatest &&
     previous.onScrollInteractionStart === next.onScrollInteractionStart &&
     previous.autoScrollStateRef === next.autoScrollStateRef &&
     previous.bottomInset === next.bottomInset
@@ -11396,12 +11430,12 @@ const createStyles = (theme: AppTheme) => {
     backgroundColor: theme.colors.bgMain,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: theme.colors.borderLight,
-    paddingVertical: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs + 2,
   },
   sessionMetaRowContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.sm,
+    gap: theme.spacing.xs + 2,
     paddingHorizontal: theme.spacing.lg,
   },
   topCardsRow: {
@@ -11531,18 +11565,18 @@ const createStyles = (theme: AppTheme) => {
   contextChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.xs,
+    gap: 3,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.sm,
-    paddingVertical: 5,
+    paddingHorizontal: theme.spacing.xs + 6,
+    paddingVertical: 4,
     flexShrink: 0,
   },
   contextChipIndicator: {
-    width: 8,
-    height: 8,
+    width: 6,
+    height: 6,
     borderRadius: 999,
     flexShrink: 0,
   },
@@ -11550,41 +11584,43 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textPrimary,
     fontWeight: '600',
+    fontSize: 11,
+    lineHeight: 14,
   },
   modelChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.xs,
+    gap: 3,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.sm,
-    paddingVertical: 5,
+    paddingHorizontal: theme.spacing.xs + 6,
+    paddingVertical: 4,
     flexShrink: 0,
   },
   modeChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.xs,
+    gap: 3,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.sm,
-    paddingVertical: 5,
+    paddingHorizontal: theme.spacing.xs + 6,
+    paddingVertical: 4,
     flexShrink: 0,
   },
   fastChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.xs,
+    gap: 3,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.border,
     backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.sm,
-    paddingVertical: 5,
+    paddingHorizontal: theme.spacing.xs + 6,
+    paddingVertical: 4,
     flexShrink: 0,
   },
   fastChipEnabled: {
@@ -11600,6 +11636,8 @@ const createStyles = (theme: AppTheme) => {
   modelChipText: {
     ...theme.typography.caption,
     color: theme.colors.textSecondary,
+    fontSize: 11,
+    lineHeight: 14,
   },
   fastChipTextEnabled: {
     color: theme.colors.textPrimary,
@@ -12246,6 +12284,24 @@ const createStyles = (theme: AppTheme) => {
   },
   messageList: {
     flex: 1,
+  },
+  jumpToLatestButton: {
+    position: 'absolute',
+    alignSelf: 'center',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.bgElevated,
+    borderRadius: theme.radius.full,
+    width: 34,
+    height: 34,
+    boxShadow: theme.isDark
+      ? '0 12px 24px rgba(0, 0, 0, 0.28)'
+      : '0 10px 22px rgba(15, 31, 54, 0.12)',
+  },
+  jumpToLatestButtonPressed: {
+    opacity: 0.84,
   },
   messageListContent: {
     flexGrow: 1,
