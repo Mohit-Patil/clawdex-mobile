@@ -4768,12 +4768,16 @@ async fn handle_preview_http_request(
     parts: axum::http::request::Parts,
     body: Body,
 ) -> Response {
-    let resolved_request =
-        match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
-        {
-            Ok(result) => result,
-            Err(response) => return response,
-        };
+    let resolved_request = match resolve_preview_session_from_request(
+        &state.preview,
+        &parts.headers,
+        &parts.uri,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
     let session = resolved_request.session;
     let bootstrap_session_id = resolved_request.bootstrap_session_id;
     let bootstrap_token = resolved_request.bootstrap_token;
@@ -4908,18 +4912,12 @@ async fn handle_preview_http_request(
                 height: Some(DEFAULT_PREVIEW_DESKTOP_HEIGHT),
             });
             return match shell_mode {
-                PreviewShellMode::Desktop => preview_desktop_shell_response(
-                    &sanitized_path_and_query,
-                    viewport,
-                    None,
-                    None,
-                ),
-                PreviewShellMode::Overview => preview_overview_shell_response(
-                    &sanitized_path_and_query,
-                    viewport,
-                    None,
-                    None,
-                ),
+                PreviewShellMode::Desktop => {
+                    preview_desktop_shell_response(&sanitized_path_and_query, viewport, None, None)
+                }
+                PreviewShellMode::Overview => {
+                    preview_overview_shell_response(&sanitized_path_and_query, viewport, None, None)
+                }
             };
         }
     }
@@ -5006,12 +5004,16 @@ async fn handle_preview_websocket_request(
     state: Arc<AppState>,
     parts: &mut axum::http::request::Parts,
 ) -> Response {
-    let resolved_request =
-        match resolve_preview_session_from_request(&state.preview, &parts.headers, &parts.uri).await
-        {
-            Ok(result) => result,
-            Err(response) => return response,
-        };
+    let resolved_request = match resolve_preview_session_from_request(
+        &state.preview,
+        &parts.headers,
+        &parts.uri,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
     let session = resolved_request.session;
     let sanitized_path_and_query = resolved_request.sanitized_path_and_query;
 
@@ -6641,11 +6643,7 @@ fn build_preview_shell_request_key(
     bootstrap_session_id: Option<&str>,
     bootstrap_token: Option<&str>,
 ) -> Option<String> {
-    Some(format!(
-        "{}:{}",
-        bootstrap_session_id?,
-        bootstrap_token?
-    ))
+    Some(format!("{}:{}", bootstrap_session_id?, bootstrap_token?))
 }
 
 fn preview_error_response(status: StatusCode, message: &str) -> Response {
@@ -6724,12 +6722,17 @@ fn preview_desktop_shell_response(
 ) -> Response {
     let desktop_width = viewport.width.unwrap_or(DEFAULT_PREVIEW_DESKTOP_WIDTH);
     let desktop_height = viewport.height.unwrap_or(DEFAULT_PREVIEW_DESKTOP_HEIGHT);
-    let frame_src =
-        build_preview_shell_frame_src(sanitized_path_and_query, bootstrap_session_id, bootstrap_token);
+    let frame_src = build_preview_shell_frame_src(
+        sanitized_path_and_query,
+        bootstrap_session_id,
+        bootstrap_token,
+    );
     let frame_src_json = serde_json::to_string(&frame_src).unwrap_or_else(|_| "\"/\"".to_string());
-    let shell_request_key_json =
-        serde_json::to_string(&build_preview_shell_request_key(bootstrap_session_id, bootstrap_token))
-            .unwrap_or_else(|_| "null".to_string());
+    let shell_request_key_json = serde_json::to_string(&build_preview_shell_request_key(
+        bootstrap_session_id,
+        bootstrap_token,
+    ))
+    .unwrap_or_else(|_| "null".to_string());
     let body = format!(
         r#"<!doctype html>
 <html>
@@ -7038,12 +7041,17 @@ fn preview_overview_shell_response(
 ) -> Response {
     let desktop_width = viewport.width.unwrap_or(DEFAULT_PREVIEW_DESKTOP_WIDTH);
     let desktop_height = viewport.height.unwrap_or(DEFAULT_PREVIEW_DESKTOP_HEIGHT);
-    let frame_src =
-        build_preview_shell_frame_src(sanitized_path_and_query, bootstrap_session_id, bootstrap_token);
+    let frame_src = build_preview_shell_frame_src(
+        sanitized_path_and_query,
+        bootstrap_session_id,
+        bootstrap_token,
+    );
     let frame_src_json = serde_json::to_string(&frame_src).unwrap_or_else(|_| "\"/\"".to_string());
-    let shell_request_key_json =
-        serde_json::to_string(&build_preview_shell_request_key(bootstrap_session_id, bootstrap_token))
-            .unwrap_or_else(|_| "null".to_string());
+    let shell_request_key_json = serde_json::to_string(&build_preview_shell_request_key(
+        bootstrap_session_id,
+        bootstrap_token,
+    ))
+    .unwrap_or_else(|_| "null".to_string());
     let body = format!(
         r#"<!doctype html>
 <html>

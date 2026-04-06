@@ -1244,8 +1244,24 @@ describe('HostBridgeApiClient', () => {
               items: [
                 {
                   type: 'userMessage',
-              id: 'u_mentions',
-              content: [{ type: 'text', text: 'review these files' }],
+                  id: 'u_mentions',
+                  content: [
+                    { type: 'text', text: 'review these files' },
+                    {
+                      type: 'mention',
+                      path: 'apps/mobile/src/screens/MainScreen.tsx',
+                      name: 'MainScreen.tsx',
+                    },
+                    {
+                      type: 'mention',
+                      path: 'apps/mobile/src/api/client.ts',
+                      name: 'client.ts',
+                    },
+                    {
+                      type: 'localImage',
+                      path: '.clawdex-mobile-attachments/example.png',
+                    },
+                  ],
                 },
               ],
             },
