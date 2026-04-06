@@ -297,7 +297,8 @@ function readBridgeProfileStoreRawFromWeb(): string | null {
   }
 
   try {
-    return storage.getItem(BRIDGE_PROFILE_STORE_KEY);
+    const raw = storage.getItem(BRIDGE_PROFILE_STORE_KEY);
+    return raw ?? bridgeProfileStoreMemoryFallback;
   } catch {
     return bridgeProfileStoreMemoryFallback;
   }

@@ -186,4 +186,52 @@ describe('bridgeProfiles storage', () => {
     );
     expect(secureStoreMock.deleteItemAsync).toHaveBeenCalledWith(bridgeProfileStoreKey);
   });
+
+  it('falls back to in-memory web storage when localStorage reads return null', async () => {
+    const getItem = jest.fn().mockReturnValue(null);
+    const setItem = jest.fn().mockImplementation(() => {
+      throw new Error('storage write blocked');
+    });
+    const removeItem = jest.fn();
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: { getItem, setItem, removeItem },
+    });
+
+    jest.doMock('react-native', () => ({
+      Platform: { OS: 'web' },
+    }));
+    jest.doMock('expo-secure-store', () => ({
+      AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY: 'after-first-unlock',
+      getItemAsync: jest.fn(),
+      setItemAsync: jest.fn(),
+      deleteItemAsync: jest.fn(),
+    }));
+
+    let bridgeProfiles!: typeof BridgeProfilesModule;
+    jest.isolateModules(() => {
+      bridgeProfiles = jest.requireActual('../bridgeProfiles') as typeof BridgeProfilesModule;
+    });
+
+    const store = {
+      activeProfileId: 'profile-1',
+      profiles: [
+        {
+          id: 'profile-1',
+          name: 'Blocked Web Bridge',
+          bridgeUrl: 'http://127.0.0.1:8787',
+          bridgeToken: 'token-web',
+          createdAt: '2026-04-07T00:00:00.000Z',
+          updatedAt: '2026-04-07T00:00:00.000Z',
+        },
+      ],
+    };
+
+    await bridgeProfiles.saveBridgeProfileStore(store);
+    const loaded = await bridgeProfiles.loadBridgeProfileStore();
+
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(getItem).toHaveBeenCalledWith(bridgeProfileStoreKey);
+    expect(loaded).toEqual(store);
+  });
 });
