@@ -8295,6 +8295,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title="Add context"
           subtitle="Bring in a workspace path, a file, a saved image, or a fresh photo."
           options={attachmentMenuOptions}
+          presentation="expanded"
           onClose={() => setAttachmentMenuVisible(false)}
         />
 
@@ -8316,6 +8317,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           loading={loadingAgentThreads}
           loadingLabel="Loading agent threads…"
           emptyLabel="No spawned agent threads for this chat yet."
+          presentation="expanded"
           onClose={() => setAgentThreadMenuVisible(false)}
         />
 
@@ -12461,6 +12463,7 @@ const createStyles = (theme: AppTheme) => {
     flex: 1,
     backgroundColor: theme.colors.overlayBackdrop,
     paddingHorizontal: theme.spacing.lg,
+    justifyContent: 'center',
   },
   renameModalKeyboardAvoider: {
     flex: 1,
@@ -12521,6 +12524,7 @@ const createStyles = (theme: AppTheme) => {
     borderColor: theme.colors.border,
     padding: theme.spacing.lg,
     gap: theme.spacing.md,
+    maxHeight: '82%',
   },
   renameModalTitle: {
     ...theme.typography.headline,
@@ -12699,6 +12703,7 @@ const createStyles = (theme: AppTheme) => {
     borderColor: theme.colors.borderHighlight,
     padding: theme.spacing.lg,
     gap: theme.spacing.md,
+    maxHeight: '80%',
   },
   userInputModalTitle: {
     ...theme.typography.headline,

@@ -66,7 +66,7 @@ export function SelectionSheet({
   loading = false,
   loadingLabel = 'Loading…',
   emptyLabel = 'No options available.',
-  presentation = 'expanded',
+  presentation = 'default',
 }: SelectionSheetProps) {
   const theme = useAppTheme();
   const { colors, spacing } = theme;
@@ -74,12 +74,18 @@ export function SelectionSheet({
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const expanded = presentation === 'expanded';
-  const expandedTopInset = Math.max(insets.top + spacing.xl + 20, 112);
-  const expandedBottomInset = Math.max(insets.bottom + spacing.xl + 28, 118);
-  const expandedCardHeight = Math.min(
-    Math.max(360, Math.round(windowHeight * 0.62)),
+  const expandedTopInset = Math.max(insets.top + spacing.xl, 68);
+  const expandedBottomInset = Math.max(insets.bottom + spacing.xl, 68);
+  const expandedCardMaxHeight = Math.min(
+    Math.max(420, Math.round(windowHeight * 0.72)),
     windowHeight - expandedTopInset - expandedBottomInset
   );
+  const expandedListMaxHeight = Math.max(180, expandedCardMaxHeight - 176);
+  const defaultCardMaxHeight = Math.min(
+    Math.max(220, Math.round(windowHeight * 0.46)),
+    windowHeight - Math.max(insets.top + spacing.xl, 72) - Math.max(insets.bottom + spacing.xl, 72)
+  );
+  const defaultListMaxHeight = Math.max(84, defaultCardMaxHeight - 168);
 
   return (
     <Modal
@@ -96,8 +102,13 @@ export function SelectionSheet({
             styles.sheetOuter,
             expanded && styles.sheetOuterExpanded,
             {
-              paddingBottom: expanded ? expandedBottomInset : Math.max(insets.bottom, spacing.md),
-              paddingTop: expanded ? expandedTopInset : undefined,
+              justifyContent: 'center',
+              paddingBottom: expanded
+                ? expandedBottomInset
+                : Math.max(insets.bottom + spacing.md, spacing.xl),
+              paddingTop: expanded
+                ? expandedTopInset
+                : Math.max(insets.top + spacing.md, spacing.xl),
             },
           ]}
         >
@@ -105,7 +116,9 @@ export function SelectionSheet({
             style={[
               styles.sheetCard,
               expanded && styles.sheetCardExpanded,
-              expanded ? { height: expandedCardHeight } : null,
+              expanded
+                ? { maxHeight: expandedCardMaxHeight }
+                : { maxHeight: defaultCardMaxHeight },
             ]}
           >
             <View style={styles.handle} />
@@ -120,129 +133,139 @@ export function SelectionSheet({
               ) : null}
             </View>
 
-            {loading ? (
-              <View style={styles.loadingState}>
-                <ActivityIndicator color={colors.textPrimary} />
-                <Text style={styles.loadingLabel}>{loadingLabel}</Text>
-              </View>
-            ) : options.length > 0 ? (
-              <ScrollView
-                style={[styles.list, expanded && styles.listExpanded]}
-                contentContainerStyle={[
-                  styles.listContent,
-                  expanded && styles.listContentExpanded,
-                ]}
-                showsVerticalScrollIndicator={false}
-              >
-                {options.map((option) => {
-                  const tone = option.tone ?? 'default';
-                  const iconColor =
-                    option.iconColor ??
-                    (tone === 'danger'
-                      ? '#FF8A8A'
-                      : option.selected || tone === 'accent'
-                        ? colors.textPrimary
-                        : colors.textMuted);
-                  const titleColor = option.titleColor ?? colors.textPrimary;
-                  const descriptionColor = option.descriptionColor ?? colors.textMuted;
-                  const metaColor = option.metaColor ?? colors.textMuted;
-                  const badgeBackgroundColor =
-                    option.badgeBackgroundColor ?? styles.badge.backgroundColor;
-                  const badgeTextColor =
-                    option.badgeTextColor ?? styles.badgeText.color;
+            <View
+              style={[
+                styles.body,
+                expanded
+                  ? { maxHeight: expandedListMaxHeight }
+                  : { maxHeight: defaultListMaxHeight },
+              ]}
+            >
+              {loading ? (
+                <View style={styles.loadingState}>
+                  <ActivityIndicator color={colors.textPrimary} />
+                  <Text style={styles.loadingLabel}>{loadingLabel}</Text>
+                </View>
+              ) : options.length > 0 ? (
+                <ScrollView
+                  style={[styles.list, expanded && styles.listExpanded]}
+                  contentContainerStyle={[
+                    styles.listContent,
+                    expanded && styles.listContentExpanded,
+                  ]}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  {options.map((option) => {
+                    const tone = option.tone ?? 'default';
+                    const iconColor =
+                      option.iconColor ??
+                      (tone === 'danger'
+                        ? '#FF8A8A'
+                        : option.selected || tone === 'accent'
+                          ? colors.textPrimary
+                          : colors.textMuted);
+                    const titleColor = option.titleColor ?? colors.textPrimary;
+                    const descriptionColor = option.descriptionColor ?? colors.textMuted;
+                    const metaColor = option.metaColor ?? colors.textMuted;
+                    const badgeBackgroundColor =
+                      option.badgeBackgroundColor ?? styles.badge.backgroundColor;
+                    const badgeTextColor =
+                      option.badgeTextColor ?? styles.badgeText.color;
 
-                  return (
-                    <Pressable
-                      key={option.key}
-                      disabled={option.disabled}
-                      onPress={option.onPress}
-                      style={({ pressed }) => [
-                        styles.option,
-                        option.selected && styles.optionSelected,
-                        option.disabled && styles.optionDisabled,
-                        pressed && !option.disabled && styles.optionPressed,
-                      ]}
-                    >
-                      <View style={styles.optionMain}>
-                        {option.icon ? (
-                          <View
-                            style={[
-                              styles.iconWrap,
-                              option.selected && styles.iconWrapSelected,
-                              tone === 'danger' && styles.iconWrapDanger,
-                            ]}
-                          >
-                            <Ionicons name={option.icon} size={15} color={iconColor} />
-                          </View>
-                        ) : null}
-
-                        <View style={styles.copy}>
-                          <View style={styles.titleRow}>
-                            <Text
+                    return (
+                      <Pressable
+                        key={option.key}
+                        disabled={option.disabled}
+                        onPress={option.onPress}
+                        style={({ pressed }) => [
+                          styles.option,
+                          option.selected && styles.optionSelected,
+                          option.disabled && styles.optionDisabled,
+                          pressed && !option.disabled && styles.optionPressed,
+                        ]}
+                      >
+                        <View style={styles.optionMain}>
+                          {option.icon ? (
+                            <View
                               style={[
-                                styles.optionTitle,
-                                option.selected && styles.optionTitleSelected,
-                                { color: titleColor },
-                                option.titleStyle,
+                                styles.iconWrap,
+                                option.selected && styles.iconWrapSelected,
+                                tone === 'danger' && styles.iconWrapDanger,
                               ]}
-                              numberOfLines={2}
                             >
-                              {option.title}
-                            </Text>
-                            {option.badge ? (
-                              <View
+                              <Ionicons name={option.icon} size={15} color={iconColor} />
+                            </View>
+                          ) : null}
+
+                          <View style={styles.copy}>
+                            <View style={styles.titleRow}>
+                              <Text
                                 style={[
-                                  styles.badge,
-                                  { backgroundColor: badgeBackgroundColor },
+                                  styles.optionTitle,
+                                  option.selected && styles.optionTitleSelected,
+                                  { color: titleColor },
+                                  option.titleStyle,
                                 ]}
+                                numberOfLines={2}
                               >
-                                <Text style={[styles.badgeText, { color: badgeTextColor }]}>
-                                  {option.badge}
-                                </Text>
-                              </View>
+                                {option.title}
+                              </Text>
+                              {option.badge ? (
+                                <View
+                                  style={[
+                                    styles.badge,
+                                    { backgroundColor: badgeBackgroundColor },
+                                  ]}
+                                >
+                                  <Text style={[styles.badgeText, { color: badgeTextColor }]}>
+                                    {option.badge}
+                                  </Text>
+                                </View>
+                              ) : null}
+                            </View>
+                            {option.description ? (
+                              <Text
+                                style={[
+                                  styles.optionDescription,
+                                  { color: descriptionColor },
+                                  option.descriptionStyle,
+                                ]}
+                                numberOfLines={option.descriptionNumberOfLines ?? 2}
+                              >
+                                {option.description}
+                              </Text>
                             ) : null}
                           </View>
-                          {option.description ? (
+                        </View>
+
+                        <View style={styles.accessory}>
+                          {option.meta ? (
                             <Text
-                              style={[
-                                styles.optionDescription,
-                                { color: descriptionColor },
-                                option.descriptionStyle,
-                              ]}
-                              numberOfLines={option.descriptionNumberOfLines ?? 2}
+                              style={[styles.meta, { color: metaColor }]}
+                              numberOfLines={1}
                             >
-                              {option.description}
+                              {option.meta}
                             </Text>
                           ) : null}
+                          {option.selected ? (
+                            <Ionicons
+                              name="checkmark-circle"
+                              size={18}
+                              color={colors.textPrimary}
+                            />
+                          ) : null}
                         </View>
-                      </View>
-
-                      <View style={styles.accessory}>
-                        {option.meta ? (
-                          <Text
-                            style={[styles.meta, { color: metaColor }]}
-                            numberOfLines={1}
-                          >
-                            {option.meta}
-                          </Text>
-                        ) : null}
-                        {option.selected ? (
-                          <Ionicons
-                            name="checkmark-circle"
-                            size={18}
-                            color={colors.textPrimary}
-                          />
-                        ) : null}
-                      </View>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-            ) : (
-              <View style={styles.loadingState}>
-                <Text style={styles.loadingLabel}>{emptyLabel}</Text>
-              </View>
-            )}
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              ) : (
+                <View style={styles.loadingState}>
+                  <Text style={styles.loadingLabel}>{emptyLabel}</Text>
+                </View>
+              )}
+            </View>
 
             <View style={styles.footer}>
               <Pressable
@@ -266,12 +289,11 @@ const createStyles = (theme: AppTheme) =>
   StyleSheet.create({
     backdrop: {
       flex: 1,
-      justifyContent: 'flex-end',
       backgroundColor: theme.colors.overlayBackdrop,
     },
     sheetOuter: {
+      flex: 1,
       paddingHorizontal: theme.spacing.md,
-      paddingTop: theme.spacing.xl,
     },
     sheetOuterExpanded: {
       paddingHorizontal: theme.spacing.md,
@@ -328,12 +350,15 @@ const createStyles = (theme: AppTheme) =>
       fontSize: 12,
       lineHeight: 16,
     },
+    body: {
+      flexShrink: 1,
+      minHeight: 0,
+    },
     list: {
-      maxHeight: 420,
+      flexGrow: 0,
     },
     listExpanded: {
-      flex: 1,
-      maxHeight: undefined,
+      minHeight: 0,
     },
     listContent: {
       gap: theme.spacing.sm,
@@ -457,6 +482,9 @@ const createStyles = (theme: AppTheme) =>
     },
     footer: {
       alignItems: 'flex-end',
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.colors.borderLight,
+      paddingTop: theme.spacing.md,
     },
     closeButton: {
       minWidth: 88,

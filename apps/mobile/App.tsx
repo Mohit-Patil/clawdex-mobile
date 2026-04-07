@@ -595,6 +595,20 @@ export default function App() {
     setDrawerVisible(true);
   }, []);
 
+  const ensureDrawerCapturesTouches = useCallback(() => {
+    if (drawerCapturesTouchesRef.current) {
+      return;
+    }
+
+    drawerCapturesTouchesRef.current = true;
+    setDrawerCapturesTouches(true);
+  }, []);
+
+  const beginDrawerInteraction = useCallback(() => {
+    ensureDrawerVisible();
+    ensureDrawerCapturesTouches();
+  }, [ensureDrawerCapturesTouches, ensureDrawerVisible]);
+
   const handleDrawerSettled = useCallback(
     (isOpen: boolean) => {
       drawerOpenRef.current = isOpen;
@@ -614,10 +628,9 @@ export default function App() {
 
       if (shouldOpen) {
         dismissKeyboard();
+        ensureDrawerCapturesTouches();
       }
 
-      drawerCapturesTouchesRef.current = shouldOpen;
-      setDrawerCapturesTouches(shouldOpen);
       ensureDrawerVisible();
       drawerOffset.value = withSpring(
         shouldOpen ? 0 : -DRAWER_WIDTH,
@@ -729,7 +742,7 @@ export default function App() {
           cancelAnimation(drawerOffset);
           drawerDragStartOffset.value = drawerOffset.value;
           runOnJS(dismissKeyboard)();
-          runOnJS(ensureDrawerVisible)();
+          runOnJS(beginDrawerInteraction)();
         })
         .onUpdate((event) => {
           drawerOffset.value = applyDrawerRubberBand(
@@ -776,13 +789,14 @@ export default function App() {
           );
         }),
     [
+      beginDrawerInteraction,
       currentScreen,
       dismissKeyboard,
       drawerDragStartOffset,
       drawerGestureDidSettle,
       drawerOffset,
-      ensureDrawerVisible,
       handleDrawerSettled,
+      ensureDrawerCapturesTouches,
       settingsAllowsDrawerGesture,
     ]
   );
@@ -803,6 +817,7 @@ export default function App() {
           drawerGestureDidSettle.value = false;
           cancelAnimation(drawerOffset);
           drawerDragStartOffset.value = drawerOffset.value;
+          runOnJS(ensureDrawerCapturesTouches)();
         })
         .onUpdate((event) => {
           drawerOffset.value = applyDrawerRubberBand(
@@ -853,24 +868,22 @@ export default function App() {
       drawerGestureDidSettle,
       drawerOffset,
       drawerVisible,
+      ensureDrawerCapturesTouches,
       handleDrawerSettled,
     ]
   );
 
-  const visibleDrawerOverlayGesture = useMemo(
+  const visibleDrawerTapGesture = useMemo(
     () =>
-      Gesture.Race(
-        Gesture.Tap()
-          .enabled(drawerVisible)
-          .maxDistance(8)
-          .onEnd((_event, success) => {
-            if (success) {
-              runOnJS(closeDrawer)();
-            }
-          }),
-        visibleDrawerGesture
-      ),
-    [closeDrawer, drawerVisible, visibleDrawerGesture]
+      Gesture.Tap()
+        .enabled(drawerVisible)
+        .maxDistance(8)
+        .onEnd((_event, success) => {
+          if (success) {
+            runOnJS(closeDrawer)();
+          }
+        }),
+    [closeDrawer, drawerVisible]
   );
 
   const navigate = useCallback(
@@ -1513,6 +1526,7 @@ export default function App() {
           <View style={styles.root}>
             <GestureDetector gesture={openDrawerGesture}>
               <Animated.View
+                pointerEvents={drawerVisible && drawerCapturesTouches ? 'none' : 'auto'}
                 style={[
                   styles.screenFrame,
                   screenFrameAnimatedStyle,
@@ -1535,26 +1549,28 @@ export default function App() {
               pointerEvents={drawerVisible && drawerCapturesTouches ? 'auto' : 'none'}
               style={styles.drawerLayer}
             >
-              <GestureDetector gesture={visibleDrawerOverlayGesture}>
-                <Animated.View style={[styles.overlay, overlayAnimatedStyle]} />
-              </GestureDetector>
-
               <GestureDetector gesture={visibleDrawerGesture}>
-                <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
-                  <Animated.View
-                    style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
-                  >
-                    <DrawerContent
-                      api={activeApi}
-                      ws={activeWs}
-                      active={drawerVisible}
-                      selectedChatId={selectedChatId}
-                      onSelectChat={handleSelectChat}
-                      onNewChat={handleNewChat}
-                      onNavigate={navigate}
-                    />
+                <View style={styles.drawerGestureSurface}>
+                  <GestureDetector gesture={visibleDrawerTapGesture}>
+                    <Animated.View style={[styles.overlay, overlayAnimatedStyle]} />
+                  </GestureDetector>
+
+                  <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
+                    <Animated.View
+                      style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
+                    >
+                      <DrawerContent
+                        api={activeApi}
+                        ws={activeWs}
+                        active={drawerVisible}
+                        selectedChatId={selectedChatId}
+                        onSelectChat={handleSelectChat}
+                        onNewChat={handleNewChat}
+                        onNavigate={navigate}
+                      />
+                    </Animated.View>
                   </Animated.View>
-                </Animated.View>
+                </View>
               </GestureDetector>
             </View>
 
@@ -1778,6 +1794,9 @@ const createStyles = (theme: ReturnType<typeof createAppTheme>) =>
     drawerLayer: {
       ...StyleSheet.absoluteFillObject,
       zIndex: 10,
+    },
+    drawerGestureSurface: {
+      ...StyleSheet.absoluteFillObject,
     },
     drawer: {
       position: 'absolute',
