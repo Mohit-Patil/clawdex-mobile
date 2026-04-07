@@ -8036,7 +8036,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           title={headerTitle}
           engineLabel={selectedChat ? getChatEngineLabel(selectedChat.engine) : undefined}
           onOpenTitleMenu={selectedChat ? openChatTitleMenu : undefined}
-          rightIconName="git-branch-outline"
+          rightIconName={selectedChat ? 'git-branch-outline' : undefined}
           onRightActionPress={selectedChat ? handleOpenGit : undefined}
         />
 

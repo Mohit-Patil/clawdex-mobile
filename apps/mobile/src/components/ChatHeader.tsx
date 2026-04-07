@@ -18,7 +18,7 @@ export function ChatHeader({
   title,
   engineLabel,
   onOpenTitleMenu,
-  rightIconName = 'sparkles-outline',
+  rightIconName,
   onRightActionPress,
 }: ChatHeaderProps) {
   const theme = useAppTheme();
@@ -62,13 +62,15 @@ export function ChatHeader({
             </View>
           )}
           <View style={{ flex: 1 }} />
-          {onRightActionPress ? (
-            <Pressable onPress={onRightActionPress} hitSlop={8} style={styles.rightBtn}>
+          {rightIconName ? (
+            onRightActionPress ? (
+              <Pressable onPress={onRightActionPress} hitSlop={8} style={styles.rightBtn}>
+                <Ionicons name={rightIconName} size={18} color={colors.textMuted} />
+              </Pressable>
+            ) : (
               <Ionicons name={rightIconName} size={18} color={colors.textMuted} />
-            </Pressable>
-          ) : (
-            <Ionicons name={rightIconName} size={18} color={colors.textMuted} />
-          )}
+            )
+          ) : null}
         </View>
       </SafeAreaView>
     </View>
