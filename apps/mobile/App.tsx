@@ -699,6 +699,7 @@ export default function App() {
       Gesture.Pan()
         .enabled(
           currentScreen !== 'ChatGit' &&
+            currentScreen !== 'Browser' &&
             (currentScreen !== 'Settings' || settingsAllowsDrawerGesture)
         )
         .activeOffsetX(12)
