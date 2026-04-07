@@ -799,7 +799,7 @@ export default function App() {
         .enabled(drawerVisible)
         .activeOffsetX([-8, 8])
         .failOffsetY([-18, 18])
-        .onBegin(() => {
+        .onStart(() => {
           drawerGestureDidSettle.value = false;
           cancelAnimation(drawerOffset);
           drawerDragStartOffset.value = drawerOffset.value;
@@ -1229,6 +1229,13 @@ export default function App() {
     closeDrawer();
   }, [closeDrawer, currentScreen]);
 
+  const handleOpenBridgeRecoveryGuide = useCallback(() => {
+    setOnboardingMode('reconnect');
+    setOnboardingReturnScreen(currentScreen === 'Onboarding' ? 'Settings' : currentScreen);
+    setCurrentScreen('Onboarding');
+    closeDrawer();
+  }, [closeDrawer, currentScreen]);
+
   const handleSwitchBridgeProfile = useCallback(
     async (profileId: string) => {
       const nextStore = setActiveBridgeProfile(currentBridgeProfileStore, profileId);
@@ -1329,19 +1336,20 @@ export default function App() {
 
   if (!bridgeUrl || !api || !ws || currentScreen === 'Onboarding') {
     const mode: OnboardingMode = bridgeUrl ? onboardingMode : 'initial';
+    const shouldUseSavedBridgeCredentials = mode === 'edit' || mode === 'reconnect';
     const initialUrl =
-      mode === 'edit'
+      shouldUseSavedBridgeCredentials
         ? activeBridgeProfile?.bridgeUrl ?? ''
         : mode === 'add'
           ? ''
           : env.legacyHostBridgeUrl ?? '';
     const initialToken =
-      mode === 'edit'
+      shouldUseSavedBridgeCredentials
         ? activeBridgeProfile?.bridgeToken ?? ''
         : mode === 'add'
           ? ''
           : env.hostBridgeToken ?? '';
-    const canCancel = (mode === 'edit' || mode === 'add') && Boolean(activeBridgeProfile);
+    const canCancel = mode !== 'initial' && Boolean(activeBridgeProfile);
     return (
       <AppThemeProvider theme={theme}>
         <GestureHandlerRootView style={styles.root}>
@@ -1388,6 +1396,7 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             onOpenLocalPreview={openBrowser}
+            onOpenBridgeRecoveryGuide={handleOpenBridgeRecoveryGuide}
             defaultStartCwd={defaultStartCwd}
             defaultChatEngine={defaultChatEngine}
             defaultEngineSettings={defaultEngineSettings}
@@ -1473,6 +1482,7 @@ export default function App() {
             onOpenDrawer={openDrawer}
             onOpenGit={handleOpenChatGit}
             onOpenLocalPreview={openBrowser}
+            onOpenBridgeRecoveryGuide={handleOpenBridgeRecoveryGuide}
             defaultStartCwd={defaultStartCwd}
             defaultChatEngine={defaultChatEngine}
             defaultEngineSettings={defaultEngineSettings}

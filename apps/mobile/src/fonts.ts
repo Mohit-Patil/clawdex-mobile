@@ -1,6 +1,13 @@
 import { Platform } from 'react-native';
 
-export type FontPreference = 'system' | 'ibmPlex' | 'spaceGrotesk' | 'jetbrainsMono';
+export type FontPreference =
+  | 'system'
+  | 'ibmPlex'
+  | 'spaceGrotesk'
+  | 'jetbrainsMono'
+  | 'sourceCodePro'
+  | 'firaCode'
+  | 'spaceMono';
 
 export interface AppFontFamilies {
   regular?: string;
@@ -55,6 +62,33 @@ const FONT_FAMILIES: Record<FontPreference, AppFontFamilies> = {
     monoMedium: 'JetBrainsMono_500Medium',
     monoBold: 'JetBrainsMono_700Bold',
   },
+  sourceCodePro: {
+    regular: 'SourceCodePro_400Regular',
+    medium: 'SourceCodePro_500Medium',
+    semibold: 'SourceCodePro_600SemiBold',
+    bold: 'SourceCodePro_700Bold',
+    monoRegular: 'SourceCodePro_400Regular',
+    monoMedium: 'SourceCodePro_500Medium',
+    monoBold: 'SourceCodePro_700Bold',
+  },
+  firaCode: {
+    regular: 'FiraCode_400Regular',
+    medium: 'FiraCode_500Medium',
+    semibold: 'FiraCode_600SemiBold',
+    bold: 'FiraCode_700Bold',
+    monoRegular: 'FiraCode_400Regular',
+    monoMedium: 'FiraCode_500Medium',
+    monoBold: 'FiraCode_700Bold',
+  },
+  spaceMono: {
+    regular: 'SpaceMono_400Regular',
+    medium: 'SpaceMono_400Regular',
+    semibold: 'SpaceMono_700Bold',
+    bold: 'SpaceMono_700Bold',
+    monoRegular: 'SpaceMono_400Regular',
+    monoMedium: 'SpaceMono_400Regular',
+    monoBold: 'SpaceMono_700Bold',
+  },
 };
 
 export const FONT_PREFERENCE_OPTIONS: readonly FontPreferenceOption[] = [
@@ -78,6 +112,21 @@ export const FONT_PREFERENCE_OPTIONS: readonly FontPreferenceOption[] = [
     title: 'JetBrains Mono',
     description: 'A full technical mono treatment across the app.',
   },
+  {
+    key: 'sourceCodePro',
+    title: 'Source Code Pro',
+    description: 'Clean and neutral, with a classic editor feel.',
+  },
+  {
+    key: 'firaCode',
+    title: 'Fira Code',
+    description: 'A sharper coding face with familiar developer character.',
+  },
+  {
+    key: 'spaceMono',
+    title: 'Space Mono',
+    description: 'Retro and expressive, but still readable in compact UI.',
+  },
 ] as const;
 
 export const APP_FONT_ASSETS = {
@@ -96,6 +145,16 @@ export const APP_FONT_ASSETS = {
   JetBrainsMono_500Medium: require('@expo-google-fonts/jetbrains-mono/500Medium/JetBrainsMono_500Medium.ttf'),
   JetBrainsMono_600SemiBold: require('@expo-google-fonts/jetbrains-mono/600SemiBold/JetBrainsMono_600SemiBold.ttf'),
   JetBrainsMono_700Bold: require('@expo-google-fonts/jetbrains-mono/700Bold/JetBrainsMono_700Bold.ttf'),
+  SourceCodePro_400Regular: require('@expo-google-fonts/source-code-pro/400Regular/SourceCodePro_400Regular.ttf'),
+  SourceCodePro_500Medium: require('@expo-google-fonts/source-code-pro/500Medium/SourceCodePro_500Medium.ttf'),
+  SourceCodePro_600SemiBold: require('@expo-google-fonts/source-code-pro/600SemiBold/SourceCodePro_600SemiBold.ttf'),
+  SourceCodePro_700Bold: require('@expo-google-fonts/source-code-pro/700Bold/SourceCodePro_700Bold.ttf'),
+  FiraCode_400Regular: require('@expo-google-fonts/fira-code/400Regular/FiraCode_400Regular.ttf'),
+  FiraCode_500Medium: require('@expo-google-fonts/fira-code/500Medium/FiraCode_500Medium.ttf'),
+  FiraCode_600SemiBold: require('@expo-google-fonts/fira-code/600SemiBold/FiraCode_600SemiBold.ttf'),
+  FiraCode_700Bold: require('@expo-google-fonts/fira-code/700Bold/FiraCode_700Bold.ttf'),
+  SpaceMono_400Regular: require('@expo-google-fonts/space-mono/400Regular/SpaceMono_400Regular.ttf'),
+  SpaceMono_700Bold: require('@expo-google-fonts/space-mono/700Bold/SpaceMono_700Bold.ttf'),
 } as const;
 
 export function normalizeFontPreference(value: unknown): FontPreference {
@@ -103,7 +162,10 @@ export function normalizeFontPreference(value: unknown): FontPreference {
     value === 'system' ||
     value === 'ibmPlex' ||
     value === 'spaceGrotesk' ||
-    value === 'jetbrainsMono'
+    value === 'jetbrainsMono' ||
+    value === 'sourceCodePro' ||
+    value === 'firaCode' ||
+    value === 'spaceMono'
   ) {
     return value;
   }

@@ -121,6 +121,7 @@ interface MainScreenProps {
   onOpenDrawer: () => void;
   onOpenGit: (chat: Chat) => void;
   onOpenLocalPreview?: (targetUrl: string) => void;
+  onOpenBridgeRecoveryGuide?: () => void;
   defaultStartCwd?: string | null;
   defaultChatEngine?: ChatEngine | null;
   defaultEngineSettings?: EngineDefaultSettingsMap | null;
@@ -505,6 +506,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       onOpenDrawer,
       onOpenGit,
       onOpenLocalPreview: onOpenLocalPreviewHandler,
+      onOpenBridgeRecoveryGuide,
       defaultStartCwd,
       defaultChatEngine,
       defaultEngineSettings,
@@ -652,6 +654,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       tone: 'idle',
       title: 'Ready',
     });
+    const [bridgeRecoveryBannerVisible, setBridgeRecoveryBannerVisible] = useState(false);
     const [heldActivity, setHeldActivity] = useState<ActivityState | null>(null);
     const [showDelayedGenericRunningActivity, setShowDelayedGenericRunningActivity] =
       useState(false);
@@ -752,9 +755,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (appStateRef.current !== 'active' || ws.isConnected) {
           return;
         }
+        setBridgeRecoveryBannerVisible(true);
         setActivity({
           tone: 'error',
-          title: 'Disconnected',
+          title: 'Bridge disconnected',
+          detail: 'Start the bridge to continue.',
         });
       };
 
@@ -2734,11 +2739,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     useEffect(() => clearDeferredDisconnectActivity, [clearDeferredDisconnectActivity]);
 
     useEffect(() => {
+      if (appStateRef.current === 'active' && !ws.isConnected) {
+        scheduleDisconnectActivity();
+      }
+
+      return ws.onStatus((connected) => {
+        if (connected) {
+          clearDeferredDisconnectActivity();
+          setBridgeRecoveryBannerVisible(false);
+          setError((previous) =>
+            isBridgeConnectionErrorMessage(previous) ? null : previous
+          );
+          return;
+        }
+
+        if (appStateRef.current !== 'active') {
+          clearDeferredDisconnectActivity();
+          setBridgeRecoveryBannerVisible(false);
+          return;
+        }
+
+        scheduleDisconnectActivity();
+      });
+    }, [clearDeferredDisconnectActivity, scheduleDisconnectActivity, ws]);
+
+    useEffect(() => {
       const subscription = AppState.addEventListener('change', (nextAppState) => {
         const previousAppState = appStateRef.current;
         appStateRef.current = nextAppState;
 
-        if (nextAppState !== 'active' || previousAppState === 'active') {
+        if (nextAppState !== 'active') {
+          clearDeferredDisconnectActivity();
+          setBridgeRecoveryBannerVisible(false);
+          return;
+        }
+
+        if (previousAppState === 'active') {
           return;
         }
 
@@ -6924,6 +6960,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const status = readString(params?.status);
           if (status === 'connected') {
             clearDeferredDisconnectActivity();
+            setBridgeRecoveryBannerVisible(false);
             if (!currentId) {
               return;
             }
@@ -6996,8 +7033,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return;
         }
 
+        const targetChatId = selectedChatId;
+
         try {
-          const latest = await api.getChat(selectedChatId);
+          const latest = await api.getChat(targetChatId);
+          // Ignore late poll responses after the user has already switched chats.
+          if (stopped || selectedChatIdRef.current !== targetChatId) {
+            return;
+          }
           const resolvedLatest = mergeChatWithPendingOptimisticMessages(latest);
           setSelectedChat((prev) => {
             if (!prev || prev.id !== resolvedLatest.id) {
@@ -7292,6 +7335,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const remainingQueuedMessagesCount = steeringMessage
       ? queuedMessages.length
       : Math.max(0, queuedMessages.length - 1);
+    const showBridgeRecoveryBanner = bridgeRecoveryBannerVisible && !ws.isConnected;
     const visibleActivity = (() => {
       if (isOpeningChat) {
         return {
@@ -7352,10 +7396,28 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       return activity;
     })();
+    const displayedActivity = (() => {
+      if (!ws.isConnected && isBridgeRecoveryActivity(visibleActivity)) {
+        if (!showBridgeRecoveryBanner) {
+          return {
+            tone: 'idle',
+            title: 'Ready',
+          } satisfies ActivityState;
+        }
+
+        return {
+          tone: 'error',
+          title: 'Bridge disconnected',
+          detail: 'Start the bridge on your computer to continue.',
+        } satisfies ActivityState;
+      }
+
+      return visibleActivity;
+    })();
     const isGenericRunningActivity =
-      visibleActivity.tone === 'running' &&
-      !visibleActivity.detail &&
-      GENERIC_RUNNING_ACTIVITY_TITLES.has(visibleActivity.title.trim().toLowerCase());
+      displayedActivity.tone === 'running' &&
+      !displayedActivity.detail &&
+      GENERIC_RUNNING_ACTIVITY_TITLES.has(displayedActivity.title.trim().toLowerCase());
     const shouldShowGenericRunningActivityImmediately =
       isGenericRunningActivity && (isTurnLoading || Boolean(activeTurnId));
 
@@ -7400,11 +7462,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       activeTurnId,
     ]);
 
-    const activityDetail = visibleActivity.detail;
+    const activityDetail = displayedActivity.detail;
     const showActivity =
       (isLoading && !isGenericRunningActivity) ||
       isOpeningChat ||
-      (visibleActivity.tone !== 'idle' &&
+      (displayedActivity.tone !== 'idle' &&
         (!isGenericRunningActivity || showDelayedGenericRunningActivity)) ||
       Boolean(activityDetail);
     const activeContextWindow = threadContextUsage?.modelContextWindow ?? null;
@@ -7577,13 +7639,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       hasPlanApprovalPrompt: showPlanImplementationPrompt,
     });
     const showTopCardsRow = !isOpeningChat && workflowCardMode !== null;
-    const showFloatingActivity = shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
+    const showFloatingActivity =
+      shouldShowComposer &&
+      Boolean(selectedChat) &&
+      !isOpeningChat &&
+      !showBridgeRecoveryBanner;
     const chatBottomInset = shouldShowComposer
       ? theme.spacing.lg
       : Math.max(theme.spacing.xxl, safeAreaInsets.bottom + theme.spacing.lg);
     const composerSafeAreaBottomInset = safeAreaInsets.bottom;
     const composerOverlayInset =
       Platform.OS === 'android' && keyboardVisible ? androidKeyboardInset : 0;
+    const visibleError =
+      !ws.isConnected && isBridgeConnectionErrorMessage(error) ? null : error;
     const androidComposerReservedInset = shouldShowComposer
       ? Math.max(
           theme.spacing.lg,
@@ -7609,7 +7677,40 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           !overlay && !keyboardVisible ? styles.composerContainerResting : null,
         ]}
       >
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        {visibleError ? <Text style={styles.errorText}>{visibleError}</Text> : null}
+        {showBridgeRecoveryBanner ? (
+          <View style={styles.bridgeRecoveryBanner}>
+            <View style={styles.bridgeRecoveryBannerTopRow}>
+              <View style={styles.bridgeRecoveryBannerIconWrap}>
+                <Ionicons
+                  name="warning-outline"
+                  size={16}
+                  color={theme.colors.warning}
+                />
+              </View>
+              <View style={styles.bridgeRecoveryBannerCopy}>
+                <Text style={styles.bridgeRecoveryBannerTitle}>Bridge disconnected</Text>
+                <Text style={styles.bridgeRecoveryBannerBody}>
+                  Start the bridge on your computer to continue. The app will reconnect
+                  automatically.
+                </Text>
+              </View>
+            </View>
+            {onOpenBridgeRecoveryGuide ? (
+              <Pressable
+                onPress={onOpenBridgeRecoveryGuide}
+                style={({ pressed }) => [
+                  styles.bridgeRecoveryBannerButton,
+                  pressed && styles.bridgeRecoveryBannerButtonPressed,
+                ]}
+              >
+                <Text style={styles.bridgeRecoveryBannerButtonText}>
+                  How to start bridge
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
         {pendingApproval ? (
           <ApprovalBanner
             approval={pendingApproval}
@@ -7710,9 +7811,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         {overlay && showFloatingActivity ? (
           <View pointerEvents="none" style={styles.activityDock}>
             <ActivityBar
-              title={visibleActivity.title}
+              title={displayedActivity.title}
               detail={activityDetail}
-              tone={visibleActivity.tone}
+              tone={displayedActivity.tone}
             />
           </View>
         ) : null}
@@ -8177,9 +8278,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             {showFloatingActivity ? (
               <View pointerEvents="none" style={styles.activityDock}>
                 <ActivityBar
-                  title={visibleActivity.title}
+                  title={displayedActivity.title}
                   detail={activityDetail}
-                  tone={visibleActivity.tone}
+                  tone={displayedActivity.tone}
                 />
               </View>
             ) : null}
@@ -10948,6 +11049,34 @@ function formatCollaborationModeLabel(mode: CollaborationMode): string {
   return mode === 'plan' ? 'Plan mode' : 'Default mode';
 }
 
+function isBridgeConnectionErrorMessage(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized.includes('bridge websocket') ||
+    normalized.includes('unable to connect to bridge websocket')
+  );
+}
+
+function isBridgeRecoveryActivity(activity: ActivityState | null | undefined): boolean {
+  if (!activity) {
+    return false;
+  }
+
+  const normalizedTitle = activity.title.trim().toLowerCase();
+  if (normalizedTitle === 'disconnected' || normalizedTitle === 'bridge disconnected') {
+    return true;
+  }
+
+  return (
+    isBridgeConnectionErrorMessage(activity.title) ||
+    isBridgeConnectionErrorMessage(activity.detail)
+  );
+}
+
 function createQueuedMessageId(): string {
   return `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -12915,6 +13044,61 @@ const createStyles = (theme: AppTheme) => {
   },
 
   // Error
+  bridgeRecoveryBanner: {
+    marginHorizontal: theme.spacing.lg,
+    marginBottom: theme.spacing.sm,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderHighlight,
+    backgroundColor: theme.colors.warningBg,
+    padding: theme.spacing.md,
+    gap: theme.spacing.sm,
+  },
+  bridgeRecoveryBannerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: theme.spacing.sm,
+  },
+  bridgeRecoveryBannerIconWrap: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.bgItem,
+  },
+  bridgeRecoveryBannerCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  bridgeRecoveryBannerTitle: {
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
+    fontWeight: '700',
+  },
+  bridgeRecoveryBannerBody: {
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
+    lineHeight: 17,
+  },
+  bridgeRecoveryBannerButton: {
+    alignSelf: 'flex-start',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accent,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+  },
+  bridgeRecoveryBannerButtonPressed: {
+    backgroundColor: theme.colors.accentPressed,
+    borderColor: theme.colors.accentPressed,
+  },
+  bridgeRecoveryBannerButtonText: {
+    ...theme.typography.caption,
+    color: theme.colors.accentText,
+    fontWeight: '700',
+  },
   errorText: {
     ...theme.typography.caption,
     color: theme.colors.error,

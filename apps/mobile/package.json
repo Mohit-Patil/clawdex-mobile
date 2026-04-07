@@ -14,10 +14,13 @@
     "test:watch": "jest --watch"
   },
   "dependencies": {
+    "@expo-google-fonts/fira-code": "^0.4.1",
     "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
     "@expo-google-fonts/ibm-plex-sans": "^0.4.1",
     "@expo-google-fonts/jetbrains-mono": "^0.4.1",
+    "@expo-google-fonts/source-code-pro": "^0.4.1",
     "@expo-google-fonts/space-grotesk": "^0.4.1",
+    "@expo-google-fonts/space-mono": "^0.4.2",
     "@expo/metro-runtime": "~55.0.6",
     "@expo/vector-icons": "15.0.3",
     "expo": "~55.0.8",

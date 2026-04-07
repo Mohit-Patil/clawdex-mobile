@@ -27,7 +27,7 @@ import { HostBridgeWsClient } from '../api/ws';
 import { BrandMark } from '../components/BrandMark';
 import { useAppTheme, type AppTheme } from '../theme';
 
-export type OnboardingMode = 'initial' | 'edit' | 'add';
+export type OnboardingMode = 'initial' | 'edit' | 'add' | 'reconnect';
 
 export interface OnboardingBridgeProfileDraft {
   bridgeUrl: string;
@@ -174,15 +174,20 @@ export function OnboardingScreen({
   const modeTitle =
     mode === 'edit'
       ? 'Update Bridge Profile'
+      : mode === 'reconnect'
+        ? 'Reconnect Bridge'
       : mode === 'add'
         ? 'Add Bridge Profile'
         : 'Pair Your Bridge';
   const modeDescription =
     mode === 'edit'
       ? 'Update the saved server details for the current profile.'
+      : mode === 'reconnect'
+        ? 'The saved bridge is unavailable. Start the bridge on your computer, then verify or update the saved URL and token here.'
       : mode === 'add'
         ? 'Save another bridge so you can switch servers from Settings later.'
         : 'Connect this phone to your private bridge and verify that it responds.';
+  const connectEyebrow = mode === 'reconnect' ? 'Bridge recovery' : 'Bridge pairing';
   const normalizedTokenPreview = tokenInput.trim();
   const showOnboardingDock = mode === 'initial';
   const currentSetupStage = useMemo(() => {
@@ -486,7 +491,7 @@ export function OnboardingScreen({
                     <View style={styles.heroIconWrap}>
                       <Ionicons name="hardware-chip-outline" size={20} color={theme.colors.textPrimary} />
                     </View>
-                    {(mode === 'edit' || mode === 'add') && onCancel ? (
+                    {(mode === 'edit' || mode === 'add' || mode === 'reconnect') && onCancel ? (
                       <Pressable
                         onPress={onCancel}
                         hitSlop={8}
@@ -496,7 +501,7 @@ export function OnboardingScreen({
                       </Pressable>
                     ) : null}
                   </View>
-                  <Text style={styles.connectEyebrow}>Bridge pairing</Text>
+                  <Text style={styles.connectEyebrow}>{connectEyebrow}</Text>
                   <Text style={styles.heroTitle}>{modeTitle}</Text>
                   <Text style={styles.heroDescription}>{modeDescription}</Text>
                 </LinearGradient>
@@ -700,7 +705,11 @@ export function OnboardingScreen({
                         <Ionicons name="arrow-forward" size={16} color={theme.colors.black} />
                       )}
                       <Text style={styles.primaryButtonText}>
-                        {mode === 'edit' ? 'Save URL' : 'Continue'}
+                        {mode === 'edit'
+                          ? 'Save URL'
+                          : mode === 'reconnect'
+                            ? 'Reconnect'
+                            : 'Continue'}
                       </Text>
                     </Pressable>
                   </View>
