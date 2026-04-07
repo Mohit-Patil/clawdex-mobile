@@ -1,4 +1,43 @@
 import { Platform } from 'react-native';
+import {
+  IBMPlexMono_400Regular,
+  IBMPlexMono_500Medium,
+  IBMPlexMono_700Bold,
+} from '@expo-google-fonts/ibm-plex-mono';
+import {
+  IBMPlexSans_400Regular,
+  IBMPlexSans_500Medium,
+  IBMPlexSans_600SemiBold,
+  IBMPlexSans_700Bold,
+} from '@expo-google-fonts/ibm-plex-sans';
+import {
+  FiraCode_400Regular,
+  FiraCode_500Medium,
+  FiraCode_600SemiBold,
+  FiraCode_700Bold,
+} from '@expo-google-fonts/fira-code';
+import {
+  JetBrainsMono_400Regular,
+  JetBrainsMono_500Medium,
+  JetBrainsMono_600SemiBold,
+  JetBrainsMono_700Bold,
+} from '@expo-google-fonts/jetbrains-mono';
+import {
+  SourceCodePro_400Regular,
+  SourceCodePro_500Medium,
+  SourceCodePro_600SemiBold,
+  SourceCodePro_700Bold,
+} from '@expo-google-fonts/source-code-pro';
+import {
+  SpaceGrotesk_400Regular,
+  SpaceGrotesk_500Medium,
+  SpaceGrotesk_600SemiBold,
+  SpaceGrotesk_700Bold,
+} from '@expo-google-fonts/space-grotesk';
+import {
+  SpaceMono_400Regular,
+  SpaceMono_700Bold,
+} from '@expo-google-fonts/space-mono';
 
 export type FontPreference =
   | 'system'
@@ -130,31 +169,31 @@ export const FONT_PREFERENCE_OPTIONS: readonly FontPreferenceOption[] = [
 ] as const;
 
 export const APP_FONT_ASSETS = {
-  IBMPlexSans_400Regular: require('@expo-google-fonts/ibm-plex-sans/400Regular/IBMPlexSans_400Regular.ttf'),
-  IBMPlexSans_500Medium: require('@expo-google-fonts/ibm-plex-sans/500Medium/IBMPlexSans_500Medium.ttf'),
-  IBMPlexSans_600SemiBold: require('@expo-google-fonts/ibm-plex-sans/600SemiBold/IBMPlexSans_600SemiBold.ttf'),
-  IBMPlexSans_700Bold: require('@expo-google-fonts/ibm-plex-sans/700Bold/IBMPlexSans_700Bold.ttf'),
-  IBMPlexMono_400Regular: require('@expo-google-fonts/ibm-plex-mono/400Regular/IBMPlexMono_400Regular.ttf'),
-  IBMPlexMono_500Medium: require('@expo-google-fonts/ibm-plex-mono/500Medium/IBMPlexMono_500Medium.ttf'),
-  IBMPlexMono_700Bold: require('@expo-google-fonts/ibm-plex-mono/700Bold/IBMPlexMono_700Bold.ttf'),
-  SpaceGrotesk_400Regular: require('@expo-google-fonts/space-grotesk/400Regular/SpaceGrotesk_400Regular.ttf'),
-  SpaceGrotesk_500Medium: require('@expo-google-fonts/space-grotesk/500Medium/SpaceGrotesk_500Medium.ttf'),
-  SpaceGrotesk_600SemiBold: require('@expo-google-fonts/space-grotesk/600SemiBold/SpaceGrotesk_600SemiBold.ttf'),
-  SpaceGrotesk_700Bold: require('@expo-google-fonts/space-grotesk/700Bold/SpaceGrotesk_700Bold.ttf'),
-  JetBrainsMono_400Regular: require('@expo-google-fonts/jetbrains-mono/400Regular/JetBrainsMono_400Regular.ttf'),
-  JetBrainsMono_500Medium: require('@expo-google-fonts/jetbrains-mono/500Medium/JetBrainsMono_500Medium.ttf'),
-  JetBrainsMono_600SemiBold: require('@expo-google-fonts/jetbrains-mono/600SemiBold/JetBrainsMono_600SemiBold.ttf'),
-  JetBrainsMono_700Bold: require('@expo-google-fonts/jetbrains-mono/700Bold/JetBrainsMono_700Bold.ttf'),
-  SourceCodePro_400Regular: require('@expo-google-fonts/source-code-pro/400Regular/SourceCodePro_400Regular.ttf'),
-  SourceCodePro_500Medium: require('@expo-google-fonts/source-code-pro/500Medium/SourceCodePro_500Medium.ttf'),
-  SourceCodePro_600SemiBold: require('@expo-google-fonts/source-code-pro/600SemiBold/SourceCodePro_600SemiBold.ttf'),
-  SourceCodePro_700Bold: require('@expo-google-fonts/source-code-pro/700Bold/SourceCodePro_700Bold.ttf'),
-  FiraCode_400Regular: require('@expo-google-fonts/fira-code/400Regular/FiraCode_400Regular.ttf'),
-  FiraCode_500Medium: require('@expo-google-fonts/fira-code/500Medium/FiraCode_500Medium.ttf'),
-  FiraCode_600SemiBold: require('@expo-google-fonts/fira-code/600SemiBold/FiraCode_600SemiBold.ttf'),
-  FiraCode_700Bold: require('@expo-google-fonts/fira-code/700Bold/FiraCode_700Bold.ttf'),
-  SpaceMono_400Regular: require('@expo-google-fonts/space-mono/400Regular/SpaceMono_400Regular.ttf'),
-  SpaceMono_700Bold: require('@expo-google-fonts/space-mono/700Bold/SpaceMono_700Bold.ttf'),
+  IBMPlexSans_400Regular,
+  IBMPlexSans_500Medium,
+  IBMPlexSans_600SemiBold,
+  IBMPlexSans_700Bold,
+  IBMPlexMono_400Regular,
+  IBMPlexMono_500Medium,
+  IBMPlexMono_700Bold,
+  SpaceGrotesk_400Regular,
+  SpaceGrotesk_500Medium,
+  SpaceGrotesk_600SemiBold,
+  SpaceGrotesk_700Bold,
+  JetBrainsMono_400Regular,
+  JetBrainsMono_500Medium,
+  JetBrainsMono_600SemiBold,
+  JetBrainsMono_700Bold,
+  SourceCodePro_400Regular,
+  SourceCodePro_500Medium,
+  SourceCodePro_600SemiBold,
+  SourceCodePro_700Bold,
+  FiraCode_400Regular,
+  FiraCode_500Medium,
+  FiraCode_600SemiBold,
+  FiraCode_700Bold,
+  SpaceMono_400Regular,
+  SpaceMono_700Bold,
 } as const;
 
 export function normalizeFontPreference(value: unknown): FontPreference {
