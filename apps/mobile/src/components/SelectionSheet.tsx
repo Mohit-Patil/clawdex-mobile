@@ -7,6 +7,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  type TextStyle,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -22,11 +23,14 @@ export interface SelectionSheetOption {
   key: string;
   title: string;
   description?: string;
+  descriptionNumberOfLines?: number;
   badge?: string;
   meta?: string;
   icon?: IoniconName;
   titleColor?: string;
   descriptionColor?: string;
+  titleStyle?: TextStyle;
+  descriptionStyle?: TextStyle;
   badgeBackgroundColor?: string;
   badgeTextColor?: string;
   metaColor?: string;
@@ -179,6 +183,7 @@ export function SelectionSheet({
                                 styles.optionTitle,
                                 option.selected && styles.optionTitleSelected,
                                 { color: titleColor },
+                                option.titleStyle,
                               ]}
                               numberOfLines={2}
                             >
@@ -199,8 +204,12 @@ export function SelectionSheet({
                           </View>
                           {option.description ? (
                             <Text
-                              style={[styles.optionDescription, { color: descriptionColor }]}
-                              numberOfLines={2}
+                              style={[
+                                styles.optionDescription,
+                                { color: descriptionColor },
+                                option.descriptionStyle,
+                              ]}
+                              numberOfLines={option.descriptionNumberOfLines ?? 2}
                             >
                               {option.description}
                             </Text>

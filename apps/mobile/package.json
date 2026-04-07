@@ -14,6 +14,10 @@
     "test:watch": "jest --watch"
   },
   "dependencies": {
+    "@expo-google-fonts/ibm-plex-mono": "^0.4.1",
+    "@expo-google-fonts/ibm-plex-sans": "^0.4.1",
+    "@expo-google-fonts/jetbrains-mono": "^0.4.1",
+    "@expo-google-fonts/space-grotesk": "^0.4.1",
     "@expo/metro-runtime": "~55.0.6",
     "@expo/vector-icons": "15.0.3",
     "expo": "~55.0.8",
@@ -23,6 +27,7 @@
     "expo-clipboard": "~55.0.9",
     "expo-document-picker": "~55.0.9",
     "expo-file-system": "~55.0.9",
+    "expo-font": "~55.0.6",
     "expo-image-picker": "~55.0.13",
     "expo-linear-gradient": "~55.0.9",
     "expo-secure-store": "~55.0.9",

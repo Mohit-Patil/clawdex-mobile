@@ -30,7 +30,6 @@ import type {
   ApprovalMode,
   BridgeCapabilities,
   BridgeRuntimeInfo,
-  ChatMessage as TranscriptChatMessage,
   ChatEngine,
   EngineDefaultSettingsMap,
   ModelOption,
@@ -39,13 +38,19 @@ import type {
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import type { BridgeProfile } from '../bridgeProfiles';
-import { ChatMessage as TranscriptMessagePreview } from '../components/ChatMessage';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import {
   buildComposerUsageLimitBadges,
   formatComposerUsageLimitResetAt,
 } from '../components/usageLimitBadges';
 import { getChatEngineLabel } from '../chatEngines';
+import {
+  FONT_PREFERENCE_OPTIONS,
+  getFontFamilies,
+  getFontPreferenceLabel,
+  normalizeFontPreference,
+  type FontPreference,
+} from '../fonts';
 import {
   formatModelOptionDescription,
   formatModelOptionLabel,
@@ -84,6 +89,7 @@ interface SettingsScreenProps {
   approvalMode?: ApprovalMode;
   showToolCalls?: boolean;
   appearancePreference?: AppearancePreference;
+  fontPreference?: FontPreference;
   onDefaultChatEngineChange?: (engine: ChatEngine) => void;
   onDefaultModelSettingsChange?: (
     engine: ChatEngine,
@@ -93,6 +99,7 @@ interface SettingsScreenProps {
   onApprovalModeChange?: (mode: ApprovalMode) => void;
   onShowToolCallsChange?: (value: boolean) => void;
   onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
+  onFontPreferenceChange?: (preference: FontPreference) => void;
   onEditBridgeProfile?: () => void;
   onAddBridgeProfile?: () => void;
   onSwitchBridgeProfile?: (profileId: string) => void | Promise<void>;
@@ -120,28 +127,6 @@ const SETTINGS_BACK_EDGE_WIDTH = 28;
 const SETTINGS_ROUTE_TRANSITION_OFFSET = 18;
 const SETTINGS_ROUTE_TRANSITION_MS = 220;
 
-const COMPACTION_PREVIEW_MESSAGES: TranscriptChatMessage[] = [
-  {
-    id: 'settings-preview-before',
-    role: 'assistant',
-    content: 'Earlier messages are summarized to keep the thread moving.',
-    createdAt: '2026-04-07T00:00:00.000Z',
-  },
-  {
-    id: 'settings-preview-compaction',
-    role: 'system',
-    content: '• Compacted conversation context',
-    createdAt: '2026-04-07T00:00:01.000Z',
-    systemKind: 'compaction',
-  },
-  {
-    id: 'settings-preview-after',
-    role: 'assistant',
-    content: 'New turns continue below the compacted history marker.',
-    createdAt: '2026-04-07T00:00:02.000Z',
-  },
-];
-
 type SettingsRouteTransitionDirection = 'forward' | 'backward';
 
 export function SettingsScreen({
@@ -156,11 +141,13 @@ export function SettingsScreen({
   approvalMode,
   showToolCalls = true,
   appearancePreference = 'system',
+  fontPreference = 'system',
   onDefaultChatEngineChange,
   onDefaultModelSettingsChange,
   onApprovalModeChange,
   onShowToolCallsChange,
   onAppearancePreferenceChange,
+  onFontPreferenceChange,
   onEditBridgeProfile,
   onAddBridgeProfile,
   onSwitchBridgeProfile,
@@ -189,6 +176,7 @@ export function SettingsScreen({
   const [effortModalVisible, setEffortModalVisible] = useState(false);
   const [approvalModeModalVisible, setApprovalModeModalVisible] = useState(false);
   const [appearanceModalVisible, setAppearanceModalVisible] = useState(false);
+  const [fontModalVisible, setFontModalVisible] = useState(false);
   const [bridgeProfileModalVisible, setBridgeProfileModalVisible] = useState(false);
   const [account, setAccount] = useState<AccountSnapshot | null>(null);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -266,6 +254,7 @@ export function SettingsScreen({
     appearancePreference === 'light' || appearancePreference === 'dark'
       ? appearancePreference
       : 'system';
+  const normalizedFontPreference = normalizeFontPreference(fontPreference);
   const approvalModeLabel =
     normalizedApprovalMode === 'yolo'
       ? 'YOLO (no approval prompts)'
@@ -276,6 +265,7 @@ export function SettingsScreen({
       : normalizedAppearancePreference === 'dark'
         ? 'Dark'
         : 'System';
+  const fontPreferenceLabel = getFontPreferenceLabel(normalizedFontPreference);
   const activeEngine = bridgeCapabilities?.activeEngine ?? null;
   const usageLimitBadges = useMemo(
     () => buildComposerUsageLimitBadges(accountRateLimits),
@@ -327,7 +317,7 @@ export function SettingsScreen({
   const chatDefaultsSummary = normalizedDefaultModelId
     ? `${defaultEngineLabel} · ${defaultModelLabel} · ${defaultEffortLabel}`
     : `${defaultEngineLabel} · Server default`;
-  const appearanceSummary = `Current theme: ${appearancePreferenceLabel}`;
+  const appearanceSummary = `${appearancePreferenceLabel} theme · ${fontPreferenceLabel}`;
   const accountSummary = 'View account type, email, and bridge auth details';
   const usageLimitsSummary = 'View weekly usage and reset times';
   const bridgeSummary = 'Manage profiles, maintenance, engines, and health';
@@ -846,6 +836,37 @@ export function SettingsScreen({
     [normalizedAppearancePreference, onAppearancePreferenceChange]
   );
 
+  const fontOptions = useMemo<SelectionSheetOption[]>(
+    () =>
+      FONT_PREFERENCE_OPTIONS.map((option) => {
+        const families = getFontFamilies(option.key);
+        const titleFamily = families.semibold ?? families.medium ?? families.regular;
+        const descriptionFamily = families.regular;
+
+        return {
+          key: option.key,
+          title: option.title,
+          description:
+            option.key === 'system'
+              ? option.description
+              : `${option.description}\nSphinx of black quartz, judge my vow.`,
+          descriptionNumberOfLines: option.key === 'system' ? 2 : 3,
+          icon:
+            option.key === 'jetbrainsMono'
+              ? ('code-slash-outline' as const)
+              : ('text-outline' as const),
+          titleStyle: titleFamily ? { fontFamily: titleFamily } : undefined,
+          descriptionStyle: descriptionFamily ? { fontFamily: descriptionFamily } : undefined,
+          selected: normalizedFontPreference === option.key,
+          onPress: () => {
+            onFontPreferenceChange?.(option.key);
+            setFontModalVisible(false);
+          },
+        };
+      }),
+    [normalizedFontPreference, onFontPreferenceChange]
+  );
+
   const bridgeProfileOptions = useMemo<SelectionSheetOption[]>(
     () =>
       bridgeProfiles.map((profile) => ({
@@ -1215,23 +1236,6 @@ export function SettingsScreen({
         start jumping while a turn is running.
       </Text>
 
-      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Compaction Preview</Text>
-      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-        <View style={styles.transcriptPreviewWrap}>
-          <Text style={styles.transcriptPreviewLabel}>
-            This is how compaction will appear inline in chat.
-          </Text>
-          <View style={styles.transcriptPreviewSurface}>
-            {COMPACTION_PREVIEW_MESSAGES.map((message) => (
-              <TranscriptMessagePreview
-                key={message.id}
-                message={message}
-              />
-            ))}
-          </View>
-        </View>
-      </BlurView>
-
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
     </>
   );
@@ -1252,6 +1256,22 @@ export function SettingsScreen({
             <Text style={styles.rowLabel}>Theme</Text>
             <Text style={styles.settingValue} numberOfLines={2}>
               {appearancePreferenceLabel}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+        <Pressable
+          onPress={() => setFontModalVisible(true)}
+          style={({ pressed }) => [
+            styles.settingRow,
+            styles.settingRowLast,
+            pressed && styles.linkRowPressed,
+          ]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Typography</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              {fontPreferenceLabel}
             </Text>
           </View>
           <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
@@ -1817,6 +1837,15 @@ export function SettingsScreen({
       />
 
       <SelectionSheet
+        visible={fontModalVisible}
+        eyebrow="Appearance"
+        title="Typography"
+        subtitle="Pick the app-wide font pack used throughout the mobile interface."
+        options={fontOptions}
+        onClose={() => setFontModalVisible(false)}
+      />
+
+      <SelectionSheet
         visible={bridgeProfileModalVisible}
         eyebrow="Bridge Profiles"
         title="Switch active bridge"
@@ -2229,24 +2258,6 @@ const createStyles = (theme: AppTheme) => {
       color: hintTextColor,
       marginTop: theme.spacing.xs,
       marginHorizontal: theme.spacing.xs,
-    },
-    transcriptPreviewWrap: {
-      paddingVertical: theme.spacing.md,
-      gap: theme.spacing.sm,
-    },
-    transcriptPreviewLabel: {
-      ...theme.typography.caption,
-      color: settingsValueColor,
-    },
-    transcriptPreviewSurface: {
-      borderRadius: theme.radius.md,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: settingsDivider,
-      backgroundColor: theme.colors.bgMain,
-      paddingHorizontal: theme.spacing.sm,
-      paddingVertical: theme.spacing.sm,
-      gap: theme.spacing.sm,
-      overflow: 'hidden',
     },
     accountLoadingState: {
       minHeight: 88,

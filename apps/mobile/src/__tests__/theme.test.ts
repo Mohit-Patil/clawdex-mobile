@@ -34,4 +34,13 @@ describe('theme', () => {
     expect(theme.colors.bgMain).toBe('#000000');
     expect(theme.colors.accentText).toBe('#000000');
   });
+
+  it('switches typography families for a custom font preset', () => {
+    const theme = createAppTheme('dark', 'ibmPlex');
+
+    expect(theme.fontPreference).toBe('ibmPlex');
+    expect(theme.typography.body.fontFamily).toBe('IBMPlexSans_400Regular');
+    expect(theme.typography.headline.fontFamily).toBe('IBMPlexSans_600SemiBold');
+    expect(theme.typography.mono.fontFamily).toBe('IBMPlexMono_400Regular');
+  });
 });

@@ -5,7 +5,6 @@ import {
   Pressable,
   type ImageSourcePropType,
   Linking,
-  Platform,
   StyleSheet,
   Text,
   type TextProps,
@@ -478,15 +477,13 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
 });
 ToolActivityGroup.displayName = 'ToolActivityGroup';
 
-const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
-
 const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
   body: {
     ...theme.typography.body,
     color: theme.colors.textPrimary,
   },
   code_inline: {
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
     fontSize: 12,
     backgroundColor: theme.colors.inlineCodeBg,
     color: theme.colors.inlineCodeText,
@@ -497,7 +494,7 @@ const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
     paddingVertical: 2,
   },
   code_block: {
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
     fontSize: 12,
     backgroundColor: theme.colors.bgInput,
     color: theme.colors.textPrimary,
@@ -508,7 +505,7 @@ const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
     marginVertical: theme.spacing.sm,
   },
   fence: {
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
     fontSize: 12,
     backgroundColor: theme.colors.bgInput,
     color: theme.colors.textPrimary,
@@ -716,7 +713,7 @@ const createStyles = (theme: AppTheme) => {
     gap: theme.spacing.sm,
   },
   userMessageText: {
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
     fontSize: 14,
     color: theme.colors.textPrimary,
     lineHeight: 20,
@@ -744,7 +741,7 @@ const createStyles = (theme: AppTheme) => {
     maxWidth: '100%',
   },
   userFileChipText: {
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
     fontSize: 12,
     lineHeight: 16,
     color: theme.colors.textMuted,
@@ -912,7 +909,7 @@ const createStyles = (theme: AppTheme) => {
     color: theme.colors.textSecondary,
     lineHeight: 16,
     flex: 1,
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
   },
   toolGroupMoreText: {
     ...theme.typography.caption,
@@ -985,7 +982,7 @@ const createStyles = (theme: AppTheme) => {
     lineHeight: 18,
   },
   timelineTitleMono: {
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
     fontSize: 12,
     lineHeight: 18,
   },
@@ -1002,7 +999,7 @@ const createStyles = (theme: AppTheme) => {
     marginTop: theme.spacing.xs,
   },
   timelineDetailLine: {
-    fontFamily: monoFont,
+    fontFamily: theme.fonts.monoRegular,
     fontSize: 11,
     lineHeight: 16,
     color: theme.colors.textSecondary,

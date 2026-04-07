@@ -161,7 +161,7 @@ const createStyles = (theme: AppTheme) =>
     },
     timer: {
       color: theme.colors.textSecondary,
-      fontFamily: 'monospace',
+      fontFamily: theme.fonts.monoRegular,
       fontSize: 12,
       fontVariant: ['tabular-nums'],
     },

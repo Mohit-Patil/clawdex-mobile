@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useMemo, useState } from 'react';
 
@@ -30,8 +30,6 @@ export function ApprovalBanner({ approval, onResolve }: ApprovalBannerProps) {
     Array.isArray(approval.proposedExecpolicyAmendment) &&
     approval.proposedExecpolicyAmendment.length > 0;
 
-  const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
-
   return (
     <Animated.View entering={FadeInDown.duration(250)} style={styles.container}>
       <View style={styles.header}>
@@ -39,7 +37,7 @@ export function ApprovalBanner({ approval, onResolve }: ApprovalBannerProps) {
         <Text style={styles.title}>Approval requested</Text>
       </View>
 
-      <Text style={[styles.command, { fontFamily: monoFont }]} numberOfLines={3}>
+      <Text style={styles.command} numberOfLines={3}>
         {label}
       </Text>
 
@@ -160,6 +158,7 @@ const createStyles = (theme: AppTheme) =>
       fontSize: 13,
     },
     command: {
+      ...theme.typography.mono,
       fontSize: 12,
       color: theme.colors.textPrimary,
       lineHeight: 18,

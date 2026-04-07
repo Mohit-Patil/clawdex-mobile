@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useMemo } from 'react';
-import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme, type AppTheme } from '../theme';
 
@@ -46,8 +46,6 @@ export function ToolBlock({
   );
 }
 
-const monoFont = Platform.select({ ios: 'Menlo', default: 'monospace' });
-
 const createStyles = (theme: AppTheme) =>
   StyleSheet.create({
     container: {
@@ -64,7 +62,7 @@ const createStyles = (theme: AppTheme) =>
     },
     command: {
       flex: 1,
-      fontFamily: monoFont,
+      ...theme.typography.mono,
       fontSize: 12,
       color: theme.colors.textPrimary,
       lineHeight: 18,

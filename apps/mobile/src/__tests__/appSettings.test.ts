@@ -10,6 +10,7 @@ describe('parseAppSettings', () => {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      fontPreference: 'system',
     });
   });
 
@@ -83,5 +84,16 @@ describe('parseAppSettings', () => {
     expect(parsed.bridgeToken).toBeNull();
     expect(parsed.defaultChatEngine).toBe('opencode');
     expect(parsed.appearancePreference).toBe('system');
+  });
+
+  it('preserves a stored font preference for version 8 settings', () => {
+    const parsed = parseAppSettings(
+      JSON.stringify({
+        version: 8,
+        fontPreference: 'spaceGrotesk',
+      })
+    );
+
+    expect(parsed.fontPreference).toBe('spaceGrotesk');
   });
 });

@@ -6,9 +6,14 @@ import type {
 } from './api/types';
 import { dedupeRecentPreviewTargets, normalizePreviewTargetInput } from './browserPreview';
 import { normalizeBridgeUrlInput } from './bridgeUrl';
+import {
+  DEFAULT_FONT_PREFERENCE,
+  normalizeFontPreference,
+  type FontPreference,
+} from './fonts';
 import type { AppearancePreference } from './theme';
 
-export const APP_SETTINGS_VERSION = 7;
+export const APP_SETTINGS_VERSION = 8;
 
 export function parseAppSettings(raw: string): {
   bridgeUrl: string | null;
@@ -19,6 +24,7 @@ export function parseAppSettings(raw: string): {
   approvalMode: ApprovalMode;
   showToolCalls: boolean;
   appearancePreference: AppearancePreference;
+  fontPreference: FontPreference;
   recentBrowserTargetUrls: string[];
 } {
   if (typeof raw !== 'string' || raw.trim().length === 0) {
@@ -31,6 +37,7 @@ export function parseAppSettings(raw: string): {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      fontPreference: DEFAULT_FONT_PREFERENCE,
       recentBrowserTargetUrls: [],
     };
   }
@@ -47,6 +54,7 @@ export function parseAppSettings(raw: string): {
         parsedVersion !== 4 &&
         parsedVersion !== 5 &&
         parsedVersion !== 6 &&
+        parsedVersion !== 7 &&
         parsedVersion !== APP_SETTINGS_VERSION)
     ) {
       return {
@@ -58,6 +66,7 @@ export function parseAppSettings(raw: string): {
         approvalMode: 'yolo',
         showToolCalls: true,
         appearancePreference: 'system',
+        fontPreference: DEFAULT_FONT_PREFERENCE,
         recentBrowserTargetUrls: [],
       };
     }
@@ -97,6 +106,9 @@ export function parseAppSettings(raw: string): {
         (parsed as { appearancePreference?: unknown }).appearancePreference,
         parsedVersion === 4 ? 'dark' : 'system'
       ),
+      fontPreference: normalizeFontPreference(
+        (parsed as { fontPreference?: unknown }).fontPreference
+      ),
       recentBrowserTargetUrls: normalizeBrowserTargetUrls(
         (parsed as { recentBrowserTargetUrls?: unknown }).recentBrowserTargetUrls
       ),
@@ -111,6 +123,7 @@ export function parseAppSettings(raw: string): {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      fontPreference: DEFAULT_FONT_PREFERENCE,
       recentBrowserTargetUrls: [],
     };
   }

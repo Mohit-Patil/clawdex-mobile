@@ -1,5 +1,6 @@
 import 'react-native-gesture-handler';
 
+import { useFonts } from 'expo-font';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -35,6 +36,12 @@ import type {
 } from './src/api/types';
 import { HostBridgeWsClient } from './src/api/ws';
 import { normalizeBridgeUrlInput } from './src/bridgeUrl';
+import {
+  APP_FONT_ASSETS,
+  DEFAULT_FONT_PREFERENCE,
+  normalizeFontPreference,
+  type FontPreference,
+} from './src/fonts';
 import {
   clearBridgeProfileStore,
   getActiveBridgeProfile,
@@ -159,6 +166,9 @@ export default function App() {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [appearancePreference, setAppearancePreference] =
     useState<AppearancePreference>('system');
+  const [fontPreference, setFontPreference] = useState<FontPreference>(
+    DEFAULT_FONT_PREFERENCE
+  );
   const [recentBrowserTargetUrls, setRecentBrowserTargetUrls] = useState<string[]>([]);
   const [pendingBrowserTargetUrl, setPendingBrowserTargetUrl] = useState<string | null>(null);
   const [appLifecycleState, setAppLifecycleState] = useState<AppStateStatus>(
@@ -172,6 +182,7 @@ export default function App() {
     null
   );
   const [drawerVisible, setDrawerVisible] = useState(false);
+  const [fontsLoaded, fontsError] = useFonts(APP_FONT_ASSETS);
   const drawerOpenRef = useRef(false);
   const drawerVisibleRef = useRef(false);
   const drawerCapturesTouchesRef = useRef(false);
@@ -184,7 +195,11 @@ export default function App() {
   const automaticStoreReviewInFlightRef = useRef(false);
   const { width: screenWidth } = useWindowDimensions();
   const resolvedThemeMode = resolveThemeMode(appearancePreference, systemColorScheme);
-  const theme = useMemo(() => createAppTheme(resolvedThemeMode), [resolvedThemeMode]);
+  const themeFontPreference = fontsLoaded ? fontPreference : DEFAULT_FONT_PREFERENCE;
+  const theme = useMemo(
+    () => createAppTheme(resolvedThemeMode, themeFontPreference),
+    [resolvedThemeMode, themeFontPreference]
+  );
   const styles = useMemo(() => createStyles(theme), [theme]);
   const contentShiftOpen = Math.min(DRAWER_WIDTH - 12, screenWidth * 0.74);
   const drawerOffset = useSharedValue(-DRAWER_WIDTH);
@@ -449,6 +464,7 @@ export default function App() {
       nextApprovalMode: ApprovalMode,
       nextShowToolCalls: boolean,
       nextAppearancePreference: AppearancePreference,
+      nextFontPreference: FontPreference,
       nextRecentBrowserTargetUrls: string[]
     ) => {
       const settingsPath = getAppSettingsPath();
@@ -464,6 +480,7 @@ export default function App() {
         approvalMode: nextApprovalMode,
         showToolCalls: nextShowToolCalls,
         appearancePreference: nextAppearancePreference,
+        fontPreference: nextFontPreference,
         recentBrowserTargetUrls: nextRecentBrowserTargetUrls,
       });
 
@@ -486,6 +503,7 @@ export default function App() {
       setApprovalMode('yolo');
       setShowToolCalls(true);
       setAppearancePreference('system');
+      setFontPreference(DEFAULT_FONT_PREFERENCE);
       setRecentBrowserTargetUrls([]);
     };
 
@@ -530,6 +548,7 @@ export default function App() {
         setApprovalMode(parsed.approvalMode);
         setShowToolCalls(parsed.showToolCalls);
         setAppearancePreference(parsed.appearancePreference);
+        setFontPreference(parsed.fontPreference);
         setRecentBrowserTargetUrls(parsed.recentBrowserTargetUrls);
 
         if (parsed.bridgeUrl || parsed.bridgeToken) {
@@ -540,6 +559,7 @@ export default function App() {
             parsed.approvalMode,
             parsed.showToolCalls,
             parsed.appearancePreference,
+            parsed.fontPreference,
             parsed.recentBrowserTargetUrls
           );
         }
@@ -904,6 +924,7 @@ export default function App() {
         approvalMode,
         showToolCalls,
         appearancePreference,
+        fontPreference,
         recentBrowserTargetUrls
       );
     },
@@ -915,6 +936,7 @@ export default function App() {
       saveAppSettings,
       showToolCalls,
       appearancePreference,
+      fontPreference,
     ]
   );
 
@@ -938,6 +960,7 @@ export default function App() {
         approvalMode,
         showToolCalls,
         appearancePreference,
+        fontPreference,
         recentBrowserTargetUrls
       );
     },
@@ -950,6 +973,7 @@ export default function App() {
       saveAppSettings,
       showToolCalls,
       appearancePreference,
+      fontPreference,
     ]
   );
 
@@ -964,6 +988,7 @@ export default function App() {
         normalizedMode,
         showToolCalls,
         appearancePreference,
+        fontPreference,
         recentBrowserTargetUrls
       );
     },
@@ -975,6 +1000,7 @@ export default function App() {
       saveAppSettings,
       showToolCalls,
       appearancePreference,
+      fontPreference,
     ]
   );
 
@@ -988,6 +1014,7 @@ export default function App() {
         approvalMode,
         nextValue,
         appearancePreference,
+        fontPreference,
         recentBrowserTargetUrls
       );
     },
@@ -999,6 +1026,7 @@ export default function App() {
       recentBrowserTargetUrls,
       saveAppSettings,
       appearancePreference,
+      fontPreference,
     ]
   );
 
@@ -1013,6 +1041,7 @@ export default function App() {
         approvalMode,
         showToolCalls,
         appearancePreference,
+        fontPreference,
         recentBrowserTargetUrls
       );
     },
@@ -1024,6 +1053,7 @@ export default function App() {
       saveAppSettings,
       showToolCalls,
       appearancePreference,
+      fontPreference,
     ]
   );
 
@@ -1037,11 +1067,40 @@ export default function App() {
         approvalMode,
         showToolCalls,
         nextPreference,
+        fontPreference,
         recentBrowserTargetUrls
       );
     },
     [
       approvalMode,
+      defaultChatEngine,
+      defaultEngineSettings,
+      defaultStartCwd,
+      recentBrowserTargetUrls,
+      saveAppSettings,
+      showToolCalls,
+      fontPreference,
+    ]
+  );
+
+  const handleFontPreferenceChange = useCallback(
+    (nextPreference: FontPreference) => {
+      const normalizedPreference = normalizeFontPreference(nextPreference);
+      setFontPreference(normalizedPreference);
+      void saveAppSettings(
+        defaultStartCwd,
+        defaultChatEngine,
+        defaultEngineSettings,
+        approvalMode,
+        showToolCalls,
+        appearancePreference,
+        normalizedPreference,
+        recentBrowserTargetUrls
+      );
+    },
+    [
+      approvalMode,
+      appearancePreference,
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
@@ -1061,6 +1120,7 @@ export default function App() {
         approvalMode,
         showToolCalls,
         appearancePreference,
+        fontPreference,
         nextTargets
       );
     },
@@ -1070,6 +1130,7 @@ export default function App() {
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
+      fontPreference,
       saveAppSettings,
       showToolCalls,
     ]
@@ -1128,6 +1189,7 @@ export default function App() {
         approvalMode,
         showToolCalls,
         appearancePreference,
+        fontPreference,
         recentBrowserTargetUrls
       );
       setCurrentScreen(onboardingMode === 'initial' ? 'Main' : onboardingReturnScreen);
@@ -1142,6 +1204,7 @@ export default function App() {
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
+      fontPreference,
       onboardingMode,
       onboardingReturnScreen,
       recentBrowserTargetUrls,
@@ -1246,7 +1309,7 @@ export default function App() {
     setCurrentScreen('Terms');
   }, []);
 
-  if (!settingsLoaded) {
+  if (!settingsLoaded || (!fontsLoaded && !fontsError)) {
     return (
       <AppThemeProvider theme={theme}>
         <GestureHandlerRootView style={styles.root}>
@@ -1360,6 +1423,8 @@ export default function App() {
             onShowToolCallsChange={handleShowToolCallsChange}
             appearancePreference={appearancePreference}
             onAppearancePreferenceChange={handleAppearancePreferenceChange}
+            fontPreference={fontPreference}
+            onFontPreferenceChange={handleFontPreferenceChange}
             onEditBridgeProfile={handleEditBridgeProfile}
             onAddBridgeProfile={handleAddBridgeProfile}
             onSwitchBridgeProfile={handleSwitchBridgeProfile}

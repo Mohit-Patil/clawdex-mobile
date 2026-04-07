@@ -373,8 +373,8 @@ const createStyles = (theme: AppTheme) =>
       backgroundColor: theme.colors.bgItem,
     },
     attachmentChipText: {
+      ...theme.typography.caption,
       color: theme.colors.textSecondary,
-      fontSize: 12,
       flexShrink: 1,
     },
     plusBtn: {
@@ -410,9 +410,9 @@ const createStyles = (theme: AppTheme) =>
       paddingVertical: theme.spacing.xs + 2,
     },
     input: {
+      ...theme.typography.body,
       flex: 1,
       color: theme.colors.textPrimary,
-      fontSize: 14,
       lineHeight: 20,
       paddingVertical: Platform.OS === 'ios' ? 2 : 0,
       textAlignVertical: 'top',
@@ -420,8 +420,8 @@ const createStyles = (theme: AppTheme) =>
     inputMeasure: {
       position: 'absolute',
       opacity: 0,
+      ...theme.typography.body,
       color: theme.colors.textPrimary,
-      fontSize: 14,
       left: theme.spacing.md,
       top: theme.spacing.xs,
     },
@@ -446,13 +446,14 @@ const createStyles = (theme: AppTheme) =>
       opacity: 0.82,
     },
     voiceStatusTitle: {
+      ...theme.typography.body,
       color: theme.colors.textPrimary,
       fontSize: 13,
       fontWeight: '600',
     },
     voiceStatusHint: {
+      ...theme.typography.caption,
       color: theme.colors.textMuted,
-      fontSize: 12,
       lineHeight: 16,
     },
     actionButtons: {

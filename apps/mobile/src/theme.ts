@@ -11,6 +11,13 @@ import {
   type TextStyle,
 } from 'react-native';
 
+import {
+  getFontFamilies,
+  type AppFontFamilies,
+  type FontPreference,
+  DEFAULT_FONT_PREFERENCE,
+} from './fonts';
+
 export type AppearancePreference = 'system' | 'light' | 'dark';
 export type ThemeMode = 'light' | 'dark';
 
@@ -65,6 +72,8 @@ export type AppTypography = {
 export interface AppTheme {
   mode: ThemeMode;
   isDark: boolean;
+  fontPreference: FontPreference;
+  fonts: AppFontFamilies;
   colors: AppColors;
   spacing: typeof spacing;
   radius: typeof radius;
@@ -178,33 +187,40 @@ export const shadow = {
   },
 } as const;
 
-function createTypography(colors: AppColors): AppTypography {
+function withWeightedFamily(
+  family: string | undefined,
+  fallbackWeight: NonNullable<TextStyle['fontWeight']>
+): Pick<TextStyle, 'fontFamily' | 'fontWeight'> {
+  return family ? { fontFamily: family } : { fontWeight: fallbackWeight };
+}
+
+function createTypography(colors: AppColors, fonts: AppFontFamilies): AppTypography {
   return {
     largeTitle: {
       fontSize: 24,
-      fontWeight: '700',
       color: colors.textPrimary,
       letterSpacing: -0.3,
+      ...withWeightedFamily(fonts.bold, '700'),
     },
     headline: {
       fontSize: 15,
-      fontWeight: '600',
       color: colors.textPrimary,
+      ...withWeightedFamily(fonts.semibold ?? fonts.medium, '600'),
     },
     body: {
       fontSize: 14,
-      fontWeight: '400',
       color: colors.textPrimary,
       lineHeight: 20,
+      ...withWeightedFamily(fonts.regular, '400'),
     },
     caption: {
       fontSize: 12,
-      fontWeight: '400',
       color: colors.textMuted,
+      ...withWeightedFamily(fonts.regular, '400'),
     },
     mono: {
       fontSize: 12,
-      fontFamily: Platform.select({ ios: 'Menlo', default: 'monospace' }),
+      fontFamily: fonts.monoRegular,
       color: colors.textPrimary,
       lineHeight: 18,
     },
@@ -222,17 +238,23 @@ export function resolveThemeMode(
   return systemScheme === 'light' ? 'light' : 'dark';
 }
 
-export function createAppTheme(mode: ThemeMode): AppTheme {
+export function createAppTheme(
+  mode: ThemeMode,
+  fontPreference: FontPreference = DEFAULT_FONT_PREFERENCE
+): AppTheme {
   const colors = mode === 'light' ? lightColors : darkColors;
   const isDark = mode === 'dark';
+  const fonts = getFontFamilies(fontPreference);
   return {
     mode,
     isDark,
+    fontPreference,
+    fonts,
     colors,
     spacing,
     radius,
     shadow,
-    typography: createTypography(colors),
+    typography: createTypography(colors, fonts),
     keyboardAppearance: isDark ? 'dark' : 'light',
     blurTint: isDark ? 'dark' : 'light',
     activityBarTint: Platform.OS === 'ios'
