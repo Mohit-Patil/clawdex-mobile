@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
-import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { useMemo } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
 
+import { LoadingGlyph } from './LoadingGlyph';
 import { useAppTheme, type AppTheme } from '../theme';
 
 export type ActivityTone = 'running' | 'complete' | 'error' | 'idle';
@@ -30,24 +31,10 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
     idle: theme.colors.statusIdle,
   };
   const color = colorByTone[tone];
-  const [dotFrame, setDotFrame] = useState(0);
-
-  useEffect(() => {
-    setDotFrame(0);
-    if (tone !== 'running') {
-      return;
-    }
-    const timer = setInterval(() => {
-      setDotFrame((prev) => (prev + 1) % 4);
-    }, 450);
-    return () => clearInterval(timer);
-  }, [tone]);
-
-  const dots = tone === 'running' ? '.'.repeat(dotFrame) : '';
   const normalizedDetail = detail?.trim() ?? '';
   const hasDetail = normalizedDetail.length > 0;
   const normalizedTitle = title.trim();
-  const titleText = `${normalizedTitle || title}${dots}`;
+  const titleText = normalizedTitle || title;
   const singleLineText = titleText;
 
   return (
@@ -70,7 +57,7 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
           ]}
         >
           {tone === 'running' ? (
-            <ActivityIndicator size="small" color={color} />
+            <LoadingGlyph color={color} variant="bars" size="small" />
           ) : (
             <Ionicons name={ICON_BY_TONE[tone]} size={13} color={color} />
           )}
