@@ -1,4 +1,5 @@
 import { parseAppSettings } from '../appSettings';
+import { DEFAULT_FONT_PREFERENCE } from '../fonts';
 
 describe('parseAppSettings', () => {
   it('defaults fresh installs to system appearance', () => {
@@ -10,7 +11,7 @@ describe('parseAppSettings', () => {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
-      fontPreference: 'system',
+      fontPreference: DEFAULT_FONT_PREFERENCE,
     });
   });
 

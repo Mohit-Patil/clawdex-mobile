@@ -18,9 +18,26 @@ function writeJson(relativePath, value) {
 function updateCargoTomlVersion(relativePath, version) {
   const fullPath = path.join(rootDir, relativePath);
   const current = fs.readFileSync(fullPath, 'utf8');
-  const next = current.replace(/^version\s*=\s*".*"$/m, `version = "${version}"`);
+  const expectedLine = `version = "${version}"`;
+  if (current.includes(expectedLine)) {
+    return;
+  }
+  const next = current.replace(/^version\s*=\s*".*"$/m, expectedLine);
   if (next === current) {
     throw new Error(`Could not find Cargo.toml version field in ${relativePath}`);
+  }
+  fs.writeFileSync(fullPath, next);
+}
+
+function updateTextFile(relativePath, version, replacer) {
+  const fullPath = path.join(rootDir, relativePath);
+  const current = fs.readFileSync(fullPath, 'utf8');
+  if (current.includes(version)) {
+    return;
+  }
+  const next = replacer(current);
+  if (next === current) {
+    throw new Error(`Could not update expected version fields in ${relativePath}`);
   }
   fs.writeFileSync(fullPath, next);
 }
@@ -51,6 +68,21 @@ function syncVersions() {
   }
   appConfig.expo.version = version;
   writeJson(appJsonPath, appConfig);
+
+  updateTextFile('apps/mobile/ios/ClawdexMobile/Info.plist', version, (current) =>
+    current.replace(
+      /(<key>CFBundleShortVersionString<\/key>\s*<string>)([^<]+)(<\/string>)/,
+      `$1${version}$3`
+    )
+  );
+
+  updateTextFile('apps/mobile/ios/ClawdexMobile.xcodeproj/project.pbxproj', version, (current) =>
+    current.replace(/MARKETING_VERSION = [^;]+;/g, `MARKETING_VERSION = ${version};`)
+  );
+
+  updateTextFile('apps/mobile/android/app/build.gradle', version, (current) =>
+    current.replace(/versionName\s+"[^"]+"/, `versionName "${version}"`)
+  );
 
   console.log(`Synchronized app and bridge versions to ${version}`);
 }

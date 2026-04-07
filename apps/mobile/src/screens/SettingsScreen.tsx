@@ -45,6 +45,7 @@ import {
 } from '../components/usageLimitBadges';
 import { getChatEngineLabel } from '../chatEngines';
 import {
+  DEFAULT_FONT_PREFERENCE,
   FONT_PREFERENCE_OPTIONS,
   getFontFamilies,
   getFontPreferenceLabel,
@@ -141,7 +142,7 @@ export function SettingsScreen({
   approvalMode,
   showToolCalls = true,
   appearancePreference = 'system',
-  fontPreference = 'system',
+  fontPreference = DEFAULT_FONT_PREFERENCE,
   onDefaultChatEngineChange,
   onDefaultModelSettingsChange,
   onApprovalModeChange,

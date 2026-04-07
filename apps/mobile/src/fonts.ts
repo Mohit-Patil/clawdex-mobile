@@ -64,7 +64,7 @@ export interface FontPreferenceOption {
   description: string;
 }
 
-export const DEFAULT_FONT_PREFERENCE: FontPreference = 'system';
+export const DEFAULT_FONT_PREFERENCE: FontPreference = 'jetbrainsMono';
 
 const SYSTEM_MONO_FAMILY = Platform.select({ ios: 'Menlo', default: 'monospace' }) ?? 'monospace';
 
