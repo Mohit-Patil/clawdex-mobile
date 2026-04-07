@@ -241,7 +241,10 @@ const AGENT_THREADS_SYNC_INTERVAL_MS = 10_000;
 const AGENT_THREADS_IDLE_SYNC_INTERVAL_MS = 20_000;
 const AGENT_THREADS_BACKGROUND_SYNC_INTERVAL_MS = 30_000;
 const APP_FOCUS_DISCONNECT_GRACE_MS = 5_000;
+const ACTIVITY_DETAIL_HOLD_MS = 2_500;
+const GENERIC_RUNNING_ACTIVITY_DELAY_MS = 1_200;
 const CONTEXT_WINDOW_BASELINE_TOKENS = 5_000;
+const GENERIC_RUNNING_ACTIVITY_TITLES = new Set(['working', 'thinking']);
 const CHAT_DRAFTS_FILE = 'chat-drafts.json';
 const CHAT_DRAFTS_VERSION = 1;
 const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
@@ -649,6 +652,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       tone: 'idle',
       title: 'Ready',
     });
+    const [heldActivity, setHeldActivity] = useState<ActivityState | null>(null);
+    const [showDelayedGenericRunningActivity, setShowDelayedGenericRunningActivity] =
+      useState(false);
     const [accountRateLimits, setAccountRateLimits] = useState<AccountRateLimitSnapshot | null>(
       null
     );
@@ -672,6 +678,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     );
     const chatDraftsRef = useRef<Record<string, string>>({});
     const draftPersistenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const heldActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const genericRunningActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [planPanelCollapsedByThread, setPlanPanelCollapsedByThread] = useState<
       Record<string, boolean>
     >({});
@@ -711,6 +719,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         clearTimeout(deferredDisconnectActivityTimeoutRef.current);
         deferredDisconnectActivityTimeoutRef.current = null;
       }
+    }, []);
+
+    const clearHeldActivity = useCallback(() => {
+      if (heldActivityTimeoutRef.current) {
+        clearTimeout(heldActivityTimeoutRef.current);
+        heldActivityTimeoutRef.current = null;
+      }
+      setHeldActivity(null);
+    }, []);
+
+    const clearGenericRunningActivityDelay = useCallback(() => {
+      if (genericRunningActivityTimeoutRef.current) {
+        clearTimeout(genericRunningActivityTimeoutRef.current);
+        genericRunningActivityTimeoutRef.current = null;
+      }
+      setShowDelayedGenericRunningActivity(false);
     }, []);
 
     const scheduleDisconnectActivity = useCallback(() => {
@@ -1967,11 +1991,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const heading =
             extractFirstBoldSnippet(nextBuffer, 56) ??
             extractFirstBoldSnippet(delta, 56);
-          const summary = toTickerSnippet(stripMarkdownInline(delta), 64);
+          const detail = toReasoningActivityDetail(nextBuffer, heading, 64);
+          const title = heading ?? 'Working';
           cacheThreadActivity(threadId, {
             tone: 'running',
-            title: heading ?? 'Reasoning',
-            detail: heading ? undefined : summary ?? undefined,
+            title,
+            detail,
           });
           return;
         }
@@ -1993,7 +2018,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           cacheThreadStreamingDelta(threadId, delta);
           cacheThreadActivity(threadId, {
             tone: 'running',
-            title: 'Thinking',
+            title: 'Working',
           });
           return;
         }
@@ -5667,12 +5692,22 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             const heading =
               extractFirstBoldSnippet(codexReasoningBufferRef.current, 56) ??
               extractFirstBoldSnippet(delta, 56);
-            const summary = toTickerSnippet(stripMarkdownInline(delta), 64);
+            const detail = heading
+              ? undefined
+              : toReasoningActivityDetail(codexReasoningBufferRef.current, heading, 64);
 
-            setActivity({
-              tone: 'running',
-              title: heading ?? 'Reasoning',
-              detail: heading ? undefined : summary ?? undefined,
+            setActivity((prev) => {
+              const title =
+                heading ??
+                (prev.tone === 'running' && prev.title.trim() ? prev.title : 'Working');
+              if (prev.tone === 'running' && prev.title === title && prev.detail === detail) {
+                return prev;
+              }
+              return {
+                tone: 'running',
+                title,
+                detail,
+              };
             });
 
             return;
@@ -5700,11 +5735,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
 
             setActivity((prev) =>
-              prev.tone === 'running' && prev.title === 'Thinking'
+              prev.tone === 'running' && prev.title === 'Working'
                 ? prev
                 : {
                     tone: 'running',
-                    title: 'Thinking',
+                    title: 'Working',
                   }
             );
             schedulePinnedScrollToBottom(true);
@@ -5929,7 +5964,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Thinking',
+              title: 'Working',
             });
             return;
           }
@@ -5942,11 +5977,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             setStreamingText((prev) => mergeStreamingDelta(prev, delta));
           }
           setActivity((prev) =>
-            prev.tone === 'running' && prev.title === 'Thinking'
+            prev.tone === 'running' && prev.title === 'Working'
               ? prev
               : {
                   tone: 'running',
-                  title: 'Thinking',
+                  title: 'Working',
                 }
           );
           schedulePinnedScrollToBottom(true);
@@ -6003,7 +6038,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             });
             cacheThreadActivity(threadId, {
               tone: 'running',
-              title: 'Turn started',
+              title: 'Working',
             });
             return;
           }
@@ -6025,7 +6060,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
           setActivity({
             tone: 'running',
-            title: 'Turn started',
+            title: 'Working',
           });
           return;
         }
@@ -6090,7 +6125,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             if (itemType === 'reasoning') {
               cacheThreadActivity(threadId, {
                 tone: 'running',
-                title: 'Reasoning',
+                title: 'Working',
               });
               return;
             }
@@ -6151,7 +6186,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
             setActivity({
               tone: 'running',
-              title: 'Reasoning',
+              title: 'Working',
             });
             return;
           }
@@ -6210,10 +6245,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             cacheThreadTurnState(threadId, {
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
             });
-            cacheThreadActivity(threadId, {
-              tone: 'running',
-              title: 'Reasoning',
-            });
             return;
           }
 
@@ -6226,14 +6257,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             reasoningSummaryRef.current[summaryKey] = '';
           }
 
-          setActivity((prev) =>
-            prev.tone === 'running' && prev.title === 'Reasoning'
-              ? prev
-              : {
-                  tone: 'running',
-                  title: 'Reasoning',
-                }
-          );
           return;
         }
 
@@ -6249,14 +6272,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               const buffer = `${threadReasoningBuffersRef.current[threadId] ?? ''}${delta}`;
               threadReasoningBuffersRef.current[threadId] = buffer;
               const heading = extractFirstBoldSnippet(buffer, 56);
-              const summary = toTickerSnippet(stripMarkdownInline(buffer), 64);
+              const detail = heading
+                ? undefined
+                : toReasoningActivityDetail(buffer, heading, 64);
+              const title = heading ?? 'Working';
               cacheThreadTurnState(threadId, {
                 runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
               });
               cacheThreadActivity(threadId, {
                 tone: 'running',
-                title: heading ?? 'Reasoning',
-                detail: heading ? undefined : summary ?? undefined,
+                title,
+                detail,
               });
             }
             return;
@@ -6268,18 +6294,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const summaryKey =
             itemId && summaryIndex !== null ? `${itemId}:${String(summaryIndex)}` : null;
 
-          let summaryText = toTickerSnippet(delta, 64);
           let heading = extractFirstBoldSnippet(delta, 56);
+          let detail = heading ? undefined : toReasoningActivityDetail(delta ?? '', heading, 64);
           if (summaryKey) {
             const accumulated = (reasoningSummaryRef.current[summaryKey] ?? '') + (delta ?? '');
             reasoningSummaryRef.current[summaryKey] = accumulated;
-            summaryText = toTickerSnippet(stripMarkdownInline(accumulated), 64);
             heading = extractFirstBoldSnippet(accumulated, 56) ?? heading;
+            detail = heading ? undefined : toReasoningActivityDetail(accumulated, heading, 64);
           }
 
           setActivity((prev) => {
-            const title = heading ?? 'Reasoning';
-            const detail = heading ? undefined : summaryText ?? prev.detail;
+            const title =
+              heading ?? (prev.tone === 'running' && prev.title.trim() ? prev.title : 'Working');
             if (
               prev.tone === 'running' &&
               prev.title === title &&
@@ -6306,10 +6332,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             cacheThreadTurnState(threadId, {
               runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
             });
-            cacheThreadActivity(threadId, {
-              tone: 'running',
-              title: 'Reasoning',
-            });
             return;
           }
 
@@ -6319,11 +6341,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             upsertLiveReasoningMessage(threadId, delta);
           }
           setActivity((prev) =>
-            prev.tone === 'running' && prev.title === 'Reasoning'
+            prev.tone === 'running'
               ? prev
               : {
                   tone: 'running',
-                  title: 'Reasoning',
+                  title: 'Working',
                 }
           );
           return;
@@ -7019,9 +7041,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               if (shouldRefreshWatchdog) {
                 bumpRunWatchdog(watchdogDurationMs);
               }
-              return prev.tone === 'running'
-                ? prev
-                : { tone: 'running', title: hasAssistantProgress ? 'Thinking' : 'Working' };
+              return prev.tone === 'running' ? prev : { tone: 'running', title: 'Working' };
             });
           } else if (!hasPendingApproval && !hasPendingUserInput) {
             clearRunWatchdog();
@@ -7186,6 +7206,47 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const hasRunWatchdog = runWatchdogUntilRef.current > runWatchdogNow;
 
     useEffect(() => {
+      if (activity.tone !== 'running') {
+        return;
+      }
+
+      const title = activity.title.trim() || 'Working';
+      const detail = activity.detail?.trim() ?? '';
+      const shouldHold = Boolean(detail) || !GENERIC_RUNNING_ACTIVITY_TITLES.has(title.toLowerCase());
+      if (!shouldHold) {
+        return;
+      }
+
+      const nextHeldActivity: ActivityState = {
+        tone: 'running',
+        title,
+        detail: detail || undefined,
+      };
+      setHeldActivity(nextHeldActivity);
+      if (heldActivityTimeoutRef.current) {
+        clearTimeout(heldActivityTimeoutRef.current);
+      }
+      heldActivityTimeoutRef.current = setTimeout(() => {
+        heldActivityTimeoutRef.current = null;
+        setHeldActivity(null);
+      }, ACTIVITY_DETAIL_HOLD_MS);
+    }, [activity.detail, activity.title, activity.tone]);
+
+    useEffect(() => {
+      clearHeldActivity();
+    }, [clearHeldActivity, openingChatId, selectedChat?.id]);
+
+    useEffect(
+      () => () => {
+        if (heldActivityTimeoutRef.current) {
+          clearTimeout(heldActivityTimeoutRef.current);
+          heldActivityTimeoutRef.current = null;
+        }
+      },
+      []
+    );
+
+    useEffect(() => {
       if (
         activity.tone !== 'running' ||
         isLoading ||
@@ -7254,24 +7315,31 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         } satisfies ActivityState;
       }
 
-      if (!isLoading && !isTurnLikelyRunning && selectedChat?.status === 'complete') {
-        return {
-          tone: 'complete',
-          title: 'Turn completed',
-        } satisfies ActivityState;
+      if (activity.tone === 'error' && activity.title !== 'Turn failed') {
+        return activity;
       }
 
-      if (isLoading || isTurnLikelyRunning || activity.tone === 'running') {
-        const runningTitle =
-          activity.title === 'Thinking' ||
-          activity.title === 'Planning' ||
-          activity.title === 'Reasoning'
-            ? activity.title
-            : 'Working';
+      if (heldActivity && !isLoading && !isTurnLikelyRunning) {
+        return heldActivity;
+      }
+
+      if (
+        isLoading ||
+        isTurnLikelyRunning ||
+        (activity.tone === 'running' && selectedChat?.status !== 'complete')
+      ) {
+        const runningTitle = activity.title.trim() || 'Working';
         return {
           tone: 'running',
           title: runningTitle,
           detail: activity.detail,
+        } satisfies ActivityState;
+      }
+
+      if (!isLoading && !isTurnLikelyRunning && selectedChat?.status === 'complete') {
+        return {
+          tone: 'complete',
+          title: 'Turn completed',
         } satisfies ActivityState;
       }
 
@@ -7284,11 +7352,60 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       return activity;
     })();
+    const isGenericRunningActivity =
+      visibleActivity.tone === 'running' &&
+      !visibleActivity.detail &&
+      GENERIC_RUNNING_ACTIVITY_TITLES.has(visibleActivity.title.trim().toLowerCase());
+    const shouldShowGenericRunningActivityImmediately =
+      isGenericRunningActivity && (isTurnLoading || Boolean(activeTurnId));
+
+    useEffect(() => {
+      if (!isGenericRunningActivity) {
+        clearGenericRunningActivityDelay();
+        return;
+      }
+
+      if (shouldShowGenericRunningActivityImmediately) {
+        if (genericRunningActivityTimeoutRef.current) {
+          clearTimeout(genericRunningActivityTimeoutRef.current);
+          genericRunningActivityTimeoutRef.current = null;
+        }
+        if (!showDelayedGenericRunningActivity) {
+          setShowDelayedGenericRunningActivity(true);
+        }
+        return;
+      }
+
+      if (showDelayedGenericRunningActivity || genericRunningActivityTimeoutRef.current) {
+        return;
+      }
+
+      genericRunningActivityTimeoutRef.current = setTimeout(() => {
+        genericRunningActivityTimeoutRef.current = null;
+        setShowDelayedGenericRunningActivity(true);
+      }, GENERIC_RUNNING_ACTIVITY_DELAY_MS);
+
+      return () => {
+        if (genericRunningActivityTimeoutRef.current) {
+          clearTimeout(genericRunningActivityTimeoutRef.current);
+          genericRunningActivityTimeoutRef.current = null;
+        }
+      };
+    }, [
+      clearGenericRunningActivityDelay,
+      isGenericRunningActivity,
+      shouldShowGenericRunningActivityImmediately,
+      showDelayedGenericRunningActivity,
+      isTurnLoading,
+      activeTurnId,
+    ]);
+
     const activityDetail = visibleActivity.detail;
     const showActivity =
-      isLoading ||
+      (isLoading && !isGenericRunningActivity) ||
       isOpeningChat ||
-      visibleActivity.tone !== 'idle' ||
+      (visibleActivity.tone !== 'idle' &&
+        (!isGenericRunningActivity || showDelayedGenericRunningActivity)) ||
       Boolean(activityDetail);
     const activeContextWindow = threadContextUsage?.modelContextWindow ?? null;
     const contextUsedTokens = threadContextUsage?.lastTokens ?? null;
@@ -7460,8 +7577,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       hasPlanApprovalPrompt: showPlanImplementationPrompt,
     });
     const showTopCardsRow = !isOpeningChat && workflowCardMode !== null;
-    const showFloatingActivity =
-      showActivity && shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
+    const showFloatingActivity = shouldShowComposer && Boolean(selectedChat) && !isOpeningChat;
     const chatBottomInset = shouldShowComposer
       ? theme.spacing.lg
       : Math.max(theme.spacing.xxl, safeAreaInsets.bottom + theme.spacing.lg);
@@ -9223,7 +9339,8 @@ function areChatStatusMapsEquivalent(
 }
 
 function resolveEquivalentChat(previous: Chat, next: Chat): Chat {
-  return areChatsEquivalent(previous, next) ? previous : next;
+  const stabilizedNext = preserveRecentUserTurnTranscript(previous, next);
+  return areChatsEquivalent(previous, stabilizedNext) ? previous : stabilizedNext;
 }
 
 function mergeChatSummaryPreservingMessages(previous: Chat, summary: ChatSummary): Chat {
@@ -9233,6 +9350,32 @@ function mergeChatSummaryPreservingMessages(previous: Chat, summary: ChatSummary
     messages: previous.messages,
   };
   return areChatsEquivalent(previous, next) ? previous : next;
+}
+
+function preserveRecentUserTurnTranscript(previous: Chat, next: Chat): Chat {
+  if (previous.id !== next.id) {
+    return next;
+  }
+
+  const previousUserCount = countUserMessages(previous.messages);
+  const nextUserCount = countUserMessages(next.messages);
+  if (nextUserCount >= previousUserCount) {
+    return next;
+  }
+
+  const shouldPreserveTranscript =
+    hasRecentUnansweredUserTurn(previous) ||
+    previous.status === 'running' ||
+    next.status === 'running';
+  if (!shouldPreserveTranscript) {
+    return next;
+  }
+
+  return {
+    ...next,
+    lastMessagePreview: previous.lastMessagePreview,
+    messages: previous.messages,
+  };
 }
 
 function areChatsEquivalent(previous: Chat | null, next: Chat | null): boolean {
@@ -10389,12 +10532,7 @@ function reconcileChatWithPendingOptimisticMessages(
   const userMessages = chat.messages.filter((message) => message.role === 'user');
   const remainingPendingMessages = pendingMessages.filter((entry) => {
     const pendingContent = normalizeChatMessageMatchContent(entry.message.content);
-    const matchedUserMessage =
-      userMessages[entry.userOrdinal - 1] ??
-      userMessages.find(
-        (message) =>
-          normalizeChatMessageMatchContent(message.content) === pendingContent
-      );
+    const matchedUserMessage = userMessages[entry.userOrdinal - 1];
 
     if (!matchedUserMessage) {
       return true;
@@ -11560,6 +11698,33 @@ function extractFirstBoldSnippet(
   }
 
   return toTickerSnippet(match[1], maxLength);
+}
+
+function toReasoningActivityDetail(
+  value: string | null | undefined,
+  heading: string | null | undefined,
+  maxLength = 64
+): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  let cleaned = stripMarkdownInline(value).replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return undefined;
+  }
+
+  if (heading) {
+    const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    cleaned = cleaned
+      .replace(new RegExp(`^${escapedHeading}(?:\\s*[:\\-.–—]\\s*|\\s+)`, 'i'), '')
+      .trim();
+    if (!cleaned || cleaned.toLowerCase() === heading.toLowerCase()) {
+      return undefined;
+    }
+  }
+
+  return toTickerSnippet(cleaned, maxLength) ?? undefined;
 }
 
 function toPendingApproval(value: unknown): PendingApproval | null {

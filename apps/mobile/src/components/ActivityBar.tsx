@@ -44,8 +44,11 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
   }, [tone]);
 
   const dots = tone === 'running' ? '.'.repeat(dotFrame) : '';
-  const suffix = detail ? ` · ${detail}` : '';
-  const text = `${title}${suffix}${dots}`;
+  const normalizedDetail = detail?.trim() ?? '';
+  const hasDetail = normalizedDetail.length > 0;
+  const normalizedTitle = title.trim();
+  const titleText = `${normalizedTitle || title}${dots}`;
+  const singleLineText = titleText;
 
   return (
     <BlurView
@@ -54,15 +57,42 @@ export function ActivityBar({ title, detail, tone }: ActivityBarProps) {
       blurMethod="dimezisBlurViewSdk31Plus"
       style={styles.container}
     >
-      <View style={styles.content}>
-        {tone === 'running' ? (
-          <ActivityIndicator size="small" color={color} />
+      <View
+        style={[
+          styles.content,
+          hasDetail && tone !== 'running' ? styles.contentExpanded : null,
+        ]}
+      >
+        <View
+          style={[
+            styles.iconWrap,
+            hasDetail && tone !== 'running' ? styles.iconWrapExpanded : null,
+          ]}
+        >
+          {tone === 'running' ? (
+            <ActivityIndicator size="small" color={color} />
+          ) : (
+            <Ionicons name={ICON_BY_TONE[tone]} size={13} color={color} />
+          )}
+        </View>
+        {hasDetail && tone !== 'running' ? (
+          <View style={styles.textColumn}>
+            <Text style={styles.titleText} numberOfLines={1}>
+              {titleText}
+            </Text>
+            <Text style={styles.detailText} numberOfLines={1}>
+              {normalizedDetail}
+            </Text>
+          </View>
+        ) : hasDetail ? (
+          <Text style={styles.summaryText} numberOfLines={1}>
+            {normalizedDetail}
+          </Text>
         ) : (
-          <Ionicons name={ICON_BY_TONE[tone]} size={13} color={color} />
+          <Text style={styles.titleText} numberOfLines={1}>
+            {singleLineText}
+          </Text>
         )}
-        <Text style={styles.text} numberOfLines={1}>
-          {text}
-        </Text>
       </View>
     </BlurView>
   );
@@ -88,10 +118,41 @@ const createStyles = (theme: AppTheme) =>
       paddingHorizontal: theme.spacing.sm + 2,
       paddingVertical: 3,
     },
-    text: {
+    contentExpanded: {
+      alignItems: 'flex-start',
+      paddingVertical: 5,
+    },
+    iconWrap: {
+      width: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    iconWrapExpanded: {
+      paddingTop: 1,
+    },
+    textColumn: {
+      flex: 1,
+      minWidth: 0,
+    },
+    titleText: {
       ...theme.typography.caption,
       fontSize: 11,
       lineHeight: 15,
+      fontWeight: '600',
+      color: theme.colors.textPrimary,
+      flex: 1,
+    },
+    detailText: {
+      ...theme.typography.caption,
+      fontSize: 11,
+      lineHeight: 14,
+      fontWeight: '500',
+      color: theme.colors.textMuted,
+    },
+    summaryText: {
+      ...theme.typography.caption,
+      fontSize: 11,
+      lineHeight: 14,
       fontWeight: '600',
       color: theme.colors.textPrimary,
       flex: 1,

@@ -600,7 +600,7 @@ export class HostBridgeApiClient {
       model: effectiveModel ?? null,
       effort: effectiveEffort ?? null,
       serviceTier: normalizedServiceTier ?? null,
-      summary: null,
+      summary: 'auto',
       personality: null,
       outputSchema: null,
       collaborationMode: normalizedCollaborationMode,
