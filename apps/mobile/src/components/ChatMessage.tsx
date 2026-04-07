@@ -33,6 +33,12 @@ interface TimelineEntry {
   details: string[];
 }
 
+interface ToolGroupEntry {
+  id: string;
+  title: string;
+  details: string[];
+}
+
 type UserMessageBlock =
   | { kind: 'text'; value: string }
   | { kind: 'file'; value: string }
@@ -408,8 +414,9 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [expanded, setExpanded] = useState(false);
+  const [expandedEntryIds, setExpandedEntryIds] = useState<Record<string, boolean>>({});
   const entries = useMemo(() => {
-    const flattened: Array<{ id: string; title: string }> = [];
+    const flattened: ToolGroupEntry[] = [];
     for (const message of messages) {
       const parsed = parseTimelineEntries(message.content);
       if (parsed && parsed.length > 0) {
@@ -417,6 +424,7 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
           flattened.push({
             id: `${message.id}-${String(index)}`,
             title: entry.title,
+            details: entry.details,
           });
         });
         continue;
@@ -425,6 +433,7 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
       flattened.push({
         id: message.id,
         title: message.content.trim(),
+        details: [],
       });
     }
     return flattened.filter((entry) => entry.title.length > 0);
@@ -440,38 +449,119 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
 
   return (
     <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
-      <Pressable
-        onPress={() => setExpanded((previous) => !previous)}
-        style={({ pressed }) => [
-          styles.toolGroupCard,
-          styles.toolGroupCardInteractive,
-          pressed && styles.toolGroupCardPressed,
-        ]}
-      >
-        <View style={styles.toolGroupHeader}>
-          <Ionicons name="construct-outline" size={14} color={theme.colors.textMuted} />
-          <Text style={styles.toolGroupTitle}>{summary}</Text>
-          <Ionicons
-            name={expanded ? 'chevron-up' : 'chevron-down'}
-            size={14}
-            color={theme.colors.textMuted}
-          />
-        </View>
+      <View style={styles.toolGroupCard}>
+        <Pressable
+          onPress={() => setExpanded((previous) => !previous)}
+          style={({ pressed }) => [
+            styles.toolGroupHeaderPressable,
+            styles.toolGroupCardInteractive,
+            pressed && styles.toolGroupCardPressed,
+          ]}
+        >
+          <View style={styles.toolGroupHeader}>
+            <Ionicons name="construct-outline" size={14} color={theme.colors.textMuted} />
+            <Text style={styles.toolGroupTitle}>{summary}</Text>
+            <Ionicons
+              name={expanded ? 'chevron-up' : 'chevron-down'}
+              size={14}
+              color={theme.colors.textMuted}
+            />
+          </View>
+        </Pressable>
 
         <View style={styles.toolGroupList}>
-          {previewEntries.map((entry) => (
-            <View key={entry.id} style={styles.toolGroupRow}>
-              <Text style={styles.toolGroupBullet}>{'\u2022'}</Text>
-              <Text style={styles.toolGroupRowText} numberOfLines={1}>
-                {entry.title}
-              </Text>
-            </View>
-          ))}
+          {previewEntries.map((entry) => {
+            const hasDetails = entry.details.length > 0;
+            const visual = toTimelineVisual(entry.title);
+            const entryExpanded = expandedEntryIds[entry.id] === true;
+
+            if (!expanded) {
+              return (
+                <View key={entry.id} style={styles.toolGroupRow}>
+                  <Text style={styles.toolGroupBullet}>{'\u2022'}</Text>
+                  <Text style={styles.toolGroupRowText} numberOfLines={1}>
+                    {entry.title}
+                  </Text>
+                </View>
+              );
+            }
+
+            return (
+              <Pressable
+                key={entry.id}
+                disabled={!hasDetails}
+                onPress={() => {
+                  if (!hasDetails) {
+                    return;
+                  }
+                  setExpandedEntryIds((previous) => ({
+                    ...previous,
+                    [entry.id]: !previous[entry.id],
+                  }));
+                }}
+                style={({ pressed }) => [
+                  styles.toolGroupEntryCard,
+                  hasDetails && styles.toolGroupEntryCardInteractive,
+                  visual.isError && styles.timelineCardError,
+                  pressed && hasDetails && styles.toolGroupEntryCardPressed,
+                ]}
+              >
+                <View style={styles.toolGroupEntryHeader}>
+                  <Ionicons
+                    name={visual.icon}
+                    size={14}
+                    color={
+                      visual.isError
+                        ? theme.colors.statusError
+                        : theme.colors.statusRunning
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.toolGroupEntryTitle,
+                      visual.useMonospaceTitle && styles.toolGroupEntryTitleMono,
+                    ]}
+                    numberOfLines={entryExpanded ? 3 : 1}
+                  >
+                    {entry.title}
+                  </Text>
+                  {hasDetails ? (
+                    <Ionicons
+                      name={entryExpanded ? 'chevron-up' : 'chevron-down'}
+                      size={14}
+                      color={theme.colors.textMuted}
+                    />
+                  ) : null}
+                </View>
+                {hasDetails ? (
+                  <Text style={styles.toolGroupEntryToggleText}>
+                    {entryExpanded
+                      ? 'Tap to hide output'
+                      : entry.details.length <= 1
+                        ? 'Tap to show output'
+                        : `Tap to show ${String(entry.details.length)} lines`}
+                  </Text>
+                ) : null}
+                {entryExpanded && hasDetails ? (
+                  <View style={styles.toolGroupEntryDetailWrap}>
+                    {entry.details.map((line, lineIndex) => (
+                      <SelectableMessageText
+                        key={`${entry.id}-line-${String(lineIndex)}`}
+                        style={styles.toolGroupEntryDetailLine}
+                      >
+                        {line}
+                      </SelectableMessageText>
+                    ))}
+                  </View>
+                ) : null}
+              </Pressable>
+            );
+          })}
           {!expanded && hiddenCount > 0 ? (
             <Text style={styles.toolGroupMoreText}>{`+${String(hiddenCount)} more`}</Text>
           ) : null}
         </View>
-      </Pressable>
+      </View>
     </View>
   );
 });
@@ -871,6 +961,13 @@ const createStyles = (theme: AppTheme) => {
     paddingHorizontal: theme.spacing.md,
     paddingVertical: theme.spacing.sm + 2,
   },
+  toolGroupHeaderPressable: {
+    marginHorizontal: -theme.spacing.md,
+    marginTop: -(theme.spacing.sm + 2),
+    paddingHorizontal: theme.spacing.md,
+    paddingTop: theme.spacing.sm + 2,
+    paddingBottom: 2,
+  },
   toolGroupCardInteractive: {
     overflow: 'hidden',
   },
@@ -916,6 +1013,51 @@ const createStyles = (theme: AppTheme) => {
     color: theme.colors.textMuted,
     marginTop: 2,
     paddingLeft: theme.spacing.lg,
+  },
+  toolGroupEntryCard: {
+    borderRadius: theme.radius.sm,
+    paddingVertical: theme.spacing.xs,
+  },
+  toolGroupEntryCardInteractive: {
+    overflow: 'hidden',
+  },
+  toolGroupEntryCardPressed: {
+    opacity: 0.82,
+  },
+  toolGroupEntryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  toolGroupEntryTitle: {
+    ...theme.typography.caption,
+    color: theme.colors.textPrimary,
+    flex: 1,
+    lineHeight: 16,
+  },
+  toolGroupEntryTitleMono: {
+    fontFamily: theme.fonts.monoRegular,
+    fontSize: 12,
+  },
+  toolGroupEntryToggleText: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    marginTop: 2,
+    paddingLeft: theme.spacing.lg + 2,
+  },
+  toolGroupEntryDetailWrap: {
+    marginTop: theme.spacing.xs,
+    marginLeft: theme.spacing.lg + 2,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: theme.colors.borderLight,
+    paddingLeft: theme.spacing.sm,
+    gap: 2,
+  },
+  toolGroupEntryDetailLine: {
+    fontFamily: theme.fonts.monoRegular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: theme.colors.textSecondary,
   },
   subAgentCard: {
     borderRadius: theme.radius.md,

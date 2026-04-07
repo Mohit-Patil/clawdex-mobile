@@ -11504,9 +11504,16 @@ function describeCompletedToolEvent(
   }
 
   if (itemType === 'fileChange') {
+    const changedPaths = readCompletedFileChangePaths(item);
+    const changedFileLabel =
+      changedPaths.length === 0
+        ? 'File changes'
+        : changedPaths.length === 1
+          ? `File changes: ${toTickerSnippet(toFileChangeTargetLabel(changedPaths[0]), 48) ?? 'file'}`
+          : `File changes: ${toTickerSnippet(toFileChangeTargetLabel(changedPaths[0]), 40) ?? 'file'} +${String(changedPaths.length - 1)}`;
     return {
       eventType: 'file_change.completed',
-      detail: buildToolEventDetail('File changes', status),
+      detail: buildToolEventDetail(changedFileLabel, status),
     };
   }
 
@@ -11538,6 +11545,42 @@ function buildToolEventDetail(
   status: 'running' | 'complete' | 'error'
 ): string {
   return `${label} | ${status}`;
+}
+
+function readCompletedFileChangePaths(item: Record<string, unknown> | null): string[] {
+  const rawChanges = Array.isArray(item?.changes) ? item.changes : [];
+  const seen = new Set<string>();
+  const paths: string[] = [];
+
+  for (const change of rawChanges) {
+    const changeRecord = toRecord(change);
+    const path =
+      readString(change)?.trim() ??
+      readString(changeRecord?.path)?.trim() ??
+      readString(changeRecord?.filePath)?.trim() ??
+      readString(changeRecord?.file_path)?.trim();
+    if (!path) {
+      continue;
+    }
+    const normalized = path.replace(/\\/g, '/');
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    paths.push(normalized);
+  }
+
+  return paths;
+}
+
+function toFileChangeTargetLabel(path: string): string {
+  const normalized = path.trim().replace(/\\/g, '/');
+  if (!normalized) {
+    return 'file';
+  }
+
+  const basename = normalized.split('/').filter(Boolean).pop();
+  return basename && basename.length > 0 ? basename : normalized;
 }
 
 function appendRunEventHistory(

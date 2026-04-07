@@ -88,6 +88,31 @@ function readNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function readFileChangePaths(item: Record<string, unknown>): string[] {
+  const rawChanges = Array.isArray(item.changes) ? item.changes : [];
+  const seen = new Set<string>();
+  const paths: string[] = [];
+
+  for (const change of rawChanges) {
+    const path =
+      readString(change)?.trim() ??
+      readString(toRecord(change)?.path)?.trim() ??
+      readString(toRecord(change)?.filePath)?.trim() ??
+      readString(toRecord(change)?.file_path)?.trim();
+    if (!path) {
+      continue;
+    }
+    const normalized = path.replace(/\\/g, '/');
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    paths.push(normalized);
+  }
+
+  return paths;
+}
+
 export function toPreview(value: string): string {
   const collapsed = value.replace(/\s+/g, ' ').trim();
   if (collapsed.length <= 180) {
@@ -882,15 +907,19 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
 
   if (type === 'filechange') {
     const status = normalizeType(readString(item.status) ?? '');
-    const changeCount = Array.isArray(item.changes) ? item.changes.length : 0;
-    const detail =
-      changeCount > 0
-        ? `${String(changeCount)} file${changeCount === 1 ? '' : 's'} changed`
-        : null;
+    const changedPaths = readFileChangePaths(item);
+    const changeCount = changedPaths.length;
+    const detail = changeCount > 0 ? changedPaths.join('\n') : null;
+    const titleSuffix =
+      changeCount === 0
+        ? ''
+        : changeCount === 1
+          ? ` to ${toFileChangeTargetLabel(changedPaths[0])}`
+          : ` to ${toFileChangeTargetLabel(changedPaths[0])} +${String(changeCount - 1)} more`;
     const title =
       status === 'failed' || status === 'error'
-        ? '• File changes failed'
-        : '• Applied file changes';
+        ? `• File changes failed${titleSuffix}`
+        : `• Applied file changes${titleSuffix}`;
     return withNestedDetail(title, detail);
   }
 
@@ -1004,6 +1033,16 @@ function normalizeInline(value: string | null, maxChars: number): string | null 
   }
 
   return `${cleaned.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+function toFileChangeTargetLabel(path: string): string {
+  const normalized = path.trim().replace(/\\/g, '/');
+  if (!normalized) {
+    return 'file';
+  }
+
+  const basename = normalized.split('/').filter(Boolean).pop();
+  return basename && basename.length > 0 ? basename : normalized;
 }
 
 function normalizeMultiline(value: string | null, maxChars: number): string | null {

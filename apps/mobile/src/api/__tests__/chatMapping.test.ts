@@ -95,7 +95,8 @@ describe('chatMapping', () => {
     expect(systemMessages[0].content).toContain('• Explored');
     expect(systemMessages[1].content).toContain('• Searched web for "react native keyboard inset"');
     expect(systemMessages[2].content).toContain('• Called tool `filesystem / read_file`');
-    expect(systemMessages[3].content).toContain('• Applied file changes');
+    expect(systemMessages[3].content).toContain('• Applied file changes to MainScreen.tsx');
+    expect(systemMessages[3].content).toContain('apps/mobile/src/screens/MainScreen.tsx');
   });
 
   it('maps reasoning items into visible transcript system messages', () => {
