@@ -121,6 +121,27 @@ function ChatMessageComponent({
 
   const timelineEntries =
     message.role === 'system' ? parseTimelineEntries(message.content) : null;
+  if (message.role === 'system' && message.systemKind === 'compaction') {
+    return (
+      <View
+        style={[
+          styles.messageWrapper,
+          styles.messageWrapperAssistant,
+          styles.messageWrapperFullWidth,
+        ]}
+      >
+        <View style={styles.compactionRow}>
+          <View style={styles.compactionLine} />
+          <View style={styles.compactionBadge}>
+            <Text style={styles.compactionText}>
+              {formatCompactionLabel(message.content)}
+            </Text>
+          </View>
+          <View style={styles.compactionLine} />
+        </View>
+      </View>
+    );
+  }
   if (message.role === 'system' && message.systemKind === 'reasoning') {
     const reasoningEntries =
       timelineEntries && timelineEntries.length > 0
@@ -671,6 +692,10 @@ const createStyles = (theme: AppTheme) => {
     alignSelf: 'flex-start',
     width: '100%',
   },
+  messageWrapperFullWidth: {
+    alignSelf: 'stretch',
+    maxWidth: '100%',
+  },
   userBubble: {
     backgroundColor: theme.colors.userBubble,
     borderWidth: StyleSheet.hairlineWidth,
@@ -815,6 +840,31 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textPrimary,
     flexShrink: 1,
+  },
+  compactionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+    alignSelf: 'stretch',
+    marginVertical: theme.spacing.xs,
+  },
+  compactionLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: theme.colors.borderLight,
+  },
+  compactionBadge: {
+    borderRadius: theme.radius.full,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 5,
+  },
+  compactionText: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    fontWeight: '600',
   },
   toolGroupCard: {
     borderRadius: theme.radius.md,
@@ -1278,6 +1328,19 @@ function normalizeTimelineDetail(line: string): string | null {
   }
 
   return withoutMarker;
+}
+
+function formatCompactionLabel(content: string): string {
+  const normalized = content.replace(/^\s*[•-]\s*/, '').trim();
+  if (!normalized) {
+    return 'Conversation compacted';
+  }
+
+  if (/^compacted conversation context$/i.test(normalized)) {
+    return 'Conversation compacted';
+  }
+
+  return normalized;
 }
 
 function summarizeReasoningPreview(details: string[]): string | null {

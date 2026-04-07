@@ -134,6 +134,34 @@ describe('chatMapping', () => {
     expect(chat.messages[1].role).toBe('assistant');
   });
 
+  it('maps context compaction into a dedicated system message kind', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_compaction',
+        preview: 'compacted',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'contextCompaction',
+                id: 'compact1',
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('compaction');
+    expect(chat.messages[0].content).toContain('Compacted conversation context');
+  });
+
   it('maps Codex reasoning items that use content arrays', () => {
     const chat = mapChat(
       toRawThread({

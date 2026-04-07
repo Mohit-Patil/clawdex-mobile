@@ -578,6 +578,8 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
             ? 'subAgent'
             : itemType === 'reasoning'
               ? 'reasoning'
+              : itemType === 'contextCompaction'
+                ? 'compaction'
               : 'tool';
         messages.push({
           id: readString(itemRecord.id) ?? generateLocalId(),

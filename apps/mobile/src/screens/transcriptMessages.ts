@@ -24,7 +24,8 @@ export function getVisibleTranscriptMessages(
       !showToolCalls &&
       msg.role === 'system' &&
       msg.systemKind !== 'subAgent' &&
-      msg.systemKind !== 'reasoning'
+      msg.systemKind !== 'reasoning' &&
+      msg.systemKind !== 'compaction'
     ) {
       return false;
     }

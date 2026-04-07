@@ -30,6 +30,7 @@ import type {
   ApprovalMode,
   BridgeCapabilities,
   BridgeRuntimeInfo,
+  ChatMessage as TranscriptChatMessage,
   ChatEngine,
   EngineDefaultSettingsMap,
   ModelOption,
@@ -38,6 +39,7 @@ import type {
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import type { BridgeProfile } from '../bridgeProfiles';
+import { ChatMessage as TranscriptMessagePreview } from '../components/ChatMessage';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import {
   buildComposerUsageLimitBadges,
@@ -117,6 +119,28 @@ const SETTINGS_BACK_GESTURE_VELOCITY = 900;
 const SETTINGS_BACK_EDGE_WIDTH = 28;
 const SETTINGS_ROUTE_TRANSITION_OFFSET = 18;
 const SETTINGS_ROUTE_TRANSITION_MS = 220;
+
+const COMPACTION_PREVIEW_MESSAGES: TranscriptChatMessage[] = [
+  {
+    id: 'settings-preview-before',
+    role: 'assistant',
+    content: 'Earlier messages are summarized to keep the thread moving.',
+    createdAt: '2026-04-07T00:00:00.000Z',
+  },
+  {
+    id: 'settings-preview-compaction',
+    role: 'system',
+    content: '• Compacted conversation context',
+    createdAt: '2026-04-07T00:00:01.000Z',
+    systemKind: 'compaction',
+  },
+  {
+    id: 'settings-preview-after',
+    role: 'assistant',
+    content: 'New turns continue below the compacted history marker.',
+    createdAt: '2026-04-07T00:00:02.000Z',
+  },
+];
 
 type SettingsRouteTransitionDirection = 'forward' | 'backward';
 
@@ -1191,6 +1215,23 @@ export function SettingsScreen({
         start jumping while a turn is running.
       </Text>
 
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Compaction Preview</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <View style={styles.transcriptPreviewWrap}>
+          <Text style={styles.transcriptPreviewLabel}>
+            This is how compaction will appear inline in chat.
+          </Text>
+          <View style={styles.transcriptPreviewSurface}>
+            {COMPACTION_PREVIEW_MESSAGES.map((message) => (
+              <TranscriptMessagePreview
+                key={message.id}
+                message={message}
+              />
+            ))}
+          </View>
+        </View>
+      </BlurView>
+
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
     </>
   );
@@ -2188,6 +2229,24 @@ const createStyles = (theme: AppTheme) => {
       color: hintTextColor,
       marginTop: theme.spacing.xs,
       marginHorizontal: theme.spacing.xs,
+    },
+    transcriptPreviewWrap: {
+      paddingVertical: theme.spacing.md,
+      gap: theme.spacing.sm,
+    },
+    transcriptPreviewLabel: {
+      ...theme.typography.caption,
+      color: settingsValueColor,
+    },
+    transcriptPreviewSurface: {
+      borderRadius: theme.radius.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: settingsDivider,
+      backgroundColor: theme.colors.bgMain,
+      paddingHorizontal: theme.spacing.sm,
+      paddingVertical: theme.spacing.sm,
+      gap: theme.spacing.sm,
+      overflow: 'hidden',
     },
     accountLoadingState: {
       minHeight: 88,

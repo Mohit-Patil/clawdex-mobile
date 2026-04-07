@@ -23,7 +23,7 @@ export interface ChatMessage {
   role: ChatMessageRole;
   content: string;
   createdAt: string;
-  systemKind?: 'tool' | 'reasoning' | 'subAgent';
+  systemKind?: 'tool' | 'reasoning' | 'subAgent' | 'compaction';
   subAgentMeta?: ChatMessageSubAgentMeta;
 }
 

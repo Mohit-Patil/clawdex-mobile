@@ -83,6 +83,22 @@ describe('getVisibleTranscriptMessages', () => {
     ]);
   });
 
+  it('keeps compaction rows visible when tool calls are disabled', () => {
+    const messages = [
+      message('u1', 'user', 'Summarize this thread'),
+      message('c1', 'system', '• Compacted conversation context', {
+        systemKind: 'compaction',
+      }),
+      message('a1', 'assistant', 'Done.'),
+    ];
+
+    expect(getVisibleTranscriptMessages(messages, false).map((entry) => entry.id)).toEqual([
+      'u1',
+      'c1',
+      'a1',
+    ]);
+  });
+
   it('keeps only the last message in a consecutive assistant run', () => {
     const messages = [
       message('u1', 'user', 'Answer this'),
@@ -138,6 +154,34 @@ describe('buildTranscriptDisplayItems', () => {
         kind: 'message',
         message: messages[3],
         renderKey: 'a1',
+      },
+    ]);
+  });
+
+  it('keeps compaction rows separate from grouped tool activity', () => {
+    const messages = [
+      message('t1', 'system', '• Ran `pwd`', { systemKind: 'tool' }),
+      message('c1', 'system', '• Compacted conversation context', {
+        systemKind: 'compaction',
+      }),
+      message('t2', 'system', '• Ran `ls`', { systemKind: 'tool' }),
+    ];
+
+    expect(buildTranscriptDisplayItems(messages)).toEqual([
+      {
+        kind: 'message',
+        message: messages[0],
+        renderKey: 't1',
+      },
+      {
+        kind: 'message',
+        message: messages[1],
+        renderKey: 'c1',
+      },
+      {
+        kind: 'message',
+        message: messages[2],
+        renderKey: 't2',
       },
     ]);
   });
