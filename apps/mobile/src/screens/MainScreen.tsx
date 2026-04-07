@@ -240,6 +240,7 @@ const BACKGROUND_CHAT_SYNC_INTERVAL_MS = 15_000;
 const AGENT_THREADS_SYNC_INTERVAL_MS = 10_000;
 const AGENT_THREADS_IDLE_SYNC_INTERVAL_MS = 20_000;
 const AGENT_THREADS_BACKGROUND_SYNC_INTERVAL_MS = 30_000;
+const APP_FOCUS_DISCONNECT_GRACE_MS = 5_000;
 const CONTEXT_WINDOW_BASELINE_TOKENS = 5_000;
 const CHAT_DRAFTS_FILE = 'chat-drafts.json';
 const CHAT_DRAFTS_VERSION = 1;
@@ -705,6 +706,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     });
     const canUseVoiceInput = Platform.OS !== 'web';
 
+    const clearDeferredDisconnectActivity = useCallback(() => {
+      if (deferredDisconnectActivityTimeoutRef.current) {
+        clearTimeout(deferredDisconnectActivityTimeoutRef.current);
+        deferredDisconnectActivityTimeoutRef.current = null;
+      }
+    }, []);
+
+    const scheduleDisconnectActivity = useCallback(() => {
+      clearDeferredDisconnectActivity();
+
+      if (appStateRef.current !== 'active') {
+        return;
+      }
+
+      const elapsedSinceForeground = Date.now() - lastAppForegroundedAtRef.current;
+      const remainingGraceMs = Math.max(0, APP_FOCUS_DISCONNECT_GRACE_MS - elapsedSinceForeground);
+
+      const showDisconnected = () => {
+        deferredDisconnectActivityTimeoutRef.current = null;
+        if (appStateRef.current !== 'active' || ws.isConnected) {
+          return;
+        }
+        setActivity({
+          tone: 'error',
+          title: 'Disconnected',
+        });
+      };
+
+      if (remainingGraceMs <= 0) {
+        showDisconnected();
+        return;
+      }
+
+      deferredDisconnectActivityTimeoutRef.current = setTimeout(showDisconnected, remainingGraceMs);
+    }, [clearDeferredDisconnectActivity, ws]);
+
     const clearPendingScrollRetries = useCallback(() => {
       for (const timeoutId of scrollRetryTimeoutsRef.current) {
         clearTimeout(timeoutId);
@@ -850,6 +887,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const stopRequestedRef = useRef(false);
     const stopSystemMessageLoggedRef = useRef(false);
     const appStateRef = useRef(AppState.currentState);
+    const lastAppForegroundedAtRef = useRef(
+      AppState.currentState === 'active' ? Date.now() : 0
+    );
+    const deferredDisconnectActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null
+    );
 
     // Track whether a command arrived since the last delta — used to
     // know when a new thinking segment starts so we can replace the old one.
@@ -2663,6 +2706,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 	      };
 	    }, [agentRootThreadId, refreshAgentThreads, relatedAgentThreads.length, selectedChatId]);
 
+    useEffect(() => clearDeferredDisconnectActivity, [clearDeferredDisconnectActivity]);
+
     useEffect(() => {
       const subscription = AppState.addEventListener('change', (nextAppState) => {
         const previousAppState = appStateRef.current;
@@ -2670,6 +2715,12 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (nextAppState !== 'active' || previousAppState === 'active') {
           return;
+        }
+
+        lastAppForegroundedAtRef.current = Date.now();
+        clearDeferredDisconnectActivity();
+        if (!ws.isConnected) {
+          scheduleDisconnectActivity();
         }
 
         const activeChatId = chatIdRef.current;
@@ -2683,7 +2734,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       return () => {
         subscription.remove();
       };
-    }, [refreshAgentThreads]);
+    }, [clearDeferredDisconnectActivity, refreshAgentThreads, scheduleDisconnectActivity, ws]);
 
     const handleWorkspaceSelection = useCallback(
       (cwd: string | null) => {
@@ -6849,7 +6900,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (event.method === 'bridge/connection/state') {
           const params = toRecord(event.params);
           const status = readString(params?.status);
-          if (status === 'connected' && currentId) {
+          if (status === 'connected') {
+            clearDeferredDisconnectActivity();
+            if (!currentId) {
+              return;
+            }
             setActivity((prev) =>
               prev.tone === 'running'
                 ? prev
@@ -6865,10 +6920,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
           if (status === 'disconnected') {
             clearRunWatchdog();
-            setActivity({
-              tone: 'error',
-              title: 'Disconnected',
-            });
+            if (appStateRef.current !== 'active') {
+              clearDeferredDisconnectActivity();
+              return;
+            }
+            scheduleDisconnectActivity();
           }
         }
       });
@@ -6880,6 +6936,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       loadChat,
       appendStopSystemMessageIfNeeded,
       bumpRunWatchdog,
+      clearDeferredDisconnectActivity,
       cacheCodexRuntimeForThread,
       cacheThreadActiveCommand,
       cacheThreadActivity,
@@ -6894,6 +6951,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       clearRunWatchdog,
       readThreadContextUsage,
       refreshPendingApprovalsForThread,
+      scheduleDisconnectActivity,
       scheduleExternalStatusFullSync,
       registerTurnStarted,
       pushActiveCommand,

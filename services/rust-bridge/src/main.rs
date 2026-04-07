@@ -6509,18 +6509,22 @@ fn parse_preview_bootstrap_params(uri: &Uri) -> PreviewBootstrapParams {
         }
         if key == "vp" {
             viewport_preset = parse_preview_viewport_preset(&value);
+            retained_pairs.push((key.to_string(), value.to_string()));
             continue;
         }
         if key == "vw" {
             viewport_width = normalize_preview_viewport_dimension(Some(value.as_ref()));
+            retained_pairs.push((key.to_string(), value.to_string()));
             continue;
         }
         if key == "vh" {
             viewport_height = normalize_preview_viewport_dimension(Some(value.as_ref()));
+            retained_pairs.push((key.to_string(), value.to_string()));
             continue;
         }
         if key == "shell" {
             shell_mode = parse_preview_shell_mode(&value);
+            retained_pairs.push((key.to_string(), value.to_string()));
             continue;
         }
         if key == "frame" {
@@ -10454,9 +10458,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_preview_bootstrap_params_strips_internal_query_fields() {
+    fn parse_preview_bootstrap_params_keeps_viewport_query_fields() {
         let uri: Uri =
-            "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&shell=desktop&foo=bar&baz=qux"
+            "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&foo=bar&baz=qux"
                 .parse()
                 .expect("valid uri");
 
@@ -10472,10 +10476,9 @@ mod tests {
                 height: Some(1117),
             })
         );
-        assert_eq!(params.shell_mode, Some(PreviewShellMode::Desktop));
         assert_eq!(
             params.sanitized_path_and_query,
-            "/index.html?foo=bar&baz=qux"
+            "/index.html?vp=desktop&vw=1728&vh=1117&foo=bar&baz=qux"
         );
     }
 
