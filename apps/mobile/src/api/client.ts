@@ -16,6 +16,9 @@ import type {
   BrowserPreviewDiscoveryResponse,
   BrowserPreviewSession,
   BridgeCapabilities,
+  BridgeThreadQueueActionResponse,
+  BridgeThreadQueueSendResponse,
+  BridgeThreadQueueState,
   BridgeRuntimeInfo,
   BridgeRestartStartResponse,
   BridgeUpdateStartResponse,
@@ -167,6 +170,31 @@ interface TurnInputLocalImage {
 interface SendChatMessageOptions {
   onTurnStarted?: (turnId: string) => void;
 }
+
+interface PreparedTurnRequest {
+  content: string;
+  mentions: TurnInputMention[];
+  localImages: TurnInputLocalImage[];
+  turnStartParams: Record<string, unknown>;
+}
+
+interface PrepareTurnRequestOptions {
+  skipResume?: boolean;
+}
+
+export type SendOrQueueChatMessageResult =
+  | {
+      disposition: 'queued';
+      queue: BridgeThreadQueueState;
+      turnId: null;
+      chat: null;
+    }
+  | {
+      disposition: 'sent';
+      queue: BridgeThreadQueueState;
+      turnId: string;
+      chat: Chat;
+    };
 
 interface ListChatsOptions {
   includeSubAgents?: boolean;
@@ -542,69 +570,14 @@ export class HostBridgeApiClient {
     body: SendChatMessageRequest,
     options?: SendChatMessageOptions
   ): Promise<Chat> {
-    const content = body.content.trim();
-    if (!content) {
+    const prepared = await this.prepareTurnRequest(id, body);
+    if (!prepared.content) {
       return this.getChat(id);
     }
-
-    if ((body.role ?? 'user') !== 'user') {
-      throw new Error('Only user role is supported in bridge/chat messaging');
-    }
-
-    const normalizedCwd = normalizeCwd(body.cwd);
-    const normalizedModel = normalizeModel(body.model);
-    const normalizedEffort = normalizeEffort(body.effort);
-    const normalizedServiceTier = normalizeServiceTier(body.serviceTier);
-    const normalizedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy);
-    const normalizedMentions = normalizeMentions(body.mentions);
-    const normalizedLocalImages = normalizeLocalImages(body.localImages);
-    const requestedCollaborationMode = normalizeCollaborationMode(body.collaborationMode);
-    let resumedThreadSettings: AppServerThreadRuntimeSettings | null = null;
-
-    try {
-      resumedThreadSettings = await this.resumeThread(id, {
-        model: normalizedModel,
-        cwd: normalizedCwd,
-        approvalPolicy: normalizedApprovalPolicy,
-      });
-    } catch {
-      // Best effort: turn/start still works for recently started chats.
-    }
-
-    let effectiveModel = normalizedModel ?? resumedThreadSettings?.model ?? null;
-    if (requestedCollaborationMode && !effectiveModel) {
-      try {
-        const models = await this.listModels(false);
-        effectiveModel =
-          models.find((entry) => entry.isDefault)?.id ?? models[0]?.id ?? null;
-      } catch {
-        // Best effort: fall back to the current thread settings if model lookup fails.
-      }
-    }
-    const effectiveEffort =
-      requestedCollaborationMode
-        ? normalizedEffort ?? resumedThreadSettings?.effort ?? null
-        : normalizedEffort;
-    const normalizedCollaborationMode = toTurnCollaborationMode(
-      requestedCollaborationMode,
-      effectiveModel,
-      effectiveEffort
+    const turnStart = await this.ws.request<AppServerTurnResponse>(
+      'turn/start',
+      prepared.turnStartParams
     );
-
-    const turnStart = await this.ws.request<AppServerTurnResponse>('turn/start', {
-      threadId: id,
-      input: buildTurnInput(content, normalizedMentions, normalizedLocalImages),
-      cwd: normalizedCwd ?? null,
-      approvalPolicy: normalizedApprovalPolicy ?? null,
-      sandboxPolicy: null,
-      model: effectiveModel ?? null,
-      effort: effectiveEffort ?? null,
-      serviceTier: normalizedServiceTier ?? null,
-      summary: 'auto',
-      personality: null,
-      outputSchema: null,
-      collaborationMode: normalizedCollaborationMode,
-    });
 
     const turnId = turnStart.turn?.id;
     if (!turnId) {
@@ -614,10 +587,64 @@ export class HostBridgeApiClient {
     return this.getChatWithUserMessage(
       id,
       turnId,
-      content,
-      normalizedMentions,
-      normalizedLocalImages
+      prepared.content,
+      prepared.mentions,
+      prepared.localImages
     );
+  }
+
+  async sendOrQueueChatMessage(
+    id: string,
+    body: SendChatMessageRequest,
+    options?: PrepareTurnRequestOptions
+  ): Promise<SendOrQueueChatMessageResult> {
+    const prepared = await this.prepareTurnRequest(id, body, options);
+    if (!prepared.content) {
+      return {
+        disposition: 'sent',
+        queue: await this.readThreadQueue(id),
+        turnId: '',
+        chat: await this.getChat(id),
+      };
+    }
+
+    const response = await this.ws.request<BridgeThreadQueueSendResponse>(
+      'bridge/thread/queue/send',
+      {
+        threadId: id,
+        content: prepared.content,
+        turnStart: prepared.turnStartParams,
+      }
+    );
+
+    if (response.disposition === 'queued') {
+      return {
+        disposition: 'queued',
+        queue: response.queue,
+        turnId: null,
+        chat: null,
+      };
+    }
+
+    const turnId = response.turnId?.trim();
+    if (!turnId) {
+      throw new Error('bridge/thread/queue/send did not return turn id for sent message');
+    }
+
+    const chat = await this.getChatWithUserMessage(
+      id,
+      turnId,
+      prepared.content,
+      prepared.mentions,
+      prepared.localImages
+    );
+
+    return {
+      disposition: 'sent',
+      queue: response.queue,
+      turnId,
+      chat,
+    };
   }
 
   async steerChatTurn(
@@ -676,6 +703,41 @@ export class HostBridgeApiClient {
     }
 
     return null;
+  }
+
+  readThreadQueue(threadId: string): Promise<BridgeThreadQueueState> {
+    const normalizedThreadId = threadId.trim();
+    if (!normalizedThreadId) {
+      return Promise.resolve({
+        threadId: '',
+        items: [],
+        lastError: null,
+      });
+    }
+
+    return this.ws.request<BridgeThreadQueueState>('bridge/thread/queue/read', {
+      threadId: normalizedThreadId,
+    });
+  }
+
+  steerQueuedThreadMessage(
+    threadId: string,
+    itemId: string
+  ): Promise<BridgeThreadQueueActionResponse> {
+    return this.ws.request<BridgeThreadQueueActionResponse>('bridge/thread/queue/steer', {
+      threadId: threadId.trim(),
+      itemId: itemId.trim(),
+    });
+  }
+
+  cancelQueuedThreadMessage(
+    threadId: string,
+    itemId: string
+  ): Promise<BridgeThreadQueueActionResponse> {
+    return this.ws.request<BridgeThreadQueueActionResponse>('bridge/thread/queue/cancel', {
+      threadId: threadId.trim(),
+      itemId: itemId.trim(),
+    });
   }
 
   uploadAttachment(body: UploadAttachmentRequest): Promise<UploadAttachmentResponse> {
@@ -933,6 +995,92 @@ export class HostBridgeApiClient {
     return this.ws.request<GitPushResponse>('bridge/git/push', {
       cwd: normalizedCwd ?? null,
     });
+  }
+
+  private async prepareTurnRequest(
+    id: string,
+    body: SendChatMessageRequest,
+    options?: PrepareTurnRequestOptions
+  ): Promise<PreparedTurnRequest> {
+    const content = body.content.trim();
+    if (!content) {
+      return {
+        content: '',
+        mentions: [],
+        localImages: [],
+        turnStartParams: {
+          threadId: id,
+          input: [],
+        },
+      };
+    }
+
+    if ((body.role ?? 'user') !== 'user') {
+      throw new Error('Only user role is supported in bridge/chat messaging');
+    }
+
+    const normalizedCwd = normalizeCwd(body.cwd);
+    const normalizedModel = normalizeModel(body.model);
+    const normalizedEffort = normalizeEffort(body.effort);
+    const normalizedServiceTier = normalizeServiceTier(body.serviceTier);
+    const normalizedApprovalPolicy = normalizeApprovalPolicy(body.approvalPolicy);
+    const normalizedMentions = normalizeMentions(body.mentions);
+    const normalizedLocalImages = normalizeLocalImages(body.localImages);
+    const requestedCollaborationMode = normalizeCollaborationMode(body.collaborationMode);
+    let resumedThreadSettings: AppServerThreadRuntimeSettings | null = null;
+
+    if (!options?.skipResume) {
+      try {
+        resumedThreadSettings = await this.resumeThread(id, {
+          model: normalizedModel,
+          cwd: normalizedCwd,
+          approvalPolicy: normalizedApprovalPolicy,
+        });
+      } catch {
+        // Best effort: turn/start still works for recently started chats.
+      }
+    }
+
+    let effectiveModel = normalizedModel ?? resumedThreadSettings?.model ?? null;
+    if (requestedCollaborationMode && !effectiveModel && !options?.skipResume) {
+      try {
+        const models = await this.listModels(false);
+        effectiveModel =
+          models.find((entry) => entry.isDefault)?.id ?? models[0]?.id ?? null;
+      } catch {
+        // Best effort: fall back to the current thread settings if model lookup fails.
+      }
+    }
+
+    const effectiveEffort =
+      requestedCollaborationMode
+        ? normalizedEffort ?? resumedThreadSettings?.effort ?? null
+        : normalizedEffort;
+    const normalizedCollaborationMode = toTurnCollaborationMode(
+      requestedCollaborationMode,
+      effectiveModel,
+      effectiveEffort
+    );
+
+    return {
+      content,
+      mentions: normalizedMentions,
+      localImages: normalizedLocalImages,
+      turnStartParams: {
+        threadId: id,
+        input: buildTurnInput(content, normalizedMentions, normalizedLocalImages),
+        cwd: normalizedCwd ?? null,
+        approvalPolicy: normalizedApprovalPolicy ?? null,
+        sandboxPolicy: null,
+        model: effectiveModel ?? null,
+        effort: effectiveEffort ?? null,
+        serviceTier: normalizedServiceTier ?? null,
+        summary: 'auto',
+        personality: null,
+        outputSchema: null,
+        collaborationMode: normalizedCollaborationMode,
+      },
+    };
   }
 
   private mapChatWithCachedTitle(rawThreadValue: unknown): Chat {

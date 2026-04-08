@@ -137,6 +137,7 @@ From repo root:
 - `scripts/start-expo.sh` bootstraps Expo, attempts runtime repair if needed, and sets `REACT_NATIVE_PACKAGER_HOSTNAME` from `.env.secure` or Tailscale/LAN discovery.
 - `scripts/start-bridge-secure.sh` sources `.env.secure` and runs the Rust bridge in dev or release mode.
 - `npm run bridge` is only a shorthand for local development and does not load `.env.secure`.
+- Do not restart the running bridge automatically as part of debugging or verification unless the user explicitly asks for a restart.
 - Real-device iOS work should be run from `apps/mobile`, not the repo-root `ios/` tree.
 
 ## Environment and Config

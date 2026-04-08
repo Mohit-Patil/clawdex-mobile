@@ -40,7 +40,7 @@ use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{mpsc, oneshot, watch, Mutex, RwLock},
+    sync::{broadcast, mpsc, oneshot, watch, Mutex, RwLock},
     time::timeout,
 };
 use tokio_tungstenite::{
@@ -63,6 +63,7 @@ const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const DEFAULT_MAX_VOICE_TRANSCRIPTION_BYTES: usize = 100 * 1024 * 1024;
 const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
 const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
+const INTERNAL_NOTIFICATION_CHANNEL_CAPACITY: usize = 1_024;
 const WS_CLIENT_QUEUE_CAPACITY: usize = 256;
 const ROLLOUT_LIVE_SYNC_POLL_INTERVAL_MS: u64 = 900;
 const ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS: u64 = 1;
@@ -252,6 +253,7 @@ struct AppState {
     started_at: Instant,
     hub: Arc<ClientHub>,
     backend: Arc<RuntimeBackend>,
+    queue: Arc<BridgeQueueService>,
     terminal: Arc<TerminalService>,
     git: Arc<GitService>,
     updater: Arc<UpdateService>,
@@ -792,6 +794,18 @@ impl RuntimeBackend {
         approvals
     }
 
+    async fn list_pending_user_inputs(&self) -> Vec<PendingUserInputRequest> {
+        let mut requests = Vec::new();
+        if let Some(codex) = &self.codex {
+            requests.extend(codex.list_pending_user_inputs().await);
+        }
+        if let Some(opencode) = &self.opencode {
+            requests.extend(opencode.list_pending_user_inputs().await);
+        }
+        requests.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+        requests
+    }
+
     async fn resolve_approval(
         &self,
         approval_id: &str,
@@ -964,6 +978,7 @@ struct ClientHub {
     replay_capacity: usize,
     clients: RwLock<HashMap<u64, mpsc::Sender<Message>>>,
     notification_replay: RwLock<VecDeque<ReplayableNotification>>,
+    notification_tx: broadcast::Sender<HubNotification>,
 }
 
 #[derive(Clone)]
@@ -972,19 +987,33 @@ struct ReplayableNotification {
     payload: Value,
 }
 
+#[derive(Clone)]
+struct HubNotification {
+    event_id: u64,
+    method: String,
+    params: Value,
+}
+
 impl ClientHub {
     fn new() -> Self {
         Self::with_replay_capacity(NOTIFICATION_REPLAY_BUFFER_SIZE)
     }
 
     fn with_replay_capacity(replay_capacity: usize) -> Self {
+        let (notification_tx, _) =
+            broadcast::channel::<HubNotification>(INTERNAL_NOTIFICATION_CHANNEL_CAPACITY);
         Self {
             next_client_id: AtomicU64::new(1),
             next_event_id: AtomicU64::new(1),
             replay_capacity,
             clients: RwLock::new(HashMap::new()),
             notification_replay: RwLock::new(VecDeque::new()),
+            notification_tx,
         }
+    }
+
+    fn subscribe_notifications(&self) -> broadcast::Receiver<HubNotification> {
+        self.notification_tx.subscribe()
     }
 
     async fn add_client(&self, tx: mpsc::Sender<Message>) -> u64 {
@@ -1071,8 +1100,14 @@ impl ClientHub {
             "eventId": event_id,
             "params": params
         });
+        let params = payload.get("params").cloned().unwrap_or(Value::Null);
 
         self.push_replay(event_id, payload.clone()).await;
+        let _ = self.notification_tx.send(HubNotification {
+            event_id,
+            method: method.to_string(),
+            params,
+        });
         self.broadcast_json(payload).await;
     }
 
@@ -1120,6 +1155,677 @@ impl ClientHub {
 
     fn latest_event_id(&self) -> u64 {
         self.next_event_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
+}
+
+impl BridgeQueuedMessageEntry {
+    fn to_public(&self) -> BridgeQueuedMessage {
+        BridgeQueuedMessage {
+            id: self.id.clone(),
+            created_at: self.created_at.clone(),
+            content: self.content.clone(),
+        }
+    }
+}
+
+impl BridgeQueueService {
+    fn new(backend: Arc<RuntimeBackend>, hub: Arc<ClientHub>) -> Arc<Self> {
+        let service = Arc::new(Self {
+            backend,
+            hub,
+            threads: Arc::new(RwLock::new(HashMap::new())),
+        });
+        service.spawn_notification_loop();
+        service
+    }
+
+    fn spawn_notification_loop(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        let mut receiver = this.hub.subscribe_notifications();
+        tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(notification) => this.handle_notification(notification).await,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    async fn read_queue(&self, thread_id: &str) -> BridgeThreadQueueState {
+        let normalized_thread_id = thread_id.trim();
+        if normalized_thread_id.is_empty() {
+            return BridgeThreadQueueState {
+                thread_id: String::new(),
+                items: Vec::new(),
+                last_error: None,
+            };
+        }
+
+        let threads = self.threads.read().await;
+        let runtime = threads.get(normalized_thread_id);
+        Self::snapshot_for_thread(normalized_thread_id, runtime)
+    }
+
+    async fn send_message(
+        &self,
+        request: BridgeThreadQueueSendRequest,
+    ) -> Result<BridgeThreadQueueSendResponse, String> {
+        let normalized_thread_id = request.thread_id.trim().to_string();
+        let content = request.content.trim().to_string();
+        if normalized_thread_id.is_empty() {
+            return Err("threadId must not be empty".to_string());
+        }
+        if content.is_empty() {
+            return Err("content must not be empty".to_string());
+        }
+
+        self.ensure_thread_runtime(&normalized_thread_id).await?;
+
+        let queued_item = BridgeQueuedMessageEntry {
+            id: format!(
+                "queue-{}-{}",
+                Utc::now().timestamp_millis(),
+                self.hub.next_event_id.load(Ordering::Relaxed)
+            ),
+            created_at: now_iso(),
+            content,
+            turn_start: request.turn_start,
+        };
+
+        let should_queue = {
+            let threads = self.threads.read().await;
+            let runtime = threads.get(&normalized_thread_id);
+            runtime.is_some_and(Self::runtime_is_blocked_or_occupied)
+        };
+
+        if should_queue {
+            let snapshot = {
+                let mut threads = self.threads.write().await;
+                let runtime = threads
+                    .entry(normalized_thread_id.clone())
+                    .or_insert_with(BridgeThreadQueueRuntime::default);
+                runtime.items.push_back(queued_item);
+                runtime.last_error = None;
+                Self::snapshot_for_thread(&normalized_thread_id, Some(runtime))
+            };
+            self.broadcast_snapshot(&snapshot).await;
+            return Ok(BridgeThreadQueueSendResponse {
+                disposition: BridgeThreadQueueDisposition::Queued,
+                queue: snapshot,
+                turn_id: None,
+            });
+        }
+
+        {
+            let mut threads = self.threads.write().await;
+            let runtime = threads
+                .entry(normalized_thread_id.clone())
+                .or_insert_with(BridgeThreadQueueRuntime::default);
+            runtime.turn_start_in_flight = true;
+            runtime.last_error = None;
+        }
+
+        match self
+            .dispatch_turn_start(&normalized_thread_id, &queued_item.turn_start)
+            .await
+        {
+            Ok(turn_id) => {
+                let snapshot = {
+                    let mut threads = self.threads.write().await;
+                    let runtime = threads
+                        .entry(normalized_thread_id.clone())
+                        .or_insert_with(BridgeThreadQueueRuntime::default);
+                    runtime.turn_start_in_flight = false;
+                    runtime.thread_running = true;
+                    runtime.active_turn_id = Some(turn_id.clone());
+                    runtime.last_error = None;
+                    Self::snapshot_for_thread(&normalized_thread_id, Some(runtime))
+                };
+                Ok(BridgeThreadQueueSendResponse {
+                    disposition: BridgeThreadQueueDisposition::Sent,
+                    queue: snapshot,
+                    turn_id: Some(turn_id),
+                })
+            }
+            Err(error) => {
+                let mut threads = self.threads.write().await;
+                if let Some(runtime) = threads.get_mut(&normalized_thread_id) {
+                    runtime.turn_start_in_flight = false;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn steer_message(
+        &self,
+        request: BridgeThreadQueueSteerRequest,
+    ) -> Result<BridgeThreadQueueActionResponse, String> {
+        let normalized_thread_id = request.thread_id.trim().to_string();
+        let normalized_item_id = request.item_id.trim().to_string();
+        if normalized_thread_id.is_empty() {
+            return Err("threadId must not be empty".to_string());
+        }
+        if normalized_item_id.is_empty() {
+            return Err("itemId must not be empty".to_string());
+        }
+
+        self.ensure_thread_runtime(&normalized_thread_id).await?;
+
+        let (turn_id, removed_item, removed_index, snapshot) = {
+            let mut threads = self.threads.write().await;
+            let runtime = threads
+                .get_mut(&normalized_thread_id)
+                .ok_or_else(|| "queue state unavailable".to_string())?;
+
+            if runtime.turn_start_in_flight || runtime.action_in_flight_item_id.is_some() {
+                return Err("queue is busy processing another action".to_string());
+            }
+            if !runtime.pending_approval_ids.is_empty() {
+                return Err("cannot steer while an approval is pending".to_string());
+            }
+            if !runtime.pending_user_input_ids.is_empty() {
+                return Err("cannot steer while user input is pending".to_string());
+            }
+
+            let active_turn_id = runtime
+                .active_turn_id
+                .clone()
+                .ok_or_else(|| "no active turn available to steer".to_string())?;
+            let item_index = runtime
+                .items
+                .iter()
+                .position(|item| item.id == normalized_item_id)
+                .ok_or_else(|| "queued message not found".to_string())?;
+            let removed_item = runtime
+                .items
+                .remove(item_index)
+                .ok_or_else(|| "queued message not found".to_string())?;
+            runtime.action_in_flight_item_id = Some(normalized_item_id.clone());
+            runtime.last_error = None;
+            let snapshot = Self::snapshot_for_thread(&normalized_thread_id, Some(runtime));
+            (active_turn_id, removed_item, item_index, snapshot)
+        };
+
+        self.broadcast_snapshot(&snapshot).await;
+
+        match self
+            .dispatch_turn_steer(&normalized_thread_id, &turn_id, &removed_item.turn_start)
+            .await
+        {
+            Ok(()) => {
+                let snapshot = {
+                    let mut threads = self.threads.write().await;
+                    let runtime = threads
+                        .entry(normalized_thread_id.clone())
+                        .or_insert_with(BridgeThreadQueueRuntime::default);
+                    if runtime.action_in_flight_item_id.as_deref()
+                        == Some(normalized_item_id.as_str())
+                    {
+                        runtime.action_in_flight_item_id = None;
+                    }
+                    runtime.last_error = None;
+                    Self::snapshot_for_thread(&normalized_thread_id, Some(runtime))
+                };
+                Ok(BridgeThreadQueueActionResponse {
+                    ok: true,
+                    queue: snapshot,
+                })
+            }
+            Err(error) => {
+                let snapshot = {
+                    let mut threads = self.threads.write().await;
+                    let runtime = threads
+                        .entry(normalized_thread_id.clone())
+                        .or_insert_with(BridgeThreadQueueRuntime::default);
+                    if runtime.action_in_flight_item_id.as_deref()
+                        == Some(normalized_item_id.as_str())
+                    {
+                        runtime.action_in_flight_item_id = None;
+                    }
+                    let insert_index = removed_index.min(runtime.items.len());
+                    runtime.items.insert(insert_index, removed_item);
+                    runtime.last_error = Some(BridgeThreadQueueError {
+                        message: error.clone(),
+                        operation: "steer".to_string(),
+                        at: now_iso(),
+                        item_id: Some(normalized_item_id.clone()),
+                    });
+                    Self::snapshot_for_thread(&normalized_thread_id, Some(runtime))
+                };
+                self.broadcast_snapshot(&snapshot).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn cancel_message(
+        &self,
+        request: BridgeThreadQueueCancelRequest,
+    ) -> Result<BridgeThreadQueueActionResponse, String> {
+        let normalized_thread_id = request.thread_id.trim().to_string();
+        let normalized_item_id = request.item_id.trim().to_string();
+        if normalized_thread_id.is_empty() {
+            return Err("threadId must not be empty".to_string());
+        }
+        if normalized_item_id.is_empty() {
+            return Err("itemId must not be empty".to_string());
+        }
+
+        let snapshot = {
+            let mut threads = self.threads.write().await;
+            let runtime = threads
+                .entry(normalized_thread_id.clone())
+                .or_insert_with(BridgeThreadQueueRuntime::default);
+            if runtime.action_in_flight_item_id.as_deref() == Some(normalized_item_id.as_str()) {
+                return Err(
+                    "cannot cancel a queued message while it is being processed".to_string()
+                );
+            }
+            let Some(item_index) = runtime
+                .items
+                .iter()
+                .position(|item| item.id == normalized_item_id)
+            else {
+                return Err("queued message not found".to_string());
+            };
+            runtime.items.remove(item_index);
+            runtime.last_error = None;
+            Self::snapshot_for_thread(&normalized_thread_id, Some(runtime))
+        };
+
+        self.broadcast_snapshot(&snapshot).await;
+
+        Ok(BridgeThreadQueueActionResponse {
+            ok: true,
+            queue: snapshot,
+        })
+    }
+
+    async fn ensure_thread_runtime(&self, thread_id: &str) -> Result<(), String> {
+        let normalized_thread_id = thread_id.trim();
+        if normalized_thread_id.is_empty() {
+            return Err("threadId must not be empty".to_string());
+        }
+
+        {
+            let threads = self.threads.read().await;
+            if threads.contains_key(normalized_thread_id) {
+                return Ok(());
+            }
+        }
+
+        let hydrated = self.hydrate_thread_runtime(normalized_thread_id).await?;
+        let mut threads = self.threads.write().await;
+        threads
+            .entry(normalized_thread_id.to_string())
+            .or_insert(hydrated);
+        Ok(())
+    }
+
+    async fn hydrate_thread_runtime(
+        &self,
+        thread_id: &str,
+    ) -> Result<BridgeThreadQueueRuntime, String> {
+        let thread_result = self
+            .backend
+            .request_internal("thread/read", Some(json!({ "threadId": thread_id })))
+            .await?;
+        let thread = thread_result
+            .get("thread")
+            .ok_or_else(|| "thread/read did not return thread".to_string())?;
+
+        let approvals = self.backend.list_pending_approvals().await;
+        let user_inputs = self.backend.list_pending_user_inputs().await;
+
+        let mut runtime = BridgeThreadQueueRuntime::default();
+        runtime.active_turn_id = read_active_turn_id_from_thread(thread);
+        runtime.thread_running = thread_has_running_turn(thread);
+        runtime.pending_approval_ids = approvals
+            .into_iter()
+            .filter(|entry| entry.thread_id == thread_id)
+            .map(|entry| entry.id)
+            .collect();
+        runtime.pending_user_input_ids = user_inputs
+            .into_iter()
+            .filter(|entry| entry.thread_id == thread_id)
+            .map(|entry| entry.id)
+            .collect();
+        Ok(runtime)
+    }
+
+    async fn dispatch_turn_start(
+        &self,
+        thread_id: &str,
+        turn_start: &Value,
+    ) -> Result<String, String> {
+        Self::dispatch_turn_start_with_backend(&self.backend, thread_id, turn_start).await
+    }
+
+    async fn dispatch_turn_start_with_backend(
+        backend: &Arc<RuntimeBackend>,
+        thread_id: &str,
+        turn_start: &Value,
+    ) -> Result<String, String> {
+        let mut params = turn_start.clone();
+        let params_object = params
+            .as_object_mut()
+            .ok_or_else(|| "turnStart payload must be an object".to_string())?;
+        params_object.insert("threadId".to_string(), Value::String(thread_id.to_string()));
+
+        let response = backend
+            .request_internal("turn/start", Some(Value::Object(params_object.clone())))
+            .await?;
+        read_string(
+            response
+                .as_object()
+                .and_then(|object| object.get("turn"))
+                .and_then(Value::as_object)
+                .and_then(|turn| turn.get("id")),
+        )
+        .ok_or_else(|| "turn/start did not return turn id".to_string())
+    }
+
+    async fn dispatch_turn_steer(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        turn_start: &Value,
+    ) -> Result<(), String> {
+        let input = turn_start
+            .as_object()
+            .and_then(|object| object.get("input"))
+            .cloned()
+            .ok_or_else(|| "turnStart payload missing input".to_string())?;
+
+        self.backend
+            .request_internal(
+                "turn/steer",
+                Some(json!({
+                    "threadId": thread_id,
+                    "expectedTurnId": turn_id,
+                    "input": input,
+                })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn broadcast_snapshot(&self, snapshot: &BridgeThreadQueueState) {
+        if let Ok(value) = serde_json::to_value(snapshot) {
+            self.hub
+                .broadcast_notification("bridge/thread/queue/updated", value)
+                .await;
+        }
+    }
+
+    fn snapshot_for_thread(
+        thread_id: &str,
+        runtime: Option<&BridgeThreadQueueRuntime>,
+    ) -> BridgeThreadQueueState {
+        let (items, last_error) = runtime.map_or((Vec::new(), None), |runtime| {
+            (
+                runtime
+                    .items
+                    .iter()
+                    .map(BridgeQueuedMessageEntry::to_public)
+                    .collect::<Vec<_>>(),
+                runtime.last_error.clone(),
+            )
+        });
+
+        BridgeThreadQueueState {
+            thread_id: thread_id.to_string(),
+            items,
+            last_error,
+        }
+    }
+
+    fn runtime_has_blockers(runtime: &BridgeThreadQueueRuntime) -> bool {
+        runtime.thread_running
+            || runtime.turn_start_in_flight
+            || runtime.action_in_flight_item_id.is_some()
+            || !runtime.pending_approval_ids.is_empty()
+            || !runtime.pending_user_input_ids.is_empty()
+    }
+
+    fn runtime_is_blocked_or_occupied(runtime: &BridgeThreadQueueRuntime) -> bool {
+        Self::runtime_has_blockers(runtime) || !runtime.items.is_empty()
+    }
+
+    async fn handle_notification(&self, notification: HubNotification) {
+        let _ = notification.event_id;
+        match notification.method.as_str() {
+            "turn/started" => {
+                let Some(thread_id) = read_string(notification.params.get("threadId"))
+                    .map(|value| value.trim().to_string())
+                else {
+                    return;
+                };
+                let turn_id = read_string(notification.params.get("turnId"));
+                let mut threads = self.threads.write().await;
+                let Some(runtime) = threads.get_mut(&thread_id) else {
+                    return;
+                };
+                runtime.thread_running = true;
+                runtime.turn_start_in_flight = false;
+                if let Some(turn_id) = turn_id {
+                    runtime.active_turn_id = Some(turn_id);
+                }
+                runtime.last_error = None;
+            }
+            "turn/completed" => {
+                let Some(thread_id) = read_string(notification.params.get("threadId"))
+                    .map(|value| value.trim().to_string())
+                else {
+                    return;
+                };
+                let should_dispatch = {
+                    let mut threads = self.threads.write().await;
+                    let Some(runtime) = threads.get_mut(&thread_id) else {
+                        return;
+                    };
+                    runtime.thread_running = false;
+                    runtime.turn_start_in_flight = false;
+                    runtime.active_turn_id = None;
+                    runtime.pending_approval_ids.clear();
+                    runtime.pending_user_input_ids.clear();
+                    runtime.action_in_flight_item_id = None;
+                    !runtime.items.is_empty()
+                };
+                if should_dispatch {
+                    self.spawn_auto_dispatch(thread_id);
+                }
+            }
+            "thread/status/changed" => {
+                let Some(thread_id) = read_string(notification.params.get("threadId"))
+                    .map(|value| value.trim().to_string())
+                else {
+                    return;
+                };
+                let Some(status) = read_string(notification.params.get("status"))
+                    .map(|value| value.trim().to_lowercase())
+                else {
+                    return;
+                };
+                let should_dispatch = {
+                    let mut threads = self.threads.write().await;
+                    let Some(runtime) = threads.get_mut(&thread_id) else {
+                        return;
+                    };
+                    if matches!(status.as_str(), "running" | "pending" | "queued") {
+                        runtime.thread_running = true;
+                        false
+                    } else {
+                        runtime.thread_running = false;
+                        runtime.turn_start_in_flight = false;
+                        runtime.active_turn_id = None;
+                        !runtime.items.is_empty()
+                    }
+                };
+                if should_dispatch {
+                    self.spawn_auto_dispatch(thread_id);
+                }
+            }
+            "bridge/approval.requested" => {
+                let Some(thread_id) = read_string(notification.params.get("threadId"))
+                    .map(|value| value.trim().to_string())
+                else {
+                    return;
+                };
+                let Some(approval_id) = read_string(notification.params.get("id")) else {
+                    return;
+                };
+                let mut threads = self.threads.write().await;
+                let Some(runtime) = threads.get_mut(&thread_id) else {
+                    return;
+                };
+                runtime.pending_approval_ids.insert(approval_id);
+            }
+            "bridge/approval.resolved" => {
+                let Some(thread_id) = read_string(notification.params.get("threadId"))
+                    .map(|value| value.trim().to_string())
+                else {
+                    return;
+                };
+                let Some(approval_id) = read_string(notification.params.get("id")) else {
+                    return;
+                };
+                let should_dispatch = {
+                    let mut threads = self.threads.write().await;
+                    let Some(runtime) = threads.get_mut(&thread_id) else {
+                        return;
+                    };
+                    runtime.pending_approval_ids.remove(&approval_id);
+                    !Self::runtime_has_blockers(runtime) && !runtime.items.is_empty()
+                };
+                if should_dispatch {
+                    self.spawn_auto_dispatch(thread_id);
+                }
+            }
+            "bridge/userInput.requested" => {
+                let Some(thread_id) = read_string(notification.params.get("threadId"))
+                    .map(|value| value.trim().to_string())
+                else {
+                    return;
+                };
+                let Some(request_id) = read_string(notification.params.get("id")) else {
+                    return;
+                };
+                let mut threads = self.threads.write().await;
+                let Some(runtime) = threads.get_mut(&thread_id) else {
+                    return;
+                };
+                runtime.pending_user_input_ids.insert(request_id);
+            }
+            "bridge/userInput.resolved" => {
+                let Some(thread_id) = read_string(notification.params.get("threadId"))
+                    .map(|value| value.trim().to_string())
+                else {
+                    return;
+                };
+                let Some(request_id) = read_string(notification.params.get("id")) else {
+                    return;
+                };
+                let should_dispatch = {
+                    let mut threads = self.threads.write().await;
+                    let Some(runtime) = threads.get_mut(&thread_id) else {
+                        return;
+                    };
+                    runtime.pending_user_input_ids.remove(&request_id);
+                    !Self::runtime_has_blockers(runtime) && !runtime.items.is_empty()
+                };
+                if should_dispatch {
+                    self.spawn_auto_dispatch(thread_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn spawn_auto_dispatch(&self, thread_id: String) {
+        let backend = Arc::clone(&self.backend);
+        let hub = Arc::clone(&self.hub);
+        let threads = Arc::clone(&self.threads);
+        tokio::spawn(async move {
+            BridgeQueueService::drain_thread_queue(backend, hub, threads, thread_id).await;
+        });
+    }
+
+    async fn drain_thread_queue(
+        backend: Arc<RuntimeBackend>,
+        hub: Arc<ClientHub>,
+        threads: Arc<RwLock<HashMap<String, BridgeThreadQueueRuntime>>>,
+        thread_id: String,
+    ) {
+        let (queued_item, snapshot) = {
+            let mut threads = threads.write().await;
+            let Some(runtime) = threads.get_mut(&thread_id) else {
+                return;
+            };
+            if runtime.thread_running
+                || runtime.turn_start_in_flight
+                || runtime.action_in_flight_item_id.is_some()
+                || !runtime.pending_approval_ids.is_empty()
+                || !runtime.pending_user_input_ids.is_empty()
+            {
+                return;
+            }
+            let Some(queued_item) = runtime.items.pop_front() else {
+                return;
+            };
+            runtime.turn_start_in_flight = true;
+            runtime.last_error = None;
+            let snapshot = BridgeQueueService::snapshot_for_thread(&thread_id, Some(runtime));
+            (queued_item, snapshot)
+        };
+
+        if let Ok(value) = serde_json::to_value(&snapshot) {
+            hub.broadcast_notification("bridge/thread/queue/updated", value)
+                .await;
+        }
+
+        match BridgeQueueService::dispatch_turn_start_with_backend(
+            &backend,
+            &thread_id,
+            &queued_item.turn_start,
+        )
+        .await
+        {
+            Ok(turn_id) => {
+                let mut threads = threads.write().await;
+                let Some(runtime) = threads.get_mut(&thread_id) else {
+                    return;
+                };
+                runtime.turn_start_in_flight = false;
+                runtime.thread_running = true;
+                runtime.active_turn_id = Some(turn_id);
+                runtime.last_error = None;
+            }
+            Err(error) => {
+                let snapshot = {
+                    let mut threads = threads.write().await;
+                    let Some(runtime) = threads.get_mut(&thread_id) else {
+                        return;
+                    };
+                    runtime.turn_start_in_flight = false;
+                    runtime.items.push_front(queued_item);
+                    runtime.last_error = Some(BridgeThreadQueueError {
+                        message: error.clone(),
+                        operation: "dispatch".to_string(),
+                        at: now_iso(),
+                        item_id: runtime.items.front().map(|item| item.id.clone()),
+                    });
+                    BridgeQueueService::snapshot_for_thread(&thread_id, Some(runtime))
+                };
+                if let Ok(value) = serde_json::to_value(&snapshot) {
+                    hub.broadcast_notification("bridge/thread/queue/updated", value)
+                        .await;
+                }
+            }
+        }
     }
 }
 
@@ -1441,6 +2147,18 @@ impl AppServerBridge {
 
         approvals.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
         approvals
+    }
+
+    async fn list_pending_user_inputs(&self) -> Vec<PendingUserInputRequest> {
+        let mut requests = self
+            .pending_user_inputs
+            .lock()
+            .await
+            .values()
+            .map(|entry| entry.request.clone())
+            .collect::<Vec<_>>();
+        requests.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+        requests
     }
 
     async fn resolve_approval(
@@ -2735,6 +3453,18 @@ impl OpencodeBackend {
             .collect::<Vec<_>>();
         approvals.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
         approvals
+    }
+
+    async fn list_pending_user_inputs(&self) -> Vec<PendingUserInputRequest> {
+        let mut requests = self
+            .pending_user_inputs
+            .lock()
+            .await
+            .values()
+            .map(|entry| entry.request.clone())
+            .collect::<Vec<_>>();
+        requests.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+        requests
     }
 
     async fn resolve_approval(
@@ -4478,6 +5208,107 @@ struct PendingUserInputQuestionOption {
     description: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueReadRequest {
+    thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueSendRequest {
+    thread_id: String,
+    content: String,
+    turn_start: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueSteerRequest {
+    thread_id: String,
+    item_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueCancelRequest {
+    thread_id: String,
+    item_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeQueuedMessage {
+    id: String,
+    created_at: String,
+    content: String,
+}
+
+#[derive(Debug, Clone)]
+struct BridgeQueuedMessageEntry {
+    id: String,
+    created_at: String,
+    content: String,
+    turn_start: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueError {
+    message: String,
+    operation: String,
+    at: String,
+    item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueState {
+    thread_id: String,
+    items: Vec<BridgeQueuedMessage>,
+    last_error: Option<BridgeThreadQueueError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BridgeThreadQueueDisposition {
+    Queued,
+    Sent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueSendResponse {
+    disposition: BridgeThreadQueueDisposition,
+    queue: BridgeThreadQueueState,
+    turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeThreadQueueActionResponse {
+    ok: bool,
+    queue: BridgeThreadQueueState,
+}
+
+#[derive(Debug, Default)]
+struct BridgeThreadQueueRuntime {
+    items: VecDeque<BridgeQueuedMessageEntry>,
+    active_turn_id: Option<String>,
+    thread_running: bool,
+    turn_start_in_flight: bool,
+    action_in_flight_item_id: Option<String>,
+    pending_approval_ids: HashSet<String>,
+    pending_user_input_ids: HashSet<String>,
+    last_error: Option<BridgeThreadQueueError>,
+}
+
+struct BridgeQueueService {
+    backend: Arc<RuntimeBackend>,
+    hub: Arc<ClientHub>,
+    threads: Arc<RwLock<HashMap<String, BridgeThreadQueueRuntime>>>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RpcQuery {
     token: Option<String>,
@@ -4532,12 +5363,14 @@ async fn main() {
     ));
     let updater = Arc::new(UpdateService::discover());
     let preview = Arc::new(BrowserPreviewService::new(config.port, config.preview_port));
+    let queue = BridgeQueueService::new(backend.clone(), hub.clone());
 
     let state = Arc::new(AppState {
         config: config.clone(),
         started_at: Instant::now(),
         hub,
         backend,
+        queue,
         terminal,
         git,
         updater,
@@ -5443,6 +6276,46 @@ async fn handle_bridge_method(
                 "earliestEventId": state.hub.earliest_event_id().await,
                 "latestEventId": state.hub.latest_event_id(),
             }))
+        }
+        "bridge/thread/queue/read" => {
+            let request: BridgeThreadQueueReadRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            serde_json::to_value(state.queue.read_queue(&request.thread_id).await)
+                .map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/thread/queue/send" => {
+            let request: BridgeThreadQueueSendRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state
+                .queue
+                .send_message(request)
+                .await
+                .map_err(|error| BridgeError::server(&error))?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/thread/queue/steer" => {
+            let request: BridgeThreadQueueSteerRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state
+                .queue
+                .steer_message(request)
+                .await
+                .map_err(|error| BridgeError::server(&error))?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/thread/queue/cancel" => {
+            let request: BridgeThreadQueueCancelRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state
+                .queue
+                .cancel_message(request)
+                .await
+                .map_err(|error| BridgeError::server(&error))?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/workspaces/list" => {
             let request: WorkspaceListRequest =
@@ -9691,6 +10564,63 @@ fn to_preview_like(value: &str) -> String {
     format!("{}...", &collapsed[..177])
 }
 
+fn normalize_thread_status_label(value: Option<&Value>) -> Option<String> {
+    let raw = read_string(value)?;
+    let normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn read_active_turn_id_from_thread(thread: &Value) -> Option<String> {
+    let thread_object = thread.as_object()?;
+    let turns = thread_object.get("turns")?.as_array()?;
+    for turn in turns.iter().rev() {
+        let turn_object = turn.as_object()?;
+        let status = normalize_thread_status_label(turn_object.get("status"));
+        if matches!(
+            status.as_deref(),
+            Some("inprogress" | "running" | "active" | "queued" | "pending")
+        ) {
+            if let Some(turn_id) = read_string(turn_object.get("id")) {
+                return Some(turn_id);
+            }
+        }
+    }
+    None
+}
+
+fn thread_has_running_turn(thread: &Value) -> bool {
+    let thread_object = match thread.as_object() {
+        Some(object) => object,
+        None => return false,
+    };
+    if read_active_turn_id_from_thread(thread).is_some() {
+        return true;
+    }
+
+    let status = thread_object
+        .get("status")
+        .and_then(|value| {
+            value
+                .as_object()
+                .and_then(|status| status.get("type"))
+                .or(Some(value))
+        })
+        .and_then(|value| normalize_thread_status_label(Some(value)));
+    matches!(
+        status.as_deref(),
+        Some("running" | "inprogress" | "queued" | "pending")
+    )
+}
+
 fn is_forwarded_method(method: &str) -> bool {
     matches!(
         method,
@@ -10444,12 +11374,14 @@ mod tests {
         ));
         let updater = Arc::new(UpdateService::discover());
         let preview = Arc::new(BrowserPreviewService::new(config.port, config.preview_port));
+        let queue = BridgeQueueService::new(backend.clone(), hub.clone());
 
         Arc::new(AppState {
             config,
             started_at: Instant::now(),
             hub,
             backend,
+            queue,
             terminal,
             git,
             updater,
@@ -12421,5 +13353,121 @@ mod tests {
         assert_eq!(payload["params"]["threadId"], "codex:thr_done");
 
         shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_queue_send_enqueues_when_thread_is_running() {
+        let state = build_test_state().await;
+        {
+            let mut threads = state.queue.threads.write().await;
+            threads.insert(
+                "codex:thr_queue".to_string(),
+                BridgeThreadQueueRuntime {
+                    thread_running: true,
+                    active_turn_id: Some("turn_live".to_string()),
+                    ..BridgeThreadQueueRuntime::default()
+                },
+            );
+        }
+
+        let result = state
+            .queue
+            .send_message(BridgeThreadQueueSendRequest {
+                thread_id: "codex:thr_queue".to_string(),
+                content: "hello from queue".to_string(),
+                turn_start: json!({
+                    "threadId": "codex:thr_queue",
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": "hello from queue",
+                            "text_elements": [],
+                        }
+                    ],
+                    "cwd": Value::Null,
+                    "approvalPolicy": Value::Null,
+                    "sandboxPolicy": Value::Null,
+                    "model": Value::Null,
+                    "effort": Value::Null,
+                    "serviceTier": Value::Null,
+                    "summary": "auto",
+                    "personality": Value::Null,
+                    "outputSchema": Value::Null,
+                    "collaborationMode": Value::Null,
+                }),
+            })
+            .await
+            .expect("queue send succeeds");
+
+        assert!(matches!(
+            result.disposition,
+            BridgeThreadQueueDisposition::Queued
+        ));
+        assert_eq!(result.queue.thread_id, "codex:thr_queue");
+        assert_eq!(result.queue.items.len(), 1);
+        assert_eq!(result.queue.items[0].content, "hello from queue");
+
+        shutdown_test_backend(&state.backend).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_queue_cancel_removes_existing_item() {
+        let state = build_test_state().await;
+        {
+            let mut threads = state.queue.threads.write().await;
+            threads.insert(
+                "codex:thr_cancel".to_string(),
+                BridgeThreadQueueRuntime {
+                    thread_running: true,
+                    active_turn_id: Some("turn_live".to_string()),
+                    ..BridgeThreadQueueRuntime::default()
+                },
+            );
+        }
+
+        let queued = state
+            .queue
+            .send_message(BridgeThreadQueueSendRequest {
+                thread_id: "codex:thr_cancel".to_string(),
+                content: "cancel me".to_string(),
+                turn_start: json!({
+                    "threadId": "codex:thr_cancel",
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": "cancel me",
+                            "text_elements": [],
+                        }
+                    ],
+                    "cwd": Value::Null,
+                    "approvalPolicy": Value::Null,
+                    "sandboxPolicy": Value::Null,
+                    "model": Value::Null,
+                    "effort": Value::Null,
+                    "serviceTier": Value::Null,
+                    "summary": "auto",
+                    "personality": Value::Null,
+                    "outputSchema": Value::Null,
+                    "collaborationMode": Value::Null,
+                }),
+            })
+            .await
+            .expect("queue send succeeds");
+
+        let queued_item_id = queued.queue.items[0].id.clone();
+
+        let result = state
+            .queue
+            .cancel_message(BridgeThreadQueueCancelRequest {
+                thread_id: "codex:thr_cancel".to_string(),
+                item_id: queued_item_id,
+            })
+            .await
+            .expect("queue cancel succeeds");
+
+        assert!(result.ok);
+        assert!(result.queue.items.is_empty());
+
+        shutdown_test_backend(&state.backend).await;
     }
 }

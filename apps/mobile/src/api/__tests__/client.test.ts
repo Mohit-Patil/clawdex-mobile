@@ -1059,6 +1059,220 @@ describe('HostBridgeApiClient', () => {
     );
   });
 
+  it('readThreadQueue() requests bridge/thread/queue/read', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      threadId: 'thr_queue',
+      items: [{ id: 'queue_1', createdAt: '2026-04-08T00:00:00.000Z', content: 'hello' }],
+      lastError: null,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readThreadQueue('thr_queue');
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/thread/queue/read', {
+      threadId: 'thr_queue',
+    });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.content).toBe('hello');
+  });
+
+  it('sendOrQueueChatMessage() queues through bridge when runtime is busy', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({
+        disposition: 'queued',
+        queue: {
+          threadId: 'thr_queue',
+          items: [
+            {
+              id: 'queue_1',
+              createdAt: '2026-04-08T00:00:00.000Z',
+              content: 'hello',
+            },
+          ],
+          lastError: null,
+        },
+        turnId: null,
+      });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.sendOrQueueChatMessage('thr_queue', {
+      content: 'hello',
+      mentions: [{ path: '/tmp/src', name: 'src' }],
+      localImages: [{ path: '/tmp/screenshot.png' }],
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/resume', expect.any(Object));
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'bridge/thread/queue/send',
+      expect.objectContaining({
+        threadId: 'thr_queue',
+        content: 'hello',
+        turnStart: expect.objectContaining({
+          threadId: 'thr_queue',
+          input: [
+            {
+              type: 'text',
+              text: 'hello',
+              text_elements: [],
+            },
+            {
+              type: 'mention',
+              path: '/tmp/src',
+              name: 'src',
+            },
+            {
+              type: 'localImage',
+              path: '/tmp/screenshot.png',
+            },
+          ],
+        }),
+      })
+    );
+    expect(result).toMatchObject({
+      disposition: 'queued',
+      turnId: null,
+      chat: null,
+    });
+    expect(result.queue.items).toHaveLength(1);
+  });
+
+  it('sendOrQueueChatMessage() can skip thread resume for known-local queued sends', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      disposition: 'queued',
+      queue: {
+        threadId: 'thr_queue',
+        items: [
+          {
+            id: 'queue_1',
+            createdAt: '2026-04-08T00:00:00.000Z',
+            content: 'hello',
+          },
+        ],
+        lastError: null,
+      },
+      turnId: null,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.sendOrQueueChatMessage(
+      'thr_queue',
+      {
+        content: 'hello',
+        cwd: '/tmp/project',
+        model: 'gpt-5.4',
+        effort: 'medium',
+        approvalPolicy: 'untrusted',
+        collaborationMode: 'default',
+      },
+      {
+        skipResume: true,
+      }
+    );
+
+    expect(ws.request).toHaveBeenCalledTimes(1);
+    expect(ws.request).toHaveBeenCalledWith(
+      'bridge/thread/queue/send',
+      expect.objectContaining({
+        threadId: 'thr_queue',
+        content: 'hello',
+        turnStart: expect.objectContaining({
+          threadId: 'thr_queue',
+          cwd: '/tmp/project',
+          model: 'gpt-5.4',
+          effort: 'medium',
+        }),
+      })
+    );
+    expect(result.disposition).toBe('queued');
+  });
+
+  it('sendOrQueueChatMessage() returns chat when bridge starts a turn immediately', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({}) // thread/resume
+      .mockResolvedValueOnce({
+        disposition: 'sent',
+        queue: {
+          threadId: 'thr_sent',
+          items: [],
+          lastError: null,
+        },
+        turnId: 'turn_sent',
+      })
+      .mockResolvedValueOnce({
+        thread: {
+          id: 'thr_sent',
+          preview: 'done',
+          createdAt: 1700000000,
+          updatedAt: 1700000002,
+          status: { type: 'idle' },
+          turns: [
+            {
+              id: 'turn_sent',
+              items: [
+                {
+                  type: 'userMessage',
+                  id: 'u_sent',
+                  content: [{ type: 'text', text: 'hello' }],
+                },
+                {
+                  type: 'agentMessage',
+                  id: 'a_sent',
+                  text: 'ok',
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.sendOrQueueChatMessage('thr_sent', {
+      content: 'hello',
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'thread/resume', expect.any(Object));
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'bridge/thread/queue/send',
+      expect.objectContaining({
+        threadId: 'thr_sent',
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(3, 'thread/read', {
+      threadId: 'thr_sent',
+      includeTurns: true,
+    });
+    expect(result.disposition).toBe('sent');
+    expect(result.turnId).toBe('turn_sent');
+    expect(result.chat?.messages[0]?.content).toBe('hello');
+  });
+
+  it('queued message actions call bridge queue endpoints', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({ ok: true, queue: { threadId: 'thr_queue', items: [], lastError: null } })
+      .mockResolvedValueOnce({ ok: true, queue: { threadId: 'thr_queue', items: [], lastError: null } });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.steerQueuedThreadMessage('thr_queue', 'queue_1');
+    await client.cancelQueuedThreadMessage('thr_queue', 'queue_1');
+
+    expect(ws.request).toHaveBeenNthCalledWith(1, 'bridge/thread/queue/steer', {
+      threadId: 'thr_queue',
+      itemId: 'queue_1',
+    });
+    expect(ws.request).toHaveBeenNthCalledWith(2, 'bridge/thread/queue/cancel', {
+      threadId: 'thr_queue',
+      itemId: 'queue_1',
+    });
+  });
+
   it('sendChatMessage() forwards selected approval policy to resume and turn/start', async () => {
     const ws = createWsMock();
     ws.request

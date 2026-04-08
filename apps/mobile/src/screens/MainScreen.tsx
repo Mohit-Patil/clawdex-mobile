@@ -48,6 +48,9 @@ import type {
   ApprovalPolicy,
   ApprovalDecision,
   BridgeCapabilities,
+  BridgeQueuedMessage,
+  BridgeThreadQueueError,
+  BridgeThreadQueueState,
   ChatEngine,
   CollaborationMode,
   EngineDefaultSettingsMap,
@@ -187,6 +190,8 @@ interface ThreadRuntimeSnapshot {
   streamingText?: string | null;
   pendingApproval?: PendingApproval | null;
   pendingUserInputRequest?: PendingUserInputRequest | null;
+  queuedMessages?: BridgeQueuedMessage[];
+  queuedMessageError?: BridgeThreadQueueError | null;
   contextUsage?: ThreadContextUsage | null;
   plan?: ActivePlanState | null;
   activeTurnId?: string | null;
@@ -199,18 +204,15 @@ interface ComposerAttachmentChip {
   label: string;
 }
 
-interface QueuedChatMessage {
-  id: string;
-  createdAt: string;
-  content: string;
-  mentions: MentionInput[];
-  localImages: LocalImageInput[];
-  collaborationMode: CollaborationMode;
-}
-
 interface PendingOptimisticUserMessage {
   message: ChatTranscriptMessage;
   userOrdinal: number;
+}
+
+interface PendingOptimisticQueuedMessage {
+  id: string;
+  content: string;
+  createdAt: string;
 }
 
 interface AutoScrollState {
@@ -638,10 +640,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [keyboardVisible, setKeyboardVisible] = useState(false);
     const [androidKeyboardInset, setAndroidKeyboardInset] = useState(0);
     const [composerHeight, setComposerHeight] = useState(0);
-    const [queuedMessages, setQueuedMessages] = useState<QueuedChatMessage[]>([]);
-    const [queueDispatching, setQueueDispatching] = useState(false);
-    const [queuePaused, setQueuePaused] = useState(false);
-    const [steeringMessage, setSteeringMessage] = useState<QueuedChatMessage | null>(null);
+    const [queueActionItemId, setQueueActionItemId] = useState<string | null>(null);
+    const [queueActionKind, setQueueActionKind] = useState<'steer' | 'cancel' | null>(null);
     const [relatedAgentThreads, setRelatedAgentThreads] = useState<ChatSummary[]>([]);
     const [agentRootThreadId, setAgentRootThreadId] = useState<string | null>(null);
     const [agentPanelCollapsed, setAgentPanelCollapsed] = useState(false);
@@ -669,12 +669,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     creatingRef.current = creating;
     const stoppingTurnRef = useRef(stoppingTurn);
     stoppingTurnRef.current = stoppingTurn;
-    const pendingApprovalIdRef = useRef<string | null>(pendingApproval?.id ?? null);
-    pendingApprovalIdRef.current = pendingApproval?.id ?? null;
-    const pendingUserInputRequestIdRef = useRef<string | null>(
-      pendingUserInputRequest?.id ?? null
-    );
-    pendingUserInputRequestIdRef.current = pendingUserInputRequest?.id ?? null;
     const attachmentPickerInProgressRef = useRef(false);
     const [threadContextUsage, setThreadContextUsage] = useState<ThreadContextUsage | null>(
       null
@@ -683,6 +677,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const draftPersistenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const heldActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const genericRunningActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const foregroundAgentRefreshHandleRef = useRef<{ cancel?: () => void } | null>(null);
     const [planPanelCollapsedByThread, setPlanPanelCollapsedByThread] = useState<
       Record<string, boolean>
     >({});
@@ -738,6 +733,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         genericRunningActivityTimeoutRef.current = null;
       }
       setShowDelayedGenericRunningActivity(false);
+    }, []);
+
+    const clearForegroundAgentRefresh = useCallback(() => {
+      foregroundAgentRefreshHandleRef.current?.cancel?.();
+      foregroundAgentRefreshHandleRef.current = null;
     }, []);
 
     const scheduleDisconnectActivity = useCallback(() => {
@@ -944,6 +944,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const pendingOptimisticUserMessagesRef = useRef<
       Record<string, PendingOptimisticUserMessage[]>
     >({});
+    const pendingOptimisticQueuedMessagesRef = useRef<
+      Record<string, PendingOptimisticQueuedMessage[]>
+    >({});
     const chatModelPreferencesRef = useRef<Record<string, ChatModelPreference>>({});
     const [chatModelPreferencesLoaded, setChatModelPreferencesLoaded] = useState(false);
     const chatPlanSnapshotsRef = useRef<Record<string, ActivePlanState>>({});
@@ -1077,6 +1080,58 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
       return mergedChat;
     }, []);
+
+    const queueOptimisticQueuedMessage = useCallback(
+      (threadId: string, content: string): PendingOptimisticQueuedMessage | null => {
+        const normalizedThreadId = threadId.trim();
+        const normalizedContent = content.trim();
+        if (!normalizedThreadId || !normalizedContent) {
+          return null;
+        }
+
+        const optimisticMessage: PendingOptimisticQueuedMessage = {
+          id: `queued-pending-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          content: normalizedContent,
+          createdAt: new Date().toISOString(),
+        };
+        const existingMessages =
+          pendingOptimisticQueuedMessagesRef.current[normalizedThreadId] ?? [];
+        pendingOptimisticQueuedMessagesRef.current[normalizedThreadId] = [
+          ...existingMessages,
+          optimisticMessage,
+        ];
+        bumpAgentRuntimeRevision();
+        return optimisticMessage;
+      },
+      [bumpAgentRuntimeRevision]
+    );
+
+    const discardOptimisticQueuedMessage = useCallback(
+      (threadId: string, messageId: string | null | undefined) => {
+        const normalizedThreadId = threadId.trim();
+        const normalizedMessageId = messageId?.trim() ?? '';
+        if (!normalizedThreadId || !normalizedMessageId) {
+          return;
+        }
+
+        const existingMessages =
+          pendingOptimisticQueuedMessagesRef.current[normalizedThreadId] ?? [];
+        if (existingMessages.length === 0) {
+          return;
+        }
+
+        const nextMessages = existingMessages.filter(
+          (message) => message.id !== normalizedMessageId
+        );
+        if (nextMessages.length > 0) {
+          pendingOptimisticQueuedMessagesRef.current[normalizedThreadId] = nextMessages;
+        } else {
+          delete pendingOptimisticQueuedMessagesRef.current[normalizedThreadId];
+        }
+        bumpAgentRuntimeRevision();
+      },
+      [bumpAgentRuntimeRevision]
+    );
 
     useEffect(() => {
       if (!selectedChat?.id) {
@@ -1711,6 +1766,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       (threadId: string, request: PendingUserInputRequest | null) => {
         upsertThreadRuntimeSnapshot(threadId, () => ({
           pendingUserInputRequest: request,
+        }));
+        bumpAgentRuntimeRevision();
+      },
+      [bumpAgentRuntimeRevision, upsertThreadRuntimeSnapshot]
+    );
+
+    const cacheThreadQueueState = useCallback(
+      (threadId: string, queueState: BridgeThreadQueueState | null) => {
+        upsertThreadRuntimeSnapshot(threadId, () => ({
+          queuedMessages: queueState?.items ?? [],
+          queuedMessageError: queueState?.lastError ?? null,
         }));
         bumpAgentRuntimeRevision();
       },
@@ -2424,10 +2490,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       setModelSettingsMenuVisible(false);
       setCollaborationModeMenuVisible(false);
       setEffortModalVisible(false);
-      setQueuedMessages([]);
-      setQueueDispatching(false);
-      setQueuePaused(false);
-      setSteeringMessage(null);
+      setQueueActionItemId(null);
+      setQueueActionKind(null);
       setActivity({
         tone: 'idle',
         title: 'Ready',
@@ -2736,7 +2800,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 	      };
 	    }, [agentRootThreadId, refreshAgentThreads, relatedAgentThreads.length, selectedChatId]);
 
-    useEffect(() => clearDeferredDisconnectActivity, [clearDeferredDisconnectActivity]);
+    useEffect(
+      () => () => {
+        clearDeferredDisconnectActivity();
+        clearForegroundAgentRefresh();
+      },
+      [clearDeferredDisconnectActivity, clearForegroundAgentRefresh]
+    );
 
     useEffect(() => {
       if (appStateRef.current === 'active' && !ws.isConnected) {
@@ -2770,6 +2840,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         if (nextAppState !== 'active') {
           clearDeferredDisconnectActivity();
+          clearForegroundAgentRefresh();
           setBridgeRecoveryBannerVisible(false);
           return;
         }
@@ -2789,13 +2860,27 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return;
         }
 
-        void refreshAgentThreads(activeChatId);
+        clearForegroundAgentRefresh();
+        foregroundAgentRefreshHandleRef.current = InteractionManager.runAfterInteractions(() => {
+          foregroundAgentRefreshHandleRef.current = null;
+          if (appStateRef.current !== 'active' || chatIdRef.current !== activeChatId) {
+            return;
+          }
+          scheduleAgentThreadsRefresh(activeChatId);
+        });
       });
 
       return () => {
+        clearForegroundAgentRefresh();
         subscription.remove();
       };
-    }, [clearDeferredDisconnectActivity, refreshAgentThreads, scheduleDisconnectActivity, ws]);
+    }, [
+      clearDeferredDisconnectActivity,
+      clearForegroundAgentRefresh,
+      scheduleAgentThreadsRefresh,
+      scheduleDisconnectActivity,
+      ws,
+    ]);
 
     const handleWorkspaceSelection = useCallback(
       (cwd: string | null) => {
@@ -4599,11 +4684,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         loadChatRequestRef.current = requestId;
         let loadedSuccessfully = false;
         try {
-          const chat = mergeChatWithPendingOptimisticMessages(await api.getChat(chatId));
+          const [loadedChat, queueState] = await Promise.all([
+            api.getChat(chatId),
+            api.readThreadQueue(chatId),
+          ]);
+          const chat = mergeChatWithPendingOptimisticMessages(loadedChat);
           if (requestId !== loadChatRequestRef.current) {
             return;
           }
           loadedSuccessfully = true;
+          cacheThreadQueueState(chatId, queueState);
           const shouldPreserveRuntimeState = Boolean(
             options?.preserveRuntimeState && chatId === chatIdRef.current
           );
@@ -4624,7 +4714,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             stopSystemMessageLoggedRef.current = false;
             const shouldRun = isChatLikelyRunning(chat);
             if (shouldRun) {
-              bumpRunWatchdog();
+              const restoredActiveTurnId =
+                chat.activeTurnId?.trim() ||
+                threadRuntimeSnapshotsRef.current[chatId]?.activeTurnId?.trim() ||
+                null;
+              cacheThreadTurnState(chatId, {
+                activeTurnId: restoredActiveTurnId,
+                runWatchdogUntil: Date.now() + RUN_WATCHDOG_MS,
+              });
               setActivity({
                 tone: 'running',
                 title: 'Working',
@@ -4707,6 +4804,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         api,
         applyThreadRuntimeSnapshot,
         bumpRunWatchdog,
+        cacheThreadQueueState,
         clearRunWatchdog,
         mergeChatWithPendingOptimisticMessages,
         refreshPendingApprovalsForThread,
@@ -4758,9 +4856,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         setActivePlan(null);
         setActiveTurnId(null);
         setStoppingTurn(false);
-        setQueuedMessages([]);
-        setQueueDispatching(false);
-        setQueuePaused(false);
+        setQueueActionItemId(null);
+        setQueueActionKind(null);
         stopRequestedRef.current = false;
         stopSystemMessageLoggedRef.current = false;
         delete autoEnabledPlanTurnIdByThreadRef.current[id];
@@ -5171,28 +5268,72 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           pendingMentionPaths.map((path) => toMentionInput(path, selectedChat?.cwd));
         const turnLocalImages =
           options?.localImages ?? pendingLocalImagePaths.map((path) => ({ path }));
-        const optimisticContent = toOptimisticUserContent(content, turnMentions, turnLocalImages);
+        const selectedThreadSnapshot = threadRuntimeSnapshotsRef.current[selectedChatId] ?? null;
+        const knownQueuedMessages = selectedThreadSnapshot?.queuedMessages ?? [];
+        const likelyQueuesLocally =
+          knownQueuedMessages.length > 0 ||
+          (Boolean(activeTurnIdRef.current) ||
+            Boolean(selectedThreadSnapshot?.activeTurnId) ||
+            Boolean(selectedChatRef.current && isChatLikelyRunning(selectedChatRef.current)) ||
+            Boolean(selectedThreadSnapshot?.pendingApproval?.id) ||
+            Boolean(selectedThreadSnapshot?.pendingUserInputRequest?.id) ||
+            Boolean(pendingApproval?.id) ||
+            Boolean(pendingUserInputRequest?.id));
+        const shouldShowOptimisticQueuedMessage =
+          knownQueuedMessages.length === 0 && likelyQueuesLocally;
+        const optimisticSentContent = !shouldShowOptimisticQueuedMessage
+          ? toOptimisticUserContent(content, turnMentions, turnLocalImages)
+          : null;
+        const optimisticSentMessage = optimisticSentContent
+          ? ({
+              id: `msg-${Date.now()}`,
+              role: 'user',
+              content: optimisticSentContent,
+              createdAt: new Date().toISOString(),
+            } satisfies ChatTranscriptMessage)
+          : null;
+        const previousSelectedChatPreview =
+          selectedChatRef.current?.id === selectedChatId
+            ? selectedChatRef.current.lastMessagePreview
+            : selectedChat?.id === selectedChatId
+              ? selectedChat.lastMessagePreview
+              : null;
+        const optimisticQueuedMessage = shouldShowOptimisticQueuedMessage
+          ? queueOptimisticQueuedMessage(selectedChatId, content)
+          : null;
+        const clearOptimisticSentMessage = () => {
+          if (!optimisticSentMessage) {
+            return;
+          }
+          discardOptimisticUserMessage(selectedChatId, optimisticSentMessage.id);
+          setSelectedChat((prev) => {
+            if (!prev || prev.id !== selectedChatId) {
+              return prev;
+            }
 
-        const optimisticMessage: ChatTranscriptMessage = {
-          id: `msg-${Date.now()}`,
-          role: 'user',
-          content: optimisticContent,
-          createdAt: new Date().toISOString(),
+            const nextMessages = prev.messages.filter(
+              (message) => message.id !== optimisticSentMessage.id
+            );
+            if (nextMessages.length === prev.messages.length) {
+              return prev;
+            }
+
+            const fallbackPreview =
+              normalizeChatMessageMatchContent(
+                nextMessages[nextMessages.length - 1]?.content ?? ''
+              ).slice(0, 120) || '';
+            return {
+              ...prev,
+              lastMessagePreview:
+                previousSelectedChatPreview ??
+                (fallbackPreview.length > 0 ? fallbackPreview : prev.lastMessagePreview),
+              messages: nextMessages,
+            };
+          });
         };
 
         try {
           setSending(true);
-          setActiveTurnId(null);
-          setStoppingTurn(false);
-          stopRequestedRef.current = false;
-          if (!shouldPreservePlan) {
-            setActivePlan(null);
-            cacheThreadPlan(selectedChatId, null);
-          }
-          setPendingUserInputRequest(null);
-          setUserInputDrafts({});
-          setUserInputError(null);
-          setResolvingUserInput(false);
           setActivity({
             tone: 'running',
             title: 'Sending message',
@@ -5201,32 +5342,35 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           if (shouldClearComposer) {
             setDraft('');
           }
-          queueOptimisticUserMessage(selectedChatId, optimisticMessage);
-          setSelectedChat((prev) => {
-            const baseChat =
-              selectedChat?.id === selectedChatId
-                ? selectedChat
-                : prev?.id === selectedChatId
-                  ? prev
-                  : prev;
-            if (!baseChat) {
-              return prev;
-            }
-            const nowIso = new Date().toISOString();
-            return {
-              ...baseChat,
-              status: 'running',
-              updatedAt: nowIso,
-              statusUpdatedAt: nowIso,
-              lastError: undefined,
-              lastMessagePreview:
-                normalizeChatMessageMatchContent(optimisticMessage.content).slice(0, 120) ||
-                baseChat.lastMessagePreview,
-              messages: [...baseChat.messages, optimisticMessage],
-            };
-          });
-          scrollToBottomReliable(true);
-          const updated = await api.sendChatMessage(
+          if (optimisticSentMessage) {
+            queueOptimisticUserMessage(selectedChatId, optimisticSentMessage);
+            setSelectedChat((prev) => {
+              const baseChat =
+                selectedChat?.id === selectedChatId
+                  ? selectedChat
+                  : prev?.id === selectedChatId
+                    ? prev
+                    : prev;
+              if (!baseChat) {
+                return prev;
+              }
+              const nowIso = new Date().toISOString();
+              return {
+                ...baseChat,
+                status: 'running',
+                updatedAt: nowIso,
+                statusUpdatedAt: nowIso,
+                lastError: undefined,
+                lastMessagePreview:
+                  normalizeChatMessageMatchContent(optimisticSentMessage.content).slice(0, 120) ||
+                  baseChat.lastMessagePreview,
+                messages: [...baseChat.messages, optimisticSentMessage],
+              };
+            });
+            scrollToBottomReliable(true);
+          }
+
+          const result = await api.sendOrQueueChatMessage(
             selectedChatId,
             {
               content,
@@ -5240,29 +5384,57 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               collaborationMode: resolvedCollaborationMode,
             },
             {
-              onTurnStarted: (turnId) => registerTurnStarted(selectedChatId, turnId),
+              skipResume: likelyQueuesLocally,
             }
           );
-          const resolvedUpdated =
-            mergeChatWithPendingOptimisticMessages(updated);
-          const autoEnabledPlan =
-            !options?.suppressPlanModeAutoEnable &&
-            shouldAutoEnablePlanModeFromChat(resolvedUpdated);
-          if (autoEnabledPlan) {
-            setSelectedCollaborationMode('plan');
-          }
+
+          discardOptimisticQueuedMessage(selectedChatId, optimisticQueuedMessage?.id);
+          cacheThreadQueueState(selectedChatId, result.queue);
           rememberChatModelPreference(
             selectedChatId,
             activeModelId,
             selectedEffort ?? activeEffort,
             activeServiceTier
           );
-          setSelectedChat(resolvedUpdated);
+
           if (shouldClearComposer) {
             setPendingMentionPaths([]);
             setPendingLocalImagePaths([]);
           }
+
           setError(null);
+
+          if (result.disposition === 'queued') {
+            clearOptimisticSentMessage();
+            if (!selectedChatRef.current || !isChatLikelyRunning(selectedChatRef.current)) {
+              setActivity({
+                tone: 'idle',
+                title: 'Message queued',
+              });
+              clearRunWatchdog();
+            }
+            return true;
+          }
+
+          registerTurnStarted(selectedChatId, result.turnId);
+          setStoppingTurn(false);
+          stopRequestedRef.current = false;
+          if (!shouldPreservePlan) {
+            setActivePlan(null);
+            cacheThreadPlan(selectedChatId, null);
+          }
+          setPendingUserInputRequest(null);
+          setUserInputDrafts({});
+          setUserInputError(null);
+          setResolvingUserInput(false);
+          const resolvedUpdated = mergeChatWithPendingOptimisticMessages(result.chat);
+          const autoEnabledPlan =
+            !options?.suppressPlanModeAutoEnable &&
+            shouldAutoEnablePlanModeFromChat(resolvedUpdated);
+          if (autoEnabledPlan) {
+            setSelectedCollaborationMode('plan');
+          }
+          setSelectedChat(resolvedUpdated);
           if (resolvedUpdated.status === 'complete') {
             setActivity({
               tone: 'complete',
@@ -5289,7 +5461,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             bumpRunWatchdog();
           }
         } catch (err) {
-          discardOptimisticUserMessage(selectedChatId, optimisticMessage.id);
+          clearOptimisticSentMessage();
+          discardOptimisticQueuedMessage(selectedChatId, optimisticQueuedMessage?.id);
           handleTurnFailure(err);
           return false;
         } finally {
@@ -5305,19 +5478,24 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         activeServiceTier,
         api,
         cacheThreadPlan,
+        cacheThreadQueueState,
         handleSlashCommand,
         pendingMentionPaths,
         pendingLocalImagePaths,
+        pendingApproval?.id,
+        pendingUserInputRequest?.id,
         selectedCollaborationMode,
         selectedChat,
         selectedChatId,
-        registerTurnStarted,
         handleTurnFailure,
-        discardOptimisticUserMessage,
         bumpRunWatchdog,
         clearRunWatchdog,
+        discardOptimisticUserMessage,
+        discardOptimisticQueuedMessage,
         mergeChatWithPendingOptimisticMessages,
         queueOptimisticUserMessage,
+        queueOptimisticQueuedMessage,
+        registerTurnStarted,
         rememberChatModelPreference,
         scrollToBottomReliable,
       ]
@@ -5334,8 +5512,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
-      setQueuePaused(false);
-
       if (uploadingAttachment) {
         setError('Please wait for attachments to finish uploading.');
         return;
@@ -5346,115 +5522,37 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return;
       }
 
-      const isTurnBlocked =
-        sending ||
-        creating ||
-        stoppingTurn ||
-        Boolean(activeTurnIdRef.current) ||
-        Boolean(pendingApproval?.id) ||
-        Boolean(pendingUserInputRequest?.id) ||
-        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
-
-      if (isTurnBlocked) {
-        const queuedMentions = pendingMentionPaths.map((path) =>
-          toMentionInput(path, selectedChat?.cwd)
-        );
-        const queuedLocalImages = pendingLocalImagePaths.map((path) => ({ path }));
-        setQueuedMessages((prev) => [
-          ...prev,
-          {
-            id: createQueuedMessageId(),
-            createdAt: new Date().toISOString(),
-            content,
-            mentions: queuedMentions,
-            localImages: queuedLocalImages,
-            collaborationMode: selectedCollaborationMode,
-          },
-        ]);
-        setDraft('');
-        setPendingMentionPaths([]);
-        setPendingLocalImagePaths([]);
-        setError(null);
-        return;
-      }
-
       await sendMessageContent(content, { allowSlashCommands: false });
     }, [
-      creating,
       draft,
       handleSlashCommand,
-      pendingApproval?.id,
-      pendingLocalImagePaths,
-      pendingMentionPaths,
-      pendingUserInputRequest?.id,
-      selectedChat,
-      selectedCollaborationMode,
       sendMessageContent,
-      sending,
-      stoppingTurn,
-      setQueuePaused,
       uploadingAttachment,
     ]);
 
     const handleSteerQueuedMessage = useCallback(async () => {
       const threadId = selectedChatId?.trim();
-      const snapshotTurnId = threadId
-        ? threadRuntimeSnapshotsRef.current[threadId]?.activeTurnId?.trim() ?? ''
-        : '';
-      const expectedTurnId = activeTurnIdRef.current?.trim() || snapshotTurnId;
-      const nextQueuedMessage = queuedMessages[0] ?? null;
+      const queuedItems = threadId
+        ? threadRuntimeSnapshotsRef.current[threadId]?.queuedMessages ?? []
+        : [];
+      const nextQueuedMessage = queuedItems[0] ?? null;
       const canSteer =
         Boolean(threadId) &&
-        Boolean(expectedTurnId) &&
         Boolean(nextQueuedMessage) &&
         !pendingApproval?.id &&
         !pendingUserInputRequest?.id;
 
-      if (!threadId || !expectedTurnId || !nextQueuedMessage || !canSteer) {
+      if (!threadId || !nextQueuedMessage || !canSteer) {
         return;
       }
 
       try {
         setError(null);
         bumpRunWatchdog();
-        setSteeringMessage(nextQueuedMessage);
-        await api.steerChatTurn(threadId, expectedTurnId, {
-          content: nextQueuedMessage.content,
-          mentions: nextQueuedMessage.mentions,
-          localImages: nextQueuedMessage.localImages,
-        });
-        const optimisticContent = toOptimisticUserContent(
-          nextQueuedMessage.content,
-          nextQueuedMessage.mentions,
-          nextQueuedMessage.localImages
-        );
-        const optimisticMessage: ChatTranscriptMessage = {
-          id: `msg-${Date.now()}`,
-          role: 'user',
-          content: optimisticContent,
-          createdAt: new Date().toISOString(),
-        };
-        queueOptimisticUserMessage(threadId, optimisticMessage);
-        setSelectedChat((prev) => {
-          if (!prev || prev.id !== threadId) {
-            return prev;
-          }
-
-          return {
-            ...prev,
-            lastMessagePreview:
-              normalizeChatMessageMatchContent(optimisticMessage.content).slice(0, 120) ||
-              prev.lastMessagePreview,
-            messages: [...prev.messages, optimisticMessage],
-          };
-        });
-        setQueuedMessages((prev) =>
-          prev[0]?.id === nextQueuedMessage.id ? prev.slice(1) : prev
-        );
-        setSteeringMessage((previous) =>
-          previous?.id === nextQueuedMessage.id ? null : previous
-        );
-        setQueuePaused(false);
+        setQueueActionItemId(nextQueuedMessage.id);
+        setQueueActionKind('steer');
+        const response = await api.steerQueuedThreadMessage(threadId, nextQueuedMessage.id);
+        cacheThreadQueueState(threadId, response.queue);
         scrollToBottomReliable(true);
         setActivity({
           tone: 'running',
@@ -5462,114 +5560,54 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           detail: 'Message sent to the current run',
         });
       } catch (err) {
-        setSteeringMessage((previous) =>
-          previous?.id === nextQueuedMessage.id ? null : previous
-        );
         setError((err as Error).message);
+      } finally {
+        setQueueActionItemId((previous) =>
+          previous === nextQueuedMessage.id ? null : previous
+        );
+        setQueueActionKind((previous) => (previous === 'steer' ? null : previous));
       }
     }, [
       api,
       bumpRunWatchdog,
+      cacheThreadQueueState,
       pendingApproval?.id,
       pendingUserInputRequest?.id,
-      queueOptimisticUserMessage,
-      queuedMessages,
       scrollToBottomReliable,
       selectedChatId,
     ]);
 
-    const handleCancelQueuedMessage = useCallback(
-      (messageId: string) => {
-        const normalizedMessageId = messageId.trim();
-        if (!normalizedMessageId || queueDispatching) {
-          return;
-        }
+    const handleCancelQueuedMessage = useCallback(async (messageId: string) => {
+      const threadId = selectedChatId?.trim();
+      const normalizedMessageId = messageId.trim();
+      if (!threadId || !normalizedMessageId) {
+        return;
+      }
 
-        setQueuedMessages((prev) =>
-          prev.filter((message) => message.id !== normalizedMessageId)
-        );
-        setQueuePaused(false);
+      try {
         setError(null);
-      },
-      [queueDispatching]
-    );
-
-    useEffect(() => {
-      if (!selectedChatId || queuedMessages.length === 0 || queueDispatching || queuePaused) {
-        return;
+        setQueueActionItemId(normalizedMessageId);
+        setQueueActionKind('cancel');
+        const response = await api.cancelQueuedThreadMessage(threadId, normalizedMessageId);
+        cacheThreadQueueState(threadId, response.queue);
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setQueueActionItemId((previous) =>
+          previous === normalizedMessageId ? null : previous
+        );
+        setQueueActionKind((previous) => (previous === 'cancel' ? null : previous));
       }
-
-      const isTurnBlocked =
-        sending ||
-        creating ||
-        stoppingTurn ||
-        uploadingAttachment ||
-        Boolean(activeTurnId) ||
-        Boolean(pendingApproval?.id) ||
-        Boolean(pendingUserInputRequest?.id) ||
-        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
-      if (isTurnBlocked) {
-        return;
-      }
-
-      const nextMessage = queuedMessages[0];
-      const dispatchingThreadId = selectedChatId;
-      const dispatchingMessageId = nextMessage.id;
-      setQueueDispatching(true);
-      void (async () => {
-        const sent = await sendMessageContent(nextMessage.content, {
-          allowSlashCommands: false,
-          collaborationMode: nextMessage.collaborationMode,
-          mentions: nextMessage.mentions,
-          localImages: nextMessage.localImages,
-          clearComposer: false,
-        });
-        if (chatIdRef.current === dispatchingThreadId) {
-          if (sent) {
-            setQueuedMessages((prev) =>
-              prev[0]?.id === dispatchingMessageId ? prev.slice(1) : prev
-            );
-          } else {
-            setQueuePaused(true);
-          }
-          setQueueDispatching(false);
-        }
-      })();
     }, [
-      activeTurnId,
-      creating,
-      pendingApproval?.id,
-      pendingUserInputRequest?.id,
-      queueDispatching,
-      queuePaused,
-      queuedMessages,
-      selectedChat,
       selectedChatId,
-      sendMessageContent,
-      sending,
-      stoppingTurn,
-      uploadingAttachment,
+      api,
+      cacheThreadQueueState,
     ]);
 
     useEffect(() => {
-      setSteeringMessage(null);
+      setQueueActionItemId(null);
+      setQueueActionKind(null);
     }, [selectedChat?.id]);
-
-    useEffect(() => {
-      if (!steeringMessage) {
-        return;
-      }
-
-      const shouldKeepSteeringMessage =
-        Boolean(activeTurnId) ||
-        runWatchdogUntilRef.current > Date.now() ||
-        (selectedChat ? isChatLikelyRunning(selectedChat) : false);
-      if (shouldKeepSteeringMessage) {
-        return;
-      }
-
-      setSteeringMessage(null);
-    }, [activeTurnId, runWatchdogNow, selectedChat, steeringMessage]);
 
     const handleInlineOptionSelect = useCallback(
       (value: string) => {
@@ -5582,11 +5620,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           !selectedChatIdRef.current ||
           sendingRef.current ||
           creatingRef.current ||
-          stoppingTurnRef.current ||
-          Boolean(activeTurnIdRef.current) ||
-          Boolean(pendingApprovalIdRef.current) ||
-          Boolean(pendingUserInputRequestIdRef.current) ||
-          (selectedChatRef.current ? isChatLikelyRunning(selectedChatRef.current) : false);
+          stoppingTurnRef.current;
         if (cannotAutoSend) {
           setDraft(option);
           return;
@@ -6670,7 +6704,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           setUserInputDrafts({});
           setUserInputError(null);
           setResolvingUserInput(false);
-          setSteeringMessage(null);
           if (!completedTurnId || completedTurnId === activeTurnIdRef.current) {
             setActiveTurnId(null);
           }
@@ -6729,6 +6762,16 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
           }
           loadChat(threadId).catch(() => {});
+          return;
+        }
+
+        if (event.method === 'bridge/thread/queue/updated') {
+          const parsed = parseBridgeThreadQueueState(event.params);
+          if (!parsed) {
+            return;
+          }
+
+          cacheThreadQueueState(parsed.threadId, parsed);
           return;
         }
 
@@ -6903,7 +6946,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   });
                   setActiveTurnId(null);
                   setStoppingTurn(false);
-                  setSteeringMessage(null);
                   if (!pendingApprovalId && !pendingUserInputRequestId) {
                     setActiveCommands([]);
                     setStreamingText(null);
@@ -7330,11 +7372,6 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChat,
     ]);
 
-    const oldestQueuedMessage = queuedMessages[0] ?? null;
-    const displayedQueuedMessage = steeringMessage ?? oldestQueuedMessage;
-    const remainingQueuedMessagesCount = steeringMessage
-      ? queuedMessages.length
-      : Math.max(0, queuedMessages.length - 1);
     const showBridgeRecoveryBanner = bridgeRecoveryBannerVisible && !ws.isConnected;
     const visibleActivity = (() => {
       if (isOpeningChat) {
@@ -7553,6 +7590,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const selectedThreadRuntimeSnapshot = selectedChat
       ? threadRuntimeSnapshotsRef.current[selectedChat.id] ?? null
       : null;
+    const selectedBridgeQueuedMessages = selectedThreadRuntimeSnapshot?.queuedMessages ?? [];
+    const selectedOptimisticQueuedMessages = selectedChat
+      ? pendingOptimisticQueuedMessagesRef.current[selectedChat.id] ?? []
+      : [];
+    const showingOptimisticQueuedMessage =
+      selectedBridgeQueuedMessages.length === 0 &&
+      selectedOptimisticQueuedMessages.length > 0;
+    const selectedQueuedMessages = showingOptimisticQueuedMessage
+      ? selectedOptimisticQueuedMessages
+      : selectedBridgeQueuedMessages;
+    const selectedQueueError = selectedThreadRuntimeSnapshot?.queuedMessageError ?? null;
+    const oldestQueuedMessage = selectedQueuedMessages[0] ?? null;
+    const remainingQueuedMessagesCount = Math.max(0, selectedQueuedMessages.length - 1);
+    const queueActionInFlight = Boolean(queueActionItemId);
     const inMemorySelectedThreadPlan = selectedChat
       ? activePlan?.threadId === selectedChat.id
         ? activePlan
@@ -7591,30 +7642,30 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       selectedChat ? (planPanelCollapsedByThread[selectedChat.id] ?? false) : false;
     const fastModeControlDisabled = isOpeningChat;
     const showSlashSuggestions = slashSuggestions.length > 0 && draft.trimStart().startsWith('/');
-    const steerTargetTurnId = resolveSteerTargetTurnId(
-      activeTurnId,
-      selectedThreadRuntimeSnapshot?.activeTurnId
-    );
     const canSteerQueuedMessage =
       Boolean(oldestQueuedMessage) &&
       Boolean(selectedChatId) &&
-      Boolean(steerTargetTurnId) &&
+      !showingOptimisticQueuedMessage &&
       !pendingApproval &&
       !pendingUserInputRequest &&
-      !steeringMessage;
+      !queueActionInFlight;
     const canCancelQueuedMessage =
-      Boolean(oldestQueuedMessage) && !queueDispatching && !steeringMessage;
-    const queuedMessageSteerDisabledReason = steeringMessage
-      ? 'Sending the queued message to the current turn.'
+      Boolean(oldestQueuedMessage) && !showingOptimisticQueuedMessage && !queueActionInFlight;
+    const queuedMessageSteerDisabledReason = showingOptimisticQueuedMessage
+      ? 'Sending the queued message to the bridge.'
+      : selectedQueueError?.message
+      ? selectedQueueError.message
+      : queueActionKind === 'steer'
+        ? 'Sending the queued message to the current turn.'
+        : queueActionKind === 'cancel'
+          ? 'Removing the queued message.'
       : pendingApproval
       ? 'Waiting for approval before steering.'
       : pendingUserInputRequest
         ? 'Waiting for required input before steering.'
-        : !steerTargetTurnId && oldestQueuedMessage
-          ? 'Steer becomes available once the current turn has started.'
         : null;
     const showQueuedMessageDock =
-      Boolean(selectedChat) && !isOpeningChat && Boolean(displayedQueuedMessage);
+      Boolean(selectedChat) && !isOpeningChat && Boolean(oldestQueuedMessage);
     const showPlanImplementationPrompt =
       Boolean(selectedPlanImplementationPrompt) &&
       !isOpeningChat &&
@@ -7632,7 +7683,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       !workspaceModalVisible &&
       !modelModalVisible &&
       !effortModalVisible &&
-      queuedMessages.length === 0;
+      selectedQueuedMessages.length === 0;
     const workflowCardMode = resolveWorkflowCardMode({
       collaborationMode: selectedCollaborationMode,
       hasStructuredPlan: showStructuredPlanCard,
@@ -7717,16 +7768,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             onResolve={handleResolveApproval}
           />
         ) : null}
-        {showQueuedMessageDock && displayedQueuedMessage ? (
+        {showQueuedMessageDock && oldestQueuedMessage ? (
           <QueuedMessageDock
-            queuedMessage={displayedQueuedMessage}
+            queuedMessage={oldestQueuedMessage}
             remainingQueuedMessagesCount={remainingQueuedMessagesCount}
+            pendingSubmission={showingOptimisticQueuedMessage}
             steerEnabled={canSteerQueuedMessage}
             cancelEnabled={canCancelQueuedMessage}
-            steeringActive={Boolean(steeringMessage)}
+            steeringActive={queueActionKind === 'steer' && queueActionItemId === oldestQueuedMessage.id}
             steerDisabledReason={queuedMessageSteerDisabledReason}
             onCancelQueuedMessage={(messageId) => {
-              handleCancelQueuedMessage(messageId);
+              void handleCancelQueuedMessage(messageId);
             }}
             onSteerQueuedMessage={() => {
               void handleSteerQueuedMessage();
@@ -9906,6 +9958,7 @@ function WorkflowCard({
 function QueuedMessageDock({
   queuedMessage,
   remainingQueuedMessagesCount,
+  pendingSubmission,
   steerEnabled,
   cancelEnabled,
   steeringActive,
@@ -9913,8 +9966,9 @@ function QueuedMessageDock({
   onCancelQueuedMessage,
   onSteerQueuedMessage,
 }: {
-  queuedMessage: QueuedChatMessage;
+  queuedMessage: BridgeQueuedMessage;
   remainingQueuedMessagesCount: number;
+  pendingSubmission: boolean;
   steerEnabled: boolean;
   cancelEnabled: boolean;
   steeringActive: boolean;
@@ -9931,7 +9985,11 @@ function QueuedMessageDock({
         <View style={styles.queuedMessageHeader}>
           <View style={styles.queuedMessageHeaderText}>
             <Text style={styles.planCardTitle}>
-              {steeringActive ? 'Steering message' : 'Queued message'}
+              {pendingSubmission
+                ? 'Queueing message'
+                : steeringActive
+                  ? 'Steering message'
+                  : 'Queued message'}
             </Text>
             {remainingQueuedMessagesCount > 0 ? (
               <Text style={styles.queuedMessageSummary}>
@@ -10849,19 +10907,6 @@ function resolveSelectedServiceTier(
   return toSelectedServiceTier(defaultServiceTier);
 }
 
-function resolveSteerTargetTurnId(
-  activeTurnId: string | null | undefined,
-  snapshotActiveTurnId: string | null | undefined
-): string | null {
-  const normalizedActiveTurnId = activeTurnId?.trim() ?? '';
-  if (normalizedActiveTurnId) {
-    return normalizedActiveTurnId;
-  }
-
-  const normalizedSnapshotTurnId = snapshotActiveTurnId?.trim() ?? '';
-  return normalizedSnapshotTurnId || null;
-}
-
 function toApprovalPolicyForMode(mode: ApprovalMode | null | undefined): ApprovalPolicy {
   return mode === 'yolo' ? 'never' : 'untrusted';
 }
@@ -10924,6 +10969,54 @@ function parseChatDrafts(raw: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+function parseBridgeThreadQueueState(value: unknown): BridgeThreadQueueState | null {
+  const record = toRecord(value);
+  const threadId = readString(record?.threadId)?.trim();
+  if (!record || !threadId) {
+    return null;
+  }
+
+  const items = Array.isArray(record.items)
+    ? record.items
+        .map((item) => {
+          const entry = toRecord(item);
+          const id = readString(entry?.id)?.trim();
+          const createdAt = readString(entry?.createdAt)?.trim();
+          const content = readString(entry?.content)?.replace(/\r\n/g, '\n');
+          if (!id || !createdAt || !content) {
+            return null;
+          }
+
+          return {
+            id,
+            createdAt,
+            content,
+          } satisfies BridgeQueuedMessage;
+        })
+        .filter((item): item is BridgeQueuedMessage => item !== null)
+    : [];
+
+  const lastErrorRecord = toRecord(record.lastError);
+  const lastErrorMessage = readString(lastErrorRecord?.message)?.trim();
+  const lastErrorOperation = readString(lastErrorRecord?.operation)?.trim();
+  const lastErrorAt = readString(lastErrorRecord?.at)?.trim();
+  const lastError =
+    lastErrorMessage && lastErrorOperation && lastErrorAt
+      ? ({
+          message: lastErrorMessage,
+          operation: lastErrorOperation,
+          at: lastErrorAt,
+          itemId: readString(lastErrorRecord?.itemId)?.trim() ?? null,
+        } satisfies BridgeThreadQueueError)
+      : null;
+
+  return {
+    threadId,
+    items,
+    lastError,
+  };
 }
 
 function getDraftScopeKey(threadId: string | null | undefined): string {
@@ -11077,10 +11170,6 @@ function isBridgeRecoveryActivity(activity: ActivityState | null | undefined): b
     isBridgeConnectionErrorMessage(activity.title) ||
     isBridgeConnectionErrorMessage(activity.detail)
   );
-}
-
-function createQueuedMessageId(): string {
-  return `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function getInitialVisibleMessageStartIndex(totalMessageCount: number): number {

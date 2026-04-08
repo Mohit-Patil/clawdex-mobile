@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
   ActivityIndicator,
+  BackHandler,
   Keyboard,
   StatusBar,
   StyleSheet,
@@ -54,7 +55,7 @@ import {
 } from './src/bridgeProfiles';
 import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
-import { BrowserScreen } from './src/screens/BrowserScreen';
+import { BrowserScreen, type BrowserScreenHandle } from './src/screens/BrowserScreen';
 import { GitScreen } from './src/screens/GitScreen';
 import { MainScreen, type MainScreenHandle } from './src/screens/MainScreen';
 import {
@@ -147,7 +148,9 @@ export default function App() {
     [activeBridgeProfileId, bridgeProfiles]
   );
   const mainRef = useRef<MainScreenHandle>(null);
+  const browserRef = useRef<BrowserScreenHandle>(null);
   const [currentScreen, setCurrentScreen] = useState<Screen>('Main');
+  const [browserReturnScreen, setBrowserReturnScreen] = useState<AppScreen>('Main');
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [activeChat, setActiveChat] = useState<Chat | null>(null);
   const [gitChat, setGitChat] = useState<Chat | null>(null);
@@ -1154,13 +1157,16 @@ export default function App() {
       if (typeof targetUrl === 'string' && targetUrl.trim().length > 0) {
         setPendingBrowserTargetUrl(targetUrl.trim());
       }
+      setBrowserReturnScreen(
+        currentScreen === 'Browser' || currentScreen === 'Onboarding' ? 'Main' : currentScreen
+      );
       chatTransitionRequestIdRef.current += 1;
       setChatTransitionChatId(null);
       setMainOpeningChatId(null);
       setCurrentScreen('Browser');
       closeDrawer();
     },
-    [closeDrawer]
+    [closeDrawer, currentScreen]
   );
 
   const resetBridgeSessionState = useCallback(() => {
@@ -1315,6 +1321,60 @@ export default function App() {
     setGitChat(null);
   }, [activeChat, gitChat, openChatWithTransition, selectedChatId]);
 
+  const handleHardwareBackPress = useCallback(() => {
+    if (drawerVisibleRef.current || drawerOpenRef.current) {
+      closeDrawer();
+      return true;
+    }
+
+    if (currentScreen === 'Onboarding') {
+      if (onboardingMode !== 'initial' && activeBridgeProfile) {
+        handleCancelOnboarding();
+        return true;
+      }
+      return false;
+    }
+
+    switch (currentScreen) {
+      case 'ChatGit':
+        handleCloseGit();
+        return true;
+      case 'Browser':
+        if (browserRef.current?.handleHardwareBackPress()) {
+          return true;
+        }
+        setCurrentScreen(browserReturnScreen);
+        return true;
+      case 'Settings':
+        setCurrentScreen('Main');
+        return true;
+      case 'Privacy':
+      case 'Terms':
+        setCurrentScreen('Settings');
+        return true;
+      case 'Main':
+      default:
+        return false;
+    }
+  }, [
+    activeBridgeProfile,
+    browserReturnScreen,
+    closeDrawer,
+    currentScreen,
+    handleCancelOnboarding,
+    handleCloseGit,
+    onboardingMode,
+  ]);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      handleHardwareBackPress
+    );
+
+    return () => subscription.remove();
+  }, [handleHardwareBackPress]);
+
   const openPrivacy = useCallback(() => {
     chatTransitionRequestIdRef.current += 1;
     setChatTransitionChatId(null);
@@ -1461,6 +1521,7 @@ export default function App() {
       case 'Browser':
         return (
           <BrowserScreen
+            ref={browserRef}
             api={activeApi}
             bridgeUrl={bridgeUrl}
             onOpenDrawer={openDrawer}

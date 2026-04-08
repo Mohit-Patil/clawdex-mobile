@@ -456,6 +456,7 @@ export function mapChat(raw: RawThread): Chat {
     latestPlan: plans.latestPlan,
     latestTurnPlan: plans.latestTurnPlan,
     latestTurnStatus: plans.latestTurnStatus,
+    activeTurnId: plans.activeTurnId,
   };
 }
 
@@ -463,17 +464,20 @@ function extractChatPlans(raw: RawThread): {
   latestPlan: ChatPlanSnapshot | null;
   latestTurnPlan: ChatPlanSnapshot | null;
   latestTurnStatus: string | null;
+  activeTurnId: string | null;
 } {
   const threadId = raw.id?.trim();
   const turns = Array.isArray(raw.turns) ? raw.turns : [];
   const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
   const latestTurnStatus = readString(latestTurn?.status);
+  const activeTurnId = extractActiveTurnId(turns);
 
   if (!threadId || turns.length === 0) {
     return {
       latestPlan: null,
       latestTurnPlan: null,
       latestTurnStatus,
+      activeTurnId,
     };
   }
 
@@ -514,7 +518,28 @@ function extractChatPlans(raw: RawThread): {
     latestPlan,
     latestTurnPlan,
     latestTurnStatus,
+    activeTurnId,
   };
+}
+
+function extractActiveTurnId(turns: RawTurn[]): string | null {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    const turnId = readString(turn.id)?.trim();
+    const turnStatus = normalizeLifecycleStatus(readString(turn.status));
+    if (
+      turnId &&
+      (turnStatus === 'inprogress' ||
+        turnStatus === 'running' ||
+        turnStatus === 'active' ||
+        turnStatus === 'queued' ||
+        turnStatus === 'pending')
+    ) {
+      return turnId;
+    }
+  }
+
+  return null;
 }
 
 function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {

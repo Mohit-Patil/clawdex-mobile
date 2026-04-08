@@ -63,6 +63,7 @@ export interface Chat extends ChatSummary {
   latestPlan?: ChatPlanSnapshot | null;
   latestTurnPlan?: ChatPlanSnapshot | null;
   latestTurnStatus?: string | null;
+  activeTurnId?: string | null;
 }
 
 export interface CreateChatRequest {
@@ -104,6 +105,38 @@ export interface MentionInput {
 
 export interface LocalImageInput {
   path: string;
+}
+
+export interface BridgeQueuedMessage {
+  id: string;
+  createdAt: string;
+  content: string;
+}
+
+export interface BridgeThreadQueueError {
+  message: string;
+  operation: string;
+  at: string;
+  itemId?: string | null;
+}
+
+export interface BridgeThreadQueueState {
+  threadId: string;
+  items: BridgeQueuedMessage[];
+  lastError?: BridgeThreadQueueError | null;
+}
+
+export type BridgeThreadQueueDisposition = 'queued' | 'sent';
+
+export interface BridgeThreadQueueSendResponse {
+  disposition: BridgeThreadQueueDisposition;
+  queue: BridgeThreadQueueState;
+  turnId?: string | null;
+}
+
+export interface BridgeThreadQueueActionResponse {
+  ok: boolean;
+  queue: BridgeThreadQueueState;
 }
 
 export type AttachmentUploadKind = 'file' | 'image';

@@ -1,8 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import {
   createElement,
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -60,6 +62,10 @@ interface BrowserScreenProps {
   onPendingTargetHandled?: () => void;
 }
 
+export interface BrowserScreenHandle {
+  handleHardwareBackPress: () => boolean;
+}
+
 type WebViewScrollEvent = NativeSyntheticEvent<
   Readonly<{
     contentOffset: {
@@ -69,7 +75,7 @@ type WebViewScrollEvent = NativeSyntheticEvent<
   }>
 >;
 
-type ViewportPreset = 'mobile' | 'desktop';
+type ViewportPreset = 'mobile' | 'desktop' | 'desktop2';
 type DesktopFrameMessage = {
   type: 'clawdexDesktopFrameState';
   shellRequestKey?: string | null;
@@ -90,15 +96,19 @@ const DESKTOP_VIEWPORT_PRESETS = [
 const DESKTOP_PREVIEW_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
-export function BrowserScreen({
-  api,
-  bridgeUrl,
-  onOpenDrawer,
-  recentTargetUrls,
-  onRecentTargetUrlsChange,
-  pendingTargetUrl = null,
-  onPendingTargetHandled,
-}: BrowserScreenProps) {
+export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>(
+  function BrowserScreen(
+    {
+      api,
+      bridgeUrl,
+      onOpenDrawer,
+      recentTargetUrls,
+      onRecentTargetUrlsChange,
+      pendingTargetUrl = null,
+      onPendingTargetHandled,
+    },
+    ref
+  ) {
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const { colors } = theme;
@@ -156,11 +166,17 @@ export function BrowserScreen({
     () => getCompactBrowserLabel(currentUrl ?? activeSession?.targetUrl ?? inputValue),
     [activeSession?.targetUrl, currentUrl, inputValue]
   );
-  const desktopModeEnabled = viewportPreset === 'desktop';
-  const desktopOverviewEnabled = desktopModeEnabled;
-  const nativeOverviewShellEnabled = Platform.OS === 'ios' && desktopModeEnabled;
+  const desktopModeEnabled = viewportPreset !== 'mobile';
   const nativeShellMode: 'desktop' | 'overview' | null =
-    Platform.OS === 'ios' && desktopModeEnabled ? 'overview' : null;
+    Platform.OS === 'ios'
+      ? viewportPreset === 'desktop'
+        ? 'overview'
+        : viewportPreset === 'desktop2'
+          ? 'desktop'
+          : null
+      : null;
+  const desktopOverviewEnabled = desktopModeEnabled && nativeShellMode !== 'desktop';
+  const nativeOverviewShellEnabled = nativeShellMode === 'overview';
   const iframeStyle = useMemo<CSSProperties>(
     () => ({
       border: 0,
@@ -563,6 +579,20 @@ export function BrowserScreen({
     webViewRef.current?.goForward();
   }, [executeDesktopFrameCommand, nativeShellMode]);
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      handleHardwareBackPress: () => {
+        if (!previewUrl || !canGoBack) {
+          return false;
+        }
+        handleGoBackPress();
+        return true;
+      },
+    }),
+    [canGoBack, handleGoBackPress, previewUrl]
+  );
+
   const handleShowStartPage = useCallback(() => {
     previewRequestIdRef.current += 1;
     setPreviewUrl(null);
@@ -797,7 +827,13 @@ export function BrowserScreen({
             return;
           }
           const nextShellMode: 'desktop' | 'overview' | null =
-            Platform.OS === 'ios' && nextPreset === 'desktop' ? 'overview' : null;
+            Platform.OS === 'ios'
+              ? nextPreset === 'desktop'
+                ? 'overview'
+                : nextPreset === 'desktop2'
+                  ? 'desktop'
+                  : null
+              : null;
           const resolvedPreviewUrl =
             applyBrowserPreviewShellMode(nextPreviewUrl, nextShellMode) ?? nextPreviewUrl;
           commitViewportSelectionState();
@@ -959,6 +995,7 @@ export function BrowserScreen({
                   {([
                     { key: 'mobile', label: 'Mobile' },
                     { key: 'desktop', label: 'Desktop' },
+                    { key: 'desktop2', label: 'Desktop 2' },
                   ] as const).map((mode) => (
                     <Pressable
                       key={mode.key}
@@ -1513,7 +1550,7 @@ export function BrowserScreen({
       </SafeAreaView>
     </View>
   );
-}
+});
 
 function StatusBanner({
   tone,
