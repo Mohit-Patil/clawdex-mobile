@@ -1174,9 +1174,17 @@ impl BridgeQueueService {
             backend,
             hub,
             threads: Arc::new(RwLock::new(HashMap::new())),
+            next_queue_item_id: AtomicU64::new(1),
         });
         service.spawn_notification_loop();
         service
+    }
+
+    fn next_queued_message_id(&self) -> String {
+        format!(
+            "queue-{}",
+            self.next_queue_item_id.fetch_add(1, Ordering::Relaxed)
+        )
     }
 
     fn spawn_notification_loop(self: &Arc<Self>) {
@@ -1224,11 +1232,7 @@ impl BridgeQueueService {
         self.ensure_thread_runtime(&normalized_thread_id).await?;
 
         let queued_item = BridgeQueuedMessageEntry {
-            id: format!(
-                "queue-{}-{}",
-                Utc::now().timestamp_millis(),
-                self.hub.next_event_id.load(Ordering::Relaxed)
-            ),
+            id: self.next_queued_message_id(),
             created_at: now_iso(),
             content,
             turn_start: request.turn_start,
@@ -5307,6 +5311,7 @@ struct BridgeQueueService {
     backend: Arc<RuntimeBackend>,
     hub: Arc<ClientHub>,
     threads: Arc<RwLock<HashMap<String, BridgeThreadQueueRuntime>>>,
+    next_queue_item_id: AtomicU64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -13476,6 +13481,74 @@ mod tests {
         assert_eq!(result.queue.thread_id, "codex:thr_queue");
         assert_eq!(result.queue.items.len(), 1);
         assert_eq!(result.queue.items[0].content, "hello from queue");
+
+        shutdown_test_backend(&state.backend).await;
+    }
+
+    #[tokio::test]
+    async fn bridge_queue_send_assigns_unique_item_ids() {
+        let state = build_test_state().await;
+        {
+            let mut threads = state.queue.threads.write().await;
+            threads.insert(
+                "codex:thr_queue_ids".to_string(),
+                BridgeThreadQueueRuntime {
+                    thread_running: true,
+                    active_turn_id: Some("turn_live".to_string()),
+                    ..BridgeThreadQueueRuntime::default()
+                },
+            );
+        }
+
+        let first = state
+            .queue
+            .send_message(BridgeThreadQueueSendRequest {
+                thread_id: "codex:thr_queue_ids".to_string(),
+                content: "first queued message".to_string(),
+                turn_start: json!({
+                    "threadId": "codex:thr_queue_ids",
+                    "input": [{ "type": "text", "text": "first queued message", "text_elements": [] }],
+                    "cwd": Value::Null,
+                    "approvalPolicy": Value::Null,
+                    "sandboxPolicy": Value::Null,
+                    "model": Value::Null,
+                    "effort": Value::Null,
+                    "serviceTier": Value::Null,
+                    "summary": "auto",
+                    "personality": Value::Null,
+                    "outputSchema": Value::Null,
+                    "collaborationMode": Value::Null,
+                }),
+            })
+            .await
+            .expect("first queue send succeeds");
+
+        let second = state
+            .queue
+            .send_message(BridgeThreadQueueSendRequest {
+                thread_id: "codex:thr_queue_ids".to_string(),
+                content: "second queued message".to_string(),
+                turn_start: json!({
+                    "threadId": "codex:thr_queue_ids",
+                    "input": [{ "type": "text", "text": "second queued message", "text_elements": [] }],
+                    "cwd": Value::Null,
+                    "approvalPolicy": Value::Null,
+                    "sandboxPolicy": Value::Null,
+                    "model": Value::Null,
+                    "effort": Value::Null,
+                    "serviceTier": Value::Null,
+                    "summary": "auto",
+                    "personality": Value::Null,
+                    "outputSchema": Value::Null,
+                    "collaborationMode": Value::Null,
+                }),
+            })
+            .await
+            .expect("second queue send succeeds");
+
+        assert_eq!(first.queue.items.len(), 1);
+        assert_eq!(second.queue.items.len(), 2);
+        assert_ne!(second.queue.items[0].id, second.queue.items[1].id);
 
         shutdown_test_backend(&state.backend).await;
     }

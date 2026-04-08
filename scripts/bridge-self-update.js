@@ -389,6 +389,16 @@ async function restartBridge(packageRoot, statusPath, payload, message) {
   await waitForHealth(path.join(packageRoot, ".env.secure"), 45_000);
 }
 
+async function stopCurrentBridge(statusPath, payload, bridgePid) {
+  writeStatus(statusPath, {
+    ...payload,
+    state: "stopping",
+    message: "Stopping the current bridge process.",
+  });
+  killBridgeProcess(bridgePid);
+  await waitForBridgeExit(bridgePid);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const packageRoot = path.resolve(__dirname, "..");
@@ -408,104 +418,108 @@ async function main() {
         ? "Bridge restart scheduled."
         : `Bridge update scheduled for ${args.version}.`,
   });
-  await sleep(800);
+  try {
+    await sleep(800);
+    await stopCurrentBridge(args.statusPath, baseStatus, args.bridgePid);
 
-  writeStatus(args.statusPath, {
-    ...baseStatus,
-    state: "stopping",
-    message: "Stopping the current bridge process.",
-  });
-  killBridgeProcess(args.bridgePid);
-  await waitForBridgeExit(args.bridgePid);
+    if (args.action === "restart") {
+      try {
+        await restartBridge(
+          packageRoot,
+          args.statusPath,
+          baseStatus,
+          "Starting the bridge process."
+        );
+        writeStatus(args.statusPath, {
+          ...baseStatus,
+          state: "completed",
+          message: "Bridge restarted successfully.",
+          completedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        writeStatus(args.statusPath, {
+          ...baseStatus,
+          state: "failed",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Bridge restart failed and the bridge did not recover automatically.",
+          completedAt: new Date().toISOString(),
+        });
+        process.exitCode = 1;
+      }
+      return;
+    }
 
-  if (args.action === "restart") {
+    let upgraded = false;
     try {
+      writeStatus(args.statusPath, {
+        ...baseStatus,
+        state: "upgrading",
+        message: `Installing clawdex-mobile@${args.version}.`,
+      });
+      await runCommand(npmCommand(), ["install", "-g", `clawdex-mobile@${args.version}`], {
+        cwd: packageRoot,
+        env: process.env,
+      });
+      restoreSecureEnv(secureEnvBackup);
+      upgraded = true;
       await restartBridge(
         packageRoot,
         args.statusPath,
         baseStatus,
-        "Starting the bridge process."
+        "Starting the updated bridge process."
       );
       writeStatus(args.statusPath, {
         ...baseStatus,
         state: "completed",
-        message: "Bridge restarted successfully.",
+        message: `Bridge updated to ${args.version} and restarted successfully.`,
         completedAt: new Date().toISOString(),
       });
     } catch (error) {
-      writeStatus(args.statusPath, {
-        ...baseStatus,
-        state: "failed",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Bridge restart failed and the bridge did not recover automatically.",
-        completedAt: new Date().toISOString(),
-      });
-      process.exitCode = 1;
-    } finally {
-      cleanupSecureEnvBackup(secureEnvBackup);
+      console.error(error instanceof Error ? error.message : String(error));
+      try {
+        restoreSecureEnv(secureEnvBackup);
+        await restartBridge(
+          packageRoot,
+          args.statusPath,
+          baseStatus,
+          upgraded
+            ? "Updated bridge failed to come up; restarting the previous bridge."
+            : "Upgrade failed; restarting the previous bridge."
+        );
+        writeStatus(args.statusPath, {
+          ...baseStatus,
+          state: "recovered",
+          message: upgraded
+            ? "Bridge update failed after install. The previous bridge was restarted."
+            : "Bridge upgrade failed. The previous bridge was restarted.",
+          completedAt: new Date().toISOString(),
+        });
+      } catch (restartError) {
+        writeStatus(args.statusPath, {
+          ...baseStatus,
+          state: "failed",
+          message:
+            restartError instanceof Error
+              ? restartError.message
+              : "Bridge update failed and automatic recovery did not complete.",
+          completedAt: new Date().toISOString(),
+        });
+        process.exitCode = 1;
+      }
     }
-    return;
-  }
-
-  let upgraded = false;
-  try {
+  } catch (error) {
     writeStatus(args.statusPath, {
       ...baseStatus,
-      state: "upgrading",
-      message: `Installing clawdex-mobile@${args.version}.`,
-    });
-    await runCommand(npmCommand(), ["install", "-g", `clawdex-mobile@${args.version}`], {
-      cwd: packageRoot,
-      env: process.env,
-    });
-    restoreSecureEnv(secureEnvBackup);
-    upgraded = true;
-    await restartBridge(
-      packageRoot,
-      args.statusPath,
-      baseStatus,
-      "Starting the updated bridge process."
-    );
-    writeStatus(args.statusPath, {
-      ...baseStatus,
-      state: "completed",
-      message: `Bridge updated to ${args.version} and restarted successfully.`,
+      state: "failed",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Bridge maintenance failed before restart or recovery could begin.",
       completedAt: new Date().toISOString(),
     });
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    try {
-      restoreSecureEnv(secureEnvBackup);
-      await restartBridge(
-        packageRoot,
-        args.statusPath,
-        baseStatus,
-        upgraded
-          ? "Updated bridge failed to come up; restarting the previous bridge."
-          : "Upgrade failed; restarting the previous bridge."
-      );
-      writeStatus(args.statusPath, {
-        ...baseStatus,
-        state: "recovered",
-        message: upgraded
-          ? "Bridge update failed after install. The previous bridge was restarted."
-          : "Bridge upgrade failed. The previous bridge was restarted.",
-        completedAt: new Date().toISOString(),
-      });
-    } catch (restartError) {
-      writeStatus(args.statusPath, {
-        ...baseStatus,
-        state: "failed",
-        message:
-          restartError instanceof Error
-            ? restartError.message
-            : "Bridge update failed and automatic recovery did not complete.",
-        completedAt: new Date().toISOString(),
-      });
-      process.exitCode = 1;
-    }
+    process.exitCode = 1;
   } finally {
     cleanupSecureEnvBackup(secureEnvBackup);
   }
