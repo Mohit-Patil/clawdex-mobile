@@ -13,9 +13,12 @@ All notable changes to this project are documented in this file.
 - Drawer, sheet, and chat header interactions feel smoother and more consistent across open/close, reconnect, and navigation flows.
 - Composer and transcript responsiveness were tightened with lower rerender churn, more stable activity indicators, and cleaner compaction presentation.
 - Browser preview controls, address handling, and preview session stability were refined for everyday use.
+- Manual npm release runs can now build every packaged bridge target without publishing to npm.
 
 ### Fixed
 - Bridge restart cleanup and maintenance behavior are more reliable during repeated local development cycles.
+- Queued thread messages now use guaranteed-unique bridge queue item IDs during blocked-turn queuing.
+- Bridge self-update now reports shutdown failures cleanly while still preserving status updates and `.env.secure` backup cleanup.
 - Browser preview and mobile UI regressions caught during review and CI were resolved before release.
 
 ## 1.1.0 - 2026-02-23
