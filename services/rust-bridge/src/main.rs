@@ -7491,8 +7491,26 @@ fn build_preview_shell_frame_src(
         };
     };
 
+    let mut kept_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter_map(|(key, value)| {
+            let should_drop = matches!(key.as_ref(), "shell" | "frame")
+                || (bootstrap_session_id.is_some() && key == "sid")
+                || (bootstrap_token.is_some() && key == "st");
+            if should_drop {
+                None
+            } else {
+                Some((key.into_owned(), value.into_owned()))
+            }
+        })
+        .collect();
+
     {
         let mut query_pairs = parsed.query_pairs_mut();
+        query_pairs.clear();
+        for (key, value) in kept_pairs.drain(..) {
+            query_pairs.append_pair(&key, &value);
+        }
         query_pairs.append_pair("frame", "1");
         if let Some(session_id) = bootstrap_session_id {
             query_pairs.append_pair("sid", session_id);
@@ -7611,16 +7629,17 @@ fn preview_desktop_shell_response(
 <html>
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no">
+    <meta id="viewport-meta" name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes">
     <style>
       html, body {{
         margin: 0;
         padding: 0;
         min-height: 100%;
-        background: #000;
+        background: #fff;
       }}
       body {{
-        overflow: auto;
+        overflow-x: auto;
+        overflow-y: auto;
         -webkit-overflow-scrolling: touch;
       }}
       #shell {{
@@ -7644,6 +7663,8 @@ fn preview_desktop_shell_response(
       (function() {{
         var frame = document.getElementById('frame');
         var shell = document.getElementById('shell');
+        var viewportMeta = document.getElementById('viewport-meta');
+        var desktopWidth = {desktop_width};
         var minimumDesktopHeight = {desktop_height};
         var frameSrc = {frame_src_json};
         var lastMeasuredHeight = 0;
@@ -7654,6 +7675,7 @@ fn preview_desktop_shell_response(
         var frameMutationObserver = null;
         var frameCleanupCallbacks = [];
         var measureFrameQueued = false;
+        var initialFitApplied = false;
 
         function currentFrameWindow() {{
           try {{
@@ -7745,31 +7767,36 @@ fn preview_desktop_shell_response(
           window.ReactNativeWebView.postMessage(nextStateJson);
         }}
 
+        function applyInitialFit() {{
+          if (initialFitApplied || !viewportMeta) {{
+            return;
+          }}
+          var viewportWidth = Math.max(
+            window.innerWidth || document.documentElement.clientWidth || 0,
+            1
+          );
+          var scale = Math.min(1, viewportWidth / desktopWidth);
+          viewportMeta.setAttribute(
+            'content',
+            'width=' +
+              desktopWidth +
+              ', initial-scale=' +
+              scale +
+              ', minimum-scale=' +
+              Math.min(scale, 1) +
+              ', maximum-scale=5, user-scalable=yes'
+          );
+          initialFitApplied = true;
+        }}
+
         function measureFrameHeight() {{
           measureFrameQueued = false;
-          var doc = currentFrameDocument();
-          var height = minimumDesktopHeight;
-          if (doc && doc.documentElement) {{
-            var html = doc.documentElement;
-            var body = doc.body;
-            html.style.overflow = 'hidden';
-            if (body) {{
-              body.style.overflow = 'hidden';
-            }}
-            height = Math.max(
-              minimumDesktopHeight,
-              html.scrollHeight || 0,
-              html.offsetHeight || 0,
-              body ? body.scrollHeight || 0 : 0,
-              body ? body.offsetHeight || 0 : 0
-            );
+          if (minimumDesktopHeight !== lastMeasuredHeight) {{
+            lastMeasuredHeight = minimumDesktopHeight;
+            frame.style.height = minimumDesktopHeight + 'px';
+            shell.style.height = minimumDesktopHeight + 'px';
           }}
-
-          if (height !== lastMeasuredHeight) {{
-            lastMeasuredHeight = height;
-            frame.style.height = height + 'px';
-            shell.style.height = height + 'px';
-          }}
+          applyInitialFit();
           postState();
         }}
 
@@ -7864,6 +7891,7 @@ fn preview_desktop_shell_response(
           setTimeout(queueMeasureFrameHeight, 120);
           setTimeout(queueMeasureFrameHeight, 400);
         }});
+        window.addEventListener('resize', queueMeasureFrameHeight, {{ passive: true }});
 
         window.__clawdexDesktopFrame = {{
           goBack: function() {{
@@ -7891,6 +7919,7 @@ fn preview_desktop_shell_response(
 
         shell.style.height = minimumDesktopHeight + 'px';
         frame.style.height = minimumDesktopHeight + 'px';
+        applyInitialFit();
         frame.src = frameSrc;
       }})();
     </script>
@@ -11426,6 +11455,47 @@ mod tests {
             frame_src,
             "/index.html?vp=desktop&vw=1728&vh=1117&frame=1&sid=session-1&st=token-1"
         );
+    }
+
+    #[test]
+    fn build_preview_shell_frame_src_strips_shell_query_before_loading_frame() {
+        let frame_src = build_preview_shell_frame_src(
+            "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&shell=desktop",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            frame_src,
+            "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117&frame=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_desktop_shell_response_allows_visible_stage_overflow() {
+        let response = preview_desktop_shell_response(
+            "/index.html?sid=session-1&st=token-1&vp=desktop&vw=1728&vh=1117",
+            PreviewViewportConfig {
+                preset: PreviewViewportPreset::Desktop,
+                width: Some(1728),
+                height: Some(1117),
+            },
+            Some("session-1"),
+            Some("token-1"),
+        );
+
+        let body = to_bytes(response.into_body(), BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES)
+            .await
+            .expect("read desktop shell body");
+        let body = String::from_utf8(body.to_vec()).expect("desktop shell is utf-8");
+
+        assert!(body.contains("overflow-x: auto;"));
+        assert!(body.contains("background: #fff;"));
+        assert!(body.contains("id=\"viewport-meta\""));
+        assert!(body.contains("function applyInitialFit()"));
+        assert!(body.contains("window.addEventListener('resize', queueMeasureFrameHeight"));
+        assert!(!body.contains("window.visualViewport.addEventListener('resize'"));
+        assert!(!body.contains("shell.style.transform = 'scale(' + scale + ')'"));
     }
 
     #[test]

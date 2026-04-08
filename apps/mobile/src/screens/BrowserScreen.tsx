@@ -995,7 +995,7 @@ export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>
                   {([
                     { key: 'mobile', label: 'Mobile' },
                     { key: 'desktop', label: 'Desktop' },
-                    { key: 'desktop2', label: 'Desktop 2' },
+                    { key: 'desktop2', label: 'Desktop Full' },
                   ] as const).map((mode) => (
                     <Pressable
                       key={mode.key}
