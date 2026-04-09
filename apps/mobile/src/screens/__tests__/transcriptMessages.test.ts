@@ -112,6 +112,20 @@ describe('getVisibleTranscriptMessages', () => {
     ]);
   });
 
+  it('keeps consecutive assistant image messages visible', () => {
+    const messages = [
+      message('u1', 'user', 'Show me the QR'),
+      message('a1', 'assistant', '[local image: /tmp/bridge-pairing-qr.png]'),
+      message('a2', 'assistant', 'Above.'),
+    ];
+
+    expect(getVisibleTranscriptMessages(messages, false).map((entry) => entry.id)).toEqual([
+      'u1',
+      'a1',
+      'a2',
+    ]);
+  });
+
   it('replaces stale sub-agent status lines with the latest thread status', () => {
     const messages = [
       message('s1', 'system', '• Spawned sub-agent\n  Thread: child\n  Status: running', {

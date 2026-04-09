@@ -50,8 +50,19 @@ export function getVisibleTranscriptMessages(
     }
 
     const next = filtered[index + 1];
-    return !next || next.role !== 'assistant';
+    if (!next || next.role !== 'assistant') {
+      return true;
+    }
+
+    return (
+      assistantMessageHasInlineMedia(msg.content) ||
+      assistantMessageHasInlineMedia(next.content)
+    );
   });
+}
+
+function assistantMessageHasInlineMedia(content: string): boolean {
+  return /^\[(?:image|local image):\s*.+?\]$/im.test(content);
 }
 
 export function buildTranscriptDisplayItems(

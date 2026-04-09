@@ -34,6 +34,7 @@ export type RawThreadItem =
       type?: 'agentMessage';
       id?: string;
       text?: string;
+      content?: Array<{ type?: string; text?: string; path?: string; url?: string }>;
     }
   | {
       type?: string;
@@ -562,36 +563,7 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
       const itemType = readString(itemRecord.type);
 
       if (itemType === 'userMessage') {
-        const contentItems = Array.isArray(itemRecord.content) ? itemRecord.content : [];
-        const text = contentItems
-          .map((entry: unknown) => {
-            const entryRecord = toRecord(entry);
-            if (!entryRecord) {
-              return '';
-            }
-
-            const entryType = readString(entryRecord.type);
-            if (entryType === 'text') {
-              return readString(entryRecord.text) ?? '';
-            }
-
-            if (entryType === 'image') {
-              return `[image: ${readString(entryRecord.url) ?? 'unknown'}]`;
-            }
-
-            if (entryType === 'localImage') {
-              return `[local image: ${readString(entryRecord.path) ?? 'unknown'}]`;
-            }
-
-            if (entryType === 'mention') {
-              const mentionPath = readString(entryRecord.path) ?? 'unknown';
-              return `[file: ${mentionPath}]`;
-            }
-
-            return '';
-          })
-          .filter(Boolean)
-          .join('\n');
+        const text = stringifyStructuredMessageContent(itemRecord);
 
         if (!text.trim()) {
           continue;
@@ -607,7 +579,8 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
       }
 
       if (itemType === 'agentMessage') {
-        const text = readString(itemRecord.text) ?? '';
+        const text =
+          stringifyStructuredMessageContent(itemRecord) || readString(itemRecord.text) || '';
         if (!text.trim()) {
           continue;
         }
@@ -644,6 +617,43 @@ function mapMessages(raw: RawThread, fallbackCreatedAt: string): ChatMessage[] {
   }
 
   return messages;
+}
+
+function stringifyStructuredMessageContent(itemRecord: Record<string, unknown>): string {
+  const contentItems = Array.isArray(itemRecord.content) ? itemRecord.content : [];
+  if (contentItems.length === 0) {
+    return '';
+  }
+
+  return contentItems
+    .map((entry: unknown) => {
+      const entryRecord = toRecord(entry);
+      if (!entryRecord) {
+        return '';
+      }
+
+      const entryType = readString(entryRecord.type);
+      if (entryType === 'text') {
+        return readString(entryRecord.text) ?? '';
+      }
+
+      if (entryType === 'image') {
+        return `[image: ${readString(entryRecord.url) ?? 'unknown'}]`;
+      }
+
+      if (entryType === 'localImage') {
+        return `[local image: ${readString(entryRecord.path) ?? 'unknown'}]`;
+      }
+
+      if (entryType === 'mention') {
+        const mentionPath = readString(entryRecord.path) ?? 'unknown';
+        return `[file: ${mentionPath}]`;
+      }
+
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
 }
 
 function generateLocalId(): string {
@@ -953,7 +963,7 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
     if (!path) {
       return null;
     }
-    return `• Viewed image\n  └ ${path}`;
+    return withNestedDetail(`• Viewed image ${toFileChangeTargetLabel(path)}`, path);
   }
 
   if (type === 'enteredreviewmode') {

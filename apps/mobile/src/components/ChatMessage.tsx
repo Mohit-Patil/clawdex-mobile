@@ -26,6 +26,8 @@ interface ChatMessageProps {
 
 interface ToolActivityGroupProps {
   messages: ApiChatMessage[];
+  bridgeUrl?: string | null;
+  bridgeToken?: string | null;
 }
 
 interface TimelineEntry {
@@ -39,7 +41,7 @@ interface ToolGroupEntry {
   details: string[];
 }
 
-type UserMessageBlock =
+type MessageBlock =
   | { kind: 'text'; value: string }
   | { kind: 'file'; value: string }
   | { kind: 'image'; source: ImageSourcePropType; accessibilityLabel?: string };
@@ -64,10 +66,9 @@ function ChatMessageComponent({
   const [expandedReasoningEntries, setExpandedReasoningEntries] = useState<
     Record<string, boolean>
   >({});
-  const userBlocks = useMemo(
-    () =>
-      isUser ? parseUserMessageBlocks(message.content, bridgeUrl, bridgeToken) : [],
-    [bridgeToken, bridgeUrl, isUser, message.content]
+  const messageBlocks = useMemo(
+    () => parseMessageBlocks(message.content, bridgeUrl, bridgeToken),
+    [bridgeToken, bridgeUrl, message.content]
   );
   const localPreviewUrls = useMemo(
     () =>
@@ -79,9 +80,14 @@ function ChatMessageComponent({
 
   const renderedMessage = isUser ? (
     <View style={[styles.messageWrapper, styles.messageWrapperUser]}>
-      <View style={[styles.userBubble, userBlocks.length > 1 && styles.userBubbleWithAttachments]}>
+      <View
+        style={[
+          styles.userBubble,
+          messageBlocks.length > 1 && styles.userBubbleWithAttachments,
+        ]}
+      >
         <View style={styles.userBubbleContent}>
-          {userBlocks.map((block, index) => {
+          {messageBlocks.map((block, index) => {
             if (block.kind === 'image') {
               return (
                 <MarkdownImage
@@ -122,6 +128,73 @@ function ChatMessageComponent({
 
   if (renderedMessage) {
     return renderedMessage;
+  }
+
+  if (message.role === 'assistant') {
+    return (
+      <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
+        <View style={styles.assistantContent}>
+          {messageBlocks.map((block, index) => {
+            if (block.kind === 'image') {
+              return (
+                <MarkdownImage
+                  key={`${message.id}-assistant-image-${String(index)}`}
+                  source={block.source}
+                  accessibilityLabel={block.accessibilityLabel}
+                />
+              );
+            }
+
+            if (block.kind === 'file') {
+              return (
+                <View
+                  key={`${message.id}-assistant-file-${String(index)}`}
+                  style={styles.userFileChip}
+                >
+                  <Ionicons
+                    name="document-text-outline"
+                    size={12}
+                    color={theme.colors.textMuted}
+                  />
+                  <Text style={styles.userFileChipText} numberOfLines={1}>
+                    {block.value}
+                  </Text>
+                </View>
+              );
+            }
+
+            return (
+              <Markdown
+                key={`${message.id}-assistant-text-${String(index)}`}
+                style={markdownStyles}
+                rules={markdownRules}
+              >
+                {block.value || '\u258D'}
+              </Markdown>
+            );
+          })}
+        </View>
+        {localPreviewUrls.length > 0 && onOpenLocalPreview ? (
+          <View style={styles.localPreviewLinkList}>
+            {localPreviewUrls.map((targetUrl) => (
+              <Pressable
+                key={`${message.id}-${targetUrl}`}
+                onPress={() => onOpenLocalPreview(targetUrl)}
+                style={({ pressed }) => [
+                  styles.localPreviewLink,
+                  pressed && styles.localPreviewLinkPressed,
+                ]}
+              >
+                <Ionicons name="globe-outline" size={14} color={theme.colors.textPrimary} />
+                <Text style={styles.localPreviewLinkText} numberOfLines={1}>
+                  {`Open ${targetUrl} in Browser`}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+      </View>
+    );
   }
 
   const timelineEntries =
@@ -280,14 +353,23 @@ function ChatMessageComponent({
         <View style={styles.timelineCardStack}>
           {timelineEntries.map((entry, index) => {
             const visual = toTimelineVisual(entry.title);
+            const viewedImage = toViewedImagePreview(
+              entry,
+              bridgeUrl,
+              bridgeToken
+            );
             const timelineKey = `${message.id}-timeline-${String(index)}`;
             const hasDetails = entry.details.length > 0;
             const expanded = expandedTimelineEntries[timelineKey] === true;
-            const toggleLabel = expanded
-              ? 'Tap to hide output'
-              : entry.details.length <= 1
-                ? 'Tap to show output'
-                : `Tap to show ${String(entry.details.length)} lines`;
+            const toggleLabel = viewedImage
+              ? expanded
+                ? 'Tap to hide path'
+                : 'Tap to show path'
+              : expanded
+                ? 'Tap to hide output'
+                : entry.details.length <= 1
+                  ? 'Tap to show output'
+                  : `Tap to show ${String(entry.details.length)} lines`;
             return (
               <Pressable
                 key={`${message.id}-timeline-${String(index)}`}
@@ -333,6 +415,13 @@ function ChatMessageComponent({
                 </View>
                 {hasDetails ? (
                   <Text style={styles.timelineToggleText}>{toggleLabel}</Text>
+                ) : null}
+                {viewedImage ? (
+                  <MarkdownImage
+                    key={`${timelineKey}-image`}
+                    source={viewedImage.source}
+                    accessibilityLabel={viewedImage.accessibilityLabel}
+                  />
                 ) : null}
                 {expanded && entry.details.length > 0 ? (
                   <View style={styles.timelineDetailWrap}>
@@ -410,6 +499,8 @@ ChatMessage.displayName = 'ChatMessage';
 
 export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
   messages,
+  bridgeUrl = null,
+  bridgeToken = null,
 }: ToolActivityGroupProps) {
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -473,6 +564,11 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
           {previewEntries.map((entry) => {
             const hasDetails = entry.details.length > 0;
             const visual = toTimelineVisual(entry.title);
+            const viewedImage = toViewedImagePreview(
+              entry,
+              bridgeUrl,
+              bridgeToken
+            );
             const entryExpanded = expandedEntryIds[entry.id] === true;
 
             if (!expanded) {
@@ -535,12 +631,23 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
                 </View>
                 {hasDetails ? (
                   <Text style={styles.toolGroupEntryToggleText}>
-                    {entryExpanded
-                      ? 'Tap to hide output'
-                      : entry.details.length <= 1
-                        ? 'Tap to show output'
-                        : `Tap to show ${String(entry.details.length)} lines`}
+                    {viewedImage
+                      ? entryExpanded
+                        ? 'Tap to hide path'
+                        : 'Tap to show path'
+                      : entryExpanded
+                        ? 'Tap to hide output'
+                        : entry.details.length <= 1
+                          ? 'Tap to show output'
+                          : `Tap to show ${String(entry.details.length)} lines`}
                   </Text>
+                ) : null}
+                {viewedImage ? (
+                  <MarkdownImage
+                    key={`${entry.id}-image`}
+                    source={viewedImage.source}
+                    accessibilityLabel={viewedImage.accessibilityLabel}
+                  />
                 ) : null}
                 {entryExpanded && hasDetails ? (
                   <View style={styles.toolGroupEntryDetailWrap}>
@@ -801,6 +908,9 @@ const createStyles = (theme: AppTheme) => {
   },
   userBubbleContent: {
     gap: theme.spacing.sm,
+  },
+  assistantContent: {
+    gap: theme.spacing.xs,
   },
   userMessageText: {
     fontFamily: theme.fonts.monoRegular,
@@ -1243,12 +1353,12 @@ function MarkdownImage({
   );
 }
 
-function parseUserMessageBlocks(
+function parseMessageBlocks(
   content: string,
   bridgeUrl: string | null,
   bridgeToken: string | null
-): UserMessageBlock[] {
-  const blocks: UserMessageBlock[] = [];
+): MessageBlock[] {
+  const blocks: MessageBlock[] = [];
   const pendingTextLines: string[] = [];
 
   const flushTextBlock = () => {
@@ -1326,6 +1436,31 @@ function parseUserMessageBlocks(
   }
 
   return blocks;
+}
+
+function toViewedImagePreview(
+  entry: TimelineEntry | ToolGroupEntry,
+  bridgeUrl: string | null,
+  bridgeToken: string | null
+): { source: ImageSourcePropType; accessibilityLabel?: string } | null {
+  if (!/^•\s*Viewed image\b/i.test(entry.title)) {
+    return null;
+  }
+
+  const path = entry.details[0]?.trim();
+  if (!path) {
+    return null;
+  }
+
+  const source = toMarkdownImageSource(path, bridgeUrl, bridgeToken);
+  if (!source) {
+    return null;
+  }
+
+  return {
+    source,
+    accessibilityLabel: toPathBasename(path),
+  };
 }
 
 function toPathBasename(path: string): string {

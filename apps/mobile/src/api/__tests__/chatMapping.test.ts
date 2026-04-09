@@ -197,6 +197,38 @@ describe('chatMapping', () => {
     expect(chat.messages[0].content).toContain('Comparing persisted thread items with live deltas.');
   });
 
+  it('maps assistant structured content arrays including images', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_assistant_image',
+        preview: 'image',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'agentMessage',
+                id: 'assistant_image_1',
+                content: [
+                  { type: 'text', text: 'Here is the QR code' },
+                  { type: 'localImage', path: '/tmp/bridge-pairing-qr.png' },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('assistant');
+    expect(chat.messages[0].content).toContain('Here is the QR code');
+    expect(chat.messages[0].content).toContain('[local image: /tmp/bridge-pairing-qr.png]');
+  });
+
   it('extracts the latest structured persisted plan for workflow rehydration', () => {
     const chat = mapChat(
       toRawThread({
@@ -446,5 +478,35 @@ describe('chatMapping', () => {
     expect(chat.messages[0].content).toContain('please review these files');
     expect(chat.messages[0].content).toContain('[file: apps/mobile/src/screens/MainScreen.tsx]');
     expect(chat.messages[0].content).toContain('[file: apps/mobile/src/api/client.ts]');
+  });
+
+  it('keeps imageview as a compact tool event with the viewed filename', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_imageview',
+        preview: 'image',
+        createdAt: 1700000000,
+        updatedAt: 1700000003,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'imageview',
+                id: 'img_view_1',
+                path: '/tmp/bridge-pairing-qr.png',
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('tool');
+    expect(chat.messages[0].content).toContain('• Viewed image bridge-pairing-qr.png');
+    expect(chat.messages[0].content).toContain('/tmp/bridge-pairing-qr.png');
   });
 });

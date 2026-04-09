@@ -9276,7 +9276,11 @@ const ChatView = memo(function ChatView({
       if (item.kind === 'toolGroup') {
         return (
           <View style={styles.chatMessageBlock}>
-            <ToolActivityGroup messages={item.messages} />
+            <ToolActivityGroup
+              messages={item.messages}
+              bridgeUrl={bridgeUrl}
+              bridgeToken={bridgeToken}
+            />
           </View>
         );
       }
