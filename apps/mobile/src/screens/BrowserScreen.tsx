@@ -42,6 +42,7 @@ import {
   applyBrowserPreviewShellMode,
   buildBrowserPreviewBootstrapUrl,
   type BrowserPreviewViewportSpec,
+  getNativeBrowserPreviewShellMode,
   getBrowserPreviewShellRequestKey,
   getBrowserPreviewOrigin,
   isLocalPreviewCandidateUrl,
@@ -167,14 +168,7 @@ export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>
     [activeSession?.targetUrl, currentUrl, inputValue]
   );
   const desktopModeEnabled = viewportPreset !== 'mobile';
-  const nativeShellMode: 'desktop' | 'overview' | null =
-    Platform.OS === 'ios'
-      ? viewportPreset === 'desktop'
-        ? 'overview'
-        : viewportPreset === 'desktop2'
-          ? 'desktop'
-          : null
-      : null;
+  const nativeShellMode = getNativeBrowserPreviewShellMode(Platform.OS, viewportPreset);
   const desktopOverviewEnabled = desktopModeEnabled && nativeShellMode !== 'desktop';
   const nativeOverviewShellEnabled = nativeShellMode === 'overview';
   const iframeStyle = useMemo<CSSProperties>(
@@ -194,11 +188,11 @@ export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>
   const bottomBarReservedSpace = bottomBarInset + 58;
   const webViewBottomInset = bottomBarVisible ? bottomBarReservedSpace : 0;
   const nativeUserAgent =
-    Platform.OS === 'web' || Platform.OS === 'ios' || !desktopModeEnabled
+    Platform.OS === 'web' || nativeShellMode || !desktopModeEnabled
       ? undefined
       : DESKTOP_PREVIEW_USER_AGENT;
   const nativeContentMode =
-    Platform.OS === 'ios'
+    Platform.OS === 'ios' || nativeShellMode
       ? undefined
       : desktopModeEnabled
         ? 'desktop'
@@ -826,14 +820,7 @@ export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>
           if (previewRequestIdRef.current !== requestId) {
             return;
           }
-          const nextShellMode: 'desktop' | 'overview' | null =
-            Platform.OS === 'ios'
-              ? nextPreset === 'desktop'
-                ? 'overview'
-                : nextPreset === 'desktop2'
-                  ? 'desktop'
-                  : null
-              : null;
+          const nextShellMode = getNativeBrowserPreviewShellMode(Platform.OS, nextPreset);
           const resolvedPreviewUrl =
             applyBrowserPreviewShellMode(nextPreviewUrl, nextShellMode) ?? nextPreviewUrl;
           commitViewportSelectionState();

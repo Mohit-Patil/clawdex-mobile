@@ -4,6 +4,7 @@ import {
   buildBrowserPreviewBootstrapUrl,
   dedupeRecentPreviewTargets,
   extractLocalPreviewUrls,
+  getNativeBrowserPreviewShellMode,
   getBrowserPreviewShellRequestKey,
   mapBrowserPreviewNavigationUrlToTargetUrl,
   normalizePreviewTargetInput,
@@ -105,6 +106,16 @@ describe('browserPreview', () => {
         'http://192.168.1.26:8788/?sid=preview-session&st=preview-token&vp=desktop&vw=1728&vh=1117&shell=overview'
       )
     ).toBe('preview-session:preview-token');
+  });
+
+  it('maps native desktop presets to the expected shell modes on ios and android', () => {
+    expect(getNativeBrowserPreviewShellMode('ios', 'mobile')).toBeNull();
+    expect(getNativeBrowserPreviewShellMode('ios', 'desktop')).toBe('overview');
+    expect(getNativeBrowserPreviewShellMode('ios', 'desktop2')).toBe('desktop');
+    expect(getNativeBrowserPreviewShellMode('android', 'mobile')).toBeNull();
+    expect(getNativeBrowserPreviewShellMode('android', 'desktop')).toBe('overview');
+    expect(getNativeBrowserPreviewShellMode('android', 'desktop2')).toBe('desktop');
+    expect(getNativeBrowserPreviewShellMode('web', 'desktop')).toBeNull();
   });
 
   it('maps a preview navigation URL back to the original target URL for display', () => {

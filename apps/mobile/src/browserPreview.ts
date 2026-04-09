@@ -203,6 +203,25 @@ export function applyBrowserPreviewShellMode(
   }
 }
 
+export function getNativeBrowserPreviewShellMode(
+  platformOs: string,
+  viewportPreset: 'mobile' | 'desktop' | 'desktop2'
+): 'desktop' | 'overview' | null {
+  if (platformOs !== 'ios' && platformOs !== 'android') {
+    return null;
+  }
+
+  if (viewportPreset === 'desktop') {
+    return 'overview';
+  }
+
+  if (viewportPreset === 'desktop2') {
+    return 'desktop';
+  }
+
+  return null;
+}
+
 export function getBrowserPreviewShellRequestKey(rawUrl: string | null | undefined): string | null {
   if (typeof rawUrl !== 'string') {
     return null;
