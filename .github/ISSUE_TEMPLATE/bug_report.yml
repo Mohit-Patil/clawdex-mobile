@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible defect in the app, CLI, or bridge
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke?
+      placeholder: A clear and concise summary of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give exact steps so someone else can reproduce the issue.
+      placeholder: |
+        1. Start...
+        2. Open...
+        3. Tap...
+        4. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: What happened instead?
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: iOS, Android, bridge host OS, CLI environment
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, screenshots, or recordings
+      description: Paste relevant logs or attach media if available.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked the README and troubleshooting docs first
+          required: true
+        - label: I removed secrets and tokens from logs and screenshots
+          required: true
