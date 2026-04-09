@@ -41,6 +41,12 @@
     }
   },
   "submit": {
+    "closedTesting": {
+      "android": {
+        "track": "alpha",
+        "releaseStatus": "completed"
+      }
+    },
     "production": {
       "ios": {
         "ascAppId": "6759833757"
