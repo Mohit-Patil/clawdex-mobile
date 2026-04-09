@@ -35,6 +35,12 @@ describe('browserPreview', () => {
     ]);
   });
 
+  it('ignores trailing markdown backticks around preview URLs', () => {
+    expect(
+      extractLocalPreviewUrls('Open `http://localhost:3000/` in browser')
+    ).toEqual(['http://localhost:3000/']);
+  });
+
   it('keeps recent preview targets unique and ordered', () => {
     expect(
       pushRecentPreviewTarget(

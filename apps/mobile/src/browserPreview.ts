@@ -2,7 +2,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 const BROWSER_PREVIEW_PROXY_PREFIX = '/__clawdex_proxy__';
 const BROWSER_PREVIEW_INTERNAL_QUERY_KEYS = ['sid', 'st', 'vp', 'vw', 'vh', 'shell', 'frame'];
 const LOCAL_PREVIEW_URL_PATTERN =
-  /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:[^\s<>"')\]]*)?/gi;
+  /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:[^\s<>"'`)\]]*)?/gi;
 const LOCAL_PREVIEW_WITHOUT_SCHEME_PATTERN =
   /^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:[/?#].*)?$/i;
 const PORT_ONLY_PATTERN = /^\d{2,5}$/;
