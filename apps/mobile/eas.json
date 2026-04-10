@@ -46,7 +46,7 @@
   "submit": {
     "closedTesting": {
       "android": {
-        "track": "alpha",
+        "track": "CLAWDEXTESTS",
         "releaseStatus": "completed"
       }
     },
