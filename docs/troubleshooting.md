@@ -34,10 +34,53 @@ npm run stop:services
 ## Bridge auth errors (`401`, invalid token)
 
 - For the shipped mobile app, rescan the bridge QR or update the stored token in Settings.
+- For GitHub-auth Codespaces profiles, reopen `GitHub Codespaces` in the app and sign in with GitHub again if the OAuth token was revoked or expired.
 - For a local dev build, also ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` in `apps/mobile/.env`.
 - Restart the bridge after token changes.
 - On secure-launcher installs, `Settings > Bridge Maintenance > Restart bridge safely` can do that from the phone.
 - If an in-app bridge update fails, inspect `.bridge-updater.log` and `.bridge-update-status.json` in the bridge install root.
+
+## GitHub Codespaces bridge URL does not connect
+
+- Pair to the printed forwarded HTTPS URL such as `https://<codespace>-8787.app.github.dev`, not `127.0.0.1`.
+- Public forwarded ports reset back to private when the codespace restarts.
+- Restart the bridge or rerun `npm run codespaces:bootstrap` to rerun the automatic visibility step.
+- If needed, set both ports public manually:
+
+```bash
+gh codespace ports visibility 8787:public 8788:public
+```
+
+- If `gh` is unavailable in the codespace, use the Codespaces `Ports` panel and change both forwarded ports to `Public`.
+- Keep bridge auth enabled. Public forwarded ports without bridge auth are not a safe setup.
+- If GitHub direct sign-in is not showing in the app, confirm the build includes `EXPO_PUBLIC_GITHUB_CLIENT_ID`.
+- If in-app Codespace creation forks or targets the wrong repo, check `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME`, `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER`, and `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_REF` in the mobile build env.
+
+## GitHub Codespaces bootstrap did not start the bridge
+
+- Check the post-start command output in the Codespace terminal or rerun it manually:
+
+```bash
+npm run codespaces:bootstrap -- --prepare-only
+npm run codespaces:bootstrap
+```
+
+- The Codespaces bootstrap only prepares the `codex` engine. It will try to install Codex automatically with `npm install -g @openai/codex`.
+- `--prepare-only` installs Codex if needed and prebuilds the Rust bridge binary without starting the bridge.
+- The bootstrap also enables `BRIDGE_GITHUB_CODESPACES_AUTH=true` so GitHub bearer tokens can connect directly to the bridge.
+- If that install fails, fix npm/global package permissions in the codespace and rerun the bootstrap.
+- Bridge startup logs and runtime state live in the Codespace repo root:
+
+```bash
+tail -n 200 .bridge.log
+ls -la .bridge.pid .bridge.log .env.secure
+```
+
+- To only rewrite `.env.secure` without starting the bridge:
+
+```bash
+npm run codespaces:bootstrap -- --no-start
+```
 
 ## Local browser preview does not open
 
@@ -49,6 +92,7 @@ npm run stop:services
 - By default the preview server binds to `BRIDGE_PORT + 1`.
 - Restart the bridge after changing `BRIDGE_PREVIEW_PORT`.
 - If the page shell loads but live reload does not, verify the target dev server is still serving its WebSocket/HMR endpoint locally.
+- In GitHub Codespaces, the preview port (`8788` by default) must also be public or the Browser screen will fail even if the main bridge port works.
 
 ## Tailscale issues
 

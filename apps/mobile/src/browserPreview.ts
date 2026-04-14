@@ -150,7 +150,8 @@ export function buildBrowserPreviewBootstrapUrl(
   bridgeUrl: string,
   previewPort: number,
   bootstrapPath: string,
-  viewport: BrowserPreviewViewportSpec = DEFAULT_BROWSER_PREVIEW_VIEWPORT
+  viewport: BrowserPreviewViewportSpec = DEFAULT_BROWSER_PREVIEW_VIEWPORT,
+  previewBaseUrl?: string | null
 ): string | null {
   if (typeof bridgeUrl !== 'string' || typeof bootstrapPath !== 'string') {
     return null;
@@ -164,11 +165,15 @@ export function buildBrowserPreviewBootstrapUrl(
 
   try {
     const normalizedViewport = normalizeBrowserPreviewViewportSpec(viewport);
-    const base = new URL(normalizedBridgeUrl);
-    base.port = String(previewPort);
-    base.pathname = '/';
-    base.search = '';
-    base.hash = '';
+    const resolvedPreviewBaseUrl = getBrowserPreviewBaseUrl(
+      normalizedBridgeUrl,
+      previewPort,
+      previewBaseUrl
+    );
+    if (!resolvedPreviewBaseUrl) {
+      return null;
+    }
+    const base = new URL(resolvedPreviewBaseUrl);
 
     const previewUrl = new URL(
       normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`,
@@ -242,19 +247,84 @@ export function getBrowserPreviewShellRequestKey(rawUrl: string | null | undefin
 
 export function getBrowserPreviewOrigin(
   bridgeUrl: string,
-  previewPort: number
+  previewPort: number,
+  previewBaseUrl?: string | null
+): string | null {
+  const baseUrl = getBrowserPreviewBaseUrl(bridgeUrl, previewPort, previewBaseUrl);
+  if (!baseUrl) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(baseUrl);
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function getBrowserPreviewBaseUrl(
+  bridgeUrl: string,
+  previewPort: number,
+  previewBaseUrl?: string | null
 ): string | null {
   if (typeof bridgeUrl !== 'string') {
     return null;
   }
 
+  const explicitBaseUrl = normalizeBrowserPreviewBaseUrl(previewBaseUrl);
+  if (explicitBaseUrl) {
+    return explicitBaseUrl;
+  }
+
   try {
     const parsed = new URL(bridgeUrl.trim());
+    const codespacesBaseUrl = rewriteCodespacesForwardedUrl(parsed, previewPort);
+    if (codespacesBaseUrl) {
+      return codespacesBaseUrl;
+    }
     parsed.port = String(previewPort);
     parsed.pathname = '/';
     parsed.search = '';
     parsed.hash = '';
-    return parsed.origin;
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return null;
+  }
+}
+
+function rewriteCodespacesForwardedUrl(parsedBridgeUrl: URL, previewPort: number): string | null {
+  if (parsedBridgeUrl.port) {
+    return null;
+  }
+
+  const match = parsedBridgeUrl.hostname.match(/^(.*)-\d+(\.app\.github\.dev)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const rewritten = new URL(parsedBridgeUrl.toString());
+  rewritten.hostname = `${match[1]}-${previewPort}${match[2]}`;
+  rewritten.pathname = '/';
+  rewritten.search = '';
+  rewritten.hash = '';
+  return rewritten.toString().replace(/\/$/, '');
+}
+
+function normalizeBrowserPreviewBaseUrl(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    parsed.pathname = '/';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
   } catch {
     return null;
   }

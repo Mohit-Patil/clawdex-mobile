@@ -6,9 +6,10 @@ import {
   type RawThread,
   toRawThread,
 } from './chatMapping';
-import { readAccountSnapshot } from './account';
+import { readAccountLoginStartResponse, readAccountSnapshot } from './account';
 import { readAccountRateLimits as readSelectedAccountRateLimits } from './rateLimits';
 import type {
+  AccountLoginStartResponse,
   AccountSnapshot,
   AccountRateLimitSnapshot,
   ApprovalPolicy,
@@ -249,6 +250,31 @@ export class HostBridgeApiClient {
       refreshToken: false,
     });
     return readAccountSnapshot(response);
+  }
+
+  async startChatGptAccountLogin(): Promise<AccountLoginStartResponse> {
+    const response = await this.ws.request<Record<string, unknown>>('account/login/start', {
+      type: 'chatgpt',
+    });
+    return readAccountLoginStartResponse(response);
+  }
+
+  async loginWithChatGptAuthTokens(input: {
+    accessToken: string;
+    chatgptAccountId: string;
+    chatgptPlanType?: string | null;
+  }): Promise<AccountLoginStartResponse> {
+    const response = await this.ws.request<Record<string, unknown>>('account/login/start', {
+      type: 'chatgptAuthTokens',
+      accessToken: input.accessToken,
+      chatgptAccountId: input.chatgptAccountId,
+      chatgptPlanType: input.chatgptPlanType ?? null,
+    });
+    return readAccountLoginStartResponse(response);
+  }
+
+  async cancelAccountLogin(loginId: string): Promise<void> {
+    await this.ws.request('account/login/cancel', { loginId });
   }
 
   async logoutAccount(): Promise<void> {
@@ -1337,6 +1363,7 @@ function readBrowserPreviewSession(value: unknown): BrowserPreviewSession | null
   const sessionId = readString(record.sessionId)?.trim() ?? '';
   const targetUrl = readString(record.targetUrl)?.trim() ?? '';
   const bootstrapPath = readString(record.bootstrapPath)?.trim() ?? '';
+  const previewBaseUrl = readString(record.previewBaseUrl)?.trim() || null;
   const previewPortRaw = record.previewPort;
   const previewPort =
     typeof previewPortRaw === 'number'
@@ -1355,6 +1382,7 @@ function readBrowserPreviewSession(value: unknown): BrowserPreviewSession | null
     sessionId,
     targetUrl,
     previewPort,
+    ...(previewBaseUrl ? { previewBaseUrl } : {}),
     bootstrapPath,
     createdAt,
     lastAccessedAt: lastAccessedAt ?? createdAt,

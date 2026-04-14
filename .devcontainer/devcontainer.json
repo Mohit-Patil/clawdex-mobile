@@ -1,0 +1,21 @@
+{
+  "name": "Clawdex Mobile",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-20-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "forwardPorts": [8787, 8788],
+  "portsAttributes": {
+    "8787": {
+      "label": "Clawdex Bridge",
+      "onAutoForward": "silent"
+    },
+    "8788": {
+      "label": "Clawdex Browser Preview",
+      "onAutoForward": "silent"
+    }
+  },
+  "postCreateCommand": "npm install --include=dev && npm run codespaces:bootstrap -- --prepare-only",
+  "postStartCommand": "npm run codespaces:bootstrap"
+}

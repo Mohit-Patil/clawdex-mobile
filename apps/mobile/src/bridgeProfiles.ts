@@ -17,9 +17,15 @@ export interface BridgeProfile {
   name: string;
   bridgeUrl: string;
   bridgeToken: string;
+  authMode: BridgeProfileAuthMode;
+  githubUserLogin: string | null;
+  githubCodespaceName: string | null;
+  githubRepositoryFullName: string | null;
   createdAt: string;
   updatedAt: string;
 }
+
+export type BridgeProfileAuthMode = 'bridgeToken' | 'githubOAuth';
 
 export interface BridgeProfileStore {
   activeProfileId: string | null;
@@ -31,6 +37,10 @@ export interface BridgeProfileDraft {
   name?: string | null;
   bridgeUrl: string;
   bridgeToken: string;
+  authMode?: BridgeProfileAuthMode | null;
+  githubUserLogin?: string | null;
+  githubCodespaceName?: string | null;
+  githubRepositoryFullName?: string | null;
   activate?: boolean;
 }
 
@@ -116,6 +126,17 @@ export function upsertBridgeProfile(
     name: resolvedName,
     bridgeUrl: normalizedUrl,
     bridgeToken: normalizedToken,
+    authMode: normalizeBridgeProfileAuthMode(draft.authMode) ?? existing?.authMode ?? 'bridgeToken',
+    githubUserLogin:
+      normalizeOptionalMetadataValue(draft.githubUserLogin) ?? existing?.githubUserLogin ?? null,
+    githubCodespaceName:
+      normalizeOptionalMetadataValue(draft.githubCodespaceName) ??
+      existing?.githubCodespaceName ??
+      null,
+    githubRepositoryFullName:
+      normalizeOptionalMetadataValue(draft.githubRepositoryFullName) ??
+      existing?.githubRepositoryFullName ??
+      null,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -158,6 +179,45 @@ export function setActiveBridgeProfile(
     ...store,
     activeProfileId: profileId,
   };
+}
+
+export function renameBridgeProfile(
+  store: BridgeProfileStore,
+  profileId: string,
+  nextName: string | null | undefined
+): BridgeProfileStore {
+  const existing = store.profiles.find((profile) => profile.id === profileId);
+  if (!existing) {
+    return sanitizeBridgeProfileStore(store);
+  }
+
+  const updatedAt = new Date().toISOString();
+  return sanitizeBridgeProfileStore({
+    ...store,
+    profiles: store.profiles.map((profile) =>
+      profile.id === profileId
+        ? {
+            ...profile,
+            name: deriveBridgeProfileName(nextName, profile.bridgeUrl),
+            updatedAt,
+          }
+        : profile
+    ),
+  });
+}
+
+export function removeBridgeProfile(
+  store: BridgeProfileStore,
+  profileId: string
+): BridgeProfileStore {
+  const nextProfiles = store.profiles.filter((profile) => profile.id !== profileId);
+  const nextActiveProfileId =
+    store.activeProfileId === profileId ? nextProfiles[0]?.id ?? null : store.activeProfileId;
+
+  return sanitizeBridgeProfileStore({
+    activeProfileId: nextActiveProfileId,
+    profiles: nextProfiles,
+  });
 }
 
 export function getActiveBridgeProfile(
@@ -216,6 +276,10 @@ function normalizeBridgeProfile(value: unknown): BridgeProfile | null {
     name?: unknown;
     bridgeUrl?: unknown;
     bridgeToken?: unknown;
+    authMode?: unknown;
+    githubUserLogin?: unknown;
+    githubCodespaceName?: unknown;
+    githubRepositoryFullName?: unknown;
     createdAt?: unknown;
     updatedAt?: unknown;
   };
@@ -234,9 +298,30 @@ function normalizeBridgeProfile(value: unknown): BridgeProfile | null {
     name: deriveBridgeProfileName(normalizeNonEmptyString(record.name), bridgeUrl),
     bridgeUrl,
     bridgeToken,
+    authMode: normalizeBridgeProfileAuthMode(record.authMode) ?? 'bridgeToken',
+    githubUserLogin: normalizeOptionalMetadataValue(record.githubUserLogin),
+    githubCodespaceName: normalizeOptionalMetadataValue(record.githubCodespaceName),
+    githubRepositoryFullName: normalizeOptionalMetadataValue(record.githubRepositoryFullName),
     createdAt: normalizeTimestamp(record.createdAt),
     updatedAt: normalizeTimestamp(record.updatedAt),
   };
+}
+
+function normalizeBridgeProfileAuthMode(value: unknown): BridgeProfileAuthMode | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (normalized === 'bridgeToken' || normalized === 'githubOAuth') {
+    return normalized;
+  }
+
+  return null;
+}
+
+function normalizeOptionalMetadataValue(value: unknown): string | null {
+  return normalizeNonEmptyString(value);
 }
 
 function normalizeBridgeToken(value: unknown): string | null {

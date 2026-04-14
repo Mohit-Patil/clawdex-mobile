@@ -4,9 +4,9 @@
   <img src="https://raw.githubusercontent.com/Mohit-Patil/clawdex-mobile/main/screenshots/social/clawdex-social-poster-1200x675.png" alt="Clawdex social banner" width="100%" />
 </p>
 
-Run Codex or OpenCode from your phone. `clawdex-mobile` ships the bridge CLI plus bundled Rust bridge binaries for supported hosts, and the mobile app pairs to that bridge over Tailscale or local LAN.
+Run Codex or OpenCode from your phone. `clawdex-mobile` ships the bridge CLI plus bundled Rust bridge binaries for supported hosts, and the mobile app pairs to that bridge over Tailscale, local LAN, or GitHub Codespaces forwarded HTTPS URLs.
 
-This project is for trusted/private networking only. Do not expose the bridge publicly.
+This project is for trusted/private networking by default. GitHub Codespaces is supported as an internet-reachable exception: keep bridge auth enabled, use only repos you trust, and remember forwarded public ports reset to private when a codespace restarts.
 
 ## What You Get
 
@@ -51,6 +51,43 @@ npm install -g clawdex-mobile@latest
 clawdex init
 clawdex stop
 ```
+
+## GitHub Codespaces
+
+You can run the bridge inside a GitHub Codespace instead of keeping a laptop or server online.
+
+From a repo checkout inside Codespaces:
+
+```bash
+npm run setup:wizard
+```
+
+Pick `GitHub Codespaces` as the network mode. The setup flow writes forwarded HTTPS bridge URLs into `.env.secure`, and bridge startup will try to mark both bridge ports public automatically.
+
+Notes:
+
+- The mobile app should pair to the printed `https://<codespace>-8787.app.github.dev` URL, not `127.0.0.1`.
+- Browser preview uses a second forwarded port (`8788` by default), so both ports need public visibility.
+- GitHub resets public forwarded ports back to private when a codespace restarts. Restarting the bridge reruns the visibility step.
+- If automatic visibility setup fails, run `gh codespace ports visibility 8787:public 8788:public`.
+- If the mobile app is built with `EXPO_PUBLIC_GITHUB_CLIENT_ID`, users can now tap `Use GitHub Codespaces` in onboarding/settings, sign in with GitHub, pick a Codespace, and connect without manually copying the bridge token.
+- The app can also create a new repo-backed Codespace directly. It prefers `<signed-in-user>/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>` first. If that repo does not exist, it automatically forks `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>` into the signed-in user account, then creates the Codespace there.
+
+This repo now also includes a Codespaces bootstrap flow. On Codespace start/resume, `.devcontainer/devcontainer.json` runs:
+
+```bash
+npm run codespaces:bootstrap
+```
+
+During initial Codespace creation, the devcontainer also runs:
+
+```bash
+npm run codespaces:bootstrap -- --prepare-only
+```
+
+That pre-installs Codex and prebuilds the Rust bridge binary so the later startup path is faster. The normal bootstrap command rewrites `.env.secure` for Codespaces with `codex` as the only enabled engine and starts the bridge in the background. You can rerun either command manually any time.
+
+In Codespaces mode, the bootstrap also enables bridge-side GitHub bearer auth for the current `CODESPACE_NAME`, so the mobile app can authenticate with the same GitHub OAuth token it used to discover and start the Codespace.
 
 ## OpenCode Setup
 

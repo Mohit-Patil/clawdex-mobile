@@ -81,9 +81,9 @@ function packagedBinaryPath(rootDir = repoRoot(), target = resolveRuntimeTarget(
   return path.join(rootDir, "vendor", "bridge-binaries", target, binaryNameForTarget(target));
 }
 
-function builtBinaryPath(rootDir = repoRoot(), platform = os.platform()) {
+function builtBinaryPath(rootDir = repoRoot(), platform = os.platform(), profile = "release") {
   const binaryName = platform === "win32" ? "codex-rust-bridge.exe" : "codex-rust-bridge";
-  return path.join(rootDir, "services", "rust-bridge", "target", "release", binaryName);
+  return path.join(rootDir, "services", "rust-bridge", "target", profile, binaryName);
 }
 
 function ensureExecutable(filePath) {
@@ -168,13 +168,13 @@ function main() {
       return;
     }
     case "current-built-path": {
-      console.log(builtBinaryPath(rootDir));
+      console.log(builtBinaryPath(rootDir, os.platform(), flags.profile || "release"));
       return;
     }
     case "stage-current": {
       const destination = stageBinary({
         rootDir,
-        from: builtBinaryPath(rootDir),
+        from: builtBinaryPath(rootDir, os.platform(), flags.profile || "release"),
         target: flags.target || resolveRuntimeTarget(),
       });
       console.log(destination);
@@ -194,8 +194,8 @@ function main() {
       console.error("  node scripts/bridge-binary.js current-target");
       console.error("  node scripts/bridge-binary.js has-current-packaged");
       console.error("  node scripts/bridge-binary.js current-packaged-path [--target <target>]");
-      console.error("  node scripts/bridge-binary.js current-built-path");
-      console.error("  node scripts/bridge-binary.js stage-current [--target <target>]");
+      console.error("  node scripts/bridge-binary.js current-built-path [--profile <debug|release>]");
+      console.error("  node scripts/bridge-binary.js stage-current [--target <target>] [--profile <debug|release>]");
       console.error("  node scripts/bridge-binary.js stage --from <binary> [--target <target>]");
       process.exit(1);
   }

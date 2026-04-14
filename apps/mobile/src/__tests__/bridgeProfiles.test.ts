@@ -3,6 +3,8 @@ import {
   createEmptyBridgeProfileStore,
   deriveBridgeProfileName,
   parseBridgeProfileStore,
+  removeBridgeProfile,
+  renameBridgeProfile,
   setActiveBridgeProfile,
   upsertBridgeProfile,
 } from '../bridgeProfiles';
@@ -35,6 +37,25 @@ describe('bridgeProfiles', () => {
     expect(updated.profiles).toHaveLength(1);
     expect(updated.profiles[0]?.name).toBe('Office Mac Mini');
     expect(updated.profiles[0]?.bridgeToken).toBe('secret-two');
+    expect(updated.profiles[0]?.authMode).toBe('bridgeToken');
+  });
+
+  it('stores GitHub auth metadata for Codespaces profiles', () => {
+    const created = upsertBridgeProfile(createEmptyBridgeProfileStore(), {
+      name: 'clawdex-codespace · octocat-codespace',
+      bridgeUrl: 'https://octocat-codespace-8787.app.github.dev',
+      bridgeToken: 'gho_token',
+      authMode: 'githubOAuth',
+      githubUserLogin: 'octocat',
+      githubCodespaceName: 'octocat-codespace',
+      githubRepositoryFullName: 'octocat/clawdex-codespace',
+      activate: true,
+    }).store;
+
+    expect(created.profiles[0]?.authMode).toBe('githubOAuth');
+    expect(created.profiles[0]?.githubUserLogin).toBe('octocat');
+    expect(created.profiles[0]?.githubCodespaceName).toBe('octocat-codespace');
+    expect(created.profiles[0]?.githubRepositoryFullName).toBe('octocat/clawdex-codespace');
   });
 
   it('parses stores and drops invalid active ids', () => {
@@ -81,6 +102,56 @@ describe('bridgeProfiles', () => {
 
     expect(switched.activeProfileId).toBe('profile-2');
     expect(switched.profiles).toHaveLength(2);
+  });
+
+  it('renames a saved profile without touching its bridge config', () => {
+    const base = parseBridgeProfileStore(
+      JSON.stringify({
+        activeProfileId: 'profile-1',
+        profiles: [
+          {
+            id: 'profile-1',
+            name: 'Server A',
+            bridgeUrl: 'http://10.0.0.1:8787',
+            bridgeToken: 'token-a',
+          },
+        ],
+      })
+    );
+
+    const renamed = renameBridgeProfile(base, 'profile-1', 'Office Bridge');
+
+    expect(renamed.profiles[0]?.name).toBe('Office Bridge');
+    expect(renamed.profiles[0]?.bridgeUrl).toBe('http://10.0.0.1:8787');
+    expect(renamed.profiles[0]?.bridgeToken).toBe('token-a');
+  });
+
+  it('removes the active profile and promotes another saved profile', () => {
+    const base = parseBridgeProfileStore(
+      JSON.stringify({
+        activeProfileId: 'profile-1',
+        profiles: [
+          {
+            id: 'profile-1',
+            name: 'Server A',
+            bridgeUrl: 'http://10.0.0.1:8787',
+            bridgeToken: 'token-a',
+          },
+          {
+            id: 'profile-2',
+            name: 'Server B',
+            bridgeUrl: 'http://10.0.0.2:8787',
+            bridgeToken: 'token-b',
+          },
+        ],
+      })
+    );
+
+    const next = removeBridgeProfile(base, 'profile-1');
+
+    expect(next.activeProfileId).toBe('profile-2');
+    expect(next.profiles).toHaveLength(1);
+    expect(next.profiles[0]?.id).toBe('profile-2');
   });
 });
 
@@ -221,6 +292,10 @@ describe('bridgeProfiles storage', () => {
           name: 'Blocked Web Bridge',
           bridgeUrl: 'http://127.0.0.1:8787',
           bridgeToken: 'token-web',
+          authMode: 'bridgeToken' as const,
+          githubUserLogin: null,
+          githubCodespaceName: null,
+          githubRepositoryFullName: null,
           createdAt: '2026-04-07T00:00:00.000Z',
           updatedAt: '2026-04-07T00:00:00.000Z',
         },

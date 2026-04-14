@@ -58,6 +58,7 @@
     "secure:setup": "./scripts/setup-secure-dev.sh",
     "secure:bridge": "node ./scripts/start-bridge-secure.js",
     "secure:bridge:dev": "node ./scripts/start-bridge-secure.js --dev",
+    "codespaces:bootstrap": "node ./scripts/codespaces-bootstrap.js",
     "bridge:ts": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "version:sync": "node scripts/sync-versions.js",
     "build": "npm run --workspaces build",

@@ -79,6 +79,91 @@ function buildBridgeUrl(host, port) {
   return `http://${formatHostForUrl(host)}:${port}`;
 }
 
+function parsePort(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function normalizeBaseUrl(rawUrl) {
+  const trimmed = String(rawUrl ?? "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "";
+    }
+    if (!parsed.hostname || parsed.username || parsed.password) {
+      return "";
+    }
+
+    const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+    parsed.pathname = normalizedPath || "";
+    parsed.search = "";
+    parsed.hash = "";
+    parsed.username = "";
+    parsed.password = "";
+
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function isCodespacesMode(env) {
+  const networkMode = readNonEmptyEnv(env, "BRIDGE_NETWORK_MODE").toLowerCase();
+  const rawCodespaces = readNonEmptyEnv(env, "CODESPACES").toLowerCase();
+  return networkMode === "codespaces" || rawCodespaces === "true";
+}
+
+function resolveBridgeBuildProfile(env) {
+  const explicitProfile = readNonEmptyEnv(env, "CLAWDEX_BRIDGE_BUILD_PROFILE").toLowerCase();
+  if (explicitProfile === "debug" || explicitProfile === "release") {
+    return explicitProfile;
+  }
+
+  return isCodespacesMode(env) ? "debug" : "release";
+}
+
+function isCodespacesAutoPublicEnabled(env) {
+  const raw = readNonEmptyEnv(env, "BRIDGE_CODESPACES_AUTO_PUBLIC").toLowerCase();
+  return raw ? raw !== "false" : true;
+}
+
+function buildCodespacesForwardedUrl(env, port) {
+  const codespaceName = readNonEmptyEnv(env, "CODESPACE_NAME");
+  const forwardingDomain = readNonEmptyEnv(env, "GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN");
+  if (!codespaceName || !forwardingDomain) {
+    return "";
+  }
+  return `https://${codespaceName}-${port}.${forwardingDomain}`;
+}
+
+function resolveBridgeAccessUrl(env, endpoint) {
+  const configured = normalizeBaseUrl(readNonEmptyEnv(env, "BRIDGE_CONNECT_URL"));
+  if (configured) {
+    return configured;
+  }
+
+  if (isCodespacesMode(env)) {
+    const forwarded = normalizeBaseUrl(buildCodespacesForwardedUrl(env, endpoint.port));
+    if (forwarded) {
+      return forwarded;
+    }
+  }
+
+  if (isUnspecifiedBindHost(endpoint.host)) {
+    return "";
+  }
+
+  return buildBridgeUrl(endpoint.host, endpoint.port);
+}
+
 function isUnspecifiedBindHost(host) {
   const normalized = String(host || "").trim().toLowerCase();
   return normalized === "0.0.0.0" || normalized === "::" || normalized === "[::]";
@@ -86,13 +171,14 @@ function isUnspecifiedBindHost(host) {
 
 function buildPairingPayload(env, endpoint) {
   const token = readNonEmptyEnv(env, "BRIDGE_AUTH_TOKEN");
-  if (!token || isUnspecifiedBindHost(endpoint.host)) {
+  const bridgeUrl = resolveBridgeAccessUrl(env, endpoint);
+  if (!token || !bridgeUrl) {
     return null;
   }
 
   return JSON.stringify({
     type: "clawdex-bridge-pair",
-    bridgeUrl: buildBridgeUrl(endpoint.host, endpoint.port),
+    bridgeUrl,
     bridgeToken: token,
   });
 }
@@ -151,9 +237,7 @@ function printPairingQr(env, endpoint) {
     console.log("");
     console.log("Bridge token QR fallback (scan from mobile onboarding):");
     qr.generate(tokenPayload, { small: true });
-    console.log(
-      `Full pairing QR unavailable because BRIDGE_HOST=${endpoint.host} is a bind address. Enter URL manually in onboarding.`
-    );
+    console.log("Full pairing QR unavailable because no phone-connectable bridge URL was resolved. Enter URL manually in onboarding.");
     console.log("");
     return true;
   } catch (error) {
@@ -200,15 +284,158 @@ function shouldShowPairingQr(env) {
 }
 
 function printBridgeAccessDetails(env, endpoint) {
-  const bridgeUrl = buildBridgeUrl(endpoint.host, endpoint.port);
-  console.log(`Bridge URL: ${bridgeUrl}`);
+  const bridgeUrl = resolveBridgeAccessUrl(env, endpoint);
+  console.log(`Bridge URL: ${bridgeUrl || "not resolved automatically"}`);
 
   const token = readNonEmptyEnv(env, "BRIDGE_AUTH_TOKEN");
   if (token) {
     console.log(`Bridge token: ${token}`);
   }
 
+  if (!bridgeUrl || bridgeUrl !== buildBridgeUrl(endpoint.host, endpoint.port)) {
+    console.log(`Bridge bind: ${buildBridgeUrl(endpoint.host, endpoint.port)}`);
+  }
+
+  if (readNonEmptyEnv(env, "BRIDGE_GITHUB_CODESPACES_AUTH").toLowerCase() === "true") {
+    console.log("GitHub auth: enabled for Codespaces direct sign-in");
+  }
+
   return bridgeUrl;
+}
+
+function ghAuthEnv(env) {
+  const githubToken =
+    readNonEmptyEnv(process.env, "GH_TOKEN") ||
+    readNonEmptyEnv(process.env, "GITHUB_TOKEN") ||
+    readNonEmptyEnv(env, "GH_TOKEN") ||
+    readNonEmptyEnv(env, "GITHUB_TOKEN");
+
+  if (!githubToken) {
+    return { ...process.env, ...env };
+  }
+
+  return {
+    ...process.env,
+    ...env,
+    GH_TOKEN: githubToken,
+  };
+}
+
+function codespaceSelectionArgs(env) {
+  const name = readNonEmptyEnv(env, "CODESPACE_NAME");
+  return name ? ["-c", name] : [];
+}
+
+function formatCodespacesVisibilityCommand(env, ports) {
+  const uniquePorts = [...new Set(ports.filter((value) => Number.isFinite(value) && value > 0))];
+  const visibilityArgs = uniquePorts.map((port) => `${port}:public`);
+  const selectionArgs = codespaceSelectionArgs(env);
+  return ["gh", "codespace", "ports", "visibility", ...visibilityArgs, ...selectionArgs].join(" ");
+}
+
+function updateCodespacesBrowseUrls(env, ports) {
+  if (!commandExists("gh")) {
+    return;
+  }
+
+  const result = spawnSync(
+    "gh",
+    ["codespace", "ports", "--json", "sourcePort,browseUrl", ...codespaceSelectionArgs(env)],
+    {
+      encoding: "utf8",
+      env: ghAuthEnv(env),
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+  if ((result.status ?? 1) !== 0 || !result.stdout) {
+    return;
+  }
+
+  let rows;
+  try {
+    rows = JSON.parse(result.stdout);
+  } catch {
+    return;
+  }
+
+  if (!Array.isArray(rows)) {
+    return;
+  }
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object") {
+      continue;
+    }
+    const sourcePort = parsePort(row.sourcePort, 0);
+    const browseUrl = normalizeBaseUrl(row.browseUrl);
+    if (!sourcePort || !browseUrl || !ports.includes(sourcePort)) {
+      continue;
+    }
+
+    if (sourcePort === parsePort(env.BRIDGE_PORT, 8787)) {
+      env.BRIDGE_CONNECT_URL = browseUrl;
+    }
+    if (sourcePort === parsePort(env.BRIDGE_PREVIEW_PORT, sourcePort + 1)) {
+      env.BRIDGE_PREVIEW_CONNECT_URL = browseUrl;
+    }
+  }
+}
+
+function ensureCodespacesPortsArePublic(env, ports) {
+  if (!isCodespacesMode(env) || !isCodespacesAutoPublicEnabled(env)) {
+    return [];
+  }
+
+  const uniquePorts = [...new Set(ports.filter((value) => Number.isFinite(value) && value > 0))];
+  const notes = [];
+
+  if (uniquePorts.length === 0) {
+    return notes;
+  }
+
+  if (!commandExists("gh")) {
+    notes.push(
+      `Codespaces mode detected, but GitHub CLI is unavailable. Run '${formatCodespacesVisibilityCommand(
+        env,
+        uniquePorts
+      )}' or mark those forwarded ports public in the Ports panel.`
+    );
+    return notes;
+  }
+
+  const result = spawnSync(
+    "gh",
+    [
+      "codespace",
+      "ports",
+      "visibility",
+      ...uniquePorts.map((port) => `${port}:public`),
+      ...codespaceSelectionArgs(env),
+    ],
+    {
+      encoding: "utf8",
+      env: ghAuthEnv(env),
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  if ((result.status ?? 1) !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    const suffix = detail ? ` (${detail.split(/\r?\n/, 1)[0]})` : "";
+    notes.push(
+      `Could not set Codespaces forwarded ports public automatically${suffix}. Run '${formatCodespacesVisibilityCommand(
+        env,
+        uniquePorts
+      )}' or update the Ports panel manually.`
+    );
+    return notes;
+  }
+
+  updateCodespacesBrowseUrls(env, uniquePorts);
+  notes.push(
+    `Codespaces forwarded ports are set to public for bridge access: ${uniquePorts.join(", ")}.`
+  );
+  return notes;
 }
 
 function bridgePidFile(rootDir) {
@@ -377,10 +604,26 @@ function spawnAndRelay(command, args, options) {
     ...options,
   });
 
+  const env = options?.env ?? process.env;
+  const healthTimeoutMs = options?.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS;
+
   child.on("error", (error) => {
     console.error(`error: failed to start ${command}: ${error.message}`);
     process.exit(1);
   });
+
+  if (child.pid) {
+    const bridgePort = parsePort(env.BRIDGE_PORT, 8787);
+    const previewPort = parsePort(env.BRIDGE_PREVIEW_PORT, bridgePort + 1);
+    void waitForHealth(env, child.pid, healthTimeoutMs)
+      .then(() => {
+        const notes = ensureCodespacesPortsArePublic(env, [bridgePort, previewPort]);
+        for (const note of notes) {
+          console.log(note);
+        }
+      })
+      .catch(() => {});
+  }
 
   child.on("exit", (code, signal) => {
     if (signal) {
@@ -396,6 +639,7 @@ async function spawnDetachedAndWait(command, args, options) {
   const logPath = bridgeLogFile(rootDir);
   const host = env.BRIDGE_HOST || "127.0.0.1";
   const port = env.BRIDGE_PORT || "8787";
+  const previewPort = parsePort(env.BRIDGE_PREVIEW_PORT, parsePort(port, 8787) + 1);
   const healthUrl = new URL(`http://${formatHostForUrl(host)}:${port}/health`);
   const existingPid = readPidFile(rootDir);
 
@@ -405,7 +649,11 @@ async function spawnDetachedAndWait(command, args, options) {
       console.log(`Logs: ${logPath}`);
       console.log("Bridge is healthy.");
       const endpoint = { host, port };
+      const notes = ensureCodespacesPortsArePublic(env, [parsePort(port, 8787), previewPort]);
       printBridgeAccessDetails(env, endpoint);
+      for (const note of notes) {
+        console.log(note);
+      }
       if (shouldShowPairingQr(env) && !printPairingQr(env, endpoint)) {
         printPairingQrUnavailableMessage(env);
       }
@@ -452,7 +700,11 @@ async function spawnDetachedAndWait(command, args, options) {
   try {
     const endpoint = await waitForHealth(env, child.pid, healthTimeoutMs);
     console.log("Bridge is healthy.");
+    const notes = ensureCodespacesPortsArePublic(env, [parsePort(endpoint.port, 8787), previewPort]);
     printBridgeAccessDetails(env, endpoint);
+    for (const note of notes) {
+      console.log(note);
+    }
 
     if (shouldShowPairingQr(env) && !printPairingQr(env, endpoint)) {
       printPairingQrUnavailableMessage(env);
@@ -464,9 +716,12 @@ async function spawnDetachedAndWait(command, args, options) {
   }
 }
 
-function buildBridgeFromSource(rootDir, env) {
+function buildBridgeFromSource(rootDir, env, profile) {
   const cargoCmd = "cargo";
-  const args = ["build", "--release", "--locked"];
+  const args = ["build", "--locked"];
+  if (profile === "release") {
+    args.push("--release");
+  }
   const result = spawnSync(cargoCmd, args, {
     cwd: path.join(rootDir, "services", "rust-bridge"),
     env,
@@ -515,6 +770,7 @@ function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
     };
   }
 
+  const buildProfile = resolveBridgeBuildProfile(env);
   const packagedBinary = packagedBinaryPath(rootDir, resolveRuntimeTarget());
   if (!forceSourceBuild && packagedBinary && fs.existsSync(packagedBinary)) {
     ensureExecutable(packagedBinary);
@@ -527,7 +783,7 @@ function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
     };
   }
 
-  const builtBinary = builtBinaryPath(rootDir, os.platform());
+  const builtBinary = builtBinaryPath(rootDir, os.platform(), buildProfile);
   if (isBuiltBinaryFresh(rootDir, builtBinary)) {
     ensureExecutable(builtBinary);
     return {
@@ -551,7 +807,7 @@ function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
     process.exit(1);
   }
 
-  buildBridgeFromSource(rootDir, env);
+  buildBridgeFromSource(rootDir, env, buildProfile);
 
   if (!fs.existsSync(builtBinary)) {
     console.error(`error: expected built bridge binary at ${builtBinary}, but it was not created.`);
@@ -583,8 +839,14 @@ async function start() {
     env.BRIDGE_RUN_MODE = "dev";
   }
   const backgroundMode = process.argv.includes("--background");
+  const prepareOnly = process.argv.includes("--prepare-only");
   const forceSourceBuild = env.CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD === "true";
   const launch = resolveLaunch(rootDir, env, { devMode, forceSourceBuild });
+
+  if (prepareOnly) {
+    console.log(`Bridge binary ready: ${launch.command}`);
+    return;
+  }
 
   if (backgroundMode) {
     await spawnDetachedAndWait(launch.command, launch.args, {

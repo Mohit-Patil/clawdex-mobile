@@ -240,6 +240,19 @@ export interface AccountSnapshot {
   requiresOpenaiAuth: boolean;
 }
 
+export type AccountLoginStartResponse =
+  | {
+      type: 'apiKey';
+    }
+  | {
+      type: 'chatgpt';
+      loginId: string;
+      authUrl: string;
+    }
+  | {
+      type: 'chatgptAuthTokens';
+    };
+
 export type ApprovalPolicy =
   | 'untrusted'
   | 'on-request'
@@ -522,6 +535,7 @@ export interface BrowserPreviewSession {
   sessionId: string;
   targetUrl: string;
   previewPort: number;
+  previewBaseUrl?: string | null;
   bootstrapPath: string;
   createdAt: string;
   lastAccessedAt: string;

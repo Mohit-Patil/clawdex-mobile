@@ -37,6 +37,65 @@ Published npm releases bundle prebuilt bridge binaries for `darwin-arm64`, `darw
 
 Published CLI installs are bridge-only. They do not include the Expo workspace or mobile app source files.
 
+## GitHub Codespaces Setup
+
+Codespaces can replace a user-managed always-on machine for development and lightweight remote use.
+
+From a repo checkout inside an active codespace:
+
+```bash
+npm run setup:wizard
+```
+
+Choose `GitHub Codespaces` for the bridge network mode.
+
+What that does:
+
+- binds the bridge locally inside the codespace
+- writes `BRIDGE_CONNECT_URL` and `BRIDGE_PREVIEW_CONNECT_URL` using the codespace forwarded HTTPS domain
+- enables bridge-side GitHub bearer auth for the current codespace
+- starts the bridge normally
+- attempts to mark the bridge port and browser-preview port public on each startup
+
+Important constraints:
+
+- Pair the mobile app to the printed `https://<codespace>-8787.app.github.dev` URL, not `127.0.0.1`
+- Browser preview uses the preview port (`8788` by default), so that forwarded port must also be public
+- GitHub resets public forwarded ports back to private whenever the codespace restarts
+- Keep bridge auth enabled and use Codespaces only for repos you trust, because public forwarded ports are internet-reachable
+- If the mobile app build sets `EXPO_PUBLIC_GITHUB_CLIENT_ID`, onboarding/settings can now sign in with GitHub, start the Codespace, and connect directly with the same OAuth token instead of copying `BRIDGE_AUTH_TOKEN`
+- The same in-app GitHub flow can create a new Codespace. It prefers `<signed-in-user>/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>`. If that repo does not exist yet, Clawdex automatically forks `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>` into the signed-in user account and creates the Codespace from that fork
+
+Manual recovery if port visibility does not update automatically:
+
+```bash
+gh codespace ports visibility 8787:public 8788:public
+```
+
+### Codespaces Bootstrap
+
+The repo devcontainer now includes:
+
+- `postCreateCommand`: `npm install --include=dev && npm run codespaces:bootstrap -- --prepare-only`
+- `postStartCommand`: `npm run codespaces:bootstrap`
+
+`npm run codespaces:bootstrap` does the following:
+
+- installs the Codex CLI via `npm install -g @openai/codex` if it is missing
+- in `--prepare-only` mode, prebuilds the Rust bridge binary without starting it
+- rewrites `.env.secure` for `BRIDGE_NETWORK_MODE=codespaces` with `BRIDGE_ACTIVE_ENGINE=codex`, `BRIDGE_ENABLED_ENGINES=codex`, and `BRIDGE_GITHUB_CODESPACES_AUTH=true`
+- starts the bridge in the background unless you set `CLAWDEX_CODESPACES_SKIP_START=true` or pass `--no-start`
+
+That means the first Codespace create now front-loads the expensive bridge compile during `postCreateCommand`, so the later `postStartCommand` can usually start the bridge much faster.
+
+Manual examples:
+
+```bash
+npm run codespaces:bootstrap -- --prepare-only
+npm run codespaces:bootstrap
+npm run codespaces:bootstrap -- --no-start
+```
+
 ## Manual Secure Setup (No Wizard)
 
 ### 1) Install dependencies
@@ -78,7 +137,7 @@ When both CLIs are selected, the bridge starts both backends and merges chat lis
 
 ### 4) Pair from the mobile app
 
-Open the installed mobile app on your phone, then scan the bridge QR. If needed, enter the bridge URL manually (for example `http://100.x.y.z:8787` or `http://192.168.x.y:8787`). The chosen bridge URL is stored on-device and can be changed later in Settings.
+Open the installed mobile app on your phone, then scan the bridge QR. If needed, enter the bridge URL manually (for example `http://100.x.y.z:8787`, `http://192.168.x.y:8787`, or `https://<codespace>-8787.app.github.dev`). The chosen bridge URL is stored on-device and can be changed later in Settings.
 
 ### In-app Bridge Maintenance
 
@@ -173,11 +232,17 @@ npm run teardown -- --yes
 
 | Variable | Purpose |
 |---|---|
+| `BRIDGE_NETWORK_MODE` | bridge connectivity mode (`tailscale`, `local`, or `codespaces`) |
 | `BRIDGE_HOST` | bind host for rust bridge |
 | `BRIDGE_PORT` | bridge port (default `8787`) |
 | `BRIDGE_PREVIEW_PORT` | browser preview port for proxied localhost web apps (default `BRIDGE_PORT + 1`) |
+| `BRIDGE_CONNECT_URL` | externally reachable bridge base URL used for pairing/QR output |
+| `BRIDGE_PREVIEW_CONNECT_URL` | externally reachable browser preview base URL |
 | `BRIDGE_AUTH_TOKEN` | required auth token |
 | `BRIDGE_ALLOW_QUERY_TOKEN_AUTH` | query-token auth fallback |
+| `BRIDGE_GITHUB_CODESPACES_AUTH` | accept GitHub bearer tokens for the current codespace |
+| `BRIDGE_GITHUB_CODESPACE_NAME` | codespace name used when validating GitHub bearer tokens |
+| `BRIDGE_GITHUB_API_URL` | GitHub REST API base URL for Codespaces auth checks |
 | `CODEX_CLI_BIN` | codex executable |
 | `BRIDGE_ACTIVE_ENGINE` | internal preferred routing backend used when multiple harnesses are enabled |
 | `BRIDGE_ENABLED_ENGINES` | selected harnesses to expose (`codex`, `opencode`, or both) |
@@ -194,6 +259,11 @@ npm run teardown -- --yes
 | Variable | Purpose |
 |---|---|
 | `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` | token used by local mobile dev builds |
+| `EXPO_PUBLIC_GITHUB_CLIENT_ID` | GitHub OAuth app client ID for in-app Codespaces sign-in |
+| `EXPO_PUBLIC_GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN` | forwarded port domain used to derive Codespaces bridge URLs (`app.github.dev` by default) |
+| `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME` | repository name to sort matching Codespaces first in the in-app picker |
+| `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER` | template/source repository owner used for automatic forking when the signed-in user does not have a same-name repo |
+| `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_REF` | optional git ref/branch used when creating a new Codespace |
 | `EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH` | query-token behavior for WebSocket auth fallback |
 | `EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE` | suppress insecure-HTTP warning |
 | `EXPO_PUBLIC_PRIVACY_POLICY_URL` | in-app Privacy link |
@@ -213,8 +283,9 @@ If you enable the optional tip jar:
 
 ## Production Readiness Checklist
 
-- Keep bridge network-private only (Tailscale/private LAN/VPN + host firewall)
-- Require `BRIDGE_AUTH_TOKEN`
+- Keep bridge network-private only by default (Tailscale/private LAN/VPN + host firewall)
+- If using GitHub Codespaces, remember the bridge is internet-reachable whenever its forwarded ports are public
+- Require bridge auth of some kind (`BRIDGE_AUTH_TOKEN` or GitHub Codespaces auth)
 - Keep `BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true` only on private networks (required for Android WS auth fallback)
 - Do not set `BRIDGE_ALLOW_INSECURE_NO_AUTH=true` outside local debugging
 - Scope `BRIDGE_WORKDIR` to minimal required root

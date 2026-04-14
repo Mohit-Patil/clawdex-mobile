@@ -40,6 +40,8 @@ interface OnboardingScreenProps {
   initialBridgeToken?: string | null;
   allowInsecureRemoteBridge?: boolean;
   allowQueryTokenAuth?: boolean;
+  githubCodespacesEnabled?: boolean;
+  onOpenGitHubCodespaces?: () => void;
   onSave: (draft: OnboardingBridgeProfileDraft) => void | Promise<void>;
   onCancel?: () => void;
 }
@@ -110,6 +112,8 @@ export function OnboardingScreen({
   initialBridgeToken,
   allowInsecureRemoteBridge = false,
   allowQueryTokenAuth = false,
+  githubCodespacesEnabled = false,
+  onOpenGitHubCodespaces,
   onSave,
   onCancel,
 }: OnboardingScreenProps) {
@@ -461,6 +465,18 @@ export function OnboardingScreen({
 
               <View style={styles.introFooter}>
                 {showOnboardingDock ? <OnboardingStepDock currentStage={currentSetupStage} /> : null}
+                {githubCodespacesEnabled && onOpenGitHubCodespaces ? (
+                  <Pressable
+                    onPress={onOpenGitHubCodespaces}
+                    style={({ pressed }) => [
+                      styles.scanButton,
+                      pressed && styles.scanButtonPressed,
+                    ]}
+                  >
+                    <Ionicons name="logo-github" size={18} color={theme.colors.textPrimary} />
+                    <Text style={styles.scanButtonText}>Use GitHub Codespaces</Text>
+                  </Pressable>
+                ) : null}
                 <Pressable
                   onPress={goToConnectStep}
                   style={({ pressed }) => [
@@ -529,6 +545,29 @@ export function OnboardingScreen({
                       manually.
                     </Text>
                   </View>
+
+                  {githubCodespacesEnabled && onOpenGitHubCodespaces ? (
+                    <>
+                      <Pressable
+                        onPress={onOpenGitHubCodespaces}
+                        style={({ pressed }) => [
+                          styles.scanButton,
+                          pressed && styles.scanButtonPressed,
+                        ]}
+                      >
+                        <Ionicons
+                          name="logo-github"
+                          size={16}
+                          color={theme.colors.textPrimary}
+                        />
+                        <Text style={styles.scanButtonText}>Connect with GitHub Codespaces</Text>
+                      </Pressable>
+                      <Text style={styles.helperText}>
+                        Best for Codespaces. Sign in with GitHub, start the Codespace, and connect
+                        without copying the bridge token manually.
+                      </Text>
+                    </>
+                  ) : null}
 
                   <Pressable
                     onPress={() => {

@@ -978,6 +978,7 @@ print_existing_setup_summary() {
   local port=""
   local token=""
   local network_mode=""
+  local connect_url=""
   local harnesses=""
   local source_path=""
   local saved_active_engine="$ACTIVE_ENGINE"
@@ -995,6 +996,7 @@ print_existing_setup_summary() {
   port="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
   token="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
   network_mode="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
+  connect_url="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_CONNECT_URL")"
   harnesses="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")"
   if [[ -n "$harnesses" ]] && ! parse_existing_engine_list_csv "$harnesses"; then
     harnesses=""
@@ -1018,6 +1020,9 @@ print_existing_setup_summary() {
   echo "bridge.port: $port"
   if [[ -n "$network_mode" ]]; then
     echo "bridge.networkMode: $network_mode"
+  fi
+  if [[ -n "$connect_url" ]]; then
+    echo "bridge.connectUrl: $connect_url"
   fi
   if [[ -n "$harnesses" ]]; then
     echo "bridge.harnesses: $harnesses"
@@ -1094,7 +1099,11 @@ choose_config_action() {
 }
 
 choose_bridge_network_mode() {
-  menu_select "Bridge network mode" "Local (LAN)" "Tailscale"
+  if [[ "${CODESPACES:-}" == "true" ]]; then
+    menu_select "Bridge network mode" "GitHub Codespaces" "Local (LAN)" "Tailscale"
+  else
+    menu_select "Bridge network mode" "Local (LAN)" "Tailscale" "GitHub Codespaces"
+  fi
   case "$MENU_RESULT" in
     "Local (LAN)")
       NETWORK_MODE="local"
@@ -1103,6 +1112,10 @@ choose_bridge_network_mode() {
     "Tailscale")
       NETWORK_MODE="tailscale"
       info "Tailscale mode selected."
+      ;;
+    "GitHub Codespaces")
+      NETWORK_MODE="codespaces"
+      info "GitHub Codespaces mode selected."
       ;;
     *)
       abort_wizard "Unexpected bridge network mode."
@@ -1143,6 +1156,17 @@ infer_network_mode_from_host() {
     return 0
   fi
   printf '%s' "local"
+}
+
+infer_network_mode() {
+  local host="$1"
+  local connect_url="$2"
+  connect_url="$(printf '%s' "$connect_url" | tr -d '[:space:]')"
+  if [[ "$connect_url" == https://*.app.github.dev* ]]; then
+    printf '%s' "codespaces"
+    return 0
+  fi
+  infer_network_mode_from_host "$host"
 }
 
 ensure_core_tools() {
@@ -1518,6 +1542,16 @@ Steps:
 - Scan the bridge token QR from the bridge terminal."
 }
 
+print_phone_codespaces_note() {
+  print_note_box "Phone setup (GitHub Codespaces)" "Use the forwarded HTTPS bridge URL from this codespace.
+
+Steps:
+- Keep the codespace running while using Clawdex.
+- The bridge startup script will try to make bridge ports public automatically on each start.
+- Pair in the mobile app with the shown HTTPS bridge URL and bridge token.
+- If pairing fails after a codespace restart, rerun the bridge start command or set the bridge + preview forwarded ports public again with 'gh codespace ports visibility ...'."
+}
+
 confirm_phone_local_quickstart() {
   local note_shown="false"
 
@@ -1588,6 +1622,34 @@ confirm_phone_local_ready() {
   confirm_phone_local_manual
 }
 
+confirm_phone_codespaces_ready() {
+  print_phone_codespaces_note
+  if [[ "$FLOW" == "quickstart" ]]; then
+    if ! confirm_prompt "Will you pair from the forwarded HTTPS bridge URL shown after startup?" "Y"; then
+      abort_wizard "Use the forwarded GitHub Codespaces bridge URL, then rerun: npm run setup:wizard"
+    fi
+    return 0
+  fi
+
+  menu_select "Phone Codespaces status" \
+    "Ready to pair from forwarded URL" \
+    "Show instructions again" \
+    "Abort"
+
+  case "$MENU_RESULT" in
+    "Ready to pair from forwarded URL")
+      return 0
+      ;;
+    "Show instructions again")
+      confirm_phone_codespaces_ready
+      return 0
+      ;;
+    *)
+      abort_wizard "Use the forwarded GitHub Codespaces bridge URL, then rerun: npm run setup:wizard"
+      ;;
+  esac
+}
+
 confirm_phone_network_ready() {
   case "$NETWORK_MODE" in
     tailscale)
@@ -1595,6 +1657,9 @@ confirm_phone_network_ready() {
       ;;
     local)
       confirm_phone_local_ready
+      ;;
+    codespaces)
+      confirm_phone_codespaces_ready
       ;;
     *)
       abort_wizard "Unknown network mode '$NETWORK_MODE'."
@@ -1682,6 +1747,14 @@ if [[ "$CONFIG_ACTION" != "keep" ]]; then
       BRIDGE_HOST="$(resolve_local_ip)"
       ok "Local LAN IPv4 detected: $BRIDGE_HOST"
       ;;
+    codespaces)
+      section "GitHub Codespaces connectivity"
+      if [[ "${CODESPACES:-}" != "true" ]]; then
+        warn "GitHub Codespaces env was not detected. This mode expects to run inside an active codespace."
+      fi
+      BRIDGE_HOST="127.0.0.1"
+      ok "Codespaces mode will use forwarded HTTPS bridge URLs."
+      ;;
     *)
       abort_wizard "Unknown network mode '$NETWORK_MODE'."
       ;;
@@ -1693,11 +1766,12 @@ else
   ok "Keeping existing secure config."
   NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
   BRIDGE_HOST="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
+  BRIDGE_CONNECT_URL="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_CONNECT_URL")"
   if [[ -z "$NETWORK_MODE" ]]; then
-    NETWORK_MODE="$(infer_network_mode_from_host "$BRIDGE_HOST")"
+    NETWORK_MODE="$(infer_network_mode "$BRIDGE_HOST" "$BRIDGE_CONNECT_URL")"
   fi
 
-  if [[ "$BRIDGE_HOST" == "0.0.0.0" ]] || [[ "$BRIDGE_HOST" == "::" ]] || [[ "$BRIDGE_HOST" == "[::]" ]]; then
+  if ([[ "$BRIDGE_HOST" == "0.0.0.0" ]] || [[ "$BRIDGE_HOST" == "::" ]] || [[ "$BRIDGE_HOST" == "[::]" ]]) && [[ "$NETWORK_MODE" != "codespaces" ]]; then
     warn "Existing BRIDGE_HOST=$BRIDGE_HOST is a bind address, not a phone-connectable host."
     if [[ "$NETWORK_MODE" == "tailscale" ]]; then
       section "Tailscale connectivity"
@@ -1724,6 +1798,8 @@ section "Phone pairing"
 confirm_phone_network_ready
 if [[ "$NETWORK_MODE" == "tailscale" ]]; then
   ok "Phone Tailscale readiness confirmed."
+elif [[ "$NETWORK_MODE" == "codespaces" ]]; then
+  ok "Phone Codespaces pairing readiness confirmed."
 else
   ok "Phone local network readiness confirmed."
 fi
@@ -1738,15 +1814,17 @@ BRIDGE_HOST="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_HOST")"
 BRIDGE_PORT="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT")"
 BRIDGE_TOKEN="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")"
 NETWORK_MODE="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_NETWORK_MODE")"
+BRIDGE_CONNECT_URL="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_CONNECT_URL")"
 if [[ -z "$NETWORK_MODE" ]]; then
-  NETWORK_MODE="$(infer_network_mode_from_host "$BRIDGE_HOST")"
+  NETWORK_MODE="$(infer_network_mode "$BRIDGE_HOST" "$BRIDGE_CONNECT_URL")"
 fi
 BRIDGE_HOST="${BRIDGE_HOST:-${TAILSCALE_IP:-127.0.0.1}}"
 BRIDGE_PORT="${BRIDGE_PORT:-8787}"
+DISPLAY_BRIDGE_URL="${BRIDGE_CONNECT_URL:-http://$BRIDGE_HOST:$BRIDGE_PORT}"
 
 section "Summary"
 rail_echo "Bridge mode: $NETWORK_MODE"
-rail_echo "Bridge endpoint: http://$BRIDGE_HOST:$BRIDGE_PORT"
+rail_echo "Bridge endpoint: $DISPLAY_BRIDGE_URL"
 rail_echo "Harnesses: $(format_selected_engines)"
 rail_echo "Secure env: $SECURE_ENV_FILE"
 if [[ "$FLOW" == "quickstart" ]]; then
@@ -1766,7 +1844,7 @@ fi
 section "Next steps"
 if [[ "$AUTO_START" == "true" ]]; then
   rail_echo "1) Open the mobile app and use onboarding to connect."
-  rail_echo "Bridge URL: http://$BRIDGE_HOST:$BRIDGE_PORT"
+  rail_echo "Bridge URL: $DISPLAY_BRIDGE_URL"
   if [[ -n "$BRIDGE_TOKEN" ]]; then
     rail_echo "Bridge token: $BRIDGE_TOKEN"
   fi

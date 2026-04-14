@@ -156,7 +156,13 @@ export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>
 
   const previewOrigin = useMemo(
     () =>
-      activeSession ? getBrowserPreviewOrigin(bridgeUrl, activeSession.previewPort) : null,
+      activeSession
+        ? getBrowserPreviewOrigin(
+            bridgeUrl,
+            activeSession.previewPort,
+            activeSession.previewBaseUrl ?? null
+          )
+        : null,
     [activeSession, bridgeUrl]
   );
   const currentShellRequestKey = useMemo(
@@ -353,7 +359,8 @@ export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>
         bridgeUrl,
         session.previewPort,
         session.bootstrapPath,
-        viewport
+        viewport,
+        session.previewBaseUrl ?? null
       );
       if (!nextPreviewUrl) {
         throw new Error('Could not build preview bootstrap URL.');

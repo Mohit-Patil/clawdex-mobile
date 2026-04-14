@@ -248,6 +248,61 @@ describe('HostBridgeApiClient', () => {
     expect(ws.request).toHaveBeenCalledWith('account/logout');
   });
 
+  it('startChatGptAccountLogin() requests account/login/start and maps auth URL details', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      type: 'chatgpt',
+      loginId: 'login_123',
+      authUrl: 'https://chatgpt.com/auth/start',
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.startChatGptAccountLogin();
+
+    expect(ws.request).toHaveBeenCalledWith('account/login/start', { type: 'chatgpt' });
+    expect(result).toEqual({
+      type: 'chatgpt',
+      loginId: 'login_123',
+      authUrl: 'https://chatgpt.com/auth/start',
+    });
+  });
+
+  it('loginWithChatGptAuthTokens() requests token-based ChatGPT login', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      type: 'chatgptAuthTokens',
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.loginWithChatGptAuthTokens({
+      accessToken: 'access_123',
+      chatgptAccountId: 'acct_123',
+      chatgptPlanType: 'plus',
+    });
+
+    expect(ws.request).toHaveBeenCalledWith('account/login/start', {
+      type: 'chatgptAuthTokens',
+      accessToken: 'access_123',
+      chatgptAccountId: 'acct_123',
+      chatgptPlanType: 'plus',
+    });
+    expect(result).toEqual({
+      type: 'chatgptAuthTokens',
+    });
+  });
+
+  it('cancelAccountLogin() requests account/login/cancel', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({});
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.cancelAccountLogin('login_123');
+
+    expect(ws.request).toHaveBeenCalledWith('account/login/cancel', {
+      loginId: 'login_123',
+    });
+  });
+
   it('listChats() maps app-server list response', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({
@@ -512,6 +567,7 @@ describe('HostBridgeApiClient', () => {
       sessionId: 'preview-1',
       targetUrl: 'http://127.0.0.1:3000/',
       previewPort: 8788,
+      previewBaseUrl: 'https://octocat-8788.app.github.dev',
       bootstrapPath: '/?sid=preview-1&st=secret',
       createdAt: '2026-01-01T00:00:00Z',
       lastAccessedAt: '2026-01-01T00:00:00Z',
@@ -524,6 +580,7 @@ describe('HostBridgeApiClient', () => {
       targetUrl: 'http://127.0.0.1:3000/',
     });
     expect(result.previewPort).toBe(8788);
+    expect(result.previewBaseUrl).toBe('https://octocat-8788.app.github.dev');
     expect(result.bootstrapPath).toBe('/?sid=preview-1&st=secret');
   });
 

@@ -59,9 +59,11 @@ Status: In progress (first implementation pass completed)
 ### Gap 3: Account/Auth UX
 - Status: In progress
 - Mobile Settings now exposes read-only account state via `account/read`, including ChatGPT email + plan type when available.
+- GitHub Codespaces connect flow now pauses after bridge bootstrap when Codex still requires ChatGPT auth, and native iOS/Android app builds can complete ChatGPT login from the phone by using on-device browser auth plus `chatgptAuthTokens` handoff to Codex.
 - Remaining:
   - no dedicated standalone account screen outside Settings
-  - login/logout is not user-driven in mobile UI yet
+  - Expo Go is still not supported for ChatGPT/Codex login; this requires the installed native app build
+  - login/logout is not fully user-driven across the rest of mobile UI yet
   - auth refresh is still operationally env-driven in bridge, not user-driven in app
   - no API-key entry flow in mobile UI
 

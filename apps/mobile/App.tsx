@@ -47,6 +47,8 @@ import {
   clearBridgeProfileStore,
   getActiveBridgeProfile,
   loadBridgeProfileStore,
+  removeBridgeProfile,
+  renameBridgeProfile,
   saveBridgeProfileStore,
   setActiveBridgeProfile,
   type BridgeProfile,
@@ -57,6 +59,7 @@ import { env } from './src/config';
 import { DrawerContent } from './src/navigation/DrawerContent';
 import { BrowserScreen, type BrowserScreenHandle } from './src/screens/BrowserScreen';
 import { GitScreen } from './src/screens/GitScreen';
+import { GitHubCodespacesScreen } from './src/screens/GitHubCodespacesScreen';
 import { MainScreen, type MainScreenHandle } from './src/screens/MainScreen';
 import {
   OnboardingScreen,
@@ -84,7 +87,7 @@ import {
 } from './src/theme';
 
 type AppScreen = 'Main' | 'ChatGit' | 'Browser' | 'Settings' | 'Privacy' | 'Terms';
-type Screen = AppScreen | 'Onboarding';
+type Screen = AppScreen | 'Onboarding' | 'GitHubCodespaces';
 
 const DRAWER_WIDTH = 280;
 const EDGE_SWIPE_WIDTH = 24;
@@ -111,6 +114,10 @@ export default function App() {
   const [onboardingMode, setOnboardingMode] = useState<OnboardingMode>('initial');
   const [onboardingReturnScreen, setOnboardingReturnScreen] =
     useState<AppScreen>('Settings');
+  const [gitHubCodespacesCancelScreen, setGitHubCodespacesCancelScreen] =
+    useState<Screen>('Onboarding');
+  const [gitHubCodespacesSuccessScreen, setGitHubCodespacesSuccessScreen] =
+    useState<AppScreen>('Main');
   const activeBridgeProfile = useMemo(
     () =>
       getActiveBridgeProfile({
@@ -121,15 +128,16 @@ export default function App() {
   );
   const bridgeUrl = activeBridgeProfile?.bridgeUrl ?? null;
   const bridgeToken = activeBridgeProfile?.bridgeToken ?? null;
+  const activeBridgeUsesGitHubAuth = activeBridgeProfile?.authMode === 'githubOAuth';
   const ws = useMemo(
     () =>
       bridgeUrl
         ? new HostBridgeWsClient(bridgeUrl, {
             authToken: bridgeToken ?? env.hostBridgeToken,
-            allowQueryTokenAuth: env.allowWsQueryTokenAuth
+            allowQueryTokenAuth: activeBridgeUsesGitHubAuth ? false : env.allowWsQueryTokenAuth,
           })
         : null,
-    [bridgeToken, bridgeUrl]
+    [activeBridgeUsesGitHubAuth, bridgeToken, bridgeUrl]
   );
   const api = useMemo(
     () =>
@@ -736,6 +744,7 @@ export default function App() {
         .enabled(
           currentScreen !== 'ChatGit' &&
             currentScreen !== 'Browser' &&
+            currentScreen !== 'GitHubCodespaces' &&
             (currentScreen !== 'Settings' || settingsAllowsDrawerGesture)
         )
         .activeOffsetX(12)
@@ -1158,7 +1167,11 @@ export default function App() {
         setPendingBrowserTargetUrl(targetUrl.trim());
       }
       setBrowserReturnScreen(
-        currentScreen === 'Browser' || currentScreen === 'Onboarding' ? 'Main' : currentScreen
+        currentScreen === 'Browser' ||
+          currentScreen === 'Onboarding' ||
+          currentScreen === 'GitHubCodespaces'
+          ? 'Main'
+          : currentScreen
       );
       chatTransitionRequestIdRef.current += 1;
       setChatTransitionChatId(null);
@@ -1234,23 +1247,106 @@ export default function App() {
     ]
   );
 
+  const handleGitHubCodespacesProfileSaved = useCallback(
+    async (draft: BridgeProfileDraft) => {
+      const normalized = normalizeBridgeUrlInput(draft.bridgeUrl);
+      const normalizedToken = normalizeBridgeToken(draft.bridgeToken);
+      if (!normalized || !normalizedToken) {
+        throw new Error('Bridge URL and token are required.');
+      }
+
+      const { store: nextStore } = upsertBridgeProfile(currentBridgeProfileStore, {
+        ...draft,
+        bridgeUrl: normalized,
+        bridgeToken: normalizedToken,
+        activate: true,
+      });
+      await saveBridgeProfileStore(nextStore);
+      setBridgeProfiles(nextStore.profiles);
+      setActiveBridgeProfileId(nextStore.activeProfileId);
+      resetBridgeSessionState();
+      void saveAppSettings(
+        defaultStartCwd,
+        defaultChatEngine,
+        defaultEngineSettings,
+        approvalMode,
+        showToolCalls,
+        appearancePreference,
+        fontPreference,
+        recentBrowserTargetUrls
+      );
+      setCurrentScreen(gitHubCodespacesSuccessScreen);
+      setOnboardingMode('edit');
+      closeDrawer();
+    },
+    [
+      approvalMode,
+      closeDrawer,
+      currentBridgeProfileStore,
+      defaultChatEngine,
+      defaultEngineSettings,
+      defaultStartCwd,
+      fontPreference,
+      gitHubCodespacesSuccessScreen,
+      recentBrowserTargetUrls,
+      resetBridgeSessionState,
+      saveAppSettings,
+      showToolCalls,
+      appearancePreference,
+    ]
+  );
+
+  const openGitHubCodespaces = useCallback(() => {
+    const successScreen: AppScreen =
+      currentScreen === 'Onboarding'
+        ? onboardingMode === 'initial'
+          ? 'Main'
+          : onboardingReturnScreen
+        : currentScreen === 'Settings' ||
+            currentScreen === 'Browser' ||
+            currentScreen === 'Privacy' ||
+            currentScreen === 'Terms'
+          ? currentScreen
+          : 'Main';
+    setGitHubCodespacesCancelScreen(currentScreen);
+    setGitHubCodespacesSuccessScreen(successScreen);
+    setCurrentScreen('GitHubCodespaces');
+    closeDrawer();
+  }, [closeDrawer, currentScreen, onboardingMode, onboardingReturnScreen]);
+
   const handleEditBridgeProfile = useCallback(() => {
+    if (activeBridgeProfile?.authMode === 'githubOAuth') {
+      openGitHubCodespaces();
+      return;
+    }
     setOnboardingMode(bridgeUrl ? 'edit' : 'initial');
-    setOnboardingReturnScreen(currentScreen === 'Onboarding' ? 'Settings' : currentScreen);
+    setOnboardingReturnScreen(
+      currentScreen === 'Onboarding' || currentScreen === 'GitHubCodespaces'
+        ? 'Settings'
+        : currentScreen
+    );
     setCurrentScreen('Onboarding');
     closeDrawer();
-  }, [bridgeUrl, closeDrawer, currentScreen]);
+  }, [activeBridgeProfile?.authMode, bridgeUrl, closeDrawer, currentScreen, openGitHubCodespaces]);
 
   const handleAddBridgeProfile = useCallback(() => {
     setOnboardingMode('add');
-    setOnboardingReturnScreen(currentScreen === 'Onboarding' ? 'Settings' : currentScreen);
+    setOnboardingReturnScreen(
+      currentScreen === 'Onboarding' || currentScreen === 'GitHubCodespaces'
+        ? 'Settings'
+        : currentScreen
+    );
     setCurrentScreen('Onboarding');
     closeDrawer();
   }, [closeDrawer, currentScreen]);
 
   const handleOpenBridgeRecoveryGuide = useCallback(() => {
     setOnboardingMode('reconnect');
-    setOnboardingReturnScreen(currentScreen === 'Onboarding' ? 'Settings' : currentScreen);
+    setOnboardingReturnScreen(
+      currentScreen === 'Onboarding' || currentScreen === 'GitHubCodespaces'
+        ? 'Settings'
+        : currentScreen
+    );
     setCurrentScreen('Onboarding');
     closeDrawer();
   }, [closeDrawer, currentScreen]);
@@ -1264,6 +1360,38 @@ export default function App() {
       resetBridgeSessionState();
     },
     [currentBridgeProfileStore, resetBridgeSessionState]
+  );
+
+  const handleRenameBridgeProfile = useCallback(
+    async (profileId: string, nextName: string) => {
+      const nextStore = renameBridgeProfile(currentBridgeProfileStore, profileId, nextName);
+      await saveBridgeProfileStore(nextStore);
+      setBridgeProfiles(nextStore.profiles);
+      setActiveBridgeProfileId(nextStore.activeProfileId);
+    },
+    [currentBridgeProfileStore]
+  );
+
+  const handleDeleteBridgeProfile = useCallback(
+    async (profileId: string) => {
+      const deletingActiveProfile = activeBridgeProfileId === profileId;
+      const nextStore = removeBridgeProfile(currentBridgeProfileStore, profileId);
+      await saveBridgeProfileStore(nextStore);
+      setBridgeProfiles(nextStore.profiles);
+      setActiveBridgeProfileId(nextStore.activeProfileId);
+
+      if (deletingActiveProfile) {
+        resetBridgeSessionState();
+      }
+
+      if (nextStore.profiles.length === 0) {
+        setOnboardingMode('initial');
+        setOnboardingReturnScreen('Main');
+        setCurrentScreen('Onboarding');
+        closeDrawer();
+      }
+    },
+    [activeBridgeProfileId, closeDrawer, currentBridgeProfileStore, resetBridgeSessionState]
   );
 
   const handleClearSavedBridges = useCallback(async () => {
@@ -1280,6 +1408,10 @@ export default function App() {
   const handleCancelOnboarding = useCallback(() => {
     setCurrentScreen(onboardingReturnScreen);
   }, [onboardingReturnScreen]);
+
+  const handleCancelGitHubCodespaces = useCallback(() => {
+    setCurrentScreen(gitHubCodespacesCancelScreen);
+  }, [gitHubCodespacesCancelScreen]);
 
   const handleOpenChatGit = useCallback((chat: Chat) => {
     chatTransitionRequestIdRef.current += 1;
@@ -1335,6 +1467,11 @@ export default function App() {
       return false;
     }
 
+    if (currentScreen === 'GitHubCodespaces') {
+      handleCancelGitHubCodespaces();
+      return true;
+    }
+
     switch (currentScreen) {
       case 'ChatGit':
         handleCloseGit();
@@ -1362,6 +1499,7 @@ export default function App() {
     closeDrawer,
     currentScreen,
     handleCancelOnboarding,
+    handleCancelGitHubCodespaces,
     handleCloseGit,
     onboardingMode,
   ]);
@@ -1407,6 +1545,27 @@ export default function App() {
     );
   }
 
+  if (currentScreen === 'GitHubCodespaces') {
+    return (
+      <AppThemeProvider theme={theme}>
+        <GestureHandlerRootView style={styles.root}>
+          <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+            <StatusBar
+              barStyle={theme.statusBarStyle}
+              backgroundColor={theme.colors.bgMain}
+            />
+            <GitHubCodespacesScreen
+              bridgeProfiles={bridgeProfiles}
+              activeBridgeProfileId={activeBridgeProfile?.id ?? null}
+              onBack={handleCancelGitHubCodespaces}
+              onConnect={handleGitHubCodespacesProfileSaved}
+            />
+          </SafeAreaProvider>
+        </GestureHandlerRootView>
+      </AppThemeProvider>
+    );
+  }
+
   if (!bridgeUrl || !api || !ws || currentScreen === 'Onboarding') {
     const mode: OnboardingMode = bridgeUrl ? onboardingMode : 'initial';
     const shouldUseSavedBridgeCredentials = mode === 'edit' || mode === 'reconnect';
@@ -1437,6 +1596,8 @@ export default function App() {
               initialBridgeToken={initialToken}
               allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
               allowQueryTokenAuth={env.allowWsQueryTokenAuth}
+              githubCodespacesEnabled={Boolean(env.githubClientId)}
+              onOpenGitHubCodespaces={env.githubClientId ? openGitHubCodespaces : undefined}
               onSave={handleBridgeProfileSaved}
               onCancel={canCancel ? handleCancelOnboarding : undefined}
             />
@@ -1509,7 +1670,10 @@ export default function App() {
             onFontPreferenceChange={handleFontPreferenceChange}
             onEditBridgeProfile={handleEditBridgeProfile}
             onAddBridgeProfile={handleAddBridgeProfile}
+            onConnectGitHubCodespaces={env.githubClientId ? openGitHubCodespaces : undefined}
             onSwitchBridgeProfile={handleSwitchBridgeProfile}
+            onRenameBridgeProfile={handleRenameBridgeProfile}
+            onDeleteBridgeProfile={handleDeleteBridgeProfile}
             onClearSavedBridges={handleClearSavedBridges}
             onOpenDrawer={openDrawer}
             onDrawerGestureEnabledChange={setSettingsAllowsDrawerGesture}

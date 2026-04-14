@@ -38,6 +38,7 @@ import type {
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
 import type { BridgeProfile } from '../bridgeProfiles';
+import { BridgeProfileManagerSheet } from '../components/bridge-profile-manager-sheet';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import {
   buildComposerUsageLimitBadges,
@@ -103,7 +104,10 @@ interface SettingsScreenProps {
   onFontPreferenceChange?: (preference: FontPreference) => void;
   onEditBridgeProfile?: () => void;
   onAddBridgeProfile?: () => void;
+  onConnectGitHubCodespaces?: () => void;
   onSwitchBridgeProfile?: (profileId: string) => void | Promise<void>;
+  onRenameBridgeProfile?: (profileId: string, nextName: string) => void | Promise<void>;
+  onDeleteBridgeProfile?: (profileId: string) => void | Promise<void>;
   onClearSavedBridges?: () => void | Promise<void>;
   onOpenDrawer: () => void;
   onDrawerGestureEnabledChange?: (enabled: boolean) => void;
@@ -151,7 +155,10 @@ export function SettingsScreen({
   onFontPreferenceChange,
   onEditBridgeProfile,
   onAddBridgeProfile,
+  onConnectGitHubCodespaces,
   onSwitchBridgeProfile,
+  onRenameBridgeProfile,
+  onDeleteBridgeProfile,
   onClearSavedBridges,
   onOpenDrawer,
   onDrawerGestureEnabledChange,
@@ -868,23 +875,6 @@ export function SettingsScreen({
     [normalizedFontPreference, onFontPreferenceChange]
   );
 
-  const bridgeProfileOptions = useMemo<SelectionSheetOption[]>(
-    () =>
-      bridgeProfiles.map((profile) => ({
-        key: profile.id,
-        title: profile.name,
-        description: profile.bridgeUrl,
-        icon: 'server-outline' as const,
-        badge: profile.id === activeBridgeProfileId ? 'Active' : undefined,
-        selected: profile.id === activeBridgeProfileId,
-        onPress: () => {
-          setBridgeProfileModalVisible(false);
-          void onSwitchBridgeProfile?.(profile.id);
-        },
-      })),
-    [activeBridgeProfileId, bridgeProfiles, onSwitchBridgeProfile]
-  );
-
   const startBridgeRestart = useCallback(async () => {
     setBridgeRestartStarting(true);
     setBridgeRestartActionError(null);
@@ -1381,8 +1371,8 @@ export function SettingsScreen({
           onPress={() => setBridgeProfileModalVisible(true)}
           style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
         >
-          <Ionicons name="swap-horizontal-outline" size={15} color={colors.textPrimary} />
-          <Text style={styles.bridgeEditBtnText}>Switch profile</Text>
+          <Ionicons name="albums-outline" size={15} color={colors.textPrimary} />
+          <Text style={styles.bridgeEditBtnText}>Manage profiles</Text>
         </Pressable>
         <Pressable
           onPress={onAddBridgeProfile}
@@ -1391,6 +1381,18 @@ export function SettingsScreen({
           <Ionicons name="add-circle-outline" size={15} color={colors.textPrimary} />
           <Text style={styles.bridgeEditBtnText}>Add profile</Text>
         </Pressable>
+        {onConnectGitHubCodespaces ? (
+          <Pressable
+            onPress={onConnectGitHubCodespaces}
+            style={({ pressed }) => [
+              styles.bridgeEditBtn,
+              pressed && styles.bridgeEditBtnPressed,
+            ]}
+          >
+            <Ionicons name="logo-github" size={15} color={colors.textPrimary} />
+            <Text style={styles.bridgeEditBtnText}>Connect GitHub Codespace</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           onPress={onEditBridgeProfile}
           style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
@@ -1846,12 +1848,13 @@ export function SettingsScreen({
         onClose={() => setFontModalVisible(false)}
       />
 
-      <SelectionSheet
+      <BridgeProfileManagerSheet
         visible={bridgeProfileModalVisible}
-        eyebrow="Bridge Profiles"
-        title="Switch active bridge"
-        subtitle="Pick which saved server this phone should connect to right now."
-        options={bridgeProfileOptions}
+        profiles={bridgeProfiles}
+        activeProfileId={activeBridgeProfileId}
+        onActivate={onSwitchBridgeProfile}
+        onRename={onRenameBridgeProfile}
+        onDelete={onDeleteBridgeProfile}
         onClose={() => setBridgeProfileModalVisible(false)}
       />
 

@@ -83,12 +83,22 @@ const BROWSER_PREVIEW_MAX_SESSIONS: usize = 12;
 const BROWSER_PREVIEW_HTTP_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const BROWSER_PREVIEW_DISCOVERY_HTTP_TIMEOUT: Duration = Duration::from_millis(500);
+const GITHUB_CODESPACES_AUTH_CACHE_TTL: Duration = Duration::from_secs(60 * 5);
+const GITHUB_CODESPACES_API_VERSION: &str = "2022-11-28";
+
+#[derive(Debug, Clone)]
+struct GitHubCodespacesAuthConfig {
+    api_url: String,
+    codespace_name: String,
+}
 
 #[derive(Clone)]
 struct BridgeConfig {
     host: String,
     port: u16,
     preview_port: u16,
+    connect_url: Option<String>,
+    preview_connect_url: Option<String>,
     workdir: PathBuf,
     cli_bin: String,
     opencode_cli_bin: String,
@@ -102,6 +112,7 @@ struct BridgeConfig {
     auth_enabled: bool,
     allow_insecure_no_auth: bool,
     allow_query_token_auth: bool,
+    github_codespaces_auth: Option<GitHubCodespacesAuthConfig>,
     allow_outside_root_cwd: bool,
     disable_terminal_exec: bool,
     terminal_allowed_commands: HashSet<String>,
@@ -122,6 +133,8 @@ impl BridgeConfig {
         if preview_port == port {
             return Err("BRIDGE_PREVIEW_PORT must differ from BRIDGE_PORT".to_string());
         }
+        let connect_url = parse_connect_url_env("BRIDGE_CONNECT_URL")?;
+        let preview_connect_url = parse_connect_url_env("BRIDGE_PREVIEW_CONNECT_URL")?;
 
         let configured_workdir = env::var("BRIDGE_WORKDIR")
             .map(PathBuf::from)
@@ -153,6 +166,7 @@ impl BridgeConfig {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+        let github_codespaces_auth = parse_github_codespaces_auth_config()?;
         let opencode_server_username = env::var("BRIDGE_OPENCODE_SERVER_USERNAME")
             .or_else(|_| env::var("OPENCODE_SERVER_USERNAME"))
             .unwrap_or_else(|_| "opencode".to_string())
@@ -166,14 +180,14 @@ impl BridgeConfig {
             .or_else(|| auth_token.clone());
 
         let allow_insecure_no_auth = parse_bool_env("BRIDGE_ALLOW_INSECURE_NO_AUTH");
-        if auth_token.is_none() && !allow_insecure_no_auth {
+        if auth_token.is_none() && github_codespaces_auth.is_none() && !allow_insecure_no_auth {
             return Err(
-                "BRIDGE_AUTH_TOKEN is required. Set BRIDGE_ALLOW_INSECURE_NO_AUTH=true only for local development."
+                "BRIDGE_AUTH_TOKEN is required unless GitHub Codespaces auth is enabled. Set BRIDGE_ALLOW_INSECURE_NO_AUTH=true only for local development."
                     .to_string(),
             );
         }
 
-        let auth_enabled = auth_token.is_some();
+        let auth_enabled = auth_token.is_some() || github_codespaces_auth.is_some();
         let allow_query_token_auth = parse_bool_env("BRIDGE_ALLOW_QUERY_TOKEN_AUTH");
         let allow_outside_root_cwd =
             parse_bool_env_with_default("BRIDGE_ALLOW_OUTSIDE_ROOT_CWD", true);
@@ -189,6 +203,8 @@ impl BridgeConfig {
             host,
             port,
             preview_port,
+            connect_url,
+            preview_connect_url,
             workdir,
             cli_bin,
             opencode_cli_bin,
@@ -202,6 +218,7 @@ impl BridgeConfig {
             auth_enabled,
             allow_insecure_no_auth,
             allow_query_token_auth,
+            github_codespaces_auth,
             allow_outside_root_cwd,
             disable_terminal_exec,
             terminal_allowed_commands,
@@ -209,29 +226,19 @@ impl BridgeConfig {
         })
     }
 
-    fn is_authorized(&self, headers: &HeaderMap, query_token: Option<&str>) -> bool {
-        if !self.auth_enabled {
-            return true;
-        }
-
+    fn is_authorized_with_bridge_token(
+        &self,
+        headers: &HeaderMap,
+        query_token: Option<&str>,
+    ) -> bool {
         let expected = match &self.auth_token {
             Some(token) => token,
             None => return false,
         };
 
-        if let Some(value) = headers.get("authorization") {
-            if let Ok(raw) = value.to_str() {
-                let mut parts = raw.trim().split_whitespace();
-                let scheme = parts.next();
-                let token = parts.next();
-                if let (Some(scheme), Some(token)) = (scheme, token) {
-                    if scheme.eq_ignore_ascii_case("bearer")
-                        && parts.next().is_none()
-                        && constant_time_eq(token, expected)
-                    {
-                        return true;
-                    }
-                }
+        if let Some(token) = extract_bearer_token(headers) {
+            if constant_time_eq(token, expected) {
+                return true;
             }
         }
 
@@ -247,6 +254,126 @@ impl BridgeConfig {
     }
 }
 
+fn parse_github_codespaces_auth_config() -> Result<Option<GitHubCodespacesAuthConfig>, String> {
+    if !parse_bool_env("BRIDGE_GITHUB_CODESPACES_AUTH") {
+        return Ok(None);
+    }
+
+    let codespace_name = env::var("BRIDGE_GITHUB_CODESPACE_NAME")
+        .or_else(|_| env::var("CODESPACE_NAME"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "BRIDGE_GITHUB_CODESPACES_AUTH=true requires BRIDGE_GITHUB_CODESPACE_NAME or CODESPACE_NAME."
+                .to_string()
+        })?;
+    let api_url = env::var("BRIDGE_GITHUB_API_URL")
+        .unwrap_or_else(|_| "https://api.github.com".to_string())
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if api_url.is_empty() {
+        return Err("BRIDGE_GITHUB_API_URL must not be empty.".to_string());
+    }
+
+    Ok(Some(GitHubCodespacesAuthConfig {
+        api_url,
+        codespace_name,
+    }))
+}
+
+fn extract_bearer_token<'a>(headers: &'a HeaderMap) -> Option<&'a str> {
+    let raw = headers.get("authorization")?.to_str().ok()?;
+    let mut parts = raw.trim().split_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    if !scheme.eq_ignore_ascii_case("bearer") || parts.next().is_some() {
+        return None;
+    }
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn hash_token_for_cache(token: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn prune_expired_auth_cache_entries(cache: &mut HashMap<u64, Instant>) {
+    let now = Instant::now();
+    cache.retain(|_, expires_at| *expires_at > now);
+}
+
+struct GitHubCodespacesAuthService {
+    config: GitHubCodespacesAuthConfig,
+    http: HttpClient,
+    cache: Mutex<HashMap<u64, Instant>>,
+}
+
+impl GitHubCodespacesAuthService {
+    fn new(config: GitHubCodespacesAuthConfig) -> Result<Self, String> {
+        let http = HttpClient::builder()
+            .user_agent("clawdex-rust-bridge")
+            .build()
+            .map_err(|error| format!("failed to build GitHub auth client: {error}"))?;
+
+        Ok(Self {
+            config,
+            http,
+            cache: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn is_authorized(&self, token: &str) -> bool {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let cache_key = hash_token_for_cache(trimmed);
+        {
+            let mut cache = self.cache.lock().await;
+            prune_expired_auth_cache_entries(&mut cache);
+            if let Some(expires_at) = cache.get(&cache_key) {
+                if *expires_at > Instant::now() {
+                    return true;
+                }
+            }
+        }
+
+        let url = format!(
+            "{}/user/codespaces/{}",
+            self.config.api_url, self.config.codespace_name
+        );
+        let response = match self
+            .http
+            .get(url)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", GITHUB_CODESPACES_API_VERSION)
+            .bearer_auth(trimmed)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return false,
+        };
+
+        if !response.status().is_success() {
+            return false;
+        }
+
+        let mut cache = self.cache.lock().await;
+        prune_expired_auth_cache_entries(&mut cache);
+        cache.insert(cache_key, Instant::now() + GITHUB_CODESPACES_AUTH_CACHE_TTL);
+        true
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     config: Arc<BridgeConfig>,
@@ -258,6 +385,7 @@ struct AppState {
     git: Arc<GitService>,
     updater: Arc<UpdateService>,
     preview: Arc<BrowserPreviewService>,
+    github_codespaces_auth: Option<Arc<GitHubCodespacesAuthService>>,
 }
 
 #[allow(dead_code)]
@@ -294,6 +422,28 @@ impl AppState {
         capabilities.supports.browser_preview = self.preview.is_available();
         capabilities
     }
+
+    async fn is_authorized(&self, headers: &HeaderMap, query_token: Option<&str>) -> bool {
+        if !self.config.auth_enabled {
+            return true;
+        }
+
+        if self
+            .config
+            .is_authorized_with_bridge_token(headers, query_token)
+        {
+            return true;
+        }
+
+        let Some(service) = &self.github_codespaces_auth else {
+            return false;
+        };
+        let Some(token) = extract_bearer_token(headers) else {
+            return false;
+        };
+
+        service.is_authorized(token).await
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -302,6 +452,7 @@ struct BrowserPreviewSessionResponse {
     session_id: String,
     target_url: String,
     preview_port: u16,
+    preview_base_url: Option<String>,
     bootstrap_path: String,
     created_at: String,
     last_accessed_at: String,
@@ -351,6 +502,7 @@ struct BrowserPreviewResolvedSession {
 struct BrowserPreviewService {
     bridge_port: u16,
     preview_port: u16,
+    preview_base_url: Option<String>,
     available: AtomicBool,
     next_session_counter: AtomicU64,
     http: HttpClient,
@@ -358,10 +510,11 @@ struct BrowserPreviewService {
 }
 
 impl BrowserPreviewService {
-    fn new(bridge_port: u16, preview_port: u16) -> Self {
+    fn new(bridge_port: u16, preview_port: u16, preview_base_url: Option<String>) -> Self {
         Self {
             bridge_port,
             preview_port,
+            preview_base_url,
             available: AtomicBool::new(false),
             next_session_counter: AtomicU64::new(1),
             http: HttpClient::builder()
@@ -500,6 +653,7 @@ impl BrowserPreviewService {
             session_id: entry.id.clone(),
             target_url: entry.target_url.to_string(),
             preview_port: self.preview_port,
+            preview_base_url: self.preview_base_url.clone(),
             bootstrap_path: build_preview_bootstrap_path(
                 &entry.target_url,
                 &entry.id,
@@ -5345,6 +5499,12 @@ async fn main() {
             "query-token auth is enabled (BRIDGE_ALLOW_QUERY_TOKEN_AUTH=true); prefer Authorization headers instead"
         );
     }
+    if let Some(github_auth) = &config.github_codespaces_auth {
+        eprintln!(
+            "GitHub Codespaces auth is enabled for '{}'; bearer tokens with Codespaces access are accepted",
+            github_auth.codespace_name
+        );
+    }
 
     let hub = Arc::new(ClientHub::new());
     let backend = match RuntimeBackend::start(&config, hub.clone()).await {
@@ -5367,8 +5527,21 @@ async fn main() {
         config.allow_outside_root_cwd,
     ));
     let updater = Arc::new(UpdateService::discover());
-    let preview = Arc::new(BrowserPreviewService::new(config.port, config.preview_port));
+    let preview = Arc::new(BrowserPreviewService::new(
+        config.port,
+        config.preview_port,
+        config.preview_connect_url.clone(),
+    ));
     let queue = BridgeQueueService::new(backend.clone(), hub.clone());
+    let github_codespaces_auth = match config.github_codespaces_auth.clone() {
+        Some(github_auth) => Some(Arc::new(
+            GitHubCodespacesAuthService::new(github_auth).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }),
+        )),
+        None => None,
+    };
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -5380,6 +5553,7 @@ async fn main() {
         git,
         updater,
         preview,
+        github_codespaces_auth,
     });
 
     let app = Router::new()
@@ -5416,6 +5590,16 @@ async fn main() {
     println!("rust-bridge listening on {bind_addr}");
     if preview_listener.is_some() {
         println!("browser preview listening on {preview_bind_addr}");
+    }
+    if let Some(connect_url) = bridge_access_url(&config) {
+        let bind_url = format!(
+            "http://{}:{}",
+            format_host_for_url(&config.host),
+            config.port
+        );
+        if connect_url != bind_url {
+            println!("bridge connect URL: {connect_url}");
+        }
     }
     maybe_print_pairing_qr(&config);
 
@@ -5469,12 +5653,12 @@ async fn local_image_handler(
     headers: HeaderMap,
     Query(query): Query<LocalImageQuery>,
 ) -> Response {
-    if !state.config.is_authorized(&headers, query.token.as_deref()) {
+    if !state.is_authorized(&headers, query.token.as_deref()).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({
                 "error": "unauthorized",
-                "message": "Missing or invalid bridge token"
+                "message": "Missing or invalid bridge credentials"
             })),
         )
             .into_response();
@@ -6011,12 +6195,12 @@ async fn ws_handler(
     headers: HeaderMap,
     Query(query): Query<RpcQuery>,
 ) -> Response {
-    if !state.config.is_authorized(&headers, query.token.as_deref()) {
+    if !state.is_authorized(&headers, query.token.as_deref()).await {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({
                 "error": "unauthorized",
-                "message": "Missing or invalid bridge token"
+                "message": "Missing or invalid bridge credentials"
             })),
         )
             .into_response();
@@ -7085,17 +7269,25 @@ fn format_host_for_url(host: &str) -> String {
     trimmed.to_string()
 }
 
-fn build_pairing_payload(config: &BridgeConfig) -> Option<String> {
+fn bridge_access_url(config: &BridgeConfig) -> Option<String> {
+    if let Some(url) = config.connect_url.clone() {
+        return Some(url);
+    }
+
     if is_unspecified_bind_host(&config.host) {
         return None;
     }
 
-    let bridge_token = config.auth_token.clone()?;
-    let bridge_url = format!(
+    Some(format!(
         "http://{}:{}",
         format_host_for_url(&config.host),
         config.port
-    );
+    ))
+}
+
+fn build_pairing_payload(config: &BridgeConfig) -> Option<String> {
+    let bridge_token = config.auth_token.clone()?;
+    let bridge_url = bridge_access_url(config)?;
 
     Some(
         json!({
@@ -7157,8 +7349,7 @@ fn maybe_print_pairing_qr(config: &BridgeConfig) {
         return;
     }
     println!(
-        "Full pairing QR unavailable because BRIDGE_HOST={} is a bind address. Enter URL manually in onboarding.",
-        config.host
+        "Full pairing QR unavailable because no phone-connectable bridge URL was resolved. Enter URL manually in onboarding."
     );
     println!();
     flush_pairing_output();
@@ -9183,6 +9374,44 @@ fn read_non_empty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_connect_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parsed = Url::parse(trimmed).ok()?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return None,
+    }
+    if parsed.host_str().is_none() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+
+    let normalized_path = parsed.path().trim_end_matches('/').to_string();
+    let final_path = if normalized_path.is_empty() {
+        ""
+    } else {
+        normalized_path.as_str()
+    };
+    parsed.set_path(final_path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+
+    Some(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn parse_connect_url_env(name: &str) -> Result<Option<String>, String> {
+    let Some(raw) = read_non_empty_env(name) else {
+        return Ok(None);
+    };
+
+    normalize_connect_url(&raw)
+        .ok_or_else(|| format!("{name} must be a valid http:// or https:// base URL"))
+        .map(Some)
 }
 
 fn resolve_max_voice_transcription_bytes() -> usize {
@@ -11373,6 +11602,8 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 8787,
             preview_port: 8788,
+            connect_url: None,
+            preview_connect_url: None,
             workdir: workdir.clone(),
             cli_bin: "cat".to_string(),
             opencode_cli_bin: "opencode".to_string(),
@@ -11386,6 +11617,7 @@ mod tests {
             auth_enabled: true,
             allow_insecure_no_auth: false,
             allow_query_token_auth: false,
+            github_codespaces_auth: None,
             allow_outside_root_cwd: false,
             disable_terminal_exec: true,
             terminal_allowed_commands: HashSet::new(),
@@ -11407,7 +11639,11 @@ mod tests {
             config.allow_outside_root_cwd,
         ));
         let updater = Arc::new(UpdateService::discover());
-        let preview = Arc::new(BrowserPreviewService::new(config.port, config.preview_port));
+        let preview = Arc::new(BrowserPreviewService::new(
+            config.port,
+            config.preview_port,
+            config.preview_connect_url.clone(),
+        ));
         let queue = BridgeQueueService::new(backend.clone(), hub.clone());
 
         Arc::new(AppState {
@@ -11420,6 +11656,7 @@ mod tests {
             git,
             updater,
             preview,
+            github_codespaces_auth: None,
         })
     }
 
@@ -13076,6 +13313,8 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 8787,
             preview_port: 8788,
+            connect_url: None,
+            preview_connect_url: None,
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
@@ -13089,6 +13328,7 @@ mod tests {
             auth_enabled: true,
             allow_insecure_no_auth: false,
             allow_query_token_auth: false,
+            github_codespaces_auth: None,
             allow_outside_root_cwd: false,
             disable_terminal_exec: false,
             terminal_allowed_commands: HashSet::new(),
@@ -13109,6 +13349,8 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 8787,
             preview_port: 8788,
+            connect_url: None,
+            preview_connect_url: None,
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
@@ -13122,6 +13364,7 @@ mod tests {
             auth_enabled: true,
             allow_insecure_no_auth: false,
             allow_query_token_auth: false,
+            github_codespaces_auth: None,
             allow_outside_root_cwd: false,
             disable_terminal_exec: false,
             terminal_allowed_commands: HashSet::new(),
@@ -13138,11 +13381,49 @@ mod tests {
     }
 
     #[test]
+    fn build_pairing_payload_prefers_connect_url_when_configured() {
+        let config = BridgeConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8787,
+            preview_port: 8788,
+            connect_url: Some("https://octocat-8787.app.github.dev".to_string()),
+            preview_connect_url: Some("https://octocat-8788.app.github.dev".to_string()),
+            workdir: PathBuf::from("/tmp/workdir"),
+            cli_bin: "codex".to_string(),
+            opencode_cli_bin: "opencode".to_string(),
+            active_engine: BridgeRuntimeEngine::Codex,
+            enabled_engines: vec![BridgeRuntimeEngine::Codex],
+            opencode_host: "127.0.0.1".to_string(),
+            opencode_port: 4090,
+            opencode_server_username: "opencode".to_string(),
+            opencode_server_password: Some("secret-token".to_string()),
+            auth_token: Some("secret-token".to_string()),
+            auth_enabled: true,
+            allow_insecure_no_auth: false,
+            allow_query_token_auth: false,
+            github_codespaces_auth: None,
+            allow_outside_root_cwd: false,
+            disable_terminal_exec: false,
+            terminal_allowed_commands: HashSet::new(),
+            show_pairing_qr: true,
+        };
+
+        let payload = build_pairing_payload(&config).expect("pairing payload");
+        let parsed: Value = serde_json::from_str(&payload).expect("valid json");
+
+        assert_eq!(parsed["type"], "clawdex-bridge-pair");
+        assert_eq!(parsed["bridgeUrl"], "https://octocat-8787.app.github.dev");
+        assert_eq!(parsed["bridgeToken"], "secret-token");
+    }
+
+    #[test]
     fn bridge_config_authorization_validates_header_and_query_token_paths() {
         let base = BridgeConfig {
             host: "127.0.0.1".to_string(),
             port: 8787,
             preview_port: 8788,
+            connect_url: None,
+            preview_connect_url: None,
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
@@ -13156,6 +13437,7 @@ mod tests {
             auth_enabled: true,
             allow_insecure_no_auth: false,
             allow_query_token_auth: false,
+            github_codespaces_auth: None,
             allow_outside_root_cwd: false,
             disable_terminal_exec: false,
             terminal_allowed_commands: HashSet::new(),
@@ -13167,19 +13449,22 @@ mod tests {
             "authorization",
             "bearer secret-token".parse().expect("header value"),
         );
-        assert!(base.is_authorized(&headers, None));
-        assert!(!base.is_authorized(&HeaderMap::new(), Some("secret-token")));
-        assert!(!base.is_authorized(&HeaderMap::new(), Some("secret-tok3n")));
+        assert!(base.is_authorized_with_bridge_token(&headers, None));
+        assert!(!base.is_authorized_with_bridge_token(&HeaderMap::new(), Some("secret-token")));
+        assert!(!base.is_authorized_with_bridge_token(&HeaderMap::new(), Some("secret-tok3n")));
 
         let mut query_allowed = base.clone();
         query_allowed.allow_query_token_auth = true;
-        assert!(query_allowed.is_authorized(&HeaderMap::new(), Some("secret-token")));
-        assert!(query_allowed.is_authorized(&HeaderMap::new(), Some("  secret-token  ")));
+        assert!(
+            query_allowed.is_authorized_with_bridge_token(&HeaderMap::new(), Some("secret-token"))
+        );
+        assert!(query_allowed
+            .is_authorized_with_bridge_token(&HeaderMap::new(), Some("  secret-token  ")));
 
         let mut auth_disabled = base;
         auth_disabled.auth_enabled = false;
         auth_disabled.auth_token = None;
-        assert!(auth_disabled.is_authorized(&HeaderMap::new(), None));
+        assert!(!auth_disabled.is_authorized_with_bridge_token(&HeaderMap::new(), None));
     }
 
     #[tokio::test]
