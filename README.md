@@ -28,7 +28,7 @@ Before you start:
 
 Install the mobile app:
 
-- Android APK: <https://github.com/Mohit-Patil/clawdex-mobile/releases/latest>
+- Android APK: <https://www.getclawdex.com/android-beta/>
 - iOS: <https://apple.co/4rNAHRF>
 
 Install the CLI and start the bridge:
