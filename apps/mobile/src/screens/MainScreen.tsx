@@ -8443,17 +8443,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           animationType="fade"
           onRequestClose={closeGitCheckoutModal}
         >
-          <View style={styles.renameModalBackdrop}>
-            <KeyboardAvoidingView
-              style={styles.renameModalKeyboardAvoider}
-              behavior={Platform.OS === 'ios' ? 'position' : 'height'}
-              keyboardVerticalOffset={
-                Platform.OS === 'ios'
-                  ? Math.max(theme.spacing.xl * 2, safeAreaInsets.bottom + theme.spacing.md)
-                  : 0
-              }
-            >
-              <View style={styles.renameModalKeyboardContent}>
+          <KeyboardAvoidingView
+            style={styles.renameModalKeyboardAvoider}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? safeAreaInsets.bottom : 0}
+          >
+            <View style={styles.renameModalBackdrop}>
+              <View
+                style={[
+                  styles.renameModalKeyboardContent,
+                  styles.renameModalKeyboardContentBottom,
+                  { paddingBottom: theme.spacing.md },
+                ]}
+              >
                 <View style={styles.renameModalCard}>
                   <Text style={styles.renameModalTitle}>Git checkout</Text>
                   <Text style={styles.gitCheckoutHint}>
@@ -8551,8 +8553,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                   </View>
                 </View>
               </View>
-            </KeyboardAvoidingView>
-          </View>
+            </View>
+          </KeyboardAvoidingView>
         </Modal>
 
         <SelectionSheet
