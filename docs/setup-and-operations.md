@@ -88,12 +88,22 @@ The repo devcontainer now includes:
 
 That means the first Codespace create now front-loads the expensive bridge compile during `postCreateCommand`, so the later `postStartCommand` can usually start the bridge much faster.
 
+The same bootstrap script is included in the published `clawdex-mobile` npm package. That lets the `clawdex-codespace` template stay minimal: it can install `clawdex-mobile@latest` globally in the devcontainer and invoke the packaged bootstrap against the current workspace instead of copying `scripts/*` and `services/rust-bridge/*` into the template repo.
+
 Manual examples:
 
 ```bash
 npm run codespaces:bootstrap -- --prepare-only
 npm run codespaces:bootstrap
 npm run codespaces:bootstrap -- --no-start
+```
+
+Minimal template equivalent:
+
+```bash
+npm install -g clawdex-mobile@latest @openai/codex
+CLAWDEX_WORKSPACE_ROOT="$PWD" node "$(npm root -g)/clawdex-mobile/scripts/codespaces-bootstrap.js" --prepare-only
+CLAWDEX_WORKSPACE_ROOT="$PWD" node "$(npm root -g)/clawdex-mobile/scripts/codespaces-bootstrap.js"
 ```
 
 ## Manual Secure Setup (No Wizard)

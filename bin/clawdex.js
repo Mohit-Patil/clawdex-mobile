@@ -34,9 +34,14 @@ Commands:
 }
 
 function runCommand(command, args = [], options = {}) {
+  const workspaceRoot = process.env.CLAWDEX_WORKSPACE_ROOT || process.cwd();
   const child = spawnSync(command, args, {
     stdio: "inherit",
-    env: process.env,
+    env: {
+      ...process.env,
+      CLAWDEX_WORKSPACE_ROOT: workspaceRoot,
+      INIT_CWD: process.env.INIT_CWD || workspaceRoot,
+    },
     cwd: process.cwd(),
     ...options,
   });

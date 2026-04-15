@@ -6,13 +6,24 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 function resolveRootDir() {
-  let rootDir = process.env.INIT_CWD
-    ? path.resolve(process.env.INIT_CWD)
-    : path.resolve(__dirname, "..");
-  if (!fs.existsSync(path.join(rootDir, "package.json"))) {
-    rootDir = path.resolve(__dirname, "..");
+  return path.resolve(__dirname, "..");
+}
+
+function resolveWorkspaceDir() {
+  const candidates = [
+    process.env.CLAWDEX_WORKSPACE_ROOT,
+    process.env.INIT_CWD,
+    process.cwd(),
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate.trim()) {
+      continue;
+    }
+    return path.resolve(candidate);
   }
-  return rootDir;
+
+  return resolveRootDir();
 }
 
 function readEnvFile(filePath) {
@@ -92,7 +103,7 @@ function ensureCodespacesContext({ force }) {
   process.exit(0);
 }
 
-function runSetup(rootDir) {
+function runSetup(rootDir, workspaceDir) {
   const setupEnv = {
     ...process.env,
   };
@@ -103,6 +114,7 @@ function runSetup(rootDir) {
   delete setupEnv.BRIDGE_ENABLED_ENGINES;
 
   setupEnv.INIT_CWD = rootDir;
+  setupEnv.CLAWDEX_WORKSPACE_ROOT = workspaceDir;
   setupEnv.BRIDGE_NETWORK_MODE = "codespaces";
   setupEnv.BRIDGE_HOST_OVERRIDE = "127.0.0.1";
   setupEnv.BRIDGE_ACTIVE_ENGINE = "codex";
@@ -110,7 +122,7 @@ function runSetup(rootDir) {
 
   console.log("Preparing .env.secure for GitHub Codespaces...");
   const result = runCommand(path.join(rootDir, "scripts", "setup-secure-dev.sh"), [], {
-    cwd: rootDir,
+    cwd: workspaceDir,
     env: setupEnv,
     shell: false,
   });
@@ -128,7 +140,7 @@ function ensureCodexCliInstalled(secureEnv) {
 
   console.log("Codex CLI not found in this codespace. Installing via npm...");
   const installResult = runCommand("npm", ["install", "-g", "@openai/codex"], {
-    cwd: resolveRootDir(),
+    cwd: resolveWorkspaceDir(),
     env: process.env,
   });
   if ((installResult.status ?? 1) !== 0) {
@@ -144,17 +156,19 @@ function ensureCodexCliInstalled(secureEnv) {
   console.log("Codex CLI installed.");
 }
 
-function prepareBridgeBinary(rootDir, secureEnv) {
+function prepareBridgeBinary(rootDir, workspaceDir, secureEnv) {
   console.log("Prebuilding bridge binary for faster Codespaces startup...");
   const prepareEnv = {
     ...process.env,
     ...secureEnv,
+    CLAWDEX_WORKSPACE_ROOT: workspaceDir,
+    INIT_CWD: process.env.INIT_CWD || workspaceDir,
   };
   const result = runCommand(
     process.execPath,
     [path.join(rootDir, "scripts", "start-bridge-secure.js"), "--prepare-only"],
     {
-      cwd: rootDir,
+      cwd: workspaceDir,
       env: prepareEnv,
     }
   );
@@ -164,14 +178,18 @@ function prepareBridgeBinary(rootDir, secureEnv) {
   }
 }
 
-function startBridge(rootDir) {
+function startBridge(rootDir, workspaceDir) {
   console.log("Starting bridge in background for this codespace...");
   const result = runCommand(
     process.execPath,
     [path.join(rootDir, "scripts", "start-bridge-secure.js"), "--background"],
     {
-      cwd: rootDir,
-      env: process.env,
+      cwd: workspaceDir,
+      env: {
+        ...process.env,
+        CLAWDEX_WORKSPACE_ROOT: workspaceDir,
+        INIT_CWD: process.env.INIT_CWD || workspaceDir,
+      },
     }
   );
 
@@ -185,9 +203,10 @@ function main() {
   ensureCodespacesContext(options);
 
   const rootDir = resolveRootDir();
-  const secureEnvPath = path.join(rootDir, ".env.secure");
+  const workspaceDir = resolveWorkspaceDir();
+  const secureEnvPath = path.join(workspaceDir, ".env.secure");
 
-  runSetup(rootDir);
+  runSetup(rootDir, workspaceDir);
 
   if (!fs.existsSync(secureEnvPath)) {
     console.error(`error: expected secure env at ${secureEnvPath}`);
@@ -202,11 +221,11 @@ function main() {
 
   ensureCodexCliInstalled(secureEnv);
   if (options.prepareOnly) {
-    prepareBridgeBinary(rootDir, secureEnv);
+    prepareBridgeBinary(rootDir, workspaceDir, secureEnv);
     console.log("Codespaces bootstrap prepared Codex and the bridge binary without starting the bridge.");
     return;
   }
-  startBridge(rootDir);
+  startBridge(rootDir, workspaceDir);
 }
 
 main();

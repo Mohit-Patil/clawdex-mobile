@@ -87,6 +87,8 @@ npm run codespaces:bootstrap -- --prepare-only
 
 That pre-installs Codex and prebuilds the Rust bridge binary so the later startup path is faster. The normal bootstrap command rewrites `.env.secure` for Codespaces with `codex` as the only enabled engine and starts the bridge in the background. You can rerun either command manually any time.
 
+The published npm package now includes that bootstrap script too, so a minimal Codespaces template repo can install `clawdex-mobile@latest` in `postCreateCommand` and call the packaged bootstrap without vendoring bridge source into the template itself.
+
 In Codespaces mode, the bootstrap also enables bridge-side GitHub bearer auth for the current `CODESPACE_NAME`, so the mobile app can authenticate with the same GitHub OAuth token it used to discover and start the Codespace.
 
 ## OpenCode Setup

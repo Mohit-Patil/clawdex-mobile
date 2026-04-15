@@ -2,10 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -L)"
-ROOT_DIR="${INIT_CWD:-$(cd "$SCRIPT_DIR/.." && pwd -L)}"
-if [[ ! -f "$ROOT_DIR/package.json" ]]; then
-  ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -L)"
+PACKAGE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -L)"
+ROOT_DIR="${CLAWDEX_WORKSPACE_ROOT:-${INIT_CWD:-$(pwd -L)}}"
+if [[ ! -d "$ROOT_DIR" ]]; then
+  ROOT_DIR="$PACKAGE_ROOT"
 fi
+ROOT_DIR_REGEX="$(printf '%s' "$ROOT_DIR" | sed 's/[][(){}.^$*+?|\\-]/\\&/g')"
+PACKAGE_ROOT_REGEX="$(printf '%s' "$PACKAGE_ROOT" | sed 's/[][(){}.^$*+?|\\-]/\\&/g')"
 
 BRIDGE_PID_FILE="$ROOT_DIR/.bridge.pid"
 EXPO_PID_FILE="$ROOT_DIR/.expo.pid"
@@ -131,12 +134,12 @@ echo "Stopping Clawdex services for project: $ROOT_DIR"
 BRIDGE_PORT="${BRIDGE_PORT:-$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PORT" || true)}"
 BRIDGE_PORT="${BRIDGE_PORT:-8787}"
 
-stop_process_group "Expo" "$ROOT_DIR/.*/expo start|$ROOT_DIR/node_modules/.bin/expo start"
+stop_process_group "Expo" "$ROOT_DIR_REGEX/.*/expo start|$ROOT_DIR_REGEX/node_modules/.bin/expo start"
 stop_launchctl_job "clawdex.bridge.$BRIDGE_PORT" || true
-stop_process_group "Bridge launcher" "$ROOT_DIR/scripts/start-bridge-secure\\.js|node .*start-bridge-secure\\.js"
+stop_process_group "Bridge launcher" "$ROOT_DIR_REGEX/scripts/start-bridge-secure\\.js|$PACKAGE_ROOT_REGEX/scripts/start-bridge-secure\\.js"
 stop_pid_file_process "Rust bridge" "$BRIDGE_PID_FILE" || true
-stop_process_group "Rust bridge" "$ROOT_DIR/services/rust-bridge|codex-rust-bridge|@codex/rust-bridge"
-stop_process_group "Legacy TS bridge" "$ROOT_DIR/services/mac-bridge|@codex/mac-bridge"
+stop_process_group "Rust bridge" "$ROOT_DIR_REGEX/services/rust-bridge|$PACKAGE_ROOT_REGEX/services/rust-bridge"
+stop_process_group "Legacy TS bridge" "$ROOT_DIR_REGEX/services/mac-bridge|$PACKAGE_ROOT_REGEX/services/mac-bridge"
 
 if [[ -f "$SECURE_ENV_FILE" ]]; then
   BRIDGE_ENABLED_ENGINES="$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES" || true)"

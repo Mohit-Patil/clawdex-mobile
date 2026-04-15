@@ -34,6 +34,7 @@
     "docs/troubleshooting.md",
     "scripts/bridge-binary.js",
     "scripts/bridge-self-update.js",
+    "scripts/codespaces-bootstrap.js",
     "scripts/setup-secure-dev.sh",
     "scripts/setup-wizard.sh",
     "scripts/start-bridge-secure.js",

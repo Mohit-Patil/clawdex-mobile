@@ -22,12 +22,25 @@ let qrcodeTerminalLoaded = false;
 let qrcodeTerminalLoadError = null;
 let pairingQrRenderError = null;
 
-function resolveRootDir() {
-  let rootDir = process.env.INIT_CWD ? path.resolve(process.env.INIT_CWD) : path.resolve(__dirname, "..");
-  if (!fs.existsSync(path.join(rootDir, "package.json"))) {
-    rootDir = path.resolve(__dirname, "..");
+function resolvePackageDir() {
+  return path.resolve(__dirname, "..");
+}
+
+function resolveWorkspaceDir() {
+  const candidates = [
+    process.env.CLAWDEX_WORKSPACE_ROOT,
+    process.env.INIT_CWD,
+    process.cwd(),
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !candidate.trim()) {
+      continue;
+    }
+    return path.resolve(candidate);
   }
-  return rootDir;
+
+  return resolvePackageDir();
 }
 
 function readEnvFile(filePath) {
@@ -548,17 +561,17 @@ function walkFiles(directory) {
   return files;
 }
 
-function isBuiltBinaryFresh(rootDir, binaryPath) {
+function isBuiltBinaryFresh(packageDir, binaryPath) {
   if (!fs.existsSync(binaryPath)) {
     return false;
   }
 
   const binaryMtime = fs.statSync(binaryPath).mtimeMs;
   const watchPaths = [
-    path.join(rootDir, "services", "rust-bridge", "Cargo.toml"),
-    path.join(rootDir, "services", "rust-bridge", "Cargo.lock"),
+    path.join(packageDir, "services", "rust-bridge", "Cargo.toml"),
+    path.join(packageDir, "services", "rust-bridge", "Cargo.lock"),
   ];
-  const sourceDir = path.join(rootDir, "services", "rust-bridge", "src");
+  const sourceDir = path.join(packageDir, "services", "rust-bridge", "src");
 
   if (fs.existsSync(sourceDir)) {
     watchPaths.push(...walkFiles(sourceDir));
@@ -716,14 +729,14 @@ async function spawnDetachedAndWait(command, args, options) {
   }
 }
 
-function buildBridgeFromSource(rootDir, env, profile) {
+function buildBridgeFromSource(packageDir, env, profile) {
   const cargoCmd = "cargo";
   const args = ["build", "--locked"];
   if (profile === "release") {
     args.push("--release");
   }
   const result = spawnSync(cargoCmd, args, {
-    cwd: path.join(rootDir, "services", "rust-bridge"),
+    cwd: path.join(packageDir, "services", "rust-bridge"),
     env,
     stdio: "inherit",
   });
@@ -738,7 +751,7 @@ function buildBridgeFromSource(rootDir, env, profile) {
   }
 }
 
-function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
+function resolveLaunch(workspaceDir, packageDir, env, { devMode, forceSourceBuild }) {
   if (devMode) {
     if (!commandExists("cargo")) {
       console.error("error: missing Rust/Cargo toolchain for dev bridge mode.");
@@ -748,7 +761,7 @@ function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
     return {
       command: "cargo",
       args: ["run"],
-      cwd: path.join(rootDir, "services", "rust-bridge"),
+      cwd: path.join(packageDir, "services", "rust-bridge"),
       env,
       healthTimeoutMs: DEV_HEALTH_TIMEOUT_MS,
     };
@@ -764,32 +777,32 @@ function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
     return {
       command: overrideBinary,
       args: [],
-      cwd: rootDir,
+      cwd: workspaceDir,
       env,
       healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
     };
   }
 
   const buildProfile = resolveBridgeBuildProfile(env);
-  const packagedBinary = packagedBinaryPath(rootDir, resolveRuntimeTarget());
+  const packagedBinary = packagedBinaryPath(packageDir, resolveRuntimeTarget());
   if (!forceSourceBuild && packagedBinary && fs.existsSync(packagedBinary)) {
     ensureExecutable(packagedBinary);
     return {
       command: packagedBinary,
       args: [],
-      cwd: rootDir,
+      cwd: workspaceDir,
       env,
       healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
     };
   }
 
-  const builtBinary = builtBinaryPath(rootDir, os.platform(), buildProfile);
-  if (isBuiltBinaryFresh(rootDir, builtBinary)) {
+  const builtBinary = builtBinaryPath(packageDir, os.platform(), buildProfile);
+  if (isBuiltBinaryFresh(packageDir, builtBinary)) {
     ensureExecutable(builtBinary);
     return {
       command: builtBinary,
       args: [],
-      cwd: rootDir,
+      cwd: workspaceDir,
       env,
       healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
     };
@@ -807,7 +820,7 @@ function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
     process.exit(1);
   }
 
-  buildBridgeFromSource(rootDir, env, buildProfile);
+  buildBridgeFromSource(packageDir, env, buildProfile);
 
   if (!fs.existsSync(builtBinary)) {
     console.error(`error: expected built bridge binary at ${builtBinary}, but it was not created.`);
@@ -818,22 +831,28 @@ function resolveLaunch(rootDir, env, { devMode, forceSourceBuild }) {
   return {
     command: builtBinary,
     args: [],
-    cwd: rootDir,
+    cwd: workspaceDir,
     env,
     healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
   };
 }
 
 async function start() {
-  const rootDir = resolveRootDir();
-  const secureEnvFile = path.join(rootDir, ".env.secure");
+  const workspaceDir = resolveWorkspaceDir();
+  const packageDir = resolvePackageDir();
+  const secureEnvFile = path.join(workspaceDir, ".env.secure");
   if (!fs.existsSync(secureEnvFile)) {
     console.error(`error: ${secureEnvFile} not found. Run: npm run secure:setup`);
     process.exit(1);
   }
 
   const fileEnv = readEnvFile(secureEnvFile);
-  const env = { ...fileEnv, ...process.env };
+  const env = {
+    ...fileEnv,
+    ...process.env,
+    CLAWDEX_WORKSPACE_ROOT: workspaceDir,
+    INIT_CWD: process.env.INIT_CWD || workspaceDir,
+  };
   const devMode = process.argv.includes("--dev") || env.BRIDGE_RUN_MODE === "dev";
   if (devMode) {
     env.BRIDGE_RUN_MODE = "dev";
@@ -841,7 +860,7 @@ async function start() {
   const backgroundMode = process.argv.includes("--background");
   const prepareOnly = process.argv.includes("--prepare-only");
   const forceSourceBuild = env.CLAWDEX_BRIDGE_FORCE_SOURCE_BUILD === "true";
-  const launch = resolveLaunch(rootDir, env, { devMode, forceSourceBuild });
+  const launch = resolveLaunch(workspaceDir, packageDir, env, { devMode, forceSourceBuild });
 
   if (prepareOnly) {
     console.log(`Bridge binary ready: ${launch.command}`);
@@ -852,7 +871,7 @@ async function start() {
     await spawnDetachedAndWait(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,
-      rootDir,
+      rootDir: workspaceDir,
       healthTimeoutMs: launch.healthTimeoutMs,
     });
     return;

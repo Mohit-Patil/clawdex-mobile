@@ -2,7 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -L)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -L)"
+PACKAGE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -L)"
+ROOT_DIR="${CLAWDEX_WORKSPACE_ROOT:-${INIT_CWD:-$(pwd -L)}}"
+if [[ ! -d "$ROOT_DIR" ]]; then
+  ROOT_DIR="$PACKAGE_ROOT"
+fi
 
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]]; then
   BOLD="$(tput bold)"

@@ -2,9 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -L)"
-ROOT_DIR="${INIT_CWD:-$(cd "$SCRIPT_DIR/.." && pwd -L)}"
-if [[ ! -f "$ROOT_DIR/package.json" ]]; then
-  ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -L)"
+PACKAGE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -L)"
+ROOT_DIR="${CLAWDEX_WORKSPACE_ROOT:-${INIT_CWD:-$(pwd -L)}}"
+if [[ ! -d "$ROOT_DIR" ]]; then
+  ROOT_DIR="$PACKAGE_ROOT"
 fi
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
 MOBILE_ENV_FILE="$ROOT_DIR/apps/mobile/.env"

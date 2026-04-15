@@ -65,6 +65,13 @@ npm run codespaces:bootstrap -- --prepare-only
 npm run codespaces:bootstrap
 ```
 
+- On the minimal `clawdex-codespace` template, rerun the packaged bootstrap instead:
+
+```bash
+CLAWDEX_WORKSPACE_ROOT="$PWD" node "$(npm root -g)/clawdex-mobile/scripts/codespaces-bootstrap.js" --prepare-only
+CLAWDEX_WORKSPACE_ROOT="$PWD" node "$(npm root -g)/clawdex-mobile/scripts/codespaces-bootstrap.js"
+```
+
 - The Codespaces bootstrap only prepares the `codex` engine. It will try to install Codex automatically with `npm install -g @openai/codex`.
 - `--prepare-only` installs Codex if needed and prebuilds the Rust bridge binary without starting the bridge.
 - The bootstrap also enables `BRIDGE_GITHUB_CODESPACES_AUTH=true` so GitHub bearer tokens can connect directly to the bridge.
