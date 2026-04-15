@@ -19,9 +19,14 @@ The bridge resolves transcription credentials in order:
 
 1. `OPENAI_API_KEY` env var → `https://api.openai.com/v1/audio/transcriptions` (model: `gpt-4o-transcribe`)
 2. `BRIDGE_CHATGPT_ACCESS_TOKEN` env var → `https://chatgpt.com/backend-api/transcribe` (no model param)
-3. `~/.codex/auth.json` fallback:
+3. ChatGPT auth tokens previously handed to Codex from the mobile app:
+   - cached in bridge memory
+   - persisted in `BRIDGE_WORKDIR/.clawdex-chatgpt-auth.json`
+4. `~/.codex/auth.json` fallback:
    - `OPENAI_API_KEY` field present → same as path 1
    - `auth_mode: "chatgpt"` with `tokens.access_token` → same as path 2
+
+That means GitHub Codespaces no longer needs a separate transcription-only env var after the user completes ChatGPT/Codex login from the app. The bridge reuses the same ChatGPT token bundle for both Codex auth refresh and voice transcription.
 
 ## Files
 

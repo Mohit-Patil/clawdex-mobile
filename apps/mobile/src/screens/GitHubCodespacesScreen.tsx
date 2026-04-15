@@ -691,7 +691,7 @@ export function GitHubCodespacesScreen({
       );
 
       try {
-        let currentCodespace = codespace;
+        const currentCodespace = codespace;
         if (currentCodespace.state.trim().toLowerCase() !== 'available') {
           setConnectionMessage(`Starting ${codespace.name}…`);
           await startGitHubCodespace(session.accessToken, codespace.name);

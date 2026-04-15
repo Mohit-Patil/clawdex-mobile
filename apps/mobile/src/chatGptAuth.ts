@@ -1,6 +1,8 @@
+import { Buffer } from 'buffer';
 import * as Crypto from 'expo-crypto';
 import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
+import * as WebBrowser from 'expo-web-browser';
 import { Platform } from 'react-native';
 
 const CHATGPT_AUTH_ISSUER = 'https://auth.openai.com';
@@ -344,7 +346,6 @@ async function openAuthSession(
   authorizeUrl: string,
   redirectUri: string
 ): Promise<ChatGptAuthSessionResult> {
-  const WebBrowser = getWebBrowserModule();
   const result = await WebBrowser.openAuthSessionAsync(authorizeUrl, redirectUri, {
     preferEphemeralSession: true,
   });
@@ -422,22 +423,11 @@ function base64UrlEncodeBytes(bytes: Uint8Array): string {
     .replace(/=+$/g, '');
 }
 
-function getWebBrowserModule(): typeof import('expo-web-browser') {
-  try {
-    return require('expo-web-browser') as typeof import('expo-web-browser');
-  } catch (error) {
-    throw new ChatGptAuthError(
-      `System browser authentication is unavailable in this build: ${(error as Error).message}`
-    );
-  }
-}
-
 function encodeBase64(value: string): string {
   if (typeof globalThis.btoa === 'function') {
     return globalThis.btoa(value);
   }
 
-  const { Buffer } = require('buffer') as typeof import('buffer');
   return Buffer.from(value, 'binary').toString('base64');
 }
 
@@ -446,6 +436,5 @@ function decodeBase64(value: string): string {
     return globalThis.atob(value);
   }
 
-  const { Buffer } = require('buffer') as typeof import('buffer');
   return Buffer.from(value, 'base64').toString('binary');
 }

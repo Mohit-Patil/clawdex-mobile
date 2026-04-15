@@ -89,6 +89,22 @@ ls -la .bridge.pid .bridge.log .env.secure
 npm run codespaces:bootstrap -- --no-start
 ```
 
+## Voice transcription says no credentials were found
+
+- The bridge can transcribe with either `OPENAI_API_KEY`, `BRIDGE_CHATGPT_ACCESS_TOKEN`, or the same ChatGPT auth tokens already used for Codex login.
+- In GitHub Codespaces, finish the ChatGPT/Codex login step from the app first. The bridge will persist those tokens to `BRIDGE_WORKDIR/.clawdex-chatgpt-auth.json` and reuse them for voice transcription.
+- If you still see the error after logging in, restart the bridge once so it reloads the persisted auth cache:
+
+```bash
+npm run secure:bridge
+```
+
+- You can inspect whether the bridge captured the token bundle:
+
+```bash
+ls -la .clawdex-chatgpt-auth.json
+```
+
 ## Local browser preview does not open
 
 - The in-app browser only supports loopback targets from the bridge host: `localhost`, `127.0.0.1`, or `::1`.

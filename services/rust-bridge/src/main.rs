@@ -7,7 +7,7 @@ use std::{
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, OnceLock, RwLock as StdRwLock,
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -58,6 +58,7 @@ const REQUEST_USER_INPUT_METHOD: &str = "item/tool/requestUserInput";
 const REQUEST_USER_INPUT_METHOD_ALT: &str = "tool/requestUserInput";
 const DYNAMIC_TOOL_CALL_METHOD: &str = "item/tool/call";
 const ACCOUNT_CHATGPT_TOKENS_REFRESH_METHOD: &str = "account/chatgptAuthTokens/refresh";
+const BRIDGE_CHATGPT_AUTH_CACHE_FILE_NAME: &str = ".clawdex-chatgpt-auth.json";
 const MOBILE_ATTACHMENTS_DIR: &str = ".clawdex-mobile-attachments";
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const DEFAULT_MAX_VOICE_TRANSCRIPTION_BYTES: usize = 100 * 1024 * 1024;
@@ -2006,6 +2007,15 @@ struct PendingRequest {
     client_id: u64,
     client_request_id: Value,
     method: String,
+    cached_chatgpt_auth: Option<BridgeChatGptAuthBundle>,
+    clear_cached_chatgpt_auth_on_success: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BridgeChatGptAuthBundle {
+    access_token: String,
+    account_id: String,
+    plan_type: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -2234,6 +2244,9 @@ impl AppServerBridge {
         params: Option<Value>,
     ) -> Result<(), String> {
         let internal_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let cached_chatgpt_auth =
+            extract_chatgpt_auth_tokens_from_account_login_start(params.as_ref());
+        let clear_cached_chatgpt_auth_on_success = method == "account/logout";
 
         {
             let mut pending = self.pending_requests.lock().await;
@@ -2243,6 +2256,8 @@ impl AppServerBridge {
                     client_id,
                     client_request_id,
                     method: method.to_string(),
+                    cached_chatgpt_auth,
+                    clear_cached_chatgpt_auth_on_success,
                 },
             );
         }
@@ -2618,18 +2633,14 @@ impl AppServerBridge {
         }
 
         if method == ACCOUNT_CHATGPT_TOKENS_REFRESH_METHOD {
-            let access_token = read_non_empty_env("BRIDGE_CHATGPT_ACCESS_TOKEN");
-            let account_id = read_non_empty_env("BRIDGE_CHATGPT_ACCOUNT_ID");
-            let plan_type = read_non_empty_env("BRIDGE_CHATGPT_PLAN_TYPE");
-
-            if let (Some(access_token), Some(chatgpt_account_id)) = (access_token, account_id) {
+            if let Some(auth) = resolve_bridge_chatgpt_auth_bundle_for_refresh() {
                 let mut result = json!({
-                    "accessToken": access_token,
-                    "chatgptAccountId": chatgpt_account_id,
+                    "accessToken": auth.access_token,
+                    "chatgptAccountId": auth.account_id,
                     "chatgptPlanType": Value::Null,
                 });
 
-                if let Some(plan_type) = plan_type {
+                if let Some(plan_type) = auth.plan_type {
                     result["chatgptPlanType"] = json!(plan_type);
                 }
 
@@ -2660,7 +2671,7 @@ impl AppServerBridge {
                         "id": id,
                         "error": {
                             "code": -32001,
-                            "message": "account/chatgptAuthTokens/refresh is not configured (set BRIDGE_CHATGPT_ACCESS_TOKEN and BRIDGE_CHATGPT_ACCOUNT_ID)"
+                            "message": "account/chatgptAuthTokens/refresh is not configured (set BRIDGE_CHATGPT_ACCESS_TOKEN and BRIDGE_CHATGPT_ACCOUNT_ID, or complete ChatGPT login from the mobile app)"
                         }
                     }))
                     .await;
@@ -2717,6 +2728,15 @@ impl AppServerBridge {
         let Some(pending) = pending else {
             return;
         };
+
+        if object.get("error").is_none() {
+            if pending.clear_cached_chatgpt_auth_on_success {
+                clear_cached_bridge_chatgpt_auth();
+            }
+            if let Some(auth) = pending.cached_chatgpt_auth.clone() {
+                cache_bridge_chatgpt_auth(auth);
+            }
+        }
 
         let client_payload = if let Some(error) = object.get("error") {
             json!({
@@ -7060,6 +7080,106 @@ async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, Brid
         .map_err(|e| BridgeError::server(&e.to_string()))?)
 }
 
+fn bridge_chatgpt_auth_cache() -> &'static StdRwLock<Option<BridgeChatGptAuthBundle>> {
+    static CACHE: OnceLock<StdRwLock<Option<BridgeChatGptAuthBundle>>> = OnceLock::new();
+    CACHE.get_or_init(|| StdRwLock::new(None))
+}
+
+fn resolve_bridge_chatgpt_auth_cache_path() -> Option<PathBuf> {
+    let workdir = read_non_empty_env("BRIDGE_WORKDIR").map(PathBuf::from)?;
+    Some(workdir.join(BRIDGE_CHATGPT_AUTH_CACHE_FILE_NAME))
+}
+
+fn load_persisted_bridge_chatgpt_auth() -> Option<BridgeChatGptAuthBundle> {
+    let path = resolve_bridge_chatgpt_auth_cache_path()?;
+    let contents = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<BridgeChatGptAuthBundle>(&contents).ok()
+}
+
+fn read_cached_bridge_chatgpt_auth() -> Option<BridgeChatGptAuthBundle> {
+    if let Ok(guard) = bridge_chatgpt_auth_cache().read() {
+        if let Some(auth) = guard.clone() {
+            return Some(auth);
+        }
+    }
+
+    let persisted = load_persisted_bridge_chatgpt_auth()?;
+    if let Ok(mut guard) = bridge_chatgpt_auth_cache().write() {
+        *guard = Some(persisted.clone());
+    }
+    Some(persisted)
+}
+
+fn cache_bridge_chatgpt_auth(auth: BridgeChatGptAuthBundle) {
+    if let Ok(mut guard) = bridge_chatgpt_auth_cache().write() {
+        *guard = Some(auth.clone());
+    }
+
+    if let Some(path) = resolve_bridge_chatgpt_auth_cache_path() {
+        if let Ok(payload) = serde_json::to_vec_pretty(&auth) {
+            let _ = std::fs::write(path, payload);
+        }
+    }
+}
+
+fn clear_cached_bridge_chatgpt_auth() {
+    if let Ok(mut guard) = bridge_chatgpt_auth_cache().write() {
+        *guard = None;
+    }
+
+    if let Some(path) = resolve_bridge_chatgpt_auth_cache_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn resolve_bridge_chatgpt_auth_bundle_for_refresh() -> Option<BridgeChatGptAuthBundle> {
+    let access_token = read_non_empty_env("BRIDGE_CHATGPT_ACCESS_TOKEN");
+    let account_id = read_non_empty_env("BRIDGE_CHATGPT_ACCOUNT_ID");
+    if let (Some(access_token), Some(account_id)) = (access_token, account_id) {
+        return Some(BridgeChatGptAuthBundle {
+            access_token,
+            account_id,
+            plan_type: read_non_empty_env("BRIDGE_CHATGPT_PLAN_TYPE"),
+        });
+    }
+
+    read_cached_bridge_chatgpt_auth()
+}
+
+fn resolve_bridge_chatgpt_access_token_for_transcription() -> Option<String> {
+    read_non_empty_env("BRIDGE_CHATGPT_ACCESS_TOKEN")
+        .or_else(|| read_cached_bridge_chatgpt_auth().map(|auth| auth.access_token))
+}
+
+fn extract_chatgpt_auth_tokens_from_account_login_start(
+    params: Option<&Value>,
+) -> Option<BridgeChatGptAuthBundle> {
+    let params = params?.as_object()?;
+    let login_type = params.get("type")?.as_str()?.trim();
+    if login_type != "chatgptAuthTokens" {
+        return None;
+    }
+
+    let access_token = params.get("accessToken")?.as_str()?.trim();
+    let account_id = params.get("chatgptAccountId")?.as_str()?.trim();
+    if access_token.is_empty() || account_id.is_empty() {
+        return None;
+    }
+
+    let plan_type = params
+        .get("chatgptPlanType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    Some(BridgeChatGptAuthBundle {
+        access_token: access_token.to_string(),
+        account_id: account_id.to_string(),
+        plan_type,
+    })
+}
+
 fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
     // Path 1: OPENAI_API_KEY env var → OpenAI direct API.
     if let Some(api_key) = read_non_empty_env("OPENAI_API_KEY") {
@@ -7070,8 +7190,9 @@ fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
         ));
     }
 
-    // Path 2: BRIDGE_CHATGPT_ACCESS_TOKEN env var → ChatGPT backend.
-    if let Some(access_token) = read_non_empty_env("BRIDGE_CHATGPT_ACCESS_TOKEN") {
+    // Path 2: bridge ChatGPT auth (env, cached mobile login, or persisted bridge cache)
+    // → ChatGPT backend.
+    if let Some(access_token) = resolve_bridge_chatgpt_access_token_for_transcription() {
         return Ok((
             "https://chatgpt.com/backend-api/transcribe".to_string(),
             access_token,
@@ -7126,7 +7247,7 @@ fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
     Err(BridgeError {
         code: -32002,
         message:
-            "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN"
+            "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN, or finish ChatGPT login for Codex in the mobile app"
                 .to_string(),
         data: None,
     })
@@ -13492,6 +13613,90 @@ mod tests {
         assert_eq!(payload["result"]["ok"], true);
         assert!(bridge.pending_requests.lock().await.is_empty());
 
+        shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn successful_chatgpt_auth_token_login_populates_bridge_auth_cache() {
+        clear_cached_bridge_chatgpt_auth();
+
+        let hub = Arc::new(ClientHub::new());
+        let bridge = build_test_bridge(hub.clone()).await;
+        let (client_id, mut rx) = add_test_client(&hub).await;
+
+        bridge
+            .forward_request(
+                client_id,
+                json!("client-req-chatgpt-login"),
+                "account/login/start",
+                Some(json!({
+                    "type": "chatgptAuthTokens",
+                    "accessToken": "bridge-cached-token",
+                    "chatgptAccountId": "account-123",
+                    "chatgptPlanType": "team",
+                })),
+            )
+            .await
+            .expect("forward request");
+
+        bridge
+            .handle_response(json!({ "id": 1, "result": { "type": "chatgptAuthTokens" } }))
+            .await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["id"], "client-req-chatgpt-login");
+        assert_eq!(payload["result"]["type"], "chatgptAuthTokens");
+
+        let refresh_auth =
+            resolve_bridge_chatgpt_auth_bundle_for_refresh().expect("cached auth bundle");
+        assert_eq!(refresh_auth.access_token, "bridge-cached-token");
+        assert_eq!(refresh_auth.account_id, "account-123");
+        assert_eq!(refresh_auth.plan_type.as_deref(), Some("team"));
+
+        let (url, token, uses_openai_api) =
+            resolve_transcription_auth().expect("transcription auth");
+        assert_eq!(url, "https://chatgpt.com/backend-api/transcribe");
+        assert_eq!(token, "bridge-cached-token");
+        assert!(!uses_openai_api);
+
+        clear_cached_bridge_chatgpt_auth();
+        shutdown_test_bridge(&bridge).await;
+    }
+
+    #[tokio::test]
+    async fn successful_account_logout_clears_cached_bridge_chatgpt_auth() {
+        clear_cached_bridge_chatgpt_auth();
+        cache_bridge_chatgpt_auth(BridgeChatGptAuthBundle {
+            access_token: "cached-before-logout".to_string(),
+            account_id: "account-logout".to_string(),
+            plan_type: Some("plus".to_string()),
+        });
+
+        let hub = Arc::new(ClientHub::new());
+        let bridge = build_test_bridge(hub.clone()).await;
+        let (client_id, mut rx) = add_test_client(&hub).await;
+
+        bridge
+            .forward_request(
+                client_id,
+                json!("client-req-logout"),
+                "account/logout",
+                None,
+            )
+            .await
+            .expect("forward request");
+
+        bridge
+            .handle_response(json!({ "id": 1, "result": {} }))
+            .await;
+
+        let payload = recv_client_json(&mut rx).await;
+        assert_eq!(payload["id"], "client-req-logout");
+        assert_eq!(payload["result"], json!({}));
+        assert!(read_cached_bridge_chatgpt_auth().is_none());
+        assert!(resolve_bridge_chatgpt_auth_bundle_for_refresh().is_none());
+
+        clear_cached_bridge_chatgpt_auth();
         shutdown_test_bridge(&bridge).await;
     }
 
