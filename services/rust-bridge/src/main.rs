@@ -7330,7 +7330,27 @@ fn bridge_chatgpt_auth_cache() -> &'static StdRwLock<Option<BridgeChatGptAuthBun
     CACHE.get_or_init(|| StdRwLock::new(None))
 }
 
+#[cfg(test)]
+fn bridge_chatgpt_auth_cache_path_override() -> &'static StdRwLock<Option<PathBuf>> {
+    static OVERRIDE: OnceLock<StdRwLock<Option<PathBuf>>> = OnceLock::new();
+    OVERRIDE.get_or_init(|| StdRwLock::new(None))
+}
+
+#[cfg(test)]
+fn set_bridge_chatgpt_auth_cache_path_override(path: Option<PathBuf>) {
+    if let Ok(mut guard) = bridge_chatgpt_auth_cache_path_override().write() {
+        *guard = path;
+    }
+}
+
 fn resolve_bridge_chatgpt_auth_cache_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Ok(guard) = bridge_chatgpt_auth_cache_path_override().read() {
+        if let Some(path) = guard.clone() {
+            return Some(path);
+        }
+    }
+
     let workdir = read_non_empty_env("BRIDGE_WORKDIR").map(PathBuf::from)?;
     Some(workdir.join(BRIDGE_CHATGPT_AUTH_CACHE_FILE_NAME))
 }
@@ -11863,6 +11883,51 @@ fn normalize_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn bridge_chatgpt_auth_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    struct TestBridgeChatGptAuthCacheScope {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        temp_dir: PathBuf,
+    }
+
+    impl TestBridgeChatGptAuthCacheScope {
+        fn new() -> Self {
+            let guard = bridge_chatgpt_auth_test_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            clear_cached_bridge_chatgpt_auth();
+
+            let nonce = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("valid time")
+                .as_nanos();
+            let temp_dir = env::temp_dir().join(format!(
+                "clawdex-bridge-chatgpt-auth-test-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&temp_dir).expect("create auth cache test dir");
+            set_bridge_chatgpt_auth_cache_path_override(Some(
+                temp_dir.join(BRIDGE_CHATGPT_AUTH_CACHE_FILE_NAME),
+            ));
+
+            Self {
+                _guard: guard,
+                temp_dir,
+            }
+        }
+    }
+
+    impl Drop for TestBridgeChatGptAuthCacheScope {
+        fn drop(&mut self) {
+            clear_cached_bridge_chatgpt_auth();
+            set_bridge_chatgpt_auth_cache_path_override(None);
+            let _ = std::fs::remove_dir_all(&self.temp_dir);
+        }
+    }
+
     async fn build_test_bridge(hub: Arc<ClientHub>) -> Arc<AppServerBridge> {
         let mut child = Command::new("cat")
             .stdin(Stdio::piped())
@@ -13863,6 +13928,7 @@ mod tests {
 
     #[tokio::test]
     async fn successful_chatgpt_auth_token_login_populates_bridge_auth_cache() {
+        let _auth_cache_scope = TestBridgeChatGptAuthCacheScope::new();
         clear_cached_bridge_chatgpt_auth();
 
         let hub = Arc::new(ClientHub::new());
@@ -13910,6 +13976,7 @@ mod tests {
 
     #[tokio::test]
     async fn successful_account_logout_clears_cached_bridge_chatgpt_auth() {
+        let _auth_cache_scope = TestBridgeChatGptAuthCacheScope::new();
         clear_cached_bridge_chatgpt_auth();
         cache_bridge_chatgpt_auth(BridgeChatGptAuthBundle {
             access_token: "cached-before-logout".to_string(),
