@@ -89,6 +89,13 @@ ls -la .bridge.pid .bridge.log .env.secure
 npm run codespaces:bootstrap -- --no-start
 ```
 
+## Git push in a Codespace fails with `403` or permission denied
+
+- The app now bootstraps GitHub HTTPS git credentials inside the Codespace after GitHub sign-in.
+- If you signed in before this behavior shipped, reopen `GitHub Codespaces` in the app and sign in with GitHub once more so the saved token includes repository access.
+- The bootstrap also rewrites common `git@github.com:...` and `ssh://git@github.com/...` remotes to HTTPS so they can use the same credential.
+- After reconnecting, retry the clone/push from the app or from the Codespace shell.
+
 ## Voice transcription says no credentials were found
 
 - The bridge can transcribe with either `OPENAI_API_KEY`, `BRIDGE_CHATGPT_ACCESS_TOKEN`, or the same ChatGPT auth tokens already used for Codex login.

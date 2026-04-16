@@ -78,7 +78,7 @@ interface PendingCodexLogin {
   profileDraft: BridgeProfileDraft;
 }
 
-const GITHUB_DEVICE_FLOW_SCOPES = ['codespace', 'read:user'];
+const GITHUB_DEVICE_FLOW_SCOPES = ['codespace', 'read:user', 'repo'];
 const BRIDGE_READY_POLL_MS = 3000;
 const BRIDGE_READY_TIMEOUT_MS = 6 * 60 * 1000;
 
@@ -620,6 +620,14 @@ export function GitHubCodespacesScreen({
         `Codespace ${codespace.name} is up. Starting bridge bootstrap… First boot can take a few minutes while the Codespace installs Codex and builds the bridge.`
       );
       await waitForBridgeReady(bridgeUrl, activeSession.accessToken);
+      if (connectFlowRef.current !== runId) {
+        return 'connected';
+      }
+
+      setConnectionMessage('Bridge is up. Enabling GitHub clone and push access inside the Codespace…');
+      await withBridgeApiClient(bridgeUrl, activeSession.accessToken, (api) =>
+        api.installGitHubAuth(activeSession.accessToken)
+      );
       if (connectFlowRef.current !== runId) {
         return 'connected';
       }

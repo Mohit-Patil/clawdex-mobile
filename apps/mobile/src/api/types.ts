@@ -297,6 +297,18 @@ export interface TerminalExecResponse {
   durationMs: number;
 }
 
+export interface GitHubAuthInstallRequest {
+  accessToken: string;
+}
+
+export interface GitHubAuthInstallResponse {
+  installed: boolean;
+  host: string;
+  login: string;
+  scopes: string[];
+  credentialFile: string;
+}
+
 export interface GitStatusResponse {
   branch: string;
   clean: boolean;

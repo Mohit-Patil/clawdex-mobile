@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
@@ -86,6 +88,10 @@ const BROWSER_PREVIEW_HTML_REWRITE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const BROWSER_PREVIEW_DISCOVERY_HTTP_TIMEOUT: Duration = Duration::from_millis(500);
 const GITHUB_CODESPACES_AUTH_CACHE_TTL: Duration = Duration::from_secs(60 * 5);
 const GITHUB_CODESPACES_API_VERSION: &str = "2022-11-28";
+const GITHUB_API_URL: &str = "https://api.github.com";
+const GITHUB_HOST: &str = "github.com";
+const GITHUB_CREDENTIALS_DIR_NAME: &str = ".clawdex";
+const GITHUB_CREDENTIALS_FILE_NAME: &str = "github-credentials";
 
 #[derive(Debug, Clone)]
 struct GitHubCodespacesAuthConfig {
@@ -373,6 +379,218 @@ impl GitHubCodespacesAuthService {
         cache.insert(cache_key, Instant::now() + GITHUB_CODESPACES_AUTH_CACHE_TTL);
         true
     }
+}
+
+#[derive(Debug, Clone)]
+struct GitHubViewer {
+    login: String,
+    scopes: Vec<String>,
+}
+
+async fn install_github_git_auth(
+    state: &Arc<AppState>,
+    access_token: &str,
+) -> Result<GitHubAuthInstallResponse, BridgeError> {
+    let viewer = fetch_github_viewer(state, access_token).await?;
+    if !github_scopes_allow_repo_access(&viewer.scopes) {
+        return Err(BridgeError::forbidden(
+            "github_repo_scope_required",
+            "GitHub repository access is required. Sign in again from the app and approve repository access.",
+        ));
+    }
+
+    let credentials_file = resolve_github_credentials_file_path()?;
+    ensure_private_parent_dir(&credentials_file).await?;
+    write_github_credentials_file(&credentials_file, access_token).await?;
+    configure_git_credential_store(state, &credentials_file).await?;
+
+    Ok(GitHubAuthInstallResponse {
+        installed: true,
+        host: GITHUB_HOST.to_string(),
+        login: viewer.login,
+        scopes: viewer.scopes,
+        credential_file: credentials_file.to_string_lossy().to_string(),
+    })
+}
+
+async fn fetch_github_viewer(
+    state: &Arc<AppState>,
+    access_token: &str,
+) -> Result<GitHubViewer, BridgeError> {
+    let trimmed = access_token.trim();
+    if trimmed.is_empty() {
+        return Err(BridgeError::invalid_params("accessToken must not be empty"));
+    }
+
+    let api_url = state
+        .config
+        .github_codespaces_auth
+        .as_ref()
+        .map(|config| config.api_url.as_str())
+        .unwrap_or(GITHUB_API_URL);
+    let http = HttpClient::builder()
+        .user_agent("clawdex-rust-bridge")
+        .build()
+        .map_err(|error| {
+            BridgeError::server(&format!("failed to build GitHub auth client: {error}"))
+        })?;
+    let response = http
+        .get(format!("{api_url}/user"))
+        .header("accept", "application/vnd.github+json")
+        .header("x-github-api-version", GITHUB_CODESPACES_API_VERSION)
+        .bearer_auth(trimmed)
+        .send()
+        .await
+        .map_err(|error| BridgeError::server(&format!("GitHub auth check failed: {error}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message = if let Ok(value) = serde_json::from_str::<Value>(&body) {
+            read_string(value.get("message"))
+                .unwrap_or_else(|| format!("GitHub auth check failed ({status})"))
+        } else {
+            format!("GitHub auth check failed ({status})")
+        };
+        return Err(BridgeError::server(&message));
+    }
+
+    let scopes = parse_github_oauth_scopes(
+        response
+            .headers()
+            .get("x-oauth-scopes")
+            .and_then(|value| value.to_str().ok()),
+    );
+    let payload = response.json::<Value>().await.map_err(|error| {
+        BridgeError::server(&format!("failed to parse GitHub user response: {error}"))
+    })?;
+    let login = read_string(payload.get("login"))
+        .ok_or_else(|| BridgeError::server("GitHub auth check returned an invalid user payload"))?;
+
+    Ok(GitHubViewer { login, scopes })
+}
+
+fn parse_github_oauth_scopes(header: Option<&str>) -> Vec<String> {
+    header
+        .unwrap_or_default()
+        .split(',')
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn github_scopes_allow_repo_access(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .any(|scope| scope == "repo" || scope == "public_repo")
+}
+
+fn resolve_github_credentials_file_path() -> Result<PathBuf, BridgeError> {
+    let home = read_non_empty_env("HOME")
+        .ok_or_else(|| BridgeError::server("HOME is not set; cannot install GitHub auth"))?;
+    Ok(PathBuf::from(home)
+        .join(GITHUB_CREDENTIALS_DIR_NAME)
+        .join(GITHUB_CREDENTIALS_FILE_NAME))
+}
+
+async fn ensure_private_parent_dir(path: &Path) -> Result<(), BridgeError> {
+    let Some(parent) = path.parent() else {
+        return Err(BridgeError::server(
+            "failed to resolve GitHub credential directory",
+        ));
+    };
+    fs::create_dir_all(parent).await.map_err(|error| {
+        BridgeError::server(&format!("failed to create GitHub auth directory: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(|error| {
+                BridgeError::server(&format!(
+                    "failed to secure GitHub auth directory permissions: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+async fn write_github_credentials_file(
+    credentials_file: &Path,
+    access_token: &str,
+) -> Result<(), BridgeError> {
+    let content = format!(
+        "https://x-access-token:{}@{}\n",
+        access_token.trim(),
+        GITHUB_HOST
+    );
+    fs::write(credentials_file, content)
+        .await
+        .map_err(|error| {
+            BridgeError::server(&format!("failed to write GitHub credentials: {error}"))
+        })?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(credentials_file, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|error| {
+                BridgeError::server(&format!(
+                    "failed to secure GitHub credential permissions: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+async fn configure_git_credential_store(
+    state: &Arc<AppState>,
+    credentials_file: &Path,
+) -> Result<(), BridgeError> {
+    let helper_value = format!("store --file {}", credentials_file.to_string_lossy());
+    let commands = vec![
+        vec![
+            "config".to_string(),
+            "--global".to_string(),
+            "--replace-all".to_string(),
+            "credential.helper".to_string(),
+            helper_value,
+        ],
+        vec![
+            "config".to_string(),
+            "--global".to_string(),
+            "--replace-all".to_string(),
+            "url.https://github.com/.insteadOf".to_string(),
+            "git@github.com:".to_string(),
+        ],
+        vec![
+            "config".to_string(),
+            "--global".to_string(),
+            "--replace-all".to_string(),
+            "url.https://github.com/.insteadOf".to_string(),
+            "ssh://git@github.com/".to_string(),
+        ],
+    ];
+
+    for args in commands {
+        let result = state
+            .terminal
+            .execute_binary("git", &args, state.config.workdir.clone(), None)
+            .await?;
+
+        if result.code != Some(0) {
+            return Err(BridgeError::server(
+                &(if !result.stderr.is_empty() {
+                    result.stderr
+                } else if !result.stdout.is_empty() {
+                    result.stdout
+                } else {
+                    "failed to configure git credentials".to_string()
+                }),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -5200,6 +5418,22 @@ struct GitQueryRequest {
     cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubAuthInstallRequest {
+    access_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubAuthInstallResponse {
+    installed: bool,
+    host: String,
+    login: String,
+    scopes: Vec<String>,
+    credential_file: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitHistoryRequest {
@@ -6555,6 +6789,13 @@ async fn handle_bridge_method(
                 .await;
 
             Ok(result_value)
+        }
+        "bridge/github/auth/install" => {
+            let request: GitHubAuthInstallRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = install_github_git_auth(state, &request.access_token).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/attachments/upload" => {
             let request: AttachmentUploadRequest =
@@ -14102,5 +14343,31 @@ mod tests {
         assert!(result.queue.items.is_empty());
 
         shutdown_test_backend(&state.backend).await;
+    }
+
+    #[test]
+    fn github_oauth_scope_header_parsing_is_trimmed_and_lowercased() {
+        let scopes = parse_github_oauth_scopes(Some("codespace, repo, Read:User , public_repo"));
+        assert_eq!(
+            scopes,
+            vec![
+                "codespace".to_string(),
+                "repo".to_string(),
+                "read:user".to_string(),
+                "public_repo".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn github_repo_scope_check_accepts_repo_and_public_repo() {
+        assert!(github_scopes_allow_repo_access(&["repo".to_string()]));
+        assert!(github_scopes_allow_repo_access(
+            &["public_repo".to_string()]
+        ));
+        assert!(!github_scopes_allow_repo_access(&[
+            "codespace".to_string(),
+            "read:user".to_string()
+        ]));
     }
 }

@@ -34,6 +34,7 @@ import type {
   GitCommitResponse,
   GitDiffResponse,
   GitHistoryResponse,
+  GitHubAuthInstallResponse,
   GitFileRequest,
   GitPushResponse,
   GitStageAllResponse,
@@ -930,6 +931,17 @@ export class HostBridgeApiClient {
 
   execTerminal(body: TerminalExecRequest): Promise<TerminalExecResponse> {
     return this.ws.request<TerminalExecResponse>('bridge/terminal/exec', body);
+  }
+
+  installGitHubAuth(accessToken: string): Promise<GitHubAuthInstallResponse> {
+    const trimmedAccessToken = accessToken.trim();
+    if (!trimmedAccessToken) {
+      return Promise.reject(new Error('accessToken must not be empty'));
+    }
+
+    return this.ws.request<GitHubAuthInstallResponse>('bridge/github/auth/install', {
+      accessToken: trimmedAccessToken,
+    });
   }
 
   gitStatus(cwd?: string): Promise<GitStatusResponse> {

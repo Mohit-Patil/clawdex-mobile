@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
+import Constants from 'expo-constants';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -170,6 +171,23 @@ export function SettingsScreen({
   const { colors } = theme;
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const appVersion = readOptionalDisplayString(Constants.expoConfig?.version) ?? 'Unknown';
+  const nativeBuildVersion =
+    Platform.OS === 'ios'
+      ? readOptionalDisplayString(Constants.platform?.ios?.buildNumber)
+      : Platform.OS === 'android'
+        ? readOptionalDisplayString(Constants.platform?.android?.versionCode)
+        : null;
+  const configuredBuildVersion =
+    Platform.OS === 'ios'
+      ? readOptionalDisplayString(Constants.expoConfig?.ios?.buildNumber)
+      : Platform.OS === 'android'
+        ? readOptionalDisplayString(Constants.expoConfig?.android?.versionCode)
+        : null;
+  const appBuildVersion =
+    nativeBuildVersion ??
+    configuredBuildVersion ??
+    (Platform.OS === 'web' ? 'Web runtime' : 'Unavailable');
   const transcriptSwitchTrackColor = theme.isDark ? colors.borderLight : 'rgba(95, 105, 118, 0.32)';
   const transcriptSwitchActiveColor = theme.isDark ? colors.accent : '#4F5D6D';
   const transcriptSwitchThumbColor = showToolCalls ? colors.white : '#FFFFFF';
@@ -1122,6 +1140,12 @@ export function SettingsScreen({
         />
       </BlurView>
 
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>App</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <Row label="Version" value={appVersion} />
+        <Row label="Build" value={appBuildVersion} isLast />
+      </BlurView>
+
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
     </>
   );
@@ -2066,6 +2090,17 @@ function formatInstallKind(kind: BridgeRuntimeInfo['installKind']): string {
     default:
       return 'Unknown';
   }
+}
+
+function readOptionalDisplayString(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
 }
 
 function formatBridgeUpdaterState(state: string): string {
