@@ -32,7 +32,8 @@ const revenueCatTestStoreApiKey =
   process.env.EXPO_PUBLIC_REVENUECAT_TEST_STORE_API_KEY?.trim() || null;
 const revenueCatTipsOfferingId =
   process.env.EXPO_PUBLIC_REVENUECAT_TIPS_OFFERING_ID?.trim() || null;
-const githubClientId = process.env.EXPO_PUBLIC_GITHUB_CLIENT_ID?.trim() || null;
+const githubClientId = process.env.EXPO_PUBLIC_GITHUB_APP_CLIENT_ID?.trim() || null;
+const githubAppSlug = process.env.EXPO_PUBLIC_GITHUB_APP_SLUG?.trim() || null;
 const githubCodespacesPortForwardingDomain =
   process.env.EXPO_PUBLIC_GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN?.trim() ||
   'app.github.dev';
@@ -66,6 +67,7 @@ export const env = {
   revenueCatTestStoreApiKey,
   revenueCatTipsOfferingId,
   githubClientId,
+  githubAppSlug,
   githubCodespacesPortForwardingDomain,
   githubCodespacesPreferredRepositoryName,
   githubCodespacesSourceRepositoryOwner,

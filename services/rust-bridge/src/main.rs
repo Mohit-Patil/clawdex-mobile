@@ -392,10 +392,10 @@ async fn install_github_git_auth(
     access_token: &str,
 ) -> Result<GitHubAuthInstallResponse, BridgeError> {
     let viewer = fetch_github_viewer(state, access_token).await?;
-    if !github_scopes_allow_repo_access(&viewer.scopes) {
+    if !github_token_can_be_used_for_git_auth(&viewer.scopes) {
         return Err(BridgeError::forbidden(
             "github_repo_scope_required",
-            "GitHub repository access is required. Sign in again from the app and approve repository access.",
+            "GitHub repository access is required. Sign in again from the app and approve the required repository access.",
         ));
     }
 
@@ -483,6 +483,10 @@ fn github_scopes_allow_repo_access(scopes: &[String]) -> bool {
     scopes
         .iter()
         .any(|scope| scope == "repo" || scope == "public_repo")
+}
+
+fn github_token_can_be_used_for_git_auth(scopes: &[String]) -> bool {
+    scopes.is_empty() || github_scopes_allow_repo_access(scopes)
 }
 
 fn resolve_github_credentials_file_path() -> Result<PathBuf, BridgeError> {
@@ -14366,6 +14370,16 @@ mod tests {
             &["public_repo".to_string()]
         ));
         assert!(!github_scopes_allow_repo_access(&[
+            "codespace".to_string(),
+            "read:user".to_string()
+        ]));
+    }
+
+    #[test]
+    fn github_git_auth_accepts_github_app_user_tokens_without_scope_headers() {
+        assert!(github_token_can_be_used_for_git_auth(&[]));
+        assert!(github_token_can_be_used_for_git_auth(&["repo".to_string()]));
+        assert!(!github_token_can_be_used_for_git_auth(&[
             "codespace".to_string(),
             "read:user".to_string()
         ]));

@@ -34,7 +34,7 @@ npm run stop:services
 ## Bridge auth errors (`401`, invalid token)
 
 - For the shipped mobile app, rescan the bridge QR or update the stored token in Settings.
-- For GitHub-auth Codespaces profiles, reopen `GitHub Codespaces` in the app and sign in with GitHub again if the OAuth token was revoked or expired.
+- For GitHub-auth Codespaces profiles, reopen `GitHub Codespaces` in the app and sign in with GitHub again if the GitHub App token or refresh token was revoked or expired.
 - For a local dev build, also ensure `BRIDGE_AUTH_TOKEN` in `.env.secure` matches `EXPO_PUBLIC_HOST_BRIDGE_TOKEN` in `apps/mobile/.env`.
 - Restart the bridge after token changes.
 - On secure-launcher installs, `Settings > Bridge Maintenance > Restart bridge safely` can do that from the phone.
@@ -53,7 +53,8 @@ gh codespace ports visibility 8787:public 8788:public
 
 - If `gh` is unavailable in the codespace, use the Codespaces `Ports` panel and change both forwarded ports to `Public`.
 - Keep bridge auth enabled. Public forwarded ports without bridge auth are not a safe setup.
-- If GitHub direct sign-in is not showing in the app, confirm the build includes `EXPO_PUBLIC_GITHUB_CLIENT_ID`.
+- If GitHub direct sign-in is not showing in the app, confirm the build includes `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID` and `EXPO_PUBLIC_GITHUB_APP_SLUG`.
+- If the app signs in but still cannot create a Codespace or clone/push inside it, reopen the GitHub App access step in the app and make sure the template repo and any target repos are selected for the installation.
 - If in-app Codespace creation forks or targets the wrong repo, check `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME`, `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER`, and `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_REF` in the mobile build env.
 
 ## GitHub Codespaces bootstrap did not start the bridge

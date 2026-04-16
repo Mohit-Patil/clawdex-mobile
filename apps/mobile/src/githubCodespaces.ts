@@ -1,9 +1,10 @@
-import type { BridgeProfile } from './bridgeProfiles';
+import { isGitHubBridgeProfile, type BridgeProfile } from './bridgeProfiles';
 
 const GITHUB_OAUTH_BASE_URL = 'https://github.com';
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const GITHUB_API_ACCEPT = 'application/vnd.github+json';
 const GITHUB_API_VERSION = '2022-11-28';
+const GITHUB_ACCESS_TOKEN_REFRESH_BUFFER_MS = 90_000;
 
 export interface GitHubDeviceCodeGrant {
   deviceCode: string;
@@ -15,10 +16,39 @@ export interface GitHubDeviceCodeGrant {
   expiresAtMs: number;
 }
 
-export interface GitHubOAuthAccessToken {
+export interface GitHubUserAccessToken {
   accessToken: string;
   scope: string[];
   tokenType: string;
+  refreshToken: string | null;
+  expiresInSec: number | null;
+  accessTokenExpiresAtMs: number | null;
+  refreshTokenExpiresInSec: number | null;
+  refreshTokenExpiresAtMs: number | null;
+}
+
+export interface GitHubAppInstallation {
+  id: number;
+  accountLogin: string | null;
+  accountId: number | null;
+  targetType: string | null;
+  repositorySelection: 'all' | 'selected' | null;
+  htmlUrl: string | null;
+}
+
+export interface GitHubAppInstallationRepository {
+  id: number;
+  installationId: number;
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  permissions: string[];
+}
+
+export interface GitHubAppAccessSnapshot {
+  installations: GitHubAppInstallation[];
+  repositories: GitHubAppInstallationRepository[];
 }
 
 export interface GitHubUser {
@@ -66,14 +96,14 @@ export interface GitHubCodespaceCreationContext {
 }
 
 export type GitHubDeviceTokenPollResult =
-  | { kind: 'authorized'; token: GitHubOAuthAccessToken }
+  | { kind: 'authorized'; token: GitHubUserAccessToken }
   | { kind: 'pending'; intervalSec: number }
   | { kind: 'denied'; message: string }
   | { kind: 'expired'; message: string };
 
 export async function requestGitHubDeviceCode(
   clientId: string,
-  scopes: string[]
+  scopes: string[] = []
 ): Promise<GitHubDeviceCodeGrant> {
   const trimmedClientId = clientId.trim();
   if (!trimmedClientId) {
@@ -82,8 +112,11 @@ export async function requestGitHubDeviceCode(
 
   const body = new URLSearchParams({
     client_id: trimmedClientId,
-    scope: scopes.join(' ').trim(),
   });
+  const normalizedScope = scopes.join(' ').trim();
+  if (normalizedScope) {
+    body.set('scope', normalizedScope);
+  }
   const response = await fetch(`${GITHUB_OAUTH_BASE_URL}/login/device/code`, {
     method: 'POST',
     headers: {
@@ -164,21 +197,44 @@ export async function pollGitHubDeviceAccessToken(
     throw new Error(readGitHubErrorMessage(payload) ?? `GitHub token exchange failed (${response.status})`);
   }
 
-  const accessToken = readRequiredString(record, 'access_token');
-  const tokenType = readOptionalString(record, 'token_type') ?? 'bearer';
-  const scope = (readOptionalString(record, 'scope') ?? '')
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
-
   return {
     kind: 'authorized',
-    token: {
-      accessToken,
-      scope,
-      tokenType,
-    },
+    token: readGitHubUserAccessToken(record),
   };
+}
+
+export async function refreshGitHubUserAccessToken(
+  clientId: string,
+  refreshToken: string
+): Promise<GitHubUserAccessToken> {
+  const trimmedClientId = clientId.trim();
+  const trimmedRefreshToken = refreshToken.trim();
+  if (!trimmedClientId) {
+    throw new Error('GitHub client ID is not configured.');
+  }
+  if (!trimmedRefreshToken) {
+    throw new Error('GitHub refresh token is not available.');
+  }
+
+  const body = new URLSearchParams({
+    client_id: trimmedClientId,
+    grant_type: 'refresh_token',
+    refresh_token: trimmedRefreshToken,
+  });
+  const response = await fetch(`${GITHUB_OAUTH_BASE_URL}/login/oauth/access_token`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(readGitHubErrorMessage(payload) ?? `GitHub token refresh failed (${response.status})`);
+  }
+
+  return readGitHubUserAccessToken(asRecord(payload));
 }
 
 export function isRetryableGitHubDeviceFlowError(error: unknown): boolean {
@@ -198,6 +254,23 @@ export function isRetryableGitHubDeviceFlowError(error: unknown): boolean {
   );
 }
 
+export function shouldRefreshGitHubUserAccessToken(
+  token: Pick<GitHubUserAccessToken, 'accessTokenExpiresAtMs' | 'refreshToken' | 'refreshTokenExpiresAtMs'>,
+  now = Date.now()
+): boolean {
+  if (!token.refreshToken?.trim()) {
+    return false;
+  }
+  if (token.refreshTokenExpiresAtMs !== null && token.refreshTokenExpiresAtMs <= now) {
+    return false;
+  }
+  if (token.accessTokenExpiresAtMs === null) {
+    return false;
+  }
+
+  return token.accessTokenExpiresAtMs <= now + GITHUB_ACCESS_TOKEN_REFRESH_BUFFER_MS;
+}
+
 export async function fetchGitHubUser(accessToken: string): Promise<GitHubUser> {
   const payload = await githubApiRequest('/user', accessToken);
   const record = asRecord(payload);
@@ -206,6 +279,59 @@ export async function fetchGitHubUser(accessToken: string): Promise<GitHubUser> 
     id: readRequiredNumber(record, 'id'),
     name: readOptionalString(record, 'name'),
     avatarUrl: readOptionalString(record, 'avatar_url'),
+  };
+}
+
+export async function fetchGitHubAppInstallations(
+  accessToken: string
+): Promise<GitHubAppInstallation[]> {
+  const payload = await githubApiRequest('/user/installations?per_page=100', accessToken);
+  const record = asRecord(payload);
+  const installations = record && Array.isArray(record.installations) ? record.installations : [];
+  return installations
+    .map((entry) => normalizeGitHubAppInstallation(entry))
+    .filter((entry): entry is GitHubAppInstallation => entry !== null);
+}
+
+export async function fetchGitHubAppInstallationRepositories(
+  accessToken: string,
+  installationId: number
+): Promise<GitHubAppInstallationRepository[]> {
+  const payload = await githubApiRequest(
+    `/user/installations/${String(installationId)}/repositories?per_page=100`,
+    accessToken
+  );
+  const record = asRecord(payload);
+  const repositories = record && Array.isArray(record.repositories) ? record.repositories : [];
+  return repositories
+    .map((entry) => normalizeGitHubAppInstallationRepository(entry, installationId))
+    .filter((entry): entry is GitHubAppInstallationRepository => entry !== null);
+}
+
+export async function fetchGitHubAppAccessSnapshot(
+  accessToken: string
+): Promise<GitHubAppAccessSnapshot> {
+  const installations = await fetchGitHubAppInstallations(accessToken);
+  const repositories = (
+    await Promise.all(
+      installations.map(async (installation) => {
+        try {
+          return await fetchGitHubAppInstallationRepositories(accessToken, installation.id);
+        } catch {
+          return [];
+        }
+      })
+    )
+  ).flat();
+
+  const uniqueRepositories = new Map<string, GitHubAppInstallationRepository>();
+  repositories.forEach((repository) => {
+    uniqueRepositories.set(repository.fullName.toLowerCase(), repository);
+  });
+
+  return {
+    installations,
+    repositories: [...uniqueRepositories.values()],
   };
 }
 
@@ -486,11 +612,41 @@ export function buildGitHubCodespacesBridgeUrl(
   return `https://${normalizedCodespaceName}-${String(port)}.${normalizedDomain}`;
 }
 
+export function buildGitHubAppInstallUrl(appSlug: string, state?: string | null): string | null {
+  const normalizedAppSlug = appSlug.trim();
+  if (!normalizedAppSlug) {
+    return null;
+  }
+
+  const url = new URL(`/apps/${normalizedAppSlug}/installations/new`, GITHUB_OAUTH_BASE_URL);
+  const normalizedState = state?.trim();
+  if (normalizedState) {
+    url.searchParams.set('state', normalizedState);
+  }
+  return url.toString();
+}
+
+export function hasGitHubAppRepositoryAccess(
+  snapshot: Pick<GitHubAppAccessSnapshot, 'repositories'> | null | undefined,
+  repositoryFullName: string | null | undefined
+): boolean {
+  const normalizedFullName = repositoryFullName?.trim().toLowerCase();
+  if (!normalizedFullName) {
+    return false;
+  }
+
+  return (
+    snapshot?.repositories.some(
+      (repository) => repository.fullName.trim().toLowerCase() === normalizedFullName
+    ) ?? false
+  );
+}
+
 export function getReusableGitHubBridgeProfile(
   profiles: BridgeProfile[],
   activeProfileId?: string | null
 ): BridgeProfile | null {
-  const githubProfiles = profiles.filter((profile) => profile.authMode === 'githubOAuth');
+  const githubProfiles = profiles.filter((profile) => isGitHubBridgeProfile(profile));
   if (githubProfiles.length === 0) {
     return null;
   }
@@ -660,6 +816,61 @@ function normalizeGitHubRepository(value: unknown): GitHubRepository | null {
   };
 }
 
+function normalizeGitHubAppInstallation(value: unknown): GitHubAppInstallation | null {
+  const record = asRecord(value);
+  const id = readOptionalNumber(record, 'id');
+  if (!record || id === null) {
+    return null;
+  }
+
+  const account = asRecord(record.account);
+  const repositorySelection = readOptionalString(record, 'repository_selection');
+  return {
+    id,
+    accountLogin: readOptionalString(account, 'login'),
+    accountId: readOptionalNumber(account, 'id'),
+    targetType: readOptionalString(record, 'target_type'),
+    repositorySelection:
+      repositorySelection === 'all' || repositorySelection === 'selected'
+        ? repositorySelection
+        : null,
+    htmlUrl: readOptionalString(record, 'html_url'),
+  };
+}
+
+function normalizeGitHubAppInstallationRepository(
+  value: unknown,
+  installationId: number
+): GitHubAppInstallationRepository | null {
+  const record = asRecord(value);
+  const id = readOptionalNumber(record, 'id');
+  const fullName = readOptionalString(record, 'full_name');
+  const name = readOptionalString(record, 'name');
+  const ownerRecord = asRecord(record?.owner);
+  const owner = readOptionalString(ownerRecord, 'login');
+  if (!record || id === null || !fullName || !name || !owner) {
+    return null;
+  }
+
+  const permissionsRecord = asRecord(record.permissions);
+  const permissions = permissionsRecord
+    ? Object.entries(permissionsRecord)
+        .filter((entry): entry is [string, boolean] => typeof entry[0] === 'string' && entry[1] === true)
+        .map(([permission]) => permission)
+        .sort()
+    : [];
+
+  return {
+    id,
+    installationId,
+    owner,
+    name,
+    fullName,
+    private: Boolean(record.private),
+    permissions,
+  };
+}
+
 function normalizePortForwardingDomain(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -693,6 +904,32 @@ function readGitHubErrorMessage(value: unknown): string | null {
     readOptionalString(record, 'error_description') ??
     readOptionalString(record, 'message');
   return description ?? null;
+}
+
+function readGitHubUserAccessToken(record: Record<string, unknown> | null): GitHubUserAccessToken {
+  const issuedAtMs = Date.now();
+  const accessToken = readRequiredString(record, 'access_token');
+  const tokenType = readOptionalString(record, 'token_type') ?? 'bearer';
+  const scope = (readOptionalString(record, 'scope') ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const expiresInSec = readOptionalNumber(record, 'expires_in');
+  const refreshToken = readOptionalString(record, 'refresh_token');
+  const refreshTokenExpiresInSec = readOptionalNumber(record, 'refresh_token_expires_in');
+
+  return {
+    accessToken,
+    scope,
+    tokenType,
+    refreshToken,
+    expiresInSec,
+    accessTokenExpiresAtMs:
+      expiresInSec !== null ? issuedAtMs + expiresInSec * 1000 : null,
+    refreshTokenExpiresInSec,
+    refreshTokenExpiresAtMs:
+      refreshTokenExpiresInSec !== null ? issuedAtMs + refreshTokenExpiresInSec * 1000 : null,
+  };
 }
 
 function readRequiredString(record: Record<string, unknown> | null, key: string): string {

@@ -70,7 +70,7 @@ Notes:
 - Browser preview uses a second forwarded port (`8788` by default), so both ports need public visibility.
 - GitHub resets public forwarded ports back to private when a codespace restarts. Restarting the bridge reruns the visibility step.
 - If automatic visibility setup fails, run `gh codespace ports visibility 8787:public 8788:public`.
-- If the mobile app is built with `EXPO_PUBLIC_GITHUB_CLIENT_ID`, users can now tap `Use GitHub Codespaces` in onboarding/settings, sign in with GitHub, pick a Codespace, and connect without manually copying the bridge token.
+- If the mobile app is built with `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID` and `EXPO_PUBLIC_GITHUB_APP_SLUG`, users can now tap `Use GitHub Codespaces` in onboarding/settings, sign in with GitHub, approve the Claudex GitHub App for only the repositories they want, pick a Codespace, and connect without manually copying the bridge token.
 - The app can also create a new repo-backed Codespace directly. It prefers `<signed-in-user>/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>` first. If that repo does not exist, it automatically forks `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>` into the signed-in user account, then creates the Codespace there.
 
 This repo now also includes a Codespaces bootstrap flow. On Codespace start/resume, `.devcontainer/devcontainer.json` runs:
@@ -89,7 +89,7 @@ That pre-installs Codex and prebuilds the Rust bridge binary so the later startu
 
 The published npm package now includes that bootstrap script too, so a minimal Codespaces template repo can install `clawdex-mobile@latest` in `postCreateCommand` and call the packaged bootstrap without vendoring bridge source into the template itself.
 
-In Codespaces mode, the bootstrap also enables bridge-side GitHub bearer auth for the current `CODESPACE_NAME`, so the mobile app can authenticate with the same GitHub OAuth token it used to discover and start the Codespace.
+In Codespaces mode, the bootstrap also enables bridge-side GitHub bearer auth for the current `CODESPACE_NAME`, so the mobile app can authenticate with the same GitHub App user token it used to discover and start the Codespace.
 
 ## OpenCode Setup
 

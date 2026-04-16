@@ -1,10 +1,13 @@
 import {
+  buildGitHubAppInstallUrl,
   buildGitHubCodespacesRepositoryCandidates,
   buildGitHubCodespacesBridgeUrl,
   findReusableGitHubCodespace,
   getReusableGitHubBridgeProfile,
+  hasGitHubAppRepositoryAccess,
   isRetryableGitHubDeviceFlowError,
   sortGitHubCodespaces,
+  shouldRefreshGitHubUserAccessToken,
 } from '../githubCodespaces';
 
 describe('githubCodespaces helpers', () => {
@@ -12,6 +15,12 @@ describe('githubCodespaces helpers', () => {
     expect(
       buildGitHubCodespacesBridgeUrl('octocat-codespace', 'app.github.dev')
     ).toBe('https://octocat-codespace-8787.app.github.dev');
+  });
+
+  it('builds the GitHub App install URL from the app slug', () => {
+    expect(buildGitHubAppInstallUrl('clawdex-mobile', 'octocat')).toBe(
+      'https://github.com/apps/clawdex-mobile/installations/new?state=octocat'
+    );
   });
 
   it('reuses the active GitHub-auth bridge profile first', () => {
@@ -26,6 +35,9 @@ describe('githubCodespaces helpers', () => {
           githubUserLogin: null,
           githubCodespaceName: null,
           githubRepositoryFullName: null,
+          githubRefreshToken: null,
+          githubAccessTokenExpiresAt: null,
+          githubRefreshTokenExpiresAt: null,
           createdAt: '2026-04-14T00:00:00.000Z',
           updatedAt: '2026-04-14T00:00:00.000Z',
         },
@@ -33,11 +45,14 @@ describe('githubCodespaces helpers', () => {
           id: 'github-1',
           name: 'clawdex-mobile · octocat-codespace',
           bridgeUrl: 'https://octocat-codespace-8787.app.github.dev',
-          bridgeToken: 'gho_token',
-          authMode: 'githubOAuth',
+          bridgeToken: 'ghu_token',
+          authMode: 'githubApp',
           githubUserLogin: 'octocat',
           githubCodespaceName: 'octocat-codespace',
           githubRepositoryFullName: 'octocat/clawdex-mobile',
+          githubRefreshToken: 'ghr_refresh',
+          githubAccessTokenExpiresAt: '2026-04-16T12:00:00.000Z',
+          githubRefreshTokenExpiresAt: '2026-10-16T12:00:00.000Z',
           createdAt: '2026-04-14T00:00:00.000Z',
           updatedAt: '2026-04-14T00:00:00.000Z',
         },
@@ -133,6 +148,52 @@ describe('githubCodespaces helpers', () => {
     );
 
     expect(codespace?.name).toBe('user-owned-space');
+  });
+
+  it('detects when the GitHub App already has repository access', () => {
+    expect(
+      hasGitHubAppRepositoryAccess(
+        {
+          repositories: [
+            {
+              id: 1,
+              installationId: 10,
+              owner: 'octocat',
+              name: 'clawdex-mobile',
+              fullName: 'octocat/clawdex-mobile',
+              private: true,
+              permissions: ['contents', 'codespaces'],
+            },
+          ],
+        },
+        'octocat/clawdex-mobile'
+      )
+    ).toBe(true);
+    expect(hasGitHubAppRepositoryAccess({ repositories: [] }, 'octocat/other')).toBe(false);
+  });
+
+  it('refreshes expiring GitHub App tokens when a refresh token exists', () => {
+    const now = Date.UTC(2026, 3, 16, 12, 0, 0);
+    expect(
+      shouldRefreshGitHubUserAccessToken(
+        {
+          accessTokenExpiresAtMs: now + 30_000,
+          refreshToken: 'ghr_refresh',
+          refreshTokenExpiresAtMs: now + 60_000,
+        },
+        now
+      )
+    ).toBe(true);
+    expect(
+      shouldRefreshGitHubUserAccessToken(
+        {
+          accessTokenExpiresAtMs: now + 10 * 60_000,
+          refreshToken: 'ghr_refresh',
+          refreshTokenExpiresAtMs: now + 60_000,
+        },
+        now
+      )
+    ).toBe(false);
   });
 
   it('treats transient device-flow network failures as retryable', () => {

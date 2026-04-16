@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import type { BridgeProfile } from '../bridgeProfiles';
+import { isGitHubBridgeProfile, type BridgeProfile } from '../bridgeProfiles';
 import { useAppTheme, type AppTheme } from '../theme';
 
 interface BridgeProfileManagerSheetProps {
@@ -197,7 +197,7 @@ export function BridgeProfileManagerSheet({
                             <View style={styles.profileMetaRow}>
                               <View style={styles.metaBadge}>
                                 <Text style={styles.metaBadgeText}>
-                                  {profile.authMode === 'githubOAuth'
+                                  {isGitHubBridgeProfile(profile)
                                     ? 'GitHub Codespace'
                                     : 'Bridge token'}
                                 </Text>

@@ -46,6 +46,7 @@ import {
 import {
   clearBridgeProfileStore,
   getActiveBridgeProfile,
+  isGitHubBridgeProfile,
   loadBridgeProfileStore,
   removeBridgeProfile,
   renameBridgeProfile,
@@ -56,6 +57,11 @@ import {
   upsertBridgeProfile,
 } from './src/bridgeProfiles';
 import { env } from './src/config';
+import {
+  refreshGitHubUserAccessToken,
+  shouldRefreshGitHubUserAccessToken,
+  type GitHubUserAccessToken,
+} from './src/githubCodespaces';
 import { DrawerContent } from './src/navigation/DrawerContent';
 import { BrowserScreen, type BrowserScreenHandle } from './src/screens/BrowserScreen';
 import { GitScreen } from './src/screens/GitScreen';
@@ -128,7 +134,7 @@ export default function App() {
   );
   const bridgeUrl = activeBridgeProfile?.bridgeUrl ?? null;
   const bridgeToken = activeBridgeProfile?.bridgeToken ?? null;
-  const activeBridgeUsesGitHubAuth = activeBridgeProfile?.authMode === 'githubOAuth';
+  const activeBridgeUsesGitHubAuth = isGitHubBridgeProfile(activeBridgeProfile);
   const ws = useMemo(
     () =>
       bridgeUrl
@@ -154,6 +160,47 @@ export default function App() {
       profiles: bridgeProfiles,
     }),
     [activeBridgeProfileId, bridgeProfiles]
+  );
+  const persistGitHubAuthTokenForUser = useCallback(
+    async (userLogin: string | null | undefined, token: GitHubUserAccessToken) => {
+      const normalizedUserLogin = userLogin?.trim().toLowerCase() ?? null;
+      const updatedAt = new Date().toISOString();
+      let didChange = false;
+      const nextProfiles = currentBridgeProfileStore.profiles.map((profile) => {
+        if (!isGitHubBridgeProfile(profile)) {
+          return profile;
+        }
+
+        const profileLogin = profile.githubUserLogin?.trim().toLowerCase() ?? null;
+        if (normalizedUserLogin && profileLogin && profileLogin !== normalizedUserLogin) {
+          return profile;
+        }
+
+        didChange = true;
+        return {
+          ...profile,
+          bridgeToken: token.accessToken,
+          authMode: 'githubApp' as const,
+          githubRefreshToken: token.refreshToken,
+          githubAccessTokenExpiresAt: timestampMsToIsoString(token.accessTokenExpiresAtMs),
+          githubRefreshTokenExpiresAt: timestampMsToIsoString(token.refreshTokenExpiresAtMs),
+          updatedAt,
+        };
+      });
+
+      if (!didChange) {
+        return;
+      }
+
+      const nextStore = {
+        activeProfileId: currentBridgeProfileStore.activeProfileId,
+        profiles: nextProfiles,
+      };
+      await saveBridgeProfileStore(nextStore);
+      setBridgeProfiles(nextStore.profiles);
+      setActiveBridgeProfileId(nextStore.activeProfileId);
+    },
+    [currentBridgeProfileStore]
   );
   const mainRef = useRef<MainScreenHandle>(null);
   const browserRef = useRef<BrowserScreenHandle>(null);
@@ -198,6 +245,7 @@ export default function App() {
   const drawerVisibleRef = useRef(false);
   const drawerCapturesTouchesRef = useRef(false);
   const gitHubAuthBootstrapKeyRef = useRef<string | null>(null);
+  const gitHubTokenRefreshKeyRef = useRef<string | null>(null);
   const chatTransitionRequestIdRef = useRef(0);
   const appLifecycleStateRef = useRef(AppState.currentState);
   const activeUsageStartedAtRef = useRef<number | null>(
@@ -259,6 +307,62 @@ export default function App() {
     ws.connect();
     return () => ws.disconnect();
   }, [ws]);
+
+  useEffect(() => {
+    if (!env.githubClientId || !activeBridgeProfile || !isGitHubBridgeProfile(activeBridgeProfile)) {
+      return;
+    }
+    if (
+      !shouldRefreshGitHubUserAccessToken({
+        accessTokenExpiresAtMs: isoStringToTimestampMs(activeBridgeProfile.githubAccessTokenExpiresAt),
+        refreshToken: activeBridgeProfile.githubRefreshToken,
+        refreshTokenExpiresAtMs: isoStringToTimestampMs(
+          activeBridgeProfile.githubRefreshTokenExpiresAt
+        ),
+      })
+    ) {
+      return;
+    }
+
+    const refreshToken = activeBridgeProfile.githubRefreshToken?.trim();
+    if (!refreshToken) {
+      return;
+    }
+
+    const refreshKey = [
+      activeBridgeProfile.id,
+      activeBridgeProfile.bridgeToken,
+      activeBridgeProfile.githubAccessTokenExpiresAt ?? 'none',
+      activeBridgeProfile.githubRefreshTokenExpiresAt ?? 'none',
+    ].join('::');
+    if (gitHubTokenRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+    gitHubTokenRefreshKeyRef.current = refreshKey;
+
+    let cancelled = false;
+    void refreshGitHubUserAccessToken(env.githubClientId, refreshToken)
+      .then(async (token) => {
+        if (cancelled) {
+          return;
+        }
+        await persistGitHubAuthTokenForUser(activeBridgeProfile.githubUserLogin, token);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        console.warn(
+          `GitHub App token refresh skipped: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBridgeProfile, persistGitHubAuthTokenForUser]);
 
   useEffect(() => {
     if (!api || !activeBridgeUsesGitHubAuth || !bridgeToken || !bridgeUrl) {
@@ -1344,7 +1448,7 @@ export default function App() {
   }, [closeDrawer, currentScreen, onboardingMode, onboardingReturnScreen]);
 
   const handleEditBridgeProfile = useCallback(() => {
-    if (activeBridgeProfile?.authMode === 'githubOAuth') {
+    if (isGitHubBridgeProfile(activeBridgeProfile)) {
       openGitHubCodespaces();
       return;
     }
@@ -1356,7 +1460,7 @@ export default function App() {
     );
     setCurrentScreen('Onboarding');
     closeDrawer();
-  }, [activeBridgeProfile?.authMode, bridgeUrl, closeDrawer, currentScreen, openGitHubCodespaces]);
+  }, [activeBridgeProfile, bridgeUrl, closeDrawer, currentScreen, openGitHubCodespaces]);
 
   const handleAddBridgeProfile = useCallback(() => {
     setOnboardingMode('add');
@@ -1422,6 +1526,33 @@ export default function App() {
     },
     [activeBridgeProfileId, closeDrawer, currentBridgeProfileStore, resetBridgeSessionState]
   );
+
+  const handleLogoutGitHubCodespacesSessions = useCallback(async () => {
+    const githubProfileIds = new Set(
+      currentBridgeProfileStore.profiles
+        .filter((profile) => isGitHubBridgeProfile(profile))
+        .map((profile) => profile.id)
+    );
+    if (githubProfileIds.size === 0) {
+      return;
+    }
+
+    let nextStore = currentBridgeProfileStore;
+    for (const profileId of githubProfileIds) {
+      nextStore = removeBridgeProfile(nextStore, profileId);
+    }
+
+    await saveBridgeProfileStore(nextStore);
+    setBridgeProfiles(nextStore.profiles);
+    setActiveBridgeProfileId(nextStore.activeProfileId);
+
+    if (
+      activeBridgeProfileId &&
+      githubProfileIds.has(activeBridgeProfileId)
+    ) {
+      resetBridgeSessionState();
+    }
+  }, [activeBridgeProfileId, currentBridgeProfileStore, resetBridgeSessionState]);
 
   const handleClearSavedBridges = useCallback(async () => {
     await clearBridgeProfileStore();
@@ -1588,6 +1719,8 @@ export default function App() {
               activeBridgeProfileId={activeBridgeProfile?.id ?? null}
               onBack={handleCancelGitHubCodespaces}
               onConnect={handleGitHubCodespacesProfileSaved}
+              onLogoutGitHubSessions={handleLogoutGitHubCodespacesSessions}
+              onSyncGitHubAuthToken={persistGitHubAuthTokenForUser}
             />
           </SafeAreaProvider>
         </GestureHandlerRootView>
@@ -1625,8 +1758,10 @@ export default function App() {
               initialBridgeToken={initialToken}
               allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
               allowQueryTokenAuth={env.allowWsQueryTokenAuth}
-              githubCodespacesEnabled={Boolean(env.githubClientId)}
-              onOpenGitHubCodespaces={env.githubClientId ? openGitHubCodespaces : undefined}
+              githubCodespacesEnabled={Boolean(env.githubClientId && env.githubAppSlug)}
+              onOpenGitHubCodespaces={
+                env.githubClientId && env.githubAppSlug ? openGitHubCodespaces : undefined
+              }
               onSave={handleBridgeProfileSaved}
               onCancel={canCancel ? handleCancelOnboarding : undefined}
             />
@@ -1699,7 +1834,9 @@ export default function App() {
             onFontPreferenceChange={handleFontPreferenceChange}
             onEditBridgeProfile={handleEditBridgeProfile}
             onAddBridgeProfile={handleAddBridgeProfile}
-            onConnectGitHubCodespaces={env.githubClientId ? openGitHubCodespaces : undefined}
+            onConnectGitHubCodespaces={
+              env.githubClientId && env.githubAppSlug ? openGitHubCodespaces : undefined
+            }
             onSwitchBridgeProfile={handleSwitchBridgeProfile}
             onRenameBridgeProfile={handleRenameBridgeProfile}
             onDeleteBridgeProfile={handleDeleteBridgeProfile}
@@ -1989,6 +2126,28 @@ function buildDrawerSpringConfig(velocityX: number) {
     mass: 0.9,
     velocity: Math.max(-1800, Math.min(1800, velocityX)),
   };
+}
+
+function timestampMsToIsoString(value: number | null | undefined): string | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return new Date(value).toISOString();
+}
+
+function isoStringToTimestampMs(value: string | null | undefined): number | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 const createStyles = (theme: ReturnType<typeof createAppTheme>) =>
