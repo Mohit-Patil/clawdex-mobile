@@ -155,7 +155,7 @@ jobs:
             bash -lc '
               set -euo pipefail
               export DEBIAN_FRONTEND=noninteractive
-              sed -i "s|http://archive.ubuntu.com/ubuntu|http://old-releases.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://old-releases.ubuntu.com/ubuntu|g" /etc/apt/sources.list
+              sed -i "s|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g" /etc/apt/sources.list
               retry() {
                 local attempts=0
                 while true; do
