@@ -53,7 +53,8 @@ gh codespace ports visibility 8787:public 8788:public
 
 - If `gh` is unavailable in the codespace, use the Codespaces `Ports` panel and change both forwarded ports to `Public`.
 - Keep bridge auth enabled. Public forwarded ports without bridge auth are not a safe setup.
-- If GitHub direct sign-in is not showing in the app, confirm the build includes `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID` and `EXPO_PUBLIC_GITHUB_APP_SLUG`.
+- If GitHub direct sign-in is not showing in the app, confirm the build includes `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID`, `EXPO_PUBLIC_GITHUB_APP_SLUG`, and `EXPO_PUBLIC_GITHUB_APP_AUTH_BASE_URL`.
+- If the GitHub browser sheet returns but sign-in still fails, confirm the GitHub App callback URL is `https://<your-domain>/github/callback` and that `Request user authorization (OAuth) during installation` is enabled.
 - If the app signs in but still cannot create a Codespace or clone/push inside it, reopen the GitHub App access step in the app and make sure the template repo and any target repos are selected for the installation.
 - If in-app Codespace creation forks or targets the wrong repo, check `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME`, `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER`, and `EXPO_PUBLIC_GITHUB_CODESPACES_REPO_REF` in the mobile build env.
 

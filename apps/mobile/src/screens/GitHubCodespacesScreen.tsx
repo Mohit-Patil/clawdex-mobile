@@ -1,13 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  AppState,
-  type AppStateStatus,
   Linking,
   Platform,
   Pressable,
@@ -25,6 +22,12 @@ import type { BridgeProfile, BridgeProfileDraft } from '../bridgeProfiles';
 import { getFreshChatGptAuthTokens, isNativeChatGptLoginAvailable } from '../chatGptAuth';
 import { env } from '../config';
 import {
+  clearStoredGitHubAppAuthTokens,
+  loadStoredGitHubAppAuthTokens,
+  loginWithGitHubApp,
+  refreshGitHubAppAuthTokens,
+} from '../githubAppAuth';
+import {
   buildGitHubAppInstallUrl,
   buildGitHubCodespacesBridgeUrl,
   buildGitHubCodespacesRepositoryCandidates,
@@ -34,10 +37,6 @@ import {
   fetchGitHubUser,
   getReusableGitHubBridgeProfile,
   hasGitHubAppRepositoryAccess,
-  isRetryableGitHubDeviceFlowError,
-  pollGitHubDeviceAccessToken,
-  refreshGitHubUserAccessToken,
-  requestGitHubDeviceCode,
   resolveGitHubCodespaceCreationContext,
   sortGitHubCodespaces,
   startGitHubCodespace,
@@ -45,7 +44,6 @@ import {
   shouldRefreshGitHubUserAccessToken,
   type GitHubAppAccessSnapshot,
   type GitHubCodespace,
-  type GitHubDeviceCodeGrant,
   type GitHubUserAccessToken,
   type GitHubUser,
 } from '../githubCodespaces';
@@ -77,7 +75,7 @@ type ConnectionPhase =
   | 'codexLoginRequired';
 
 type ConnectionStepState = 'pending' | 'active' | 'done';
-type OnboardingStage = 'github' | 'authorize' | 'codespace' | 'connect';
+type OnboardingStage = 'github' | 'codespace' | 'connect';
 
 interface PendingCodexLogin {
   runId: number;
@@ -87,7 +85,6 @@ interface PendingCodexLogin {
   profileDraft: BridgeProfileDraft;
 }
 
-const GITHUB_APP_DEVICE_FLOW_SCOPES: string[] = [];
 const BRIDGE_READY_POLL_MS = 3000;
 const BRIDGE_READY_TIMEOUT_MS = 6 * 60 * 1000;
 
@@ -251,7 +248,6 @@ export function GitHubCodespacesScreen({
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [session, setSession] = useState<GitHubSession | null>(null);
-  const [deviceGrant, setDeviceGrant] = useState<GitHubDeviceCodeGrant | null>(null);
   const [restoringSession, setRestoringSession] = useState(true);
   const [authorizing, setAuthorizing] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -273,61 +269,14 @@ export function GitHubCodespacesScreen({
   const [pendingCodexLogin, setPendingCodexLogin] = useState<PendingCodexLogin | null>(null);
   const [codexLoginChecking, setCodexLoginChecking] = useState(false);
   const [codexLoginSubmitting, setCodexLoginSubmitting] = useState(false);
-  const [deviceCodeCopied, setDeviceCodeCopied] = useState(false);
   const authFlowRef = useRef(0);
   const connectFlowRef = useRef(0);
-  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
-  const deviceCodeCopyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const githubConfigured = Boolean(env.githubClientId && env.githubAppSlug);
+  const githubConfigured = Boolean(env.githubClientId);
   const preferredRepositoryName = env.githubCodespacesPreferredRepositoryName;
   const configuredSourceOwner = env.githubCodespacesSourceRepositoryOwner;
   const configuredRepositoryRef = env.githubCodespacesRepositoryRef;
   const createEnabled = Boolean(preferredRepositoryName);
   const nativeChatGptLoginAvailable = isNativeChatGptLoginAvailable();
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextState) => {
-      appStateRef.current = nextState;
-    });
-
-    return () => {
-      subscription.remove();
-      if (deviceCodeCopyResetTimeoutRef.current) {
-        clearTimeout(deviceCodeCopyResetTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const flashDeviceCodeCopied = useCallback(() => {
-    if (deviceCodeCopyResetTimeoutRef.current) {
-      clearTimeout(deviceCodeCopyResetTimeoutRef.current);
-    }
-    setDeviceCodeCopied(true);
-    deviceCodeCopyResetTimeoutRef.current = setTimeout(() => {
-      setDeviceCodeCopied(false);
-      deviceCodeCopyResetTimeoutRef.current = null;
-    }, 1400);
-  }, []);
-
-  const copyGitHubDeviceCode = useCallback(
-    async (userCode: string) => {
-      try {
-        await Clipboard.setStringAsync(userCode);
-        flashDeviceCodeCopied();
-      } catch {
-        setAuthError('Unable to copy the GitHub device code automatically.');
-      }
-    },
-    [flashDeviceCodeCopied]
-  );
-
-  const openGitHubDeviceVerification = useCallback(async (verificationUri: string) => {
-    try {
-      await WebBrowser.openBrowserAsync(verificationUri);
-    } catch {
-      setAuthError('Unable to open GitHub device verification automatically.');
-    }
-  }, []);
 
   const loadCodespaces = useCallback(
     async (accessToken: string) => {
@@ -361,7 +310,7 @@ export function GitHubCodespacesScreen({
     let cancelled = false;
     const reusableProfile = getReusableGitHubBridgeProfile(bridgeProfiles, activeBridgeProfileId);
 
-    if (!githubConfigured || !reusableProfile) {
+    if (!githubConfigured) {
       setRestoringSession(false);
       return () => {
         cancelled = true;
@@ -370,17 +319,21 @@ export function GitHubCodespacesScreen({
 
     const restoreSession = async () => {
       try {
-        let restoredToken = bridgeProfileToGitHubToken(reusableProfile);
+        let restoredToken =
+          reusableProfile ? bridgeProfileToGitHubToken(reusableProfile) : await loadStoredGitHubAppAuthTokens();
+        if (!restoredToken) {
+          return;
+        }
         if (
-          env.githubClientId &&
+          env.githubAppAuthBaseUrl &&
           shouldRefreshGitHubUserAccessToken(restoredToken) &&
-          reusableProfile.githubRefreshToken
+          restoredToken.refreshToken
         ) {
-          restoredToken = await refreshGitHubUserAccessToken(
-            env.githubClientId,
-            reusableProfile.githubRefreshToken
+          restoredToken = await refreshGitHubAppAuthTokens(
+            env.githubAppAuthBaseUrl,
+            restoredToken.refreshToken
           );
-          await onSyncGitHubAuthToken?.(reusableProfile.githubUserLogin, restoredToken);
+          await onSyncGitHubAuthToken?.(reusableProfile?.githubUserLogin, restoredToken);
         }
 
         const user = await fetchGitHubUser(restoredToken.accessToken);
@@ -430,6 +383,14 @@ export function GitHubCodespacesScreen({
       setAuthError('GitHub login is not configured in this build.');
       return;
     }
+    if (!env.githubAppSlug) {
+      setAuthError('GitHub App slug is not configured in this build.');
+      return;
+    }
+    if (!env.githubAppAuthBaseUrl) {
+      setAuthError('GitHub auth backend URL is not configured in this build.');
+      return;
+    }
 
     const runId = authFlowRef.current + 1;
     authFlowRef.current = runId;
@@ -437,76 +398,27 @@ export function GitHubCodespacesScreen({
     setAuthError(null);
     setConnectionError(null);
     setSession(null);
-    setDeviceGrant(null);
-    setDeviceCodeCopied(false);
 
     try {
-      const grant = await requestGitHubDeviceCode(env.githubClientId, GITHUB_APP_DEVICE_FLOW_SCOPES);
+      const token = await loginWithGitHubApp({
+        appSlug: env.githubAppSlug,
+        authBaseUrl: env.githubAppAuthBaseUrl,
+      });
       if (authFlowRef.current !== runId) {
         return;
       }
 
-      setDeviceGrant(grant);
-      void copyGitHubDeviceCode(grant.userCode);
-
-      let nextIntervalSec = grant.intervalSec;
-      while (Date.now() < grant.expiresAtMs && authFlowRef.current === runId) {
-        if (appStateRef.current !== 'active') {
-          await sleep(500);
-          continue;
-        }
-
-        await sleep(nextIntervalSec * 1000);
-        if (authFlowRef.current !== runId) {
-          return;
-        }
-        if (appStateRef.current !== 'active') {
-          continue;
-        }
-
-        let result;
-        try {
-          result = await pollGitHubDeviceAccessToken(env.githubClientId, grant.deviceCode);
-        } catch (error) {
-          if (isRetryableGitHubDeviceFlowError(error)) {
-            continue;
-          }
-          throw error;
-        }
-        if (authFlowRef.current !== runId) {
-          return;
-        }
-
-        if (result.kind === 'pending') {
-          nextIntervalSec = result.intervalSec;
-          continue;
-        }
-
-        if (result.kind === 'denied' || result.kind === 'expired') {
-          setAuthError(result.message);
-          setDeviceGrant(null);
-          return;
-        }
-
-        const nextSession = await finalizeGitHubSession(result.token);
-        if (authFlowRef.current !== runId) {
-          return;
-        }
-
-        await onSyncGitHubAuthToken?.(nextSession.user.login, result.token);
-        setSession(nextSession);
-        setDeviceGrant(null);
-        await Promise.all([
-          loadCodespaces(nextSession.accessToken),
-          loadGitHubAppAccess(nextSession.accessToken),
-        ]);
+      const nextSession = await finalizeGitHubSession(token);
+      if (authFlowRef.current !== runId) {
         return;
       }
 
-      if (authFlowRef.current === runId) {
-        setAuthError('GitHub device verification timed out. Start sign-in again.');
-        setDeviceGrant(null);
-      }
+      await onSyncGitHubAuthToken?.(nextSession.user.login, token);
+      setSession(nextSession);
+      await Promise.all([
+        loadCodespaces(nextSession.accessToken),
+        loadGitHubAppAccess(nextSession.accessToken),
+      ]);
     } catch (error) {
       if (authFlowRef.current === runId) {
         setAuthError((error as Error).message);
@@ -516,14 +428,11 @@ export function GitHubCodespacesScreen({
         setAuthorizing(false);
       }
     }
-  }, [copyGitHubDeviceCode, loadCodespaces, loadGitHubAppAccess, onSyncGitHubAuthToken, openGitHubDeviceVerification]);
-
-  const cancelGitHubSignIn = useCallback(() => {
-    authFlowRef.current += 1;
-    setAuthorizing(false);
-    setDeviceGrant(null);
-    setDeviceCodeCopied(false);
-  }, []);
+  }, [
+    loadCodespaces,
+    loadGitHubAppAccess,
+    onSyncGitHubAuthToken,
+  ]);
 
   const logoutGitHubSession = useCallback(async () => {
     authFlowRef.current += 1;
@@ -532,7 +441,6 @@ export function GitHubCodespacesScreen({
     setAuthorizing(false);
     setRestoringSession(false);
     setSession(null);
-    setDeviceGrant(null);
     setAppAccess(null);
     setAppAccessError(null);
     setAppAccessLoading(false);
@@ -550,10 +458,10 @@ export function GitHubCodespacesScreen({
     setPendingCodexLogin(null);
     setCodexLoginChecking(false);
     setCodexLoginSubmitting(false);
-    setDeviceCodeCopied(false);
     setAuthError(null);
 
     try {
+      await clearStoredGitHubAppAuthTokens();
       await onLogoutGitHubSessions?.();
     } catch (error) {
       setAuthError((error as Error).message);
@@ -1080,19 +988,17 @@ export function GitHubCodespacesScreen({
     : createEnabled && templateRepositoryAccessReady
       ? creationHint
       : repositoryAccessDescription;
-  const onboardingStage: OnboardingStage = deviceGrant
-    ? 'authorize'
-    : session
-      ? statusCardVisible
-        ? 'connect'
-        : 'codespace'
-      : 'github';
+  const onboardingStage: OnboardingStage = session
+    ? statusCardVisible
+      ? 'connect'
+      : 'codespace'
+    : 'github';
   const onboardingStepStates: {
     github: ConnectionStepState;
     codespace: ConnectionStepState;
     connect: ConnectionStepState;
   } =
-    onboardingStage === 'github' || onboardingStage === 'authorize'
+    onboardingStage === 'github'
       ? {
           github: 'active',
           codespace: 'pending',
@@ -1112,29 +1018,23 @@ export function GitHubCodespacesScreen({
   const onboardingStepNumber =
     onboardingStage === 'codespace' ? 2 : onboardingStage === 'connect' ? 3 : 1;
   const onboardingStageTitle =
-    onboardingStage === 'authorize'
-      ? 'Authorize the GitHub App'
-      : onboardingStage === 'codespace'
-        ? 'Choose your Codespace'
-        : onboardingStage === 'connect'
-          ? 'Finish connection'
-          : 'Sign in with GitHub';
+    onboardingStage === 'codespace'
+      ? 'Choose your Codespace'
+      : onboardingStage === 'connect'
+        ? 'Finish connection'
+        : 'Continue with GitHub';
   const onboardingStageDescription =
-    onboardingStage === 'authorize'
-      ? 'Copy the device code, open GitHub when you are ready, then approve the Claudex GitHub App there. Clawdex keeps waiting here for completion.'
-      : onboardingStage === 'codespace'
-        ? 'Choose which repositories the GitHub App can touch, then reopen a recent Codespace or create a fresh one from the Clawdex template.'
-        : onboardingStage === 'connect'
-          ? 'Keep this screen open while Clawdex waits for the Codespace bridge and finishes Codex login.'
-          : 'Use the GitHub account that owns your Codespaces. Clawdex uses a GitHub App session to create, start, and reconnect without any relay.';
+    onboardingStage === 'codespace'
+      ? 'Choose which repositories the GitHub App can touch, then reopen a recent Codespace or create a fresh one from the Clawdex template.'
+      : onboardingStage === 'connect'
+        ? 'Keep this screen open while Clawdex waits for the Codespace bridge and finishes Codex login.'
+        : 'GitHub opens once in the browser sheet so you can approve the app, choose repositories, and return here automatically.';
   const onboardingStageIcon =
-    onboardingStage === 'authorize'
-      ? 'keypad-outline'
-      : onboardingStage === 'codespace'
-        ? 'cube-outline'
-        : onboardingStage === 'connect'
-          ? 'git-network-outline'
-          : 'logo-github';
+    onboardingStage === 'codespace'
+      ? 'cube-outline'
+      : onboardingStage === 'connect'
+        ? 'git-network-outline'
+        : 'logo-github';
 
   return (
     <View style={styles.container}>
@@ -1232,9 +1132,9 @@ export function GitHubCodespacesScreen({
             <BlurView intensity={55} tint={theme.blurTint} style={styles.card}>
               <Text style={styles.cardTitle}>GitHub login not configured</Text>
               <Text style={styles.cardBody}>
-                Set `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID` and `EXPO_PUBLIC_GITHUB_APP_SLUG` in the
-                mobile app build environment, then rebuild the app to enable direct Codespaces
-                sign-in.
+                Set `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID`, `EXPO_PUBLIC_GITHUB_APP_SLUG`, and
+                `EXPO_PUBLIC_GITHUB_APP_AUTH_BASE_URL` in the mobile app build environment, then
+                rebuild the app to enable direct Codespaces sign-in.
               </Text>
             </BlurView>
           ) : null}
@@ -1307,7 +1207,7 @@ export function GitHubCodespacesScreen({
                 </View>
               ) : null}
 
-              {session && onboardingStage !== 'github' && onboardingStage !== 'authorize' ? (
+              {session && onboardingStage !== 'github' ? (
                 <View style={styles.accountStrip}>
                   <View style={styles.accountStripCopy}>
                     <Text style={styles.accountStripLabel}>GitHub session</Text>
@@ -1366,7 +1266,8 @@ export function GitHubCodespacesScreen({
                       <View style={styles.signalCopy}>
                         <Text style={styles.signalTitle}>Stay on this phone</Text>
                         <Text style={styles.signalMeta}>
-                          GitHub opens in the native browser sheet and returns here automatically.
+                          GitHub opens in the browser sheet, handles app install and repository
+                          approval, then returns here automatically.
                         </Text>
                       </View>
                     </View>
@@ -1414,110 +1315,9 @@ export function GitHubCodespacesScreen({
                     <Text style={styles.primaryButtonText}>Sign in with GitHub</Text>
                   </Pressable>
                   <Text style={styles.helperText}>
-                    No relay. No broad `repo` scope. GitHub only grants the repositories you choose.
+                    One GitHub flow. No relay. No broad `repo` scope. GitHub only grants the
+                    repositories you choose.
                   </Text>
-                </>
-              ) : null}
-
-              {onboardingStage === 'authorize' && deviceGrant ? (
-                <>
-                  <View style={styles.stagePanel}>
-                    <Text style={styles.stagePanelEyebrow}>Device verification</Text>
-                    <Text style={styles.stagePanelTitle}>Enter this code in GitHub</Text>
-                    <View style={styles.deviceCodeWrap}>
-                      <Text selectable style={styles.deviceCodeValue}>
-                        {deviceGrant.userCode}
-                      </Text>
-                    </View>
-                    <View style={styles.authorizeInstructionList}>
-                      <View style={styles.authorizeInstructionRow}>
-                        <Text style={styles.authorizeInstructionNumber}>1</Text>
-                        <Text style={styles.authorizeInstructionText}>
-                          {deviceCodeCopied
-                            ? 'The code has been copied to your clipboard.'
-                            : 'Copy the code so you can paste it into GitHub.'}
-                        </Text>
-                      </View>
-                      <View style={styles.authorizeInstructionRow}>
-                        <Text style={styles.authorizeInstructionNumber}>2</Text>
-                        <Text style={styles.authorizeInstructionText}>
-                          Tap `Open GitHub`, paste the code, and approve the Claudex GitHub App.
-                        </Text>
-                      </View>
-                      <View style={styles.authorizeInstructionRow}>
-                        <Text style={styles.authorizeInstructionNumber}>3</Text>
-                        <Text style={styles.authorizeInstructionText}>
-                          Return here. Clawdex will continue automatically once GitHub finishes.
-                        </Text>
-                      </View>
-                    </View>
-                    <View
-                      style={[
-                        styles.deviceCodeStatusRow,
-                        deviceCodeCopied && styles.deviceCodeStatusRowActive,
-                      ]}
-                    >
-                      <Ionicons
-                        name={deviceCodeCopied ? 'checkmark-circle-outline' : 'copy-outline'}
-                        size={16}
-                        color={
-                          deviceCodeCopied ? theme.colors.statusComplete : theme.colors.textMuted
-                        }
-                      />
-                      <Text
-                        style={[
-                          styles.deviceCodeStatusText,
-                          deviceCodeCopied && styles.deviceCodeStatusTextActive,
-                        ]}
-                      >
-                        {deviceCodeCopied
-                          ? 'Code copied to clipboard'
-                          : 'Copy the code before opening GitHub'}
-                      </Text>
-                    </View>
-                  </View>
-                  <View style={styles.actionRow}>
-                    <Pressable
-                      onPress={() => {
-                        void copyGitHubDeviceCode(deviceGrant.userCode);
-                      }}
-                      style={({ pressed }) => [
-                        styles.primaryButton,
-                        pressed && styles.primaryButtonPressed,
-                      ]}
-                    >
-                      <Ionicons
-                        name={deviceCodeCopied ? 'checkmark-outline' : 'copy-outline'}
-                        size={15}
-                        color={theme.colors.black}
-                      />
-                      <Text style={styles.primaryButtonText}>
-                        {deviceCodeCopied ? 'Copy again' : 'Copy code'}
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => {
-                        void openGitHubDeviceVerification(deviceGrant.verificationUri);
-                      }}
-                      style={({ pressed }) => [
-                        styles.secondaryButton,
-                        pressed && styles.secondaryButtonPressed,
-                      ]}
-                    >
-                      <Ionicons name="open-outline" size={16} color={theme.colors.textPrimary} />
-                      <Text style={styles.secondaryButtonText}>Open GitHub</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={cancelGitHubSignIn}
-                      style={({ pressed }) => [
-                        styles.secondaryButton,
-                        pressed && styles.secondaryButtonPressed,
-                      ]}
-                    >
-                      <Ionicons name="close-outline" size={15} color={theme.colors.textPrimary} />
-                      <Text style={styles.secondaryButtonText}>Cancel</Text>
-                    </Pressable>
-                  </View>
                 </>
               ) : null}
 

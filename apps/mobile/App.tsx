@@ -58,7 +58,11 @@ import {
 } from './src/bridgeProfiles';
 import { env } from './src/config';
 import {
-  refreshGitHubUserAccessToken,
+  clearStoredGitHubAppAuthTokens,
+  refreshGitHubAppAuthTokens,
+  saveStoredGitHubAppAuthTokens,
+} from './src/githubAppAuth';
+import {
   shouldRefreshGitHubUserAccessToken,
   type GitHubUserAccessToken,
 } from './src/githubCodespaces';
@@ -189,6 +193,7 @@ export default function App() {
       });
 
       if (!didChange) {
+        await saveStoredGitHubAppAuthTokens(token);
         return;
       }
 
@@ -197,6 +202,7 @@ export default function App() {
         profiles: nextProfiles,
       };
       await saveBridgeProfileStore(nextStore);
+      await saveStoredGitHubAppAuthTokens(token);
       setBridgeProfiles(nextStore.profiles);
       setActiveBridgeProfileId(nextStore.activeProfileId);
     },
@@ -309,7 +315,11 @@ export default function App() {
   }, [ws]);
 
   useEffect(() => {
-    if (!env.githubClientId || !activeBridgeProfile || !isGitHubBridgeProfile(activeBridgeProfile)) {
+    if (
+      !env.githubAppAuthBaseUrl ||
+      !activeBridgeProfile ||
+      !isGitHubBridgeProfile(activeBridgeProfile)
+    ) {
       return;
     }
     if (
@@ -341,7 +351,7 @@ export default function App() {
     gitHubTokenRefreshKeyRef.current = refreshKey;
 
     let cancelled = false;
-    void refreshGitHubUserAccessToken(env.githubClientId, refreshToken)
+    void refreshGitHubAppAuthTokens(env.githubAppAuthBaseUrl, refreshToken)
       .then(async (token) => {
         if (cancelled) {
           return;
@@ -362,7 +372,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeBridgeProfile, persistGitHubAuthTokenForUser]);
+  }, [activeBridgeProfile, env.githubAppAuthBaseUrl, persistGitHubAuthTokenForUser]);
 
   useEffect(() => {
     if (!api || !activeBridgeUsesGitHubAuth || !bridgeToken || !bridgeUrl) {
@@ -1543,6 +1553,7 @@ export default function App() {
     }
 
     await saveBridgeProfileStore(nextStore);
+    await clearStoredGitHubAppAuthTokens();
     setBridgeProfiles(nextStore.profiles);
     setActiveBridgeProfileId(nextStore.activeProfileId);
 
@@ -1758,10 +1769,8 @@ export default function App() {
               initialBridgeToken={initialToken}
               allowInsecureRemoteBridge={env.allowInsecureRemoteBridge}
               allowQueryTokenAuth={env.allowWsQueryTokenAuth}
-              githubCodespacesEnabled={Boolean(env.githubClientId && env.githubAppSlug)}
-              onOpenGitHubCodespaces={
-                env.githubClientId && env.githubAppSlug ? openGitHubCodespaces : undefined
-              }
+              githubCodespacesEnabled={Boolean(env.githubClientId)}
+              onOpenGitHubCodespaces={env.githubClientId ? openGitHubCodespaces : undefined}
               onSave={handleBridgeProfileSaved}
               onCancel={canCancel ? handleCancelOnboarding : undefined}
             />
@@ -1834,9 +1843,7 @@ export default function App() {
             onFontPreferenceChange={handleFontPreferenceChange}
             onEditBridgeProfile={handleEditBridgeProfile}
             onAddBridgeProfile={handleAddBridgeProfile}
-            onConnectGitHubCodespaces={
-              env.githubClientId && env.githubAppSlug ? openGitHubCodespaces : undefined
-            }
+            onConnectGitHubCodespaces={env.githubClientId ? openGitHubCodespaces : undefined}
             onSwitchBridgeProfile={handleSwitchBridgeProfile}
             onRenameBridgeProfile={handleRenameBridgeProfile}
             onDeleteBridgeProfile={handleDeleteBridgeProfile}

@@ -70,7 +70,8 @@ Notes:
 - Browser preview uses a second forwarded port (`8788` by default), so both ports need public visibility.
 - GitHub resets public forwarded ports back to private when a codespace restarts. Restarting the bridge reruns the visibility step.
 - If automatic visibility setup fails, run `gh codespace ports visibility 8787:public 8788:public`.
-- If the mobile app is built with `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID` and `EXPO_PUBLIC_GITHUB_APP_SLUG`, users can now tap `Use GitHub Codespaces` in onboarding/settings, sign in with GitHub, approve the Claudex GitHub App for only the repositories they want, pick a Codespace, and connect without manually copying the bridge token.
+- If the mobile app is built with `EXPO_PUBLIC_GITHUB_APP_CLIENT_ID`, `EXPO_PUBLIC_GITHUB_APP_SLUG`, and `EXPO_PUBLIC_GITHUB_APP_AUTH_BASE_URL`, users can now tap `Use GitHub Codespaces` in onboarding/settings, complete one in-app GitHub App install/auth flow, pick a Codespace, and connect without manually copying the bridge token.
+- The tiny auth backend for that flow lives in `services/github-app-auth-worker`. Point the GitHub App callback URL at `https://<your-domain>/github/callback` and enable `Request user authorization (OAuth) during installation`.
 - The app can also create a new repo-backed Codespace directly. It prefers `<signed-in-user>/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>` first. If that repo does not exist, it automatically forks `EXPO_PUBLIC_GITHUB_CODESPACES_SOURCE_OWNER/<EXPO_PUBLIC_GITHUB_CODESPACES_REPO_NAME>` into the signed-in user account, then creates the Codespace there.
 
 This repo now also includes a Codespaces bootstrap flow. On Codespace start/resume, `.devcontainer/devcontainer.json` runs:
