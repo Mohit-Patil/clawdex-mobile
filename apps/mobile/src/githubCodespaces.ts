@@ -51,6 +51,13 @@ export interface GitHubAppAccessSnapshot {
   repositories: GitHubAppInstallationRepository[];
 }
 
+export interface GitHubInstallationAccessToken {
+  accessToken: string;
+  installationId: number;
+  repositoryNames: string[];
+  expiresAt: string | null;
+}
+
 export interface GitHubUser {
   login: string;
   id: number;
@@ -333,6 +340,65 @@ export async function fetchGitHubAppAccessSnapshot(
   return {
     installations,
     repositories: [...uniqueRepositories.values()],
+  };
+}
+
+export async function requestGitHubInstallationAccessToken(input: {
+  authBaseUrl: string;
+  userAccessToken: string;
+  installationId: number;
+  repositories: string[];
+}): Promise<GitHubInstallationAccessToken> {
+  const authBaseUrl = input.authBaseUrl.trim();
+  const userAccessToken = input.userAccessToken.trim();
+  if (!authBaseUrl) {
+    throw new Error('GitHub auth backend URL is not configured.');
+  }
+  if (!userAccessToken) {
+    throw new Error('GitHub user access token is required.');
+  }
+
+  const repositories = input.repositories
+    .map((repository) => repository.trim())
+    .filter((repository) => repository.length > 0);
+  if (repositories.length === 0) {
+    throw new Error('At least one repository is required to request an installation token.');
+  }
+
+  const response = await fetch(new URL('/api/github/installations/token', ensureTrailingSlash(authBaseUrl)), {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      userAccessToken,
+      installationId: input.installationId,
+      repositories,
+    }),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(
+      readGitHubErrorMessage(payload) ?? `GitHub installation token request failed (${response.status})`
+    );
+  }
+
+  const record = asRecord(payload);
+  const accessToken = readRequiredString(record, 'access_token');
+  const installationId = readRequiredNumber(record, 'installation_id');
+  const repositoryNames = Array.isArray(record?.repositories)
+    ? record.repositories.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : [];
+  if (!accessToken || !installationId || repositoryNames.length === 0) {
+    throw new Error('GitHub installation token response was invalid.');
+  }
+
+  return {
+    accessToken,
+    installationId,
+    repositoryNames,
+    expiresAt: readOptionalString(record, 'expires_at'),
   };
 }
 
@@ -1014,6 +1080,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   }
 
   return value as Record<string, unknown>;
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith('/') ? value : `${value}/`;
 }
 
 function sleep(durationMs: number): Promise<void> {

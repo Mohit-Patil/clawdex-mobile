@@ -39,6 +39,7 @@ import {
   fetchGitHubCodespaceDefaults,
   fetchGitHubCodespaces,
   fetchGitHubRepository,
+  requestGitHubInstallationAccessToken,
   fetchGitHubUser,
   getReusableGitHubBridgeProfile,
   sortGitHubCodespaces,
@@ -525,6 +526,43 @@ export function GitHubCodespacesScreen({
     [onSyncGitHubAuthToken]
   );
 
+  const buildGitHubInstallationAuthGrants = useCallback(
+    async (activeSession: GitHubSession) => {
+      if (!env.githubAppAuthBaseUrl) {
+        throw new Error('GitHub auth backend URL is not configured.');
+      }
+
+      const repositoriesByInstallation = new Map<number, string[]>();
+      approvedRepositories.forEach((repository) => {
+        const current = repositoriesByInstallation.get(repository.installationId) ?? [];
+        current.push(repository.fullName);
+        repositoriesByInstallation.set(repository.installationId, current);
+      });
+
+      if (repositoriesByInstallation.size === 0) {
+        return [];
+      }
+
+      const grants = await Promise.all(
+        [...repositoriesByInstallation.entries()].map(async ([installationId, repositories]) => {
+          const token = await requestGitHubInstallationAccessToken({
+            authBaseUrl: env.githubAppAuthBaseUrl!,
+            userAccessToken: activeSession.accessToken,
+            installationId,
+            repositories,
+          });
+          return {
+            accessToken: token.accessToken,
+            repositories: token.repositoryNames,
+          };
+        })
+      );
+
+      return grants.filter((grant) => grant.repositories.length > 0 && grant.accessToken.trim());
+    },
+    [approvedRepositories]
+  );
+
   const openGitHubAppAccess = useCallback(async () => {
     if (!session) {
       setAuthError('Sign in with GitHub first.');
@@ -706,13 +744,19 @@ export function GitHubCodespacesScreen({
         return 'connected';
       }
 
-      setConnectionMessage('Bridge is up. Enabling GitHub clone and push access inside the Codespace…');
-      await withBridgeApiClient(bridgeUrl, bridgeSession.accessToken, (api) =>
-        api.installGitHubAuth(
-          bridgeSession.accessToken,
-          approvedRepositories.map((repository) => repository.fullName)
-        )
-      );
+      const gitAuthGrants = await buildGitHubInstallationAuthGrants(bridgeSession);
+      if (connectFlowRef.current !== runId) {
+        return 'connected';
+      }
+
+      if (gitAuthGrants.length > 0) {
+        setConnectionMessage('Bridge is up. Enabling GitHub clone and push access inside the Codespace…');
+        await withBridgeApiClient(bridgeUrl, bridgeSession.accessToken, (api) =>
+          api.installGitHubAuth({
+            grants: gitAuthGrants,
+          })
+        );
+      }
       if (connectFlowRef.current !== runId) {
         return 'connected';
       }
@@ -764,7 +808,7 @@ export function GitHubCodespacesScreen({
       return 'codexLogin';
     },
     [
-      approvedRepositories,
+      buildGitHubInstallationAuthGrants,
       finalizeConnectedBridgeProfile,
       nativeChatGptLoginAvailable,
       refreshGitHubSessionForBridgeInstall,

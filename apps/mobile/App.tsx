@@ -250,7 +250,6 @@ export default function App() {
   const drawerOpenRef = useRef(false);
   const drawerVisibleRef = useRef(false);
   const drawerCapturesTouchesRef = useRef(false);
-  const gitHubAuthBootstrapKeyRef = useRef<string | null>(null);
   const gitHubTokenRefreshKeyRef = useRef<string | null>(null);
   const chatTransitionRequestIdRef = useRef(0);
   const appLifecycleStateRef = useRef(AppState.currentState);
@@ -373,34 +372,6 @@ export default function App() {
       cancelled = true;
     };
   }, [activeBridgeProfile, env.githubAppAuthBaseUrl, persistGitHubAuthTokenForUser]);
-
-  useEffect(() => {
-    if (!api || !activeBridgeUsesGitHubAuth || !bridgeToken || !bridgeUrl) {
-      return;
-    }
-
-    const bootstrapKey = `${bridgeUrl}::${bridgeToken}`;
-    if (gitHubAuthBootstrapKeyRef.current === bootstrapKey) {
-      return;
-    }
-    gitHubAuthBootstrapKeyRef.current = bootstrapKey;
-
-    let cancelled = false;
-    void api.installGitHubAuth(bridgeToken).catch((error) => {
-      if (cancelled) {
-        return;
-      }
-      console.warn(
-        `GitHub repo access bootstrap skipped: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeBridgeUsesGitHubAuth, api, bridgeToken, bridgeUrl]);
 
   useEffect(() => {
     void configureRevenueCatIfNeeded().catch((error) => {

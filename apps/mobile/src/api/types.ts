@@ -298,6 +298,12 @@ export interface TerminalExecResponse {
 }
 
 export interface GitHubAuthInstallRequest {
+  accessToken?: string;
+  repositories?: string[];
+  grants?: GitHubAuthGrantInput[];
+}
+
+export interface GitHubAuthGrantInput {
   accessToken: string;
   repositories?: string[];
 }
@@ -305,9 +311,10 @@ export interface GitHubAuthInstallRequest {
 export interface GitHubAuthInstallResponse {
   installed: boolean;
   host: string;
-  login: string;
+  login: string | null;
   scopes: string[];
   credentialFile: string;
+  grantsInstalled: number;
 }
 
 export interface GitStatusResponse {

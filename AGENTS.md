@@ -197,6 +197,7 @@ Current behavior:
   - `scripts/start-expo.sh`
   - `docs/setup-and-operations.md`
   - `docs/troubleshooting.md`
+- If you bump app/package versions for an internal or npm release, also sync `services/rust-bridge/Cargo.lock`. The release workflow builds the bridge with `cargo --locked`, so a stale bridge package version in the lockfile will fail every binary job before publish.
 - Do not confuse `apps/mobile/ios` with the older repo-root `ios/` directory.
 - Do not edit vendored/generated files unless the change is deliberately maintained through a script or checked-in config.
 
@@ -248,6 +249,7 @@ Use `docs/setup-and-operations.md` as the canonical smoke-test runbook. Minimum 
 - Two iOS trees exist. The active mobile app is under `apps/mobile/ios`, not repo-root `ios/`.
 - Real devices must use LAN/Tailscale bridge URLs, not localhost.
 - `MainScreen.tsx` is very large; broad refactors there are risky.
+- Internal release bumps can fail in GitHub Actions if `services/rust-bridge/Cargo.lock` still references the previous `codex-rust-bridge` version. When package versions change, verify `cargo check --locked` passes in `services/rust-bridge` before triggering the release workflow.
 - Android cleartext bridge access is intentionally enabled by the Expo config plugin for local/private HTTP development.
 - Worklets/Reanimated issues are usually cache/install problems, not missing config. `babel.config.js` already includes the required plugin.
 - If setup, auth, Expo startup, QR/networking, or interrupt behavior breaks, use `docs/troubleshooting.md` instead of reinventing recovery steps.

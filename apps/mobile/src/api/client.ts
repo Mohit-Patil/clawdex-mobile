@@ -34,6 +34,7 @@ import type {
   GitCommitResponse,
   GitDiffResponse,
   GitHistoryResponse,
+  GitHubAuthGrantInput,
   GitHubAuthInstallResponse,
   GitFileRequest,
   GitPushResponse,
@@ -934,19 +935,40 @@ export class HostBridgeApiClient {
   }
 
   installGitHubAuth(
-    accessToken: string,
-    repositories: string[] = []
+    body:
+      | {
+          accessToken: string;
+          repositories?: string[];
+        }
+      | {
+          grants: GitHubAuthGrantInput[];
+        }
   ): Promise<GitHubAuthInstallResponse> {
-    const trimmedAccessToken = accessToken.trim();
-    if (!trimmedAccessToken) {
-      return Promise.reject(new Error('accessToken must not be empty'));
+    const grants =
+      'grants' in body
+        ? body.grants
+        : [
+            {
+              accessToken: body.accessToken,
+              repositories: body.repositories ?? [],
+            },
+          ];
+
+    const normalizedGrants = grants
+      .map((grant) => ({
+        accessToken: grant.accessToken.trim(),
+        repositories: (grant.repositories ?? [])
+          .map((repository) => repository.trim())
+          .filter((repository) => repository.length > 0),
+      }))
+      .filter((grant) => grant.accessToken.length > 0);
+
+    if (normalizedGrants.length === 0) {
+      return Promise.reject(new Error('At least one GitHub auth grant is required'));
     }
 
     return this.ws.request<GitHubAuthInstallResponse>('bridge/github/auth/install', {
-      accessToken: trimmedAccessToken,
-      repositories: repositories
-        .map((repository) => repository.trim())
-        .filter((repository) => repository.length > 0),
+      grants: normalizedGrants,
     });
   }
 

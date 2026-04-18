@@ -388,40 +388,89 @@ struct GitHubViewer {
     scopes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedGitHubAuthGrant {
+    access_token: String,
+    repositories: Vec<String>,
+}
+
 async fn install_github_git_auth(
     state: &Arc<AppState>,
-    access_token: &str,
-    repositories: &[String],
+    request: GitHubAuthInstallRequest,
 ) -> Result<GitHubAuthInstallResponse, BridgeError> {
-    let viewer = fetch_github_viewer(state, access_token).await?;
-    if !github_token_can_be_used_for_git_auth(&viewer.scopes) {
-        return Err(BridgeError::forbidden(
-            "github_repo_scope_required",
-            "GitHub repository access is required. Sign in again from the app and approve the required repository access.",
+    let resolved_grants = resolve_github_auth_grants(request)?;
+    if resolved_grants.is_empty() {
+        return Err(BridgeError::invalid_params(
+            "At least one GitHub auth grant is required",
         ));
     }
 
-    let normalized_repositories = normalize_github_auth_repositories(repositories);
+    let mut login = None;
+    let mut scopes = Vec::new();
+    if let Some(first_grant) = resolved_grants.first() {
+        if let Ok(viewer) = fetch_github_viewer(state, &first_grant.access_token).await {
+            if !github_token_can_be_used_for_git_auth(&viewer.scopes) {
+                return Err(BridgeError::forbidden(
+                    "github_repo_scope_required",
+                    "GitHub repository access is required. Sign in again from the app and approve the required repository access.",
+                ));
+            }
+            login = Some(viewer.login);
+            scopes = viewer.scopes;
+        }
+    }
+
     let credentials_file = resolve_github_credentials_file_path()?;
     let git_config_file = resolve_github_git_config_file_path()?;
     ensure_private_parent_dir(&credentials_file).await?;
-    write_github_credentials_file(&credentials_file, access_token, &normalized_repositories)
-        .await?;
-    write_github_git_config_file(
-        &git_config_file,
-        &credentials_file,
-        &normalized_repositories,
-    )
-    .await?;
+    write_github_credentials_file(&credentials_file, &resolved_grants).await?;
+    write_github_git_config_file(&git_config_file, &credentials_file, &resolved_grants).await?;
     configure_git_credential_store(state, &credentials_file, &git_config_file).await?;
 
     Ok(GitHubAuthInstallResponse {
         installed: true,
         host: GITHUB_HOST.to_string(),
-        login: viewer.login,
-        scopes: viewer.scopes,
+        login,
+        scopes,
         credential_file: credentials_file.to_string_lossy().to_string(),
+        grants_installed: resolved_grants.len(),
     })
+}
+
+fn resolve_github_auth_grants(
+    request: GitHubAuthInstallRequest,
+) -> Result<Vec<ResolvedGitHubAuthGrant>, BridgeError> {
+    let raw_grants = if let Some(grants) = request.grants {
+        grants
+    } else if let Some(access_token) = request.access_token {
+        vec![GitHubAuthGrantInput {
+            access_token,
+            repositories: request.repositories,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let mut grants = Vec::new();
+    for grant in raw_grants {
+        let access_token = grant.access_token.trim().to_string();
+        if access_token.is_empty() {
+            continue;
+        }
+
+        let repositories =
+            normalize_github_auth_repositories(grant.repositories.as_deref().unwrap_or(&[]));
+        if repositories.is_empty() {
+            continue;
+        }
+
+        grants.push(ResolvedGitHubAuthGrant {
+            access_token,
+            repositories,
+        });
+    }
+
+    Ok(grants)
 }
 
 async fn fetch_github_viewer(
@@ -565,18 +614,20 @@ async fn ensure_private_parent_dir(path: &Path) -> Result<(), BridgeError> {
 
 async fn write_github_credentials_file(
     credentials_file: &Path,
-    access_token: &str,
-    repositories: &[String],
+    grants: &[ResolvedGitHubAuthGrant],
 ) -> Result<(), BridgeError> {
     let mut content = String::new();
-    let trimmed_access_token = access_token.trim();
-    for repository in repositories {
-        content.push_str(&format!(
-            "https://x-access-token:{trimmed_access_token}@{GITHUB_HOST}/{repository}\n"
-        ));
-        content.push_str(&format!(
-            "https://x-access-token:{trimmed_access_token}@{GITHUB_HOST}/{repository}.git\n"
-        ));
+    for grant in grants {
+        for repository in &grant.repositories {
+            content.push_str(&format!(
+                "https://x-access-token:{}@{GITHUB_HOST}/{repository}\n",
+                grant.access_token
+            ));
+            content.push_str(&format!(
+                "https://x-access-token:{}@{GITHUB_HOST}/{repository}.git\n",
+                grant.access_token
+            ));
+        }
     }
 
     fs::write(credentials_file, content)
@@ -600,21 +651,23 @@ async fn write_github_credentials_file(
 async fn write_github_git_config_file(
     git_config_file: &Path,
     credentials_file: &Path,
-    repositories: &[String],
+    grants: &[ResolvedGitHubAuthGrant],
 ) -> Result<(), BridgeError> {
     let helper_value = format!("store --file {}", credentials_file.to_string_lossy());
     let mut content = String::from(
         "[credential \"https://github.com\"]\n\tuseHttpPath = true\n[url \"https://github.com/\"]\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@github.com/\n",
     );
 
-    for repository in repositories {
-        for context in [
-            format!("https://{GITHUB_HOST}/{repository}"),
-            format!("https://{GITHUB_HOST}/{repository}.git"),
-        ] {
-            content.push_str(&format!(
-                "[credential \"{context}\"]\n\thelper =\n\thelper = {helper_value}\n\tusername = x-access-token\n"
-            ));
+    for grant in grants {
+        for repository in &grant.repositories {
+            for context in [
+                format!("https://{GITHUB_HOST}/{repository}"),
+                format!("https://{GITHUB_HOST}/{repository}.git"),
+            ] {
+                content.push_str(&format!(
+                    "[credential \"{context}\"]\n\thelper =\n\thelper = {helper_value}\n\tusername = x-access-token\n"
+                ));
+            }
         }
     }
 
@@ -5569,6 +5622,14 @@ struct GitQueryRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitHubAuthInstallRequest {
+    access_token: Option<String>,
+    repositories: Option<Vec<String>>,
+    grants: Option<Vec<GitHubAuthGrantInput>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubAuthGrantInput {
     access_token: String,
     repositories: Option<Vec<String>>,
 }
@@ -5578,9 +5639,10 @@ struct GitHubAuthInstallRequest {
 struct GitHubAuthInstallResponse {
     installed: bool,
     host: String,
-    login: String,
+    login: Option<String>,
     scopes: Vec<String>,
     credential_file: String,
+    grants_installed: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -6943,12 +7005,7 @@ async fn handle_bridge_method(
             let request: GitHubAuthInstallRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
                     .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
-            let result = install_github_git_auth(
-                state,
-                &request.access_token,
-                request.repositories.as_deref().unwrap_or(&[]),
-            )
-            .await?;
+            let result = install_github_git_auth(state, request).await?;
             serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/attachments/upload" => {
