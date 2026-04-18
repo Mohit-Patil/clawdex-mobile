@@ -13,6 +13,18 @@ describe('chatImageSource', () => {
     });
   });
 
+  it('keeps data uri images direct', () => {
+    expect(
+      toMarkdownImageSource(
+        'data:image/png;base64,abc123',
+        'http://192.168.1.26:8787',
+        'secret-token'
+      )
+    ).toEqual({
+      uri: 'data:image/png;base64,abc123',
+    });
+  });
+
   it('proxies absolute local paths through the bridge', () => {
     expect(
       toMarkdownImageSource('/tmp/My QR.png', 'http://192.168.1.26:8787', 'secret-token')

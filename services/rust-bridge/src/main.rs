@@ -10195,6 +10195,10 @@ fn normalize_thread_record(value: Value, engine: BridgeRuntimeEngine) -> Value {
         return value;
     };
 
+    if engine == BridgeRuntimeEngine::Codex {
+        enrich_thread_record_with_rollout_mcp_media(&mut object);
+    }
+
     if let Some(id) = object.get("id").and_then(Value::as_str) {
         object.insert(
             "id".to_string(),
@@ -10203,6 +10207,334 @@ fn normalize_thread_record(value: Value, engine: BridgeRuntimeEngine) -> Value {
     }
     object.insert("engine".to_string(), json!(engine.as_str()));
     Value::Object(object)
+}
+
+fn enrich_thread_record_with_rollout_mcp_media(thread: &mut serde_json::Map<String, Value>) {
+    let Some(path) = read_string(thread.get("path")).filter(|value| !value.is_empty()) else {
+        return;
+    };
+
+    let candidate_ids = collect_thread_mcp_tool_media_candidates(thread);
+    if candidate_ids.is_empty() {
+        return;
+    }
+
+    let enrichments =
+        read_rollout_mcp_tool_result_parts_by_call_id(Path::new(&path), &candidate_ids);
+    if enrichments.is_empty() {
+        return;
+    }
+
+    apply_rollout_mcp_tool_result_part_enrichments(thread, &enrichments);
+}
+
+fn collect_thread_mcp_tool_media_candidates(
+    thread: &serde_json::Map<String, Value>,
+) -> HashSet<String> {
+    let mut candidates = HashSet::new();
+    let Some(turns) = thread.get("turns").and_then(Value::as_array) else {
+        return candidates;
+    };
+
+    for turn in turns {
+        let Some(items) = turn.get("items").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for item in items {
+            let Some(item_object) = item.as_object() else {
+                continue;
+            };
+            if item_object.get("type").and_then(Value::as_str) != Some("mcpToolCall") {
+                continue;
+            }
+            let Some(item_id) =
+                read_string(item_object.get("id")).filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if thread_mcp_tool_result_has_image(item_object.get("result")) {
+                continue;
+            }
+            candidates.insert(item_id);
+        }
+    }
+
+    candidates
+}
+
+fn thread_mcp_tool_result_has_image(result: Option<&Value>) -> bool {
+    rollout_value_contains_image(result, 0)
+}
+
+fn rollout_value_contains_image(value: Option<&Value>, depth: usize) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    let Some(value) = value else {
+        return false;
+    };
+
+    match value {
+        Value::Array(entries) => entries
+            .iter()
+            .any(|entry| rollout_value_contains_image(Some(entry), depth + 1)),
+        Value::Object(object) => {
+            let entry_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .map(normalize_rollout_content_type)
+                .unwrap_or_default();
+            if matches!(entry_type.as_str(), "image" | "inputimage" | "localimage")
+                && (object
+                    .get("image_url")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .is_some()
+                    || object
+                        .get("imageUrl")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .is_some()
+                    || object
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .is_some()
+                    || object
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .is_some()
+                    || rollout_image_data_url(object).is_some())
+            {
+                return true;
+            }
+
+            let candidate_keys = [
+                "content",
+                "contents",
+                "items",
+                "item",
+                "result",
+                "results",
+                "output",
+                "data",
+                "structuredContent",
+                "structured_content",
+                "_meta",
+                "meta",
+            ];
+            candidate_keys.iter().any(|key| {
+                object
+                    .get(*key)
+                    .map(|child| rollout_value_contains_image(Some(child), depth + 1))
+                    .unwrap_or(false)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn read_rollout_mcp_tool_result_parts_by_call_id(
+    path: &Path,
+    candidate_ids: &HashSet<String>,
+) -> HashMap<String, Vec<Value>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return HashMap::new(),
+    };
+    let reader = std::io::BufReader::new(file);
+    let mut enrichments = HashMap::new();
+    use std::io::BufRead as _;
+
+    for line in reader.lines() {
+        if enrichments.len() >= candidate_ids.len() {
+            break;
+        }
+
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(record_object) = record.as_object() else {
+            continue;
+        };
+        if read_string(record_object.get("type")).as_deref() != Some("event_msg") {
+            continue;
+        }
+
+        let Some(payload) = record_object.get("payload").and_then(Value::as_object) else {
+            continue;
+        };
+        if read_string(payload.get("type")).as_deref() != Some("mcp_tool_call_end") {
+            continue;
+        }
+
+        let Some(call_id) = read_string(payload.get("call_id")).filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if !candidate_ids.contains(&call_id) {
+            continue;
+        }
+
+        let result_parts = payload
+            .get("result")
+            .and_then(Value::as_object)
+            .and_then(|result| result.get("Ok"))
+            .and_then(rollout_mcp_tool_result_parts);
+        let Some(result_parts) = result_parts.filter(|parts| !parts.is_empty()) else {
+            continue;
+        };
+        enrichments.insert(call_id, result_parts);
+    }
+
+    enrichments
+}
+
+fn rollout_mcp_tool_result_parts(result: &Value) -> Option<Vec<Value>> {
+    let content = result.get("content").and_then(Value::as_array)?;
+    let mut parts = Vec::new();
+
+    for entry in content {
+        let Some(entry_object) = entry.as_object() else {
+            continue;
+        };
+        match normalize_rollout_content_type(
+            entry_object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )
+        .as_str()
+        {
+            "text" => {
+                if let Some(text) =
+                    read_string(entry_object.get("text")).filter(|value| !value.is_empty())
+                {
+                    parts.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
+            }
+            "image" | "inputimage" => {
+                if let Some(image_url) = rollout_image_data_url(entry_object) {
+                    parts.push(json!({
+                        "type": "input_image",
+                        "image_url": image_url,
+                    }));
+                }
+            }
+            "localimage" => {
+                if let Some(path) =
+                    read_string(entry_object.get("path")).filter(|value| !value.is_empty())
+                {
+                    parts.push(json!({
+                        "type": "localImage",
+                        "path": path,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(parts)
+}
+
+fn rollout_image_data_url(entry: &serde_json::Map<String, Value>) -> Option<String> {
+    let data = read_string(entry.get("data")).filter(|value| !value.is_empty())?;
+    let mime_type = read_string(entry.get("mimeType"))
+        .or_else(|| read_string(entry.get("mime_type")))
+        .filter(|value| !value.is_empty())?;
+    Some(format!("data:{mime_type};base64,{data}"))
+}
+
+fn normalize_rollout_content_type(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn apply_rollout_mcp_tool_result_part_enrichments(
+    thread: &mut serde_json::Map<String, Value>,
+    enrichments: &HashMap<String, Vec<Value>>,
+) {
+    let Some(turns) = thread.get_mut("turns").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for turn in turns {
+        let Some(items) = turn.get_mut("items").and_then(Value::as_array_mut) else {
+            continue;
+        };
+
+        for item in items {
+            let Some(item_object) = item.as_object_mut() else {
+                continue;
+            };
+            if item_object.get("type").and_then(Value::as_str) != Some("mcpToolCall") {
+                continue;
+            }
+            let Some(item_id) = read_string(item_object.get("id")) else {
+                continue;
+            };
+            let Some(enrichment_parts) = enrichments.get(&item_id) else {
+                continue;
+            };
+
+            let result = item_object
+                .entry("result".to_string())
+                .or_insert_with(|| json!({}));
+            let Some(result_object) = result.as_object_mut() else {
+                continue;
+            };
+
+            let existing_has_content = result_object
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|content| !content.is_empty())
+                .unwrap_or(false);
+            if !existing_has_content {
+                result_object.insert(
+                    "content".to_string(),
+                    Value::Array(enrichment_parts.clone()),
+                );
+                continue;
+            }
+            if thread_mcp_tool_result_has_image(Some(&Value::Object(result_object.clone()))) {
+                continue;
+            }
+
+            let Some(content) = result_object
+                .get_mut("content")
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            content.extend(
+                enrichment_parts
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .map(normalize_rollout_content_type)
+                            .is_some_and(|entry_type| {
+                                matches!(entry_type.as_str(), "image" | "inputimage" | "localimage")
+                            })
+                    })
+                    .cloned(),
+            );
+        }
+    }
 }
 
 fn looks_like_thread_record(object: &serde_json::Map<String, Value>) -> bool {
@@ -12446,6 +12778,89 @@ mod tests {
             normalized["data"][0]["source"]["parentThreadId"],
             "codex:thr_parent"
         );
+    }
+
+    #[test]
+    fn normalize_thread_record_enriches_rollout_mcp_tool_images() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let rollout_path = env::temp_dir().join(format!(
+            "clawdex-rollout-thread-media-{}-{}.jsonl",
+            std::process::id(),
+            unique
+        ));
+        let rollout_line = json!({
+            "timestamp": "2026-04-17T17:08:12.099Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "call_id": "call_get_app_state",
+                "invocation": {
+                    "server": "computer-use",
+                    "tool": "get_app_state",
+                    "arguments": { "app": "Google Chrome" }
+                },
+                "result": {
+                    "Ok": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Computer Use state\nApp=com.google.Chrome"
+                            },
+                            {
+                                "type": "image",
+                                "data": "abc123",
+                                "mimeType": "image/png"
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+        std::fs::write(&rollout_path, format!("{rollout_line}\n")).expect("write rollout");
+
+        let normalized = normalize_thread_record(
+            json!({
+                "id": "thr_media",
+                "path": rollout_path.to_string_lossy().to_string(),
+                "cwd": "/tmp",
+                "createdAt": 1,
+                "updatedAt": 2,
+                "turns": [
+                    {
+                        "items": [
+                            {
+                                "id": "call_get_app_state",
+                                "type": "mcpToolCall",
+                                "server": "computer-use",
+                                "tool": "get_app_state",
+                                "status": "completed",
+                                "result": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "Computer Use state\nApp=com.google.Chrome"
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }),
+            BridgeRuntimeEngine::Codex,
+        );
+
+        let content = normalized["turns"][0]["items"][0]["result"]["content"]
+            .as_array()
+            .expect("content array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,abc123");
+
+        let _ = std::fs::remove_file(&rollout_path);
     }
 
     #[test]

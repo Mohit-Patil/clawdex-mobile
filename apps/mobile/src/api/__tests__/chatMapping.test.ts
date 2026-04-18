@@ -229,6 +229,39 @@ describe('chatMapping', () => {
     expect(chat.messages[0].content).toContain('[local image: /tmp/bridge-pairing-qr.png]');
   });
 
+  it('maps assistant structured content arrays using responses api item types', () => {
+    const dataUrl = 'data:image/png;base64,abc123';
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_assistant_input_image',
+        preview: 'image',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'agentMessage',
+                id: 'assistant_image_2',
+                content: [
+                  { type: 'output_text', text: 'Window snapshot attached' },
+                  { type: 'input_image', image_url: dataUrl },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('assistant');
+    expect(chat.messages[0].content).toContain('Window snapshot attached');
+    expect(chat.messages[0].content).toContain(`[image: ${dataUrl}]`);
+  });
+
   it('extracts the latest structured persisted plan for workflow rehydration', () => {
     const chat = mapChat(
       toRawThread({
@@ -478,6 +511,149 @@ describe('chatMapping', () => {
     expect(chat.messages[0].content).toContain('please review these files');
     expect(chat.messages[0].content).toContain('[file: apps/mobile/src/screens/MainScreen.tsx]');
     expect(chat.messages[0].content).toContain('[file: apps/mobile/src/api/client.ts]');
+  });
+
+  it('maps structured tool results with screenshots into previewable system details', () => {
+    const dataUrl = 'data:image/png;base64,toolshot123';
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_tool_image',
+        preview: 'tool image',
+        createdAt: 1700000000,
+        updatedAt: 1700000003,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'mcpToolCall',
+                id: 'tool_image_1',
+                server: 'computer_use',
+                tool: 'get_app_state',
+                status: 'completed',
+                result: {
+                  content: [
+                    {
+                      type: 'input_text',
+                      text: 'Computer Use state\nApp=com.apple.finder',
+                    },
+                    {
+                      type: 'input_image',
+                      image_url: dataUrl,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('tool');
+    expect(chat.messages[0].content).toContain('• Called tool `computer_use / get_app_state`');
+    expect(chat.messages[0].content).toContain('Computer Use state');
+    expect(chat.messages[0].content).toContain(`[image: ${dataUrl}]`);
+  });
+
+  it('maps mcp tool result structuredContent screenshots into previewable system details', () => {
+    const dataUrl = 'data:image/png;base64,structuredtoolshot456';
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_tool_structured_image',
+        preview: 'tool structured image',
+        createdAt: 1700000000,
+        updatedAt: 1700000003,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'mcpToolCall',
+                id: 'tool_structured_image_1',
+                server: 'computer-use',
+                tool: 'get_app_state',
+                status: 'completed',
+                result: {
+                  structuredContent: {
+                    content: [
+                      {
+                        type: 'input_text',
+                        text: 'Computer Use state\nApp=Google Chrome',
+                      },
+                      {
+                        type: 'input_image',
+                        image_url: dataUrl,
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('tool');
+    expect(chat.messages[0].content).toContain('• Called tool `computer-use / get_app_state`');
+    expect(chat.messages[0].content).toContain('Computer Use state');
+    expect(chat.messages[0].content).toContain(`[image: ${dataUrl}]`);
+  });
+
+  it('maps raw image data parts in tool results into previewable screenshots', () => {
+    const base64Image = 'rawtoolshot789';
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_tool_raw_image',
+        preview: 'tool raw image',
+        createdAt: 1700000000,
+        updatedAt: 1700000003,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'mcpToolCall',
+                id: 'tool_raw_image_1',
+                server: 'computer-use',
+                tool: 'get_app_state',
+                status: 'completed',
+                result: {
+                  content: [
+                    {
+                      type: 'text',
+                      text: 'Computer Use state\nApp=Google Chrome',
+                    },
+                    {
+                      type: 'image',
+                      data: base64Image,
+                      mimeType: 'image/png',
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0].role).toBe('system');
+    expect(chat.messages[0].systemKind).toBe('tool');
+    expect(chat.messages[0].content).toContain('• Called tool `computer-use / get_app_state`');
+    expect(chat.messages[0].content).toContain('Computer Use state');
+    expect(chat.messages[0].content).toContain(
+      `[image: data:image/png;base64,${base64Image}]`
+    );
   });
 
   it('keeps imageview as a compact tool event with the viewed filename', () => {

@@ -1,21 +1,35 @@
 import { Ionicons } from '@expo/vector-icons';
-import { memo, useMemo, useState, type ReactElement } from 'react';
+import { memo, useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   Image,
+  Modal,
   Pressable,
   type ImageSourcePropType,
   Linking,
   StyleSheet,
   Text,
   type TextProps,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Markdown, { type RenderRules } from 'react-native-markdown-display';
+import Animated, {
+  clamp,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
 import type { ChatMessage as ApiChatMessage } from '../api/types';
 import { extractLocalPreviewUrls } from '../browserPreview';
 import { useAppTheme, type AppTheme } from '../theme';
 import { toMarkdownImageSource } from './chatImageSource';
+import {
+  computerUseActionIconName,
+  isComputerUseTraceEntry,
+  parseComputerUseTraceEntry,
+} from './computerUseTrace';
 
 interface ChatMessageProps {
   message: ApiChatMessage;
@@ -39,6 +53,22 @@ interface ToolGroupEntry {
   id: string;
   title: string;
   details: string[];
+}
+
+interface TimelineDetailMediaPreview {
+  source: ImageSourcePropType;
+  accessibilityLabel?: string;
+}
+
+interface TimelineDetailPreview {
+  textDetails: string[];
+  images: TimelineDetailMediaPreview[];
+}
+
+interface ComputerUseTimelineProps {
+  entries: ToolGroupEntry[];
+  bridgeUrl: string | null;
+  bridgeToken: string | null;
 }
 
 type MessageBlock =
@@ -348,28 +378,47 @@ function ChatMessageComponent({
     );
   }
   if (timelineEntries && timelineEntries.length > 0) {
+    const timelineToolEntries = timelineEntries.map((entry, index) => ({
+      id: `${message.id}-timeline-${String(index)}`,
+      title: entry.title,
+      details: entry.details,
+    }));
+    if (entriesAreComputerUseTimeline(timelineToolEntries)) {
+      return (
+        <ComputerUseTimeline
+          entries={timelineToolEntries}
+          bridgeUrl={bridgeUrl}
+          bridgeToken={bridgeToken}
+        />
+      );
+    }
+
     return (
       <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
         <View style={styles.timelineCardStack}>
           {timelineEntries.map((entry, index) => {
             const visual = toTimelineVisual(entry.title);
-            const viewedImage = toViewedImagePreview(
+            const detailPreview = toTimelineDetailPreview(
               entry,
               bridgeUrl,
               bridgeToken
             );
+            const hasImages = detailPreview.images.length > 0;
+            const textDetails = detailPreview.textDetails;
             const timelineKey = `${message.id}-timeline-${String(index)}`;
-            const hasDetails = entry.details.length > 0;
+            const hasDetails = textDetails.length > 0;
             const expanded = expandedTimelineEntries[timelineKey] === true;
-            const toggleLabel = viewedImage
-              ? expanded
-                ? 'Tap to hide path'
-                : 'Tap to show path'
-              : expanded
-                ? 'Tap to hide output'
-                : entry.details.length <= 1
-                  ? 'Tap to show output'
-                  : `Tap to show ${String(entry.details.length)} lines`;
+            const toggleLabel = hasDetails
+              ? hasImages && isViewedImageEntry(entry.title, textDetails)
+                ? expanded
+                  ? 'Tap to hide path'
+                  : 'Tap to show path'
+                : expanded
+                  ? 'Tap to hide details'
+                  : textDetails.length <= 1
+                    ? 'Tap to show details'
+                    : `Tap to show ${String(textDetails.length)} lines`
+              : null;
             return (
               <Pressable
                 key={`${message.id}-timeline-${String(index)}`}
@@ -416,16 +465,16 @@ function ChatMessageComponent({
                 {hasDetails ? (
                   <Text style={styles.timelineToggleText}>{toggleLabel}</Text>
                 ) : null}
-                {viewedImage ? (
+                {detailPreview.images.map((image, imageIndex) => (
                   <MarkdownImage
-                    key={`${timelineKey}-image`}
-                    source={viewedImage.source}
-                    accessibilityLabel={viewedImage.accessibilityLabel}
+                    key={`${timelineKey}-image-${String(imageIndex)}`}
+                    source={image.source}
+                    accessibilityLabel={image.accessibilityLabel}
                   />
-                ) : null}
-                {expanded && entry.details.length > 0 ? (
+                ))}
+                {expanded && textDetails.length > 0 ? (
                   <View style={styles.timelineDetailWrap}>
-                    {entry.details.map((line, lineIndex) => (
+                    {textDetails.map((line, lineIndex) => (
                       <SelectableMessageText
                         key={`${message.id}-timeline-${String(index)}-line-${String(lineIndex)}`}
                         style={styles.timelineDetailLine}
@@ -534,6 +583,16 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
     return null;
   }
 
+  if (entriesAreComputerUseTimeline(entries)) {
+    return (
+      <ComputerUseTimeline
+        entries={entries}
+        bridgeUrl={bridgeUrl}
+        bridgeToken={bridgeToken}
+      />
+    );
+  }
+
   const previewEntries = expanded ? entries : entries.slice(0, 3);
   const hiddenCount = Math.max(entries.length - previewEntries.length, 0);
   const summary = summarizeToolGroup(entries.map((entry) => entry.title));
@@ -562,22 +621,34 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
 
         <View style={styles.toolGroupList}>
           {previewEntries.map((entry) => {
-            const hasDetails = entry.details.length > 0;
             const visual = toTimelineVisual(entry.title);
-            const viewedImage = toViewedImagePreview(
+            const detailPreview = toTimelineDetailPreview(
               entry,
               bridgeUrl,
               bridgeToken
             );
+            const hasImages = detailPreview.images.length > 0;
+            const textDetails = detailPreview.textDetails;
+            const hasDetails = textDetails.length > 0;
             const entryExpanded = expandedEntryIds[entry.id] === true;
 
             if (!expanded) {
+              const previewImage = detailPreview.images[0] ?? null;
               return (
-                <View key={entry.id} style={styles.toolGroupRow}>
-                  <Text style={styles.toolGroupBullet}>{'\u2022'}</Text>
-                  <Text style={styles.toolGroupRowText} numberOfLines={1}>
-                    {entry.title}
-                  </Text>
+                <View key={entry.id} style={styles.toolGroupPreviewEntry}>
+                  <View style={styles.toolGroupRow}>
+                    <Text style={styles.toolGroupBullet}>{'\u2022'}</Text>
+                    <Text style={styles.toolGroupRowText} numberOfLines={1}>
+                      {entry.title}
+                    </Text>
+                  </View>
+                  {previewImage ? (
+                    <MarkdownImage
+                      key={`${entry.id}-preview-image`}
+                      source={previewImage.source}
+                      accessibilityLabel={previewImage.accessibilityLabel}
+                    />
+                  ) : null}
                 </View>
               );
             }
@@ -631,27 +702,27 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
                 </View>
                 {hasDetails ? (
                   <Text style={styles.toolGroupEntryToggleText}>
-                    {viewedImage
+                    {hasImages && isViewedImageEntry(entry.title, textDetails)
                       ? entryExpanded
                         ? 'Tap to hide path'
                         : 'Tap to show path'
                       : entryExpanded
                         ? 'Tap to hide output'
-                        : entry.details.length <= 1
+                        : textDetails.length <= 1
                           ? 'Tap to show output'
-                          : `Tap to show ${String(entry.details.length)} lines`}
+                          : `Tap to show ${String(textDetails.length)} lines`}
                   </Text>
                 ) : null}
-                {viewedImage ? (
+                {detailPreview.images.map((image, imageIndex) => (
                   <MarkdownImage
-                    key={`${entry.id}-image`}
-                    source={viewedImage.source}
-                    accessibilityLabel={viewedImage.accessibilityLabel}
+                    key={`${entry.id}-image-${String(imageIndex)}`}
+                    source={image.source}
+                    accessibilityLabel={image.accessibilityLabel}
                   />
-                ) : null}
+                ))}
                 {entryExpanded && hasDetails ? (
                   <View style={styles.toolGroupEntryDetailWrap}>
-                    {entry.details.map((line, lineIndex) => (
+                    {textDetails.map((line, lineIndex) => (
                       <SelectableMessageText
                         key={`${entry.id}-line-${String(lineIndex)}`}
                         style={styles.toolGroupEntryDetailLine}
@@ -673,6 +744,99 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
   );
 });
 ToolActivityGroup.displayName = 'ToolActivityGroup';
+
+function ComputerUseTimeline({
+  entries,
+  bridgeUrl,
+  bridgeToken,
+}: ComputerUseTimelineProps): ReactElement | null {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const parsedEntries = entries
+    .map((entry) => {
+      const parsed = parseComputerUseTraceEntry(entry);
+      if (!parsed) {
+        return null;
+      }
+      return {
+        entry,
+        parsed,
+        detailPreview: toTimelineDetailPreview(entry, bridgeUrl, bridgeToken),
+      };
+    })
+    .filter(
+      (
+        entry
+      ): entry is {
+        entry: ToolGroupEntry;
+        parsed: NonNullable<ReturnType<typeof parseComputerUseTraceEntry>>;
+        detailPreview: TimelineDetailPreview;
+      } => entry !== null
+    );
+
+  if (parsedEntries.length === 0) {
+    return null;
+  }
+
+  return (
+    <View
+      style={[
+        styles.messageWrapper,
+        styles.messageWrapperAssistant,
+        styles.messageWrapperFullWidth,
+      ]}
+    >
+      <View style={styles.computerUseTrace}>
+        {parsedEntries.length > 1 ? (
+          <View style={styles.computerUseTraceSummaryRow}>
+            <Ionicons name="desktop-outline" size={14} color={theme.colors.textMuted} />
+            <Text style={styles.computerUseTraceSummaryText}>
+              {`${String(parsedEntries.length)} actions`}
+            </Text>
+          </View>
+        ) : null}
+
+        <View style={styles.computerUseTraceStepList}>
+          {parsedEntries.map(({ entry, parsed, detailPreview }) => {
+            return (
+              <View key={entry.id} style={styles.computerUseTraceStep}>
+                <View style={styles.computerUseTraceStepBody}>
+                  <View style={styles.computerUseTraceStepTopRow}>
+                    <Ionicons
+                      name={computerUseActionIconName(parsed.actionKey)}
+                      size={13}
+                      color={theme.colors.textMuted}
+                    />
+                    <Text style={styles.computerUseTraceAction}>{parsed.actionLabel}</Text>
+                    {parsed.appName ? (
+                      <Text style={styles.computerUseTraceInlineMeta} numberOfLines={1}>
+                        {parsed.appName}
+                      </Text>
+                    ) : null}
+                  </View>
+
+                  {detailPreview.images.map((image, imageIndex) => (
+                    <MarkdownImage
+                      key={`${entry.id}-computer-use-image-${String(imageIndex)}`}
+                      source={image.source}
+                      accessibilityLabel={image.accessibilityLabel}
+                    />
+                  ))}
+
+                  {!detailPreview.images.length && parsed.windowTitle ? (
+                    <Text style={styles.computerUseTraceInlineMeta} numberOfLines={1}>
+                      {parsed.windowTitle}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+    </View>
+  );
+}
 
 const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
   body: {
@@ -867,6 +1031,10 @@ function createMarkdownRules(
   };
 }
 
+function entriesAreComputerUseTimeline(entries: Array<Pick<ToolGroupEntry, 'title'>>): boolean {
+  return entries.length > 0 && entries.every((entry) => isComputerUseTraceEntry(entry));
+}
+
 const createStyles = (theme: AppTheme) => {
   const subAgentBorder = theme.isDark
     ? 'rgba(245, 165, 36, 0.35)'
@@ -953,9 +1121,64 @@ const createStyles = (theme: AppTheme) => {
     marginVertical: theme.spacing.sm,
     backgroundColor: theme.colors.bgInput,
   },
+  markdownImagePressable: {
+    alignSelf: 'stretch',
+  },
+  markdownImagePressablePressed: {
+    opacity: 0.88,
+  },
   markdownImageFallback: {
     minHeight: 120,
     maxHeight: 260,
+  },
+  imageViewerModalRoot: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.94)',
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.xxl,
+    paddingBottom: theme.spacing.xl,
+  },
+  imageViewerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.spacing.sm,
+  },
+  imageViewerHintChip: {
+    borderRadius: theme.radius.full,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 6,
+  },
+  imageViewerHintText: {
+    ...theme.typography.caption,
+    color: 'rgba(255, 255, 255, 0.84)',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  imageViewerCloseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+  },
+  imageViewerCloseButtonPressed: {
+    opacity: 0.84,
+  },
+  imageViewerStage: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imageViewerImage: {
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.bgInput,
   },
   timelineCardStack: {
     gap: theme.spacing.sm,
@@ -1105,6 +1328,9 @@ const createStyles = (theme: AppTheme) => {
     alignItems: 'flex-start',
     gap: theme.spacing.sm,
   },
+  toolGroupPreviewEntry: {
+    gap: theme.spacing.xs,
+  },
   toolGroupBullet: {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
@@ -1168,6 +1394,57 @@ const createStyles = (theme: AppTheme) => {
     fontSize: 11,
     lineHeight: 16,
     color: theme.colors.textSecondary,
+  },
+  computerUseTrace: {
+    borderRadius: theme.radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm + 2,
+    paddingVertical: theme.spacing.sm + 2,
+    gap: theme.spacing.sm,
+  },
+  computerUseTraceSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+    paddingHorizontal: 2,
+  },
+  computerUseTraceSummaryText: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  computerUseTraceStepList: {
+    gap: theme.spacing.xs + 2,
+  },
+  computerUseTraceStep: {
+    gap: theme.spacing.xs,
+  },
+  computerUseTraceStepBody: {
+    flex: 1,
+    gap: theme.spacing.xs,
+  },
+  computerUseTraceStepTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: theme.spacing.xs,
+  },
+  computerUseTraceAction: {
+    ...theme.typography.body,
+    color: theme.colors.textPrimary,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '600',
+  },
+  computerUseTraceInlineMeta: {
+    ...theme.typography.caption,
+    color: theme.colors.textMuted,
+    lineHeight: 16,
+    fontSize: 11,
+    flexShrink: 1,
   },
   subAgentCard: {
     borderRadius: theme.radius.md,
@@ -1319,38 +1596,306 @@ function MarkdownImage({
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  const [viewerVisible, setViewerVisible] = useState(false);
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const modalImageWidth = Math.max(windowWidth - theme.spacing.xl * 2, 160);
+  const modalImageHeight = Math.max(windowHeight - theme.spacing.xxl * 4, 220);
+  const viewerImageFrame = useMemo(
+    () => resolveContainedImageFrame(modalImageWidth, modalImageHeight, aspectRatio),
+    [aspectRatio, modalImageHeight, modalImageWidth]
+  );
+  const scale = useSharedValue(1);
+  const scaleOffset = useSharedValue(1);
+  const translateX = useSharedValue(0);
+  const translateY = useSharedValue(0);
+  const translateOffsetX = useSharedValue(0);
+  const translateOffsetY = useSharedValue(0);
+
+  useEffect(() => {
+    if (!viewerVisible) {
+      scale.value = 1;
+      scaleOffset.value = 1;
+      translateX.value = 0;
+      translateY.value = 0;
+      translateOffsetX.value = 0;
+      translateOffsetY.value = 0;
+    }
+  }, [
+    scale,
+    scaleOffset,
+    translateOffsetX,
+    translateOffsetY,
+    translateX,
+    translateY,
+    viewerVisible,
+  ]);
+
+  const modalImageAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: translateX.value },
+      { translateY: translateY.value },
+      { scale: scale.value },
+    ],
+  }));
+
+  const pinchGesture = useMemo(
+    () =>
+      Gesture.Pinch()
+        .enabled(viewerVisible)
+        .onStart(() => {
+          scaleOffset.value = scale.value;
+        })
+        .onUpdate((event) => {
+          const nextScale = clamp(scaleOffset.value * event.scale, 1, 4);
+          const maxX = Math.max(
+            (viewerImageFrame.width * nextScale - viewerImageFrame.width) / 2,
+            0
+          );
+          const maxY = Math.max(
+            (viewerImageFrame.height * nextScale - viewerImageFrame.height) / 2,
+            0
+          );
+          scale.value = nextScale;
+          translateX.value = clamp(translateX.value, -maxX, maxX);
+          translateY.value = clamp(translateY.value, -maxY, maxY);
+        })
+        .onEnd(() => {
+          if (scale.value <= 1.01) {
+            scale.value = withTiming(1);
+            translateX.value = withTiming(0);
+            translateY.value = withTiming(0);
+            scaleOffset.value = 1;
+            translateOffsetX.value = 0;
+            translateOffsetY.value = 0;
+            return;
+          }
+
+          scaleOffset.value = scale.value;
+          translateOffsetX.value = translateX.value;
+          translateOffsetY.value = translateY.value;
+        }),
+    [
+      scale,
+      scaleOffset,
+      translateOffsetX,
+      translateOffsetY,
+      translateX,
+      translateY,
+      viewerImageFrame.height,
+      viewerImageFrame.width,
+      viewerVisible,
+    ]
+  );
+
+  const panGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(viewerVisible)
+        .minDistance(2)
+        .onStart(() => {
+          translateOffsetX.value = translateX.value;
+          translateOffsetY.value = translateY.value;
+        })
+        .onUpdate((event) => {
+          if (scale.value <= 1.01) {
+            translateX.value = 0;
+            translateY.value = 0;
+            return;
+          }
+
+          const maxX = Math.max(
+            (viewerImageFrame.width * scale.value - viewerImageFrame.width) / 2,
+            0
+          );
+          const maxY = Math.max(
+            (viewerImageFrame.height * scale.value - viewerImageFrame.height) / 2,
+            0
+          );
+          translateX.value = clamp(translateOffsetX.value + event.translationX, -maxX, maxX);
+          translateY.value = clamp(translateOffsetY.value + event.translationY, -maxY, maxY);
+        })
+        .onEnd(() => {
+          translateOffsetX.value = translateX.value;
+          translateOffsetY.value = translateY.value;
+        }),
+    [
+      scale,
+      translateOffsetX,
+      translateOffsetY,
+      translateX,
+      translateY,
+      viewerImageFrame.height,
+      viewerImageFrame.width,
+      viewerVisible,
+    ]
+  );
+
+  const doubleTapGesture = useMemo(
+    () =>
+      Gesture.Tap()
+        .enabled(viewerVisible)
+        .numberOfTaps(2)
+        .maxDuration(250)
+        .onEnd((_event, success) => {
+          if (!success) {
+            return;
+          }
+
+          if (scale.value > 1.01) {
+            scale.value = withTiming(1);
+            translateX.value = withTiming(0);
+            translateY.value = withTiming(0);
+            scaleOffset.value = 1;
+            translateOffsetX.value = 0;
+            translateOffsetY.value = 0;
+            return;
+          }
+
+          scale.value = withTiming(2);
+          scaleOffset.value = 2;
+          translateX.value = withTiming(0);
+          translateY.value = withTiming(0);
+          translateOffsetX.value = 0;
+          translateOffsetY.value = 0;
+        }),
+    [
+      scale,
+      scaleOffset,
+      translateOffsetX,
+      translateOffsetY,
+      translateX,
+      translateY,
+      viewerVisible,
+    ]
+  );
+
+  const viewerGesture = useMemo(
+    () => Gesture.Exclusive(doubleTapGesture, Gesture.Simultaneous(pinchGesture, panGesture)),
+    [doubleTapGesture, panGesture, pinchGesture]
+  );
 
   return (
-    <Image
-      source={source}
-      style={[
-        styles.markdownImage,
-        aspectRatio ? { aspectRatio } : styles.markdownImageFallback,
-      ]}
-      resizeMode="contain"
-      accessible={Boolean(accessibilityLabel)}
-      accessibilityLabel={accessibilityLabel}
-      onLoad={(event) => {
-        const width = event.nativeEvent.source?.width;
-        const height = event.nativeEvent.source?.height;
-        if (
-          typeof width !== 'number' ||
-          typeof height !== 'number' ||
-          !Number.isFinite(width) ||
-          !Number.isFinite(height) ||
-          width <= 0 ||
-          height <= 0
-        ) {
-          return;
-        }
+    <>
+      <Pressable
+        testID="chat-image-fullscreen-trigger"
+        onPress={() => setViewerVisible(true)}
+        style={({ pressed }) => [
+          styles.markdownImagePressable,
+          pressed && styles.markdownImagePressablePressed,
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel ?? 'Chat image'}
+        accessibilityHint="Opens the image full screen"
+      >
+        <Image
+          source={source}
+          style={[
+            styles.markdownImage,
+            aspectRatio ? { aspectRatio } : styles.markdownImageFallback,
+          ]}
+          resizeMode="contain"
+          accessible={false}
+          onLoad={(event) => {
+            const width = event.nativeEvent.source?.width;
+            const height = event.nativeEvent.source?.height;
+            if (
+              typeof width !== 'number' ||
+              typeof height !== 'number' ||
+              !Number.isFinite(width) ||
+              !Number.isFinite(height) ||
+              width <= 0 ||
+              height <= 0
+            ) {
+              return;
+            }
 
-        const nextAspectRatio = width / height;
-        setAspectRatio((previousAspectRatio) =>
-          previousAspectRatio === nextAspectRatio ? previousAspectRatio : nextAspectRatio
-        );
-      }}
-    />
+            const nextAspectRatio = width / height;
+            setAspectRatio((previousAspectRatio) =>
+              previousAspectRatio === nextAspectRatio ? previousAspectRatio : nextAspectRatio
+            );
+          }}
+        />
+      </Pressable>
+      <Modal
+        testID="chat-image-fullscreen-modal"
+        visible={viewerVisible}
+        transparent
+        animationType="fade"
+        presentationStyle="overFullScreen"
+        statusBarTranslucent
+        onRequestClose={() => setViewerVisible(false)}
+      >
+        <View style={styles.imageViewerModalRoot}>
+          <Pressable
+            testID="chat-image-fullscreen-backdrop"
+            style={StyleSheet.absoluteFill}
+            onPress={() => setViewerVisible(false)}
+          />
+          <View style={styles.imageViewerHeader}>
+            <View style={styles.imageViewerHintChip}>
+              <Text style={styles.imageViewerHintText}>Pinch or double tap to zoom</Text>
+            </View>
+            <Pressable
+              onPress={() => setViewerVisible(false)}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.imageViewerCloseButton,
+                pressed && styles.imageViewerCloseButtonPressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Close full-screen image"
+            >
+              <Ionicons name="close" size={20} color={theme.colors.textPrimary} />
+            </Pressable>
+          </View>
+          <View style={styles.imageViewerStage}>
+            <GestureDetector gesture={viewerGesture}>
+              <Animated.Image
+                source={source}
+                style={[
+                  styles.imageViewerImage,
+                  modalImageAnimatedStyle,
+                  {
+                    width: viewerImageFrame.width,
+                    height: viewerImageFrame.height,
+                  },
+                ]}
+                resizeMode="contain"
+                accessible={Boolean(accessibilityLabel)}
+                accessibilityLabel={accessibilityLabel}
+              />
+            </GestureDetector>
+          </View>
+        </View>
+      </Modal>
+    </>
   );
+}
+
+function resolveContainedImageFrame(
+  maxWidth: number,
+  maxHeight: number,
+  aspectRatio: number | null
+): { width: number; height: number } {
+  if (!aspectRatio || !Number.isFinite(aspectRatio) || aspectRatio <= 0) {
+    return {
+      width: maxWidth,
+      height: maxHeight,
+    };
+  }
+
+  const widthFromHeight = maxHeight * aspectRatio;
+  if (widthFromHeight <= maxWidth) {
+    return {
+      width: widthFromHeight,
+      height: maxHeight,
+    };
+  }
+
+  return {
+    width: maxWidth,
+    height: maxWidth / aspectRatio,
+  };
 }
 
 function parseMessageBlocks(
@@ -1379,32 +1924,15 @@ function parseMessageBlocks(
   };
 
   for (const line of content.split('\n')) {
-    const localImageMatch = line.match(/^\[local image:\s*(.+?)\]$/i);
-    if (localImageMatch) {
-      const source = toMarkdownImageSource(localImageMatch[1], bridgeUrl, bridgeToken);
-      if (source) {
-        flushTextBlock();
-        blocks.push({
-          kind: 'image',
-          source,
-          accessibilityLabel: toPathBasename(localImageMatch[1]),
-        });
-        continue;
-      }
-    }
-
-    const remoteImageMatch = line.match(/^\[image:\s*(.+?)\]$/i);
-    if (remoteImageMatch) {
-      const source = toMarkdownImageSource(remoteImageMatch[1], bridgeUrl, bridgeToken);
-      if (source) {
-        flushTextBlock();
-        blocks.push({
-          kind: 'image',
-          source,
-          accessibilityLabel: toPathBasename(remoteImageMatch[1]),
-        });
-        continue;
-      }
+    const inlineImage = toInlineImagePreviewFromMarkerLine(line, bridgeUrl, bridgeToken);
+    if (inlineImage) {
+      flushTextBlock();
+      blocks.push({
+        kind: 'image',
+        source: inlineImage.source,
+        accessibilityLabel: inlineImage.accessibilityLabel,
+      });
+      continue;
     }
 
     const fileMatch = line.match(/^\[file:\s*(.+?)\]$/i);
@@ -1438,34 +1966,92 @@ function parseMessageBlocks(
   return blocks;
 }
 
-function toViewedImagePreview(
+function toTimelineDetailPreview(
   entry: TimelineEntry | ToolGroupEntry,
   bridgeUrl: string | null,
   bridgeToken: string | null
-): { source: ImageSourcePropType; accessibilityLabel?: string } | null {
-  if (!/^•\s*Viewed image\b/i.test(entry.title)) {
-    return null;
+): TimelineDetailPreview {
+  const images: TimelineDetailMediaPreview[] = [];
+  const textDetails: string[] = [];
+
+  if (/^•\s*Viewed image\b/i.test(entry.title)) {
+    const path = entry.details[0]?.trim();
+    if (path) {
+      const source = toMarkdownImageSource(path, bridgeUrl, bridgeToken);
+      if (source) {
+        images.push({
+          source,
+          accessibilityLabel: toPathBasename(path),
+        });
+      }
+    }
   }
 
-  const path = entry.details[0]?.trim();
-  if (!path) {
-    return null;
-  }
-
-  const source = toMarkdownImageSource(path, bridgeUrl, bridgeToken);
-  if (!source) {
-    return null;
+  for (const detail of entry.details) {
+    const inlineImage = toInlineImagePreviewFromMarkerLine(
+      detail,
+      bridgeUrl,
+      bridgeToken
+    );
+    if (inlineImage) {
+      images.push(inlineImage);
+      continue;
+    }
+    textDetails.push(detail);
   }
 
   return {
-    source,
-    accessibilityLabel: toPathBasename(path),
+    textDetails,
+    images,
   };
+}
+
+function toInlineImagePreviewFromMarkerLine(
+  line: string,
+  bridgeUrl: string | null,
+  bridgeToken: string | null
+): TimelineDetailMediaPreview | null {
+  const normalizedLine = line.trim();
+
+  const localImageMatch = normalizedLine.match(/^\[local image:\s*(.+?)\]$/i);
+  if (localImageMatch) {
+    const source = toMarkdownImageSource(localImageMatch[1], bridgeUrl, bridgeToken);
+    if (!source) {
+      return null;
+    }
+
+    return {
+      source,
+      accessibilityLabel: toPathBasename(localImageMatch[1]),
+    };
+  }
+
+  const remoteImageMatch = normalizedLine.match(/^\[image:\s*(.+?)\]$/i);
+  if (remoteImageMatch) {
+    const source = toMarkdownImageSource(remoteImageMatch[1], bridgeUrl, bridgeToken);
+    if (!source) {
+      return null;
+    }
+
+    return {
+      source,
+      accessibilityLabel: toPathBasename(remoteImageMatch[1]),
+    };
+  }
+
+  return null;
+}
+
+function isViewedImageEntry(title: string, textDetails: string[]): boolean {
+  return /^•\s*Viewed image\b/i.test(title) && textDetails.length > 0;
 }
 
 function toPathBasename(path: string): string {
   const normalizedPath = path.trim().replace(/\\/g, '/');
   if (!normalizedPath) {
+    return 'image';
+  }
+  if (/^data:image\//i.test(normalizedPath)) {
     return 'image';
   }
 
