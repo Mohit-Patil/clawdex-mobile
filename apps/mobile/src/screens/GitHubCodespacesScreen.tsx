@@ -29,6 +29,7 @@ import {
   loadStoredGitHubAppAuthTokens,
   loginWithGitHubApp,
   refreshGitHubAppAuthTokens,
+  refreshStoredGitHubAppAuthTokens,
 } from '../githubAppAuth';
 import {
   buildGitHubAppInstallUrl,
@@ -502,6 +503,28 @@ export function GitHubCodespacesScreen({
     ]);
   }, [loadCodespaces, loadGitHubAppAccess, session]);
 
+  const refreshGitHubSessionForBridgeInstall = useCallback(
+    async (activeSession: GitHubSession): Promise<GitHubSession> => {
+      if (!env.githubAppAuthBaseUrl || !activeSession.refreshToken) {
+        return activeSession;
+      }
+
+      const refreshedToken = await refreshStoredGitHubAppAuthTokens(
+        env.githubAppAuthBaseUrl,
+        activeSession.refreshToken
+      );
+      const nextSession: GitHubSession = {
+        ...refreshedToken,
+        user: activeSession.user,
+      };
+
+      setSession(nextSession);
+      await onSyncGitHubAuthToken?.(activeSession.user.login, refreshedToken);
+      return nextSession;
+    },
+    [onSyncGitHubAuthToken]
+  );
+
   const openGitHubAppAccess = useCallback(async () => {
     if (!session) {
       setAuthError('Sign in with GitHub first.');
@@ -661,6 +684,11 @@ export function GitHubCodespacesScreen({
       codespace: GitHubCodespace,
       activeSession: GitHubSession
     ): Promise<'connected' | 'codexLogin'> => {
+      const bridgeSession = await refreshGitHubSessionForBridgeInstall(activeSession);
+      if (connectFlowRef.current !== runId) {
+        return 'connected';
+      }
+
       const bridgeUrl = buildGitHubCodespacesBridgeUrl(
         codespace.name,
         env.githubCodespacesPortForwardingDomain
@@ -673,15 +701,15 @@ export function GitHubCodespacesScreen({
       setConnectionMessage(
         `Codespace ${codespace.name} is up. Starting bridge bootstrap… First boot can take a few minutes while the Codespace installs Codex and builds the bridge.`
       );
-      await waitForBridgeReady(bridgeUrl, activeSession.accessToken);
+      await waitForBridgeReady(bridgeUrl, bridgeSession.accessToken);
       if (connectFlowRef.current !== runId) {
         return 'connected';
       }
 
       setConnectionMessage('Bridge is up. Enabling GitHub clone and push access inside the Codespace…');
-      await withBridgeApiClient(bridgeUrl, activeSession.accessToken, (api) =>
+      await withBridgeApiClient(bridgeUrl, bridgeSession.accessToken, (api) =>
         api.installGitHubAuth(
-          activeSession.accessToken,
+          bridgeSession.accessToken,
           approvedRepositories.map((repository) => repository.fullName)
         )
       );
@@ -692,21 +720,21 @@ export function GitHubCodespacesScreen({
       const profileDraft: BridgeProfileDraft = {
         name: buildCodespaceProfileName(codespace),
         bridgeUrl,
-        bridgeToken: activeSession.accessToken,
+        bridgeToken: bridgeSession.accessToken,
         authMode: 'githubApp',
-        githubUserLogin: activeSession.user.login,
+        githubUserLogin: bridgeSession.user.login,
         githubCodespaceName: codespace.name,
         githubRepositoryFullName: codespace.repositoryFullName,
-        githubRefreshToken: activeSession.refreshToken,
-        githubAccessTokenExpiresAt: timestampMsToIsoString(activeSession.accessTokenExpiresAtMs),
+        githubRefreshToken: bridgeSession.refreshToken,
+        githubAccessTokenExpiresAt: timestampMsToIsoString(bridgeSession.accessTokenExpiresAtMs),
         githubRefreshTokenExpiresAt: timestampMsToIsoString(
-          activeSession.refreshTokenExpiresAtMs
+          bridgeSession.refreshTokenExpiresAtMs
         ),
         activate: true,
       };
 
       setConnectionMessage('Bridge is up. Checking whether Codex login is still required…');
-      const account = await withBridgeApiClient(bridgeUrl, activeSession.accessToken, (api) =>
+      const account = await withBridgeApiClient(bridgeUrl, bridgeSession.accessToken, (api) =>
         api.readAccount()
       );
       if (connectFlowRef.current !== runId) {
@@ -722,7 +750,7 @@ export function GitHubCodespacesScreen({
       setPendingCodexLogin({
         runId,
         bridgeUrl,
-        accessToken: activeSession.accessToken,
+        accessToken: bridgeSession.accessToken,
         codespaceWebUrl: codespace.webUrl ?? null,
         profileDraft,
       });
@@ -735,7 +763,12 @@ export function GitHubCodespacesScreen({
       );
       return 'codexLogin';
     },
-    [approvedRepositories, finalizeConnectedBridgeProfile, nativeChatGptLoginAvailable]
+    [
+      approvedRepositories,
+      finalizeConnectedBridgeProfile,
+      nativeChatGptLoginAvailable,
+      refreshGitHubSessionForBridgeInstall,
+    ]
   );
 
   const handleConnectCodespace = useCallback(
@@ -1797,7 +1830,7 @@ async function withBridgeApiClient<T>(
 ): Promise<T> {
   const ws = new HostBridgeWsClient(bridgeUrl, {
     authToken: accessToken,
-    allowQueryTokenAuth: false,
+    allowQueryTokenAuth: env.allowWsQueryTokenAuth,
     requestTimeoutMs: 15_000,
   });
   const api = new HostBridgeApiClient({ ws });

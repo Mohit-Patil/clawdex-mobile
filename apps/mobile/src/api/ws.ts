@@ -326,7 +326,7 @@ export class HostBridgeWsClient {
         const shouldUseHeaderAuth =
           Boolean(this.authToken) &&
           Platform.OS !== 'web' &&
-          !(Platform.OS === 'android' && this.allowQueryTokenAuth);
+          !this.allowQueryTokenAuth;
         const socket =
           shouldUseHeaderAuth
             ? new WebSocketCtor(socketUrl, undefined, {
