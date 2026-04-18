@@ -1,6 +1,6 @@
 [package]
 name = "codex-rust-bridge"
-version = "5.1.3-internal.4"
+version = "5.1.3-internal.5"
 edition = "2021"
 
 [dependencies]

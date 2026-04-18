@@ -785,12 +785,32 @@ impl AppState {
         let Some(service) = &self.github_codespaces_auth else {
             return false;
         };
-        let Some(token) = extract_bearer_token(headers) else {
+        let Some(token) =
+            extract_auth_token(headers, query_token, self.config.allow_query_token_auth)
+        else {
             return false;
         };
 
         service.is_authorized(token).await
     }
+}
+
+fn extract_auth_token<'a>(
+    headers: &'a HeaderMap,
+    query_token: Option<&'a str>,
+    allow_query_token_auth: bool,
+) -> Option<&'a str> {
+    if let Some(token) = extract_bearer_token(headers) {
+        return Some(token);
+    }
+
+    if allow_query_token_auth {
+        if let Some(token) = query_token.map(str::trim).filter(|token| !token.is_empty()) {
+            return Some(token);
+        }
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Serialize)]
