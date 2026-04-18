@@ -13,9 +13,16 @@ jest.mock('expo-constants', () => ({
   },
 }));
 
+jest.mock('react-native-tcp-socket', () => ({
+  __esModule: true,
+  default: {
+    createServer: jest.fn(),
+  },
+}));
+
 describe('chatGptAuth helpers', () => {
-  it('builds the shared app redirect URI', () => {
-    expect(buildChatGptRedirectUri()).toBe('clawdex://auth/callback');
+  it('builds the localhost redirect URI used with OpenAI auth', () => {
+    expect(buildChatGptRedirectUri()).toBe('http://localhost:1455/auth/callback');
   });
 
   it('builds the expected authorize URL', () => {
@@ -23,7 +30,7 @@ describe('chatGptAuth helpers', () => {
       buildAuthorizeUrl({
         state: 'state-123',
         codeChallenge: 'challenge-123',
-        redirectUri: 'clawdex://auth/callback',
+        redirectUri: 'http://localhost:1455/auth/callback',
       })
     );
 
@@ -31,7 +38,7 @@ describe('chatGptAuth helpers', () => {
     expect(url.pathname).toBe('/oauth/authorize');
     expect(url.searchParams.get('response_type')).toBe('code');
     expect(url.searchParams.get('client_id')).toBe('app_EMoamEEZ73f0CkXaXp7hrann');
-    expect(url.searchParams.get('redirect_uri')).toBe('clawdex://auth/callback');
+    expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:1455/auth/callback');
     expect(url.searchParams.get('code_challenge')).toBe('challenge-123');
     expect(url.searchParams.get('state')).toBe('state-123');
     expect(url.searchParams.get('codex_cli_simplified_flow')).toBe('true');

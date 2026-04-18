@@ -299,6 +299,7 @@ export interface TerminalExecResponse {
 
 export interface GitHubAuthInstallRequest {
   accessToken: string;
+  repositories?: string[];
 }
 
 export interface GitHubAuthInstallResponse {

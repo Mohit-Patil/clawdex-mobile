@@ -77,6 +77,7 @@ export interface GitHubCodespacesRepositoryReference {
 }
 
 export interface GitHubRepository {
+  id: number;
   owner: string;
   name: string;
   fullName: string;
@@ -506,6 +507,46 @@ export async function createGitHubCodespaceInRepository(
   return normalized;
 }
 
+export async function createGitHubCodespaceForAuthenticatedUser(
+  accessToken: string,
+  repositoryId: number,
+  options: {
+    ref?: string | null;
+    devcontainerPath?: string | null;
+    location?: string | null;
+  } = {}
+): Promise<GitHubCodespace> {
+  if (!Number.isFinite(repositoryId) || repositoryId <= 0) {
+    throw new Error('GitHub repository ID is not available for Codespace creation.');
+  }
+
+  const body: Record<string, number | string> = {
+    repository_id: repositoryId,
+  };
+  const normalizedRef = options.ref?.trim();
+  if (normalizedRef) {
+    body.ref = normalizedRef;
+  }
+  const normalizedDevcontainerPath = options.devcontainerPath?.trim();
+  if (normalizedDevcontainerPath) {
+    body.devcontainer_path = normalizedDevcontainerPath;
+  }
+  const normalizedLocation = options.location?.trim();
+  if (normalizedLocation) {
+    body.location = normalizedLocation;
+  }
+
+  const payload = await githubApiRequest('/user/codespaces', accessToken, {
+    method: 'POST',
+    body,
+  });
+  const normalized = normalizeGitHubCodespace(payload);
+  if (!normalized) {
+    throw new Error('GitHub returned an invalid Codespace creation payload.');
+  }
+  return normalized;
+}
+
 export function buildGitHubCodespacesRepositoryCandidates(
   userLogin: string,
   repoName: string,
@@ -799,15 +840,17 @@ function normalizeGitHubRepository(value: unknown): GitHubRepository | null {
     return null;
   }
 
+  const id = readOptionalNumber(record, 'id');
   const owner = asRecord(record.owner);
   const ownerLogin = readOptionalString(owner, 'login');
   const repoName = readOptionalString(record, 'name');
   const fullName = readOptionalString(record, 'full_name');
-  if (!ownerLogin || !repoName || !fullName) {
+  if (id === null || !ownerLogin || !repoName || !fullName) {
     return null;
   }
 
   return {
+    id,
     owner: ownerLogin,
     name: repoName,
     fullName,

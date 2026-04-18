@@ -933,7 +933,10 @@ export class HostBridgeApiClient {
     return this.ws.request<TerminalExecResponse>('bridge/terminal/exec', body);
   }
 
-  installGitHubAuth(accessToken: string): Promise<GitHubAuthInstallResponse> {
+  installGitHubAuth(
+    accessToken: string,
+    repositories: string[] = []
+  ): Promise<GitHubAuthInstallResponse> {
     const trimmedAccessToken = accessToken.trim();
     if (!trimmedAccessToken) {
       return Promise.reject(new Error('accessToken must not be empty'));
@@ -941,6 +944,9 @@ export class HostBridgeApiClient {
 
     return this.ws.request<GitHubAuthInstallResponse>('bridge/github/auth/install', {
       accessToken: trimmedAccessToken,
+      repositories: repositories
+        .map((repository) => repository.trim())
+        .filter((repository) => repository.length > 0),
     });
   }
 

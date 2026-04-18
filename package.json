@@ -1,6 +1,6 @@
 {
   "name": "clawdex-mobile",
-  "version": "5.1.3-internal.3",
+  "version": "5.1.3-internal.4",
   "description": "Private-network mobile bridge and CLI for Codex and OpenCode",
   "keywords": [
     "codex",
@@ -52,6 +52,8 @@
     "mobile": "./scripts/start-expo.sh mobile",
     "ios": "./scripts/start-expo.sh ios",
     "android": "./scripts/start-expo.sh android",
+    "stack:lan": "./scripts/start-mobile-stack-lan.sh",
+    "stack:tailscale": "./scripts/start-mobile-stack-tailscale.sh",
     "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/rust-bridge dev",
     "bridge:package:stage-current": "node ./scripts/bridge-binary.js stage-current",
     "setup:wizard": "./scripts/setup-wizard.sh",

@@ -10,6 +10,10 @@ const CHATGPT_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CALLBACK_SCHEME = 'clawdex';
 const CALLBACK_HOST = 'auth';
 const CALLBACK_PATH = '/callback';
+const CALLBACK_BIND_HOST = '127.0.0.1';
+const CALLBACK_PUBLIC_HOST = 'localhost';
+const CALLBACK_PORT = 1455;
+const CALLBACK_TIMEOUT_MS = 10 * 60 * 1000;
 const TOKEN_STORE_KEY = 'chatgpt-auth-tokens-v1';
 
 export interface ChatGptAuthTokenBundle {
@@ -25,6 +29,26 @@ type ChatGptAuthSessionResult =
   | { kind: 'cancelled' }
   | { kind: 'dismissed' }
   | { kind: 'error'; message: string };
+
+type TcpSocketConnection = {
+  destroy: () => void;
+  end: () => void;
+  on: (event: string, listener: (...args: unknown[]) => void) => void;
+  setEncoding: (encoding: string) => void;
+  write: (buffer: string, encoding?: string, cb?: () => void) => boolean;
+};
+
+type TcpSocketServerHandle = {
+  close: (callback?: (err?: Error) => void) => void;
+  listen: (options: { port: number; host?: string; reuseAddress?: boolean }) => void;
+  off: (event: string, listener: (...args: unknown[]) => void) => void;
+  on: (event: string, listener: (...args: unknown[]) => void) => void;
+  once: (event: string, listener: (...args: unknown[]) => void) => void;
+};
+
+type TcpSocketModule = {
+  createServer: () => TcpSocketServerHandle;
+};
 
 export class ChatGptAuthError extends Error {
   constructor(message: string) {
@@ -131,6 +155,10 @@ export function isNativeChatGptLoginAvailable(): boolean {
 }
 
 export function buildChatGptRedirectUri(): string {
+  return `http://${CALLBACK_PUBLIC_HOST}:${CALLBACK_PORT}/auth/callback`;
+}
+
+function buildChatGptAppRedirectUri(): string {
   return `${CALLBACK_SCHEME}://${CALLBACK_HOST}${CALLBACK_PATH}`;
 }
 
@@ -346,9 +374,14 @@ async function openAuthSession(
   authorizeUrl: string,
   redirectUri: string
 ): Promise<ChatGptAuthSessionResult> {
-  const result = await WebBrowser.openAuthSessionAsync(authorizeUrl, redirectUri, {
-    preferEphemeralSession: true,
-  });
+  const appRedirectUri = buildChatGptAppRedirectUri();
+  const loopbackServer = await startChatGptLoopbackServer(appRedirectUri);
+  let result: WebBrowser.WebBrowserAuthSessionResult;
+  try {
+    result = await WebBrowser.openAuthSessionAsync(authorizeUrl, appRedirectUri);
+  } finally {
+    await loopbackServer.close();
+  }
 
   if (result.type === 'cancel') {
     return { kind: 'cancelled' };
@@ -367,6 +400,248 @@ async function openAuthSession(
     kind: 'error',
     message: result.type,
   };
+}
+
+type ChatGptLoopbackServer = {
+  close: () => Promise<void>;
+};
+
+async function startChatGptLoopbackServer(appRedirectUri: string): Promise<ChatGptLoopbackServer> {
+  const tcpSocketModule = (await import('react-native-tcp-socket')) as unknown as {
+    default?: TcpSocketModule;
+    createServer?: TcpSocketModule['createServer'];
+  };
+  const tcpSocket = tcpSocketModule.default ?? tcpSocketModule;
+  if (typeof tcpSocket.createServer !== 'function') {
+    throw new ChatGptAuthError(
+      'ChatGPT login requires the installed native app build. Expo Go is not supported.'
+    );
+  }
+  const server = tcpSocket.createServer();
+  const sockets = new Set<TcpSocketConnection>();
+  let isClosed = false;
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+
+  const close = async () => {
+    if (isClosed) {
+      return;
+    }
+    isClosed = true;
+    if (timeout) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+
+    for (const socket of sockets) {
+      try {
+        socket.destroy();
+      } catch {
+        // Ignore per-socket teardown errors during auth cleanup.
+      }
+    }
+    sockets.clear();
+
+    await new Promise<void>((resolve) => {
+      let didResolve = false;
+      const finish = () => {
+        if (didResolve) {
+          return;
+        }
+        didResolve = true;
+        resolve();
+      };
+
+      try {
+        server.close(() => finish());
+        setTimeout(finish, 250);
+      } catch {
+        finish();
+      }
+    });
+  };
+
+  const handleRequest = (socket: TcpSocketConnection, request: string) => {
+    const requestLine = request.split('\r\n', 1)[0] ?? '';
+    const match = requestLine.match(/^[A-Z]+\s+(\S+)\s+HTTP\/\d\.\d$/i);
+    if (!match) {
+      writeHttpResponse(socket, 400, 'Bad Request', 'Invalid request.');
+      return;
+    }
+
+    let callbackUrl: URL;
+    try {
+      callbackUrl = new URL(match[1], buildChatGptRedirectUri());
+    } catch {
+      writeHttpResponse(socket, 400, 'Bad Request', 'Invalid callback URL.');
+      return;
+    }
+
+    if (callbackUrl.pathname !== '/auth/callback') {
+      writeHttpResponse(socket, 404, 'Not Found', 'Unknown path.');
+      return;
+    }
+
+    const appCallbackUrl = buildAppCallbackUrl(callbackUrl, appRedirectUri);
+    writeHttpResponse(
+      socket,
+      200,
+      'OK',
+      buildLoopbackSuccessHtml(appCallbackUrl)
+    );
+  };
+
+  server.on('connection', (socketArg) => {
+    const socket = socketArg as TcpSocketConnection;
+    sockets.add(socket);
+    socket.setEncoding('utf8');
+    let request = '';
+    let handled = false;
+
+    socket.on('data', (chunkArg: unknown) => {
+      if (handled || isClosed) {
+        return;
+      }
+
+      const chunk =
+        typeof chunkArg === 'string' || chunkArg instanceof Uint8Array
+          ? chunkArg
+          : Buffer.isBuffer(chunkArg)
+            ? chunkArg
+            : '';
+      request += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      if (!request.includes('\r\n\r\n')) {
+        return;
+      }
+
+      handled = true;
+      handleRequest(socket, request);
+    });
+
+    const cleanup = () => {
+      sockets.delete(socket);
+    };
+
+    socket.on('close', cleanup);
+    socket.on('error', cleanup);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const onError = (errorArg: unknown) => {
+      const error = errorArg instanceof Error ? errorArg : new Error('Unknown socket error');
+      server.off('listening', onListening);
+      reject(
+        new ChatGptAuthError(
+          `ChatGPT login could not start the local callback server: ${error.message}`
+        )
+      );
+    };
+
+    const onListening = () => {
+      server.off('error', onError);
+      resolve();
+    };
+
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen({
+      port: CALLBACK_PORT,
+      host: CALLBACK_BIND_HOST,
+      reuseAddress: true,
+    });
+  });
+
+  timeout = setTimeout(() => {
+    void close();
+  }, CALLBACK_TIMEOUT_MS);
+
+  return { close };
+}
+
+function buildAppCallbackUrl(callbackUrl: URL, appRedirectUri: string): string {
+  const appCallbackUrl = new URL(appRedirectUri);
+  appCallbackUrl.search = callbackUrl.search;
+  return appCallbackUrl.toString();
+}
+
+function buildLoopbackSuccessHtml(appCallbackUrl: string): string {
+  const escapedUrl = JSON.stringify(appCallbackUrl);
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Return to Claudex</title>
+    <meta http-equiv="refresh" content="0;url=${escapeHtmlAttribute(appCallbackUrl)}" />
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0d1117;
+        color: #f0f6fc;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      }
+      main {
+        width: min(92vw, 420px);
+        padding: 24px;
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      h1 { margin: 0 0 8px; font-size: 22px; }
+      p { margin: 0; line-height: 1.5; color: rgba(240, 246, 252, 0.78); }
+      a { color: #f0f6fc; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Returning to Claudex…</h1>
+      <p>If the app does not open automatically, <a href="${escapeHtmlAttribute(
+        appCallbackUrl
+      )}">tap here</a>.</p>
+    </main>
+    <script>
+      window.location.replace(${escapedUrl});
+    </script>
+  </body>
+</html>`;
+}
+
+function writeHttpResponse(
+  socket: TcpSocketConnection,
+  statusCode: number,
+  statusText: string,
+  body: string
+) {
+  const response =
+    `HTTP/1.1 ${statusCode} ${statusText}\r\n` +
+    'Content-Type: text/html; charset=utf-8\r\n' +
+    `Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n` +
+    'Connection: close\r\n' +
+    '\r\n' +
+    body;
+
+  socket.write(response, 'utf8', () => {
+    try {
+      socket.end();
+    } catch {
+      try {
+        socket.destroy();
+      } catch {
+        // Ignore teardown issues after the callback response is sent.
+      }
+    }
+  });
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function readTokenBundle(value: unknown): ChatGptAuthTokenBundle | null {

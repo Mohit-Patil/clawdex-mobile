@@ -120,6 +120,16 @@ npm run setup:wizard
 npm run mobile
 ```
 
+For one-step restarts that switch the bridge network mode, reuse the existing token, start the
+bridge in the background, and then launch Expo:
+
+```bash
+npm run stack:lan
+npm run stack:tailscale
+```
+
+`stack:lan` is the local network path, so it also covers the same-device LAN/VLAN case.
+
 For an OpenCode-first repo checkout:
 
 ```bash
@@ -137,6 +147,8 @@ Use `npm run setup:wizard -- --no-start` if you only want to write config.
 - `npm run setup:wizard`
 - `npm run secure:bridge`
 - `npm run mobile`
+- `npm run stack:lan`
+- `npm run stack:tailscale`
 - `npm run ios`
 - `npm run android`
 - `npm run stop:services`

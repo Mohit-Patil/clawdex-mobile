@@ -92,6 +92,7 @@ const GITHUB_API_URL: &str = "https://api.github.com";
 const GITHUB_HOST: &str = "github.com";
 const GITHUB_CREDENTIALS_DIR_NAME: &str = ".clawdex";
 const GITHUB_CREDENTIALS_FILE_NAME: &str = "github-credentials";
+const GITHUB_GIT_CONFIG_FILE_NAME: &str = "github-git-auth.gitconfig";
 
 #[derive(Debug, Clone)]
 struct GitHubCodespacesAuthConfig {
@@ -390,6 +391,7 @@ struct GitHubViewer {
 async fn install_github_git_auth(
     state: &Arc<AppState>,
     access_token: &str,
+    repositories: &[String],
 ) -> Result<GitHubAuthInstallResponse, BridgeError> {
     let viewer = fetch_github_viewer(state, access_token).await?;
     if !github_token_can_be_used_for_git_auth(&viewer.scopes) {
@@ -399,10 +401,19 @@ async fn install_github_git_auth(
         ));
     }
 
+    let normalized_repositories = normalize_github_auth_repositories(repositories);
     let credentials_file = resolve_github_credentials_file_path()?;
+    let git_config_file = resolve_github_git_config_file_path()?;
     ensure_private_parent_dir(&credentials_file).await?;
-    write_github_credentials_file(&credentials_file, access_token).await?;
-    configure_git_credential_store(state, &credentials_file).await?;
+    write_github_credentials_file(&credentials_file, access_token, &normalized_repositories)
+        .await?;
+    write_github_git_config_file(
+        &git_config_file,
+        &credentials_file,
+        &normalized_repositories,
+    )
+    .await?;
+    configure_git_credential_store(state, &credentials_file, &git_config_file).await?;
 
     Ok(GitHubAuthInstallResponse {
         installed: true,
@@ -489,12 +500,45 @@ fn github_token_can_be_used_for_git_auth(scopes: &[String]) -> bool {
     scopes.is_empty() || github_scopes_allow_repo_access(scopes)
 }
 
-fn resolve_github_credentials_file_path() -> Result<PathBuf, BridgeError> {
+fn normalize_github_auth_repositories(repositories: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for repository in repositories {
+        let trimmed = repository.trim().trim_matches('/');
+        let Some((owner, name)) = trimmed.split_once('/') else {
+            continue;
+        };
+        if owner.is_empty() || name.is_empty() || name.contains('/') {
+            continue;
+        }
+
+        let key = format!(
+            "{}/{}",
+            owner.to_ascii_lowercase(),
+            name.to_ascii_lowercase()
+        );
+        if seen.insert(key) {
+            normalized.push(format!("{owner}/{name}"));
+        }
+    }
+
+    normalized.sort_unstable_by_key(|repository| repository.to_ascii_lowercase());
+    normalized
+}
+
+fn resolve_github_credentials_dir_path() -> Result<PathBuf, BridgeError> {
     let home = read_non_empty_env("HOME")
         .ok_or_else(|| BridgeError::server("HOME is not set; cannot install GitHub auth"))?;
-    Ok(PathBuf::from(home)
-        .join(GITHUB_CREDENTIALS_DIR_NAME)
-        .join(GITHUB_CREDENTIALS_FILE_NAME))
+    Ok(PathBuf::from(home).join(GITHUB_CREDENTIALS_DIR_NAME))
+}
+
+fn resolve_github_credentials_file_path() -> Result<PathBuf, BridgeError> {
+    Ok(resolve_github_credentials_dir_path()?.join(GITHUB_CREDENTIALS_FILE_NAME))
+}
+
+fn resolve_github_git_config_file_path() -> Result<PathBuf, BridgeError> {
+    Ok(resolve_github_credentials_dir_path()?.join(GITHUB_GIT_CONFIG_FILE_NAME))
 }
 
 async fn ensure_private_parent_dir(path: &Path) -> Result<(), BridgeError> {
@@ -522,12 +566,19 @@ async fn ensure_private_parent_dir(path: &Path) -> Result<(), BridgeError> {
 async fn write_github_credentials_file(
     credentials_file: &Path,
     access_token: &str,
+    repositories: &[String],
 ) -> Result<(), BridgeError> {
-    let content = format!(
-        "https://x-access-token:{}@{}\n",
-        access_token.trim(),
-        GITHUB_HOST
-    );
+    let mut content = String::new();
+    let trimmed_access_token = access_token.trim();
+    for repository in repositories {
+        content.push_str(&format!(
+            "https://x-access-token:{trimmed_access_token}@{GITHUB_HOST}/{repository}\n"
+        ));
+        content.push_str(&format!(
+            "https://x-access-token:{trimmed_access_token}@{GITHUB_HOST}/{repository}.git\n"
+        ));
+    }
+
     fs::write(credentials_file, content)
         .await
         .map_err(|error| {
@@ -546,42 +597,115 @@ async fn write_github_credentials_file(
     Ok(())
 }
 
+async fn write_github_git_config_file(
+    git_config_file: &Path,
+    credentials_file: &Path,
+    repositories: &[String],
+) -> Result<(), BridgeError> {
+    let helper_value = format!("store --file {}", credentials_file.to_string_lossy());
+    let mut content = String::from(
+        "[credential \"https://github.com\"]\n\tuseHttpPath = true\n[url \"https://github.com/\"]\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@github.com/\n",
+    );
+
+    for repository in repositories {
+        for context in [
+            format!("https://{GITHUB_HOST}/{repository}"),
+            format!("https://{GITHUB_HOST}/{repository}.git"),
+        ] {
+            content.push_str(&format!(
+                "[credential \"{context}\"]\n\thelper =\n\thelper = {helper_value}\n\tusername = x-access-token\n"
+            ));
+        }
+    }
+
+    fs::write(git_config_file, content).await.map_err(|error| {
+        BridgeError::server(&format!("failed to write GitHub git config: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(git_config_file, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|error| {
+                BridgeError::server(&format!(
+                    "failed to secure GitHub git config permissions: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 async fn configure_git_credential_store(
     state: &Arc<AppState>,
     credentials_file: &Path,
+    git_config_file: &Path,
 ) -> Result<(), BridgeError> {
     let helper_value = format!("store --file {}", credentials_file.to_string_lossy());
+    let include_path = git_config_file.to_string_lossy().to_string();
     let commands = vec![
-        vec![
-            "config".to_string(),
-            "--global".to_string(),
-            "--replace-all".to_string(),
-            "credential.helper".to_string(),
-            helper_value,
-        ],
-        vec![
-            "config".to_string(),
-            "--global".to_string(),
-            "--replace-all".to_string(),
-            "url.https://github.com/.insteadOf".to_string(),
-            "git@github.com:".to_string(),
-        ],
-        vec![
-            "config".to_string(),
-            "--global".to_string(),
-            "--replace-all".to_string(),
-            "url.https://github.com/.insteadOf".to_string(),
-            "ssh://git@github.com/".to_string(),
-        ],
+        (
+            vec![
+                "config".to_string(),
+                "--global".to_string(),
+                "--fixed-value".to_string(),
+                "--unset-all".to_string(),
+                "credential.helper".to_string(),
+                helper_value.clone(),
+            ],
+            true,
+        ),
+        (
+            vec![
+                "config".to_string(),
+                "--global".to_string(),
+                "--fixed-value".to_string(),
+                "--unset-all".to_string(),
+                "credential.https://github.com.helper".to_string(),
+                helper_value.clone(),
+            ],
+            true,
+        ),
+        (
+            vec![
+                "config".to_string(),
+                "--global".to_string(),
+                "--fixed-value".to_string(),
+                "--unset-all".to_string(),
+                "credential.https://github.com.username".to_string(),
+                "x-access-token".to_string(),
+            ],
+            true,
+        ),
+        (
+            vec![
+                "config".to_string(),
+                "--global".to_string(),
+                "--fixed-value".to_string(),
+                "--unset-all".to_string(),
+                "include.path".to_string(),
+                include_path.clone(),
+            ],
+            true,
+        ),
+        (
+            vec![
+                "config".to_string(),
+                "--global".to_string(),
+                "--add".to_string(),
+                "include.path".to_string(),
+                include_path,
+            ],
+            false,
+        ),
     ];
 
-    for args in commands {
+    for (args, allow_missing) in commands {
         let result = state
             .terminal
             .execute_binary("git", &args, state.config.workdir.clone(), None)
             .await?;
 
-        if result.code != Some(0) {
+        let code = result.code.unwrap_or(-1);
+        if code != 0 && !(allow_missing && code == 5) {
             return Err(BridgeError::server(
                 &(if !result.stderr.is_empty() {
                     result.stderr
@@ -5426,6 +5550,7 @@ struct GitQueryRequest {
 #[serde(rename_all = "camelCase")]
 struct GitHubAuthInstallRequest {
     access_token: String,
+    repositories: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6798,7 +6923,12 @@ async fn handle_bridge_method(
             let request: GitHubAuthInstallRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
                     .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
-            let result = install_github_git_auth(state, &request.access_token).await?;
+            let result = install_github_git_auth(
+                state,
+                &request.access_token,
+                request.repositories.as_deref().unwrap_or(&[]),
+            )
+            .await?;
             serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/attachments/upload" => {

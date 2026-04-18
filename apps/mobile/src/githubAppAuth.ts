@@ -56,22 +56,26 @@ export async function clearStoredGitHubAppAuthTokens(): Promise<void> {
 }
 
 export async function loginWithGitHubApp(options: {
-  appSlug: string;
+  clientId: string;
   authBaseUrl: string;
 }): Promise<GitHubUserAccessToken> {
   ensureSupportedPlatform();
 
-  const appSlug = options.appSlug.trim();
+  const clientId = normalizeString(options.clientId);
   const authBaseUrl = normalizeBaseUrl(options.authBaseUrl);
-  if (!appSlug) {
-    throw new GitHubAppAuthError('GitHub App slug is not configured.');
+  if (!clientId) {
+    throw new GitHubAppAuthError('GitHub App client ID is not configured.');
   }
   if (!authBaseUrl) {
     throw new GitHubAppAuthError('GitHub auth backend URL is not configured.');
   }
 
   const state = Crypto.randomUUID();
-  const authorizeUrl = buildGitHubAppInstallUrl(appSlug, state);
+  const authorizeUrl = buildGitHubAppAuthorizeUrl({
+    clientId,
+    authBaseUrl,
+    state,
+  });
   const redirectUri = buildGitHubAppRedirectUri();
   const session = await openAuthSession(authorizeUrl, redirectUri);
   if (session.kind === 'cancelled') {
@@ -125,10 +129,21 @@ export function validateGitHubAppCallbackUrl(callbackUrl: URL): URL {
   return callbackUrl;
 }
 
-function buildGitHubAppInstallUrl(appSlug: string, state: string): string {
-  const url = new URL(`/apps/${appSlug}/installations/new`, 'https://github.com');
-  url.searchParams.set('state', state);
+export function buildGitHubAppAuthorizeUrl(input: {
+  clientId: string;
+  authBaseUrl: string;
+  state: string;
+}): string {
+  const url = new URL('/login/oauth/authorize', 'https://github.com');
+  url.searchParams.set('client_id', input.clientId);
+  url.searchParams.set('redirect_uri', buildGitHubAppWebCallbackUrl(input.authBaseUrl));
+  url.searchParams.set('state', input.state);
+  url.searchParams.set('prompt', 'select_account');
   return url.toString();
+}
+
+export function buildGitHubAppWebCallbackUrl(authBaseUrl: string): string {
+  return new URL('/github/callback', ensureTrailingSlash(authBaseUrl)).toString();
 }
 
 async function completeAuthorization(input: {

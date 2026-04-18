@@ -183,6 +183,18 @@ npm run mobile
 
 `npm run mobile` uses `scripts/start-expo.sh`, which sets `REACT_NATIVE_PACKAGER_HOSTNAME` from your secure config so QR resolution is predictable.
 
+If you want one command that switches the bridge between LAN/VLAN and Tailscale, preserves your
+existing bridge token and enabled harnesses, restarts the bridge in the background, and then opens
+Expo:
+
+```bash
+npm run stack:lan
+npm run stack:tailscale
+```
+
+Both wrappers call `scripts/start-mobile-stack.sh`. Pass `--expo ios` or `--expo android` if you
+want the same flow but to open a native Expo run command instead of the default `mobile` mode.
+
 ## Advanced Knobs
 
 Optional environment variables:

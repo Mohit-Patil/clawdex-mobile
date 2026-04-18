@@ -19,7 +19,10 @@ import { HostBridgeApiClient } from '../api/client';
 import { HostBridgeWsClient } from '../api/ws';
 import { toBridgeHealthUrl } from '../bridgeUrl';
 import type { BridgeProfile, BridgeProfileDraft } from '../bridgeProfiles';
-import { getFreshChatGptAuthTokens, isNativeChatGptLoginAvailable } from '../chatGptAuth';
+import {
+  getFreshChatGptAuthTokens,
+  isNativeChatGptLoginAvailable,
+} from '../chatGptAuth';
 import { env } from '../config';
 import {
   clearStoredGitHubAppAuthTokens,
@@ -30,14 +33,13 @@ import {
 import {
   buildGitHubAppInstallUrl,
   buildGitHubCodespacesBridgeUrl,
-  buildGitHubCodespacesRepositoryCandidates,
-  createGitHubCodespaceInRepository,
+  createGitHubCodespaceForAuthenticatedUser,
   fetchGitHubAppAccessSnapshot,
+  fetchGitHubCodespaceDefaults,
   fetchGitHubCodespaces,
+  fetchGitHubRepository,
   fetchGitHubUser,
   getReusableGitHubBridgeProfile,
-  hasGitHubAppRepositoryAccess,
-  resolveGitHubCodespaceCreationContext,
   sortGitHubCodespaces,
   startGitHubCodespace,
   stopGitHubCodespace,
@@ -67,7 +69,6 @@ interface GitHubSession extends GitHubUserAccessToken {
 
 type ConnectionPhase =
   | 'checkingExisting'
-  | 'resolvingRepo'
   | 'creatingCodespace'
   | 'startingCodespace'
   | 'codespaceReady'
@@ -132,8 +133,6 @@ function formatConnectionPhaseTitle(
   switch (phase) {
     case 'checkingExisting':
       return `Checking existing Codespaces${targetLabel}`;
-    case 'resolvingRepo':
-      return `Preparing repository${targetLabel}`;
     case 'creatingCodespace':
       return `Creating Codespace${targetLabel}`;
     case 'startingCodespace':
@@ -275,7 +274,6 @@ export function GitHubCodespacesScreen({
   const preferredRepositoryName = env.githubCodespacesPreferredRepositoryName;
   const configuredSourceOwner = env.githubCodespacesSourceRepositoryOwner;
   const configuredRepositoryRef = env.githubCodespacesRepositoryRef;
-  const createEnabled = Boolean(preferredRepositoryName);
   const nativeChatGptLoginAvailable = isNativeChatGptLoginAvailable();
 
   const loadCodespaces = useCallback(
@@ -378,6 +376,29 @@ export function GitHubCodespacesScreen({
     onSyncGitHubAuthToken,
   ]);
 
+  const approvedRepositories = useMemo(
+    () =>
+      [...(appAccess?.repositories ?? [])].sort((left, right) =>
+        left.fullName.localeCompare(right.fullName)
+      ),
+    [appAccess]
+  );
+  const templateRepository = useMemo(() => {
+    const owner = configuredSourceOwner?.trim();
+    const repo = preferredRepositoryName?.trim();
+    if (!owner || !repo) {
+      return null;
+    }
+
+    return {
+      owner,
+      repo,
+      fullName: `${owner}/${repo}`,
+      source: 'fallback' as const,
+    };
+  }, [configuredSourceOwner, preferredRepositoryName]);
+  const createEnabled = Boolean(templateRepository);
+
   const beginGitHubSignIn = useCallback(async () => {
     if (!env.githubClientId) {
       setAuthError('GitHub login is not configured in this build.');
@@ -401,7 +422,7 @@ export function GitHubCodespacesScreen({
 
     try {
       const token = await loginWithGitHubApp({
-        appSlug: env.githubAppSlug,
+        clientId: env.githubClientId,
         authBaseUrl: env.githubAppAuthBaseUrl,
       });
       if (authFlowRef.current !== runId) {
@@ -495,9 +516,7 @@ export function GitHubCodespacesScreen({
       ) ??
       appAccess?.installations[0] ??
       null;
-    const accessUrl =
-      matchingInstallation?.htmlUrl ??
-      buildGitHubAppInstallUrl(env.githubAppSlug ?? '', session.user.login);
+    const accessUrl = matchingInstallation?.htmlUrl ?? buildGitHubAppInstallUrl(env.githubAppSlug ?? '');
     if (!accessUrl) {
       setAppAccessError('GitHub App install management is not configured in this build.');
       return;
@@ -661,7 +680,10 @@ export function GitHubCodespacesScreen({
 
       setConnectionMessage('Bridge is up. Enabling GitHub clone and push access inside the Codespace…');
       await withBridgeApiClient(bridgeUrl, activeSession.accessToken, (api) =>
-        api.installGitHubAuth(activeSession.accessToken)
+        api.installGitHubAuth(
+          activeSession.accessToken,
+          approvedRepositories.map((repository) => repository.fullName)
+        )
       );
       if (connectFlowRef.current !== runId) {
         return 'connected';
@@ -713,7 +735,7 @@ export function GitHubCodespacesScreen({
       );
       return 'codexLogin';
     },
-    [finalizeConnectedBridgeProfile, nativeChatGptLoginAvailable]
+    [approvedRepositories, finalizeConnectedBridgeProfile, nativeChatGptLoginAvailable]
   );
 
   const handleConnectCodespace = useCallback(
@@ -773,19 +795,8 @@ export function GitHubCodespacesScreen({
       setConnectionError('Sign in with GitHub first.');
       return;
     }
-    if (!preferredRepositoryName) {
-      setConnectionError('No repository is configured for Codespace creation.');
-      return;
-    }
-    const hasRepositoryAccess = buildGitHubCodespacesRepositoryCandidates(
-      session.user.login,
-      preferredRepositoryName,
-      configuredSourceOwner
-    ).some((repository) => hasGitHubAppRepositoryAccess(appAccess, repository.fullName));
-    if (!hasRepositoryAccess) {
-      setConnectionError(
-        `Choose the ${preferredRepositoryName} repository in GitHub first, then refresh access here.`
-      );
+    if (!templateRepository) {
+      setConnectionError('The Claudex template repository is not configured in this build.');
       return;
     }
 
@@ -795,39 +806,37 @@ export function GitHubCodespacesScreen({
     setCreatingCodespace(true);
     setPendingStopCodespaceName(null);
     setConnectingCodespaceName(null);
-    setCreationTargetLabel(null);
+    setCreationTargetLabel(templateRepository.fullName);
     setConnectionError(null);
     setPendingCodexLogin(null);
     setCodexLoginChecking(false);
     setCodexLoginSubmitting(false);
-    setConnectionPhase('resolvingRepo');
+    setConnectionPhase('creatingCodespace');
 
     try {
-      setConnectionMessage('Preparing a fresh Codespace from your repository…');
-      const creationContext = await resolveGitHubCodespaceCreationContext(session.accessToken, {
-        userLogin: session.user.login,
-        repoName: preferredRepositoryName,
-        sourceOwner: configuredSourceOwner,
-        ref: configuredRepositoryRef,
-      });
+      setConnectionMessage('Preparing the Claudex template…');
+      const defaults = await fetchGitHubCodespaceDefaults(
+        session.accessToken,
+        templateRepository,
+        configuredRepositoryRef
+      );
       if (connectFlowRef.current !== runId) {
         return;
       }
 
-      setCreationTargetLabel(creationContext.repository.fullName);
-      setConnectionPhase('creatingCodespace');
-      setConnectionMessage(
-        creationContext.createdFork
-          ? `Fork ready. Creating a new Codespace in ${creationContext.repository.fullName}…`
-          : `Creating a new Codespace in ${creationContext.repository.fullName}…`
-      );
-      const codespace = await createGitHubCodespaceInRepository(
+      const repository = await fetchGitHubRepository(session.accessToken, templateRepository);
+      if (connectFlowRef.current !== runId) {
+        return;
+      }
+
+      setConnectionMessage('Creating your new Codespace…');
+      const codespace = await createGitHubCodespaceForAuthenticatedUser(
         session.accessToken,
-        creationContext.repository,
+        repository.id,
         {
           ref: configuredRepositoryRef,
-          devcontainerPath: creationContext.defaults.devcontainerPath,
-          location: creationContext.defaults.location,
+          devcontainerPath: defaults.devcontainerPath,
+          location: defaults.location,
         }
       );
       if (connectFlowRef.current !== runId) {
@@ -842,7 +851,12 @@ export function GitHubCodespacesScreen({
       void loadCodespaces(session.accessToken);
     } catch (error) {
       if (connectFlowRef.current === runId) {
-        setConnectionError((error as Error).message);
+        const message = (error as Error).message;
+        setConnectionError(
+          message.toLowerCase().includes('resource not accessible by integration')
+            ? 'This GitHub App still cannot create Codespaces from the Claudex template. Install the app on the template owner once, then try again.'
+            : message
+        );
       }
     } finally {
       if (connectFlowRef.current === runId) {
@@ -856,13 +870,11 @@ export function GitHubCodespacesScreen({
       }
     }
   }, [
-    appAccess,
     configuredRepositoryRef,
-    configuredSourceOwner,
     finalizeCodespaceConnection,
     loadCodespaces,
-    preferredRepositoryName,
     session,
+    templateRepository,
   ]);
 
   const handleOpenCodespace = useCallback((codespace: GitHubCodespace) => {
@@ -905,17 +917,6 @@ export function GitHubCodespacesScreen({
   );
 
   const githubAccountLabel = session?.user.name?.trim() || session?.user.login || 'GitHub account';
-  const repositoryCandidates = useMemo(
-    () =>
-      session
-        ? buildGitHubCodespacesRepositoryCandidates(
-            session.user.login,
-            preferredRepositoryName,
-            configuredSourceOwner
-          )
-        : [],
-    [configuredSourceOwner, preferredRepositoryName, session]
-  );
   const signedInInstallation = useMemo(() => {
     if (!session) {
       return null;
@@ -931,63 +932,39 @@ export function GitHubCodespacesScreen({
       null
     );
   }, [appAccess, session]);
-  const templateRepositoryAccessReady = useMemo(
-    () =>
-      repositoryCandidates.some((repository) =>
-        hasGitHubAppRepositoryAccess(appAccess, repository.fullName)
-      ),
-    [appAccess, repositoryCandidates]
-  );
-  const accessibleRepositoryCount = appAccess?.repositories.length ?? 0;
-  const repositoryAccessTitle = templateRepositoryAccessReady
-    ? 'Repository access is ready'
-    : 'Choose which repositories Claudex can use';
-  const repositoryAccessDescription = templateRepositoryAccessReady
-    ? accessibleRepositoryCount > 0
-      ? `The GitHub App can currently reach ${accessibleRepositoryCount} approved ${
+  const accessibleRepositoryCount = approvedRepositories.length;
+  const approvedRepositoryPreview = useMemo(() => {
+    const names = approvedRepositories.map((repository) => repository.fullName).filter(Boolean);
+    if (names.length === 0) {
+      return null;
+    }
+    if (names.length <= 3) {
+      return names.join(', ');
+    }
+    return `${names.slice(0, 3).join(', ')} +${String(names.length - 3)} more`;
+  }, [approvedRepositories]);
+  const repositoryAccessTitle = signedInInstallation
+    ? 'Git access for later'
+    : 'Optional Git access';
+  const repositoryAccessDescription =
+    signedInInstallation && accessibleRepositoryCount > 0 && approvedRepositoryPreview
+      ? `GitHub already approved ${accessibleRepositoryCount} ${
           accessibleRepositoryCount === 1 ? 'repository' : 'repositories'
-        } for this account.`
-      : 'The GitHub App is installed and ready for the template repository.'
-    : preferredRepositoryName
-      ? `Clawdex now uses a GitHub App instead of broad repo scope. Install it on your account and include ${preferredRepositoryName} plus any repositories you want to clone or push later.`
-      : 'Install the GitHub App on your account and choose the repositories Claudex should be allowed to touch.';
+        }: ${approvedRepositoryPreview}. When you connect to a Codespace, Claudex installs this GitHub access there so you can clone or push manually later.`
+      : 'If you want git clone or push to work later inside the Codespace, choose repositories in the GitHub App. This is optional for simply connecting to the bridge.';
   const busy =
     Boolean(connectingCodespaceName) ||
     Boolean(stoppingCodespaceName) ||
-    creatingCodespace ||
     codexLoginChecking ||
     codexLoginSubmitting;
   const statusCardVisible =
     Boolean(connectionPhase) || busy || Boolean(connectionMessage) || Boolean(pendingCodexLogin);
-  const creationHint =
-    repositoryCandidates.length > 1
-      ? `Clawdex will try ${repositoryCandidates[0]?.fullName} first. If it does not exist yet, it will fork from ${repositoryCandidates[1]?.fullName} and create the Codespace there.`
-      : repositoryCandidates.length === 1
-        ? `Clawdex will create the Codespace in ${repositoryCandidates[0]?.fullName}.`
-        : 'Configure a repository name to enable in-app Codespace creation.';
   const connectionStepStates = buildConnectionStepStates(connectionPhase);
   const activeCodespaceLabel =
     connectingCodespaceName ??
     pendingCodexLogin?.profileDraft.githubCodespaceName ??
-    creationTargetLabel;
-  const suggestedCodespace = codespaces[0] ?? null;
-  const suggestedCodespaceActionLabel = suggestedCodespace
-    ? suggestedCodespace.state.trim().toLowerCase() === 'available'
-      ? 'Connect latest Codespace'
-      : 'Start latest Codespace'
-    : null;
-  const sessionPrimaryActionLabel = suggestedCodespaceActionLabel
-    ? suggestedCodespaceActionLabel
-    : createEnabled && templateRepositoryAccessReady
-      ? 'Create your first Codespace'
-      : 'Choose repositories first';
-  const sessionPrimaryActionDescription = suggestedCodespace
-    ? `${suggestedCodespace.name} • ${
-        suggestedCodespace.repositoryFullName ?? 'Unknown repository'
-      }`
-    : createEnabled && templateRepositoryAccessReady
-      ? creationHint
-      : repositoryAccessDescription;
+    creationTargetLabel ??
+    null;
   const onboardingStage: OnboardingStage = session
     ? statusCardVisible
       ? 'connect'
@@ -1019,16 +996,16 @@ export function GitHubCodespacesScreen({
     onboardingStage === 'codespace' ? 2 : onboardingStage === 'connect' ? 3 : 1;
   const onboardingStageTitle =
     onboardingStage === 'codespace'
-      ? 'Choose your Codespace'
+      ? 'Create or connect'
       : onboardingStage === 'connect'
         ? 'Finish connection'
         : 'Continue with GitHub';
   const onboardingStageDescription =
     onboardingStage === 'codespace'
-      ? 'Choose which repositories the GitHub App can touch, then reopen a recent Codespace or create a fresh one from the Clawdex template.'
+      ? 'Create a fresh Codespace from the Claudex template, or reconnect to one you already have.'
       : onboardingStage === 'connect'
-        ? 'Keep this screen open while Clawdex waits for the Codespace bridge and finishes Codex login.'
-        : 'GitHub opens once in the browser sheet so you can approve the app, choose repositories, and return here automatically.';
+        ? 'Keep this screen open while Clawdex waits for the bridge and finishes setup.'
+        : 'Sign in with GitHub once and return here automatically.';
   const onboardingStageIcon =
     onboardingStage === 'codespace'
       ? 'cube-outline'
@@ -1069,40 +1046,10 @@ export function GitHubCodespacesScreen({
             style={styles.hero}
           >
             <Text style={styles.heroEyebrow}>No relay needed</Text>
-            <Text style={styles.heroTitle}>Sign in once. Clawdex handles the rest.</Text>
+            <Text style={styles.heroTitle}>Create a Codespace. Connect from your phone.</Text>
             <Text style={styles.heroDescription}>
-              Use GitHub to create or resume your own Codespace, approve only the repositories you
-              want Claudex to touch, then reconnect straight from the app.
+              Sign in, create from the Claudex template, then wait for the bridge to come up.
             </Text>
-            <View style={styles.heroMonitor}>
-              <View style={styles.heroMonitorRow}>
-                <View
-                  style={[
-                    styles.heroMonitorDot,
-                    onboardingStepStates.github !== 'pending' && styles.heroMonitorDotActive,
-                  ]}
-                />
-                <Text style={styles.heroMonitorLabel}>GitHub App session on this device</Text>
-              </View>
-              <View style={styles.heroMonitorRow}>
-                <View
-                  style={[
-                    styles.heroMonitorDot,
-                    onboardingStepStates.codespace !== 'pending' && styles.heroMonitorDotActive,
-                  ]}
-                />
-                <Text style={styles.heroMonitorLabel}>Codespace owned by the user account</Text>
-              </View>
-              <View style={styles.heroMonitorRow}>
-                <View
-                  style={[
-                    styles.heroMonitorDot,
-                    onboardingStepStates.connect !== 'pending' && styles.heroMonitorDotActive,
-                  ]}
-                />
-                <Text style={styles.heroMonitorLabel}>Direct bridge connection back to Clawdex</Text>
-              </View>
-            </View>
             <View style={styles.heroStepRow}>
               <HeroStepPill
                 number={1}
@@ -1258,42 +1205,6 @@ export function GitHubCodespacesScreen({
 
               {onboardingStage === 'github' ? (
                 <>
-                  <View style={styles.signalList}>
-                    <View style={styles.signalRow}>
-                      <View style={styles.signalIconWrap}>
-                        <Ionicons name="phone-portrait-outline" size={16} color={theme.colors.textPrimary} />
-                      </View>
-                      <View style={styles.signalCopy}>
-                        <Text style={styles.signalTitle}>Stay on this phone</Text>
-                        <Text style={styles.signalMeta}>
-                          GitHub opens in the browser sheet, handles app install and repository
-                          approval, then returns here automatically.
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.signalRow}>
-                      <View style={styles.signalIconWrap}>
-                        <Ionicons name="cloud-outline" size={16} color={theme.colors.textPrimary} />
-                      </View>
-                      <View style={styles.signalCopy}>
-                        <Text style={styles.signalTitle}>Use your own compute</Text>
-                        <Text style={styles.signalMeta}>
-                          Clawdex finds or creates a Codespace under the signed-in GitHub account.
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.signalRow}>
-                      <View style={styles.signalIconWrap}>
-                        <Ionicons name="git-network-outline" size={16} color={theme.colors.textPrimary} />
-                      </View>
-                      <View style={styles.signalCopy}>
-                        <Text style={styles.signalTitle}>Reconnect directly</Text>
-                        <Text style={styles.signalMeta}>
-                          Once the bridge is up, the app talks straight to that Codespace.
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
                   <Pressable
                     onPress={() => {
                       void beginGitHubSignIn();
@@ -1315,188 +1226,36 @@ export function GitHubCodespacesScreen({
                     <Text style={styles.primaryButtonText}>Sign in with GitHub</Text>
                   </Pressable>
                   <Text style={styles.helperText}>
-                    One GitHub flow. No relay. No broad `repo` scope. GitHub only grants the
-                    repositories you choose.
+                    GitHub opens once, then returns here automatically.
                   </Text>
                 </>
               ) : null}
 
               {onboardingStage === 'codespace' && session ? (
                 <>
-                  <View style={styles.stagePanel}>
-                    <Text style={styles.stagePanelEyebrow}>GitHub App access</Text>
-                    <Text style={styles.stagePanelTitle}>{repositoryAccessTitle}</Text>
-                    <Text style={styles.stagePanelMeta}>{repositoryAccessDescription}</Text>
-                    <View style={styles.signalList}>
-                      <View style={styles.signalRow}>
-                        <View style={styles.signalIconWrap}>
-                          <Ionicons
-                            name={
-                              templateRepositoryAccessReady
-                                ? 'checkmark-circle-outline'
-                                : 'folder-open-outline'
-                            }
-                            size={16}
-                            color={theme.colors.textPrimary}
-                          />
-                        </View>
-                        <View style={styles.signalCopy}>
-                          <Text style={styles.signalTitle}>Template repository</Text>
-                          <Text style={styles.signalMeta}>
-                            {templateRepositoryAccessReady
-                              ? repositoryCandidates
-                                  .filter((repository) =>
-                                    hasGitHubAppRepositoryAccess(appAccess, repository.fullName)
-                                  )
-                                  .map((repository) => repository.fullName)
-                                  .join(', ')
-                              : preferredRepositoryName
-                                ? `Add ${preferredRepositoryName} so Clawdex can create or reconnect to its template Codespace.`
-                                : 'Configure a template repository name in the mobile build.'}
-                          </Text>
-                        </View>
-                      </View>
-                      <View style={styles.signalRow}>
-                        <View style={styles.signalIconWrap}>
-                          <Ionicons
-                            name="git-branch-outline"
-                            size={16}
-                            color={theme.colors.textPrimary}
-                          />
-                        </View>
-                        <View style={styles.signalCopy}>
-                          <Text style={styles.signalTitle}>Clone and push later</Text>
-                          <Text style={styles.signalMeta}>
-                            {signedInInstallation?.repositorySelection === 'all'
-                              ? 'This installation already has access to all repositories on the selected account.'
-                              : 'Add any repositories you want to clone or push from inside the Codespace.'}
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
-                    {appAccessLoading ? (
-                      <View style={styles.loadingRow}>
-                        <ActivityIndicator color={theme.colors.textPrimary} />
-                        <Text style={styles.cardBody}>Refreshing GitHub App access…</Text>
-                      </View>
-                    ) : null}
-                    <View style={styles.actionRow}>
-                      <Pressable
-                        onPress={() => {
-                          void openGitHubAppAccess();
-                        }}
-                        style={({ pressed }) => [
-                          styles.primaryButton,
-                          pressed && styles.primaryButtonPressed,
-                        ]}
-                      >
-                        <Ionicons name="open-outline" size={16} color={theme.colors.black} />
-                        <Text style={styles.primaryButtonText}>
-                          {signedInInstallation ? 'Manage access' : 'Install app'}
-                        </Text>
-                      </Pressable>
-                      <Pressable
-                        onPress={() => {
-                          void refreshGitHubState();
-                        }}
-                        disabled={appAccessLoading || codespacesLoading}
-                        style={({ pressed }) => [
-                          styles.secondaryButton,
-                          pressed &&
-                            !appAccessLoading &&
-                            !codespacesLoading &&
-                            styles.secondaryButtonPressed,
-                        ]}
-                      >
-                        <Ionicons
-                          name="refresh-outline"
-                          size={15}
-                          color={theme.colors.textPrimary}
-                        />
-                        <Text style={styles.secondaryButtonText}>Refresh access</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-
-                  <View style={styles.stagePanel}>
-                    <Text style={styles.stagePanelEyebrow}>Recommended next step</Text>
-                    <Text style={styles.stagePanelTitle}>{sessionPrimaryActionLabel}</Text>
-                    <Text style={styles.stagePanelMeta}>{sessionPrimaryActionDescription}</Text>
-                    <Pressable
-                      onPress={() => {
-                        if (suggestedCodespace) {
-                          void handleConnectCodespace(suggestedCodespace);
-                          return;
-                        }
-                        if (createEnabled && templateRepositoryAccessReady) {
-                          void handleCreateCodespace();
-                          return;
-                        }
-                        void openGitHubAppAccess();
-                      }}
-                      disabled={
-                        busy ||
-                        (!suggestedCodespace && !createEnabled && !env.githubAppSlug)
-                      }
-                      style={({ pressed }) => [
-                        styles.primaryButton,
-                        pressed &&
-                          !busy &&
-                          (suggestedCodespace || createEnabled || Boolean(env.githubAppSlug)) &&
-                          styles.primaryButtonPressed,
-                      ]}
-                    >
-                      {busy ? (
-                        <ActivityIndicator size="small" color={theme.colors.black} />
-                      ) : (
-                        <Ionicons
-                          name={
-                            suggestedCodespace
-                              ? 'flash-outline'
-                              : templateRepositoryAccessReady
-                                ? 'rocket-outline'
-                                : 'open-outline'
-                          }
-                          size={16}
-                          color={theme.colors.black}
-                        />
-                      )}
-                      <Text style={styles.primaryButtonText}>{sessionPrimaryActionLabel}</Text>
-                    </Pressable>
-                  </View>
-
                   <View style={styles.codespacesHeaderRow}>
-                    <Text style={styles.sectionLabel}>Your Codespaces</Text>
+                    <Text style={styles.sectionLabel}>Existing Codespaces</Text>
                     {createEnabled ? (
                       <Pressable
                         onPress={() => {
-                          if (templateRepositoryAccessReady) {
-                            void handleCreateCodespace();
-                            return;
-                          }
-                          void openGitHubAppAccess();
+                          void handleCreateCodespace();
                         }}
-                        disabled={busy || !env.githubAppSlug}
+                        disabled={busy}
                         style={({ pressed }) => [
                           styles.secondaryButton,
-                          pressed &&
-                            !busy &&
-                            Boolean(env.githubAppSlug) &&
-                            styles.secondaryButtonPressed,
+                          pressed && !busy && styles.secondaryButtonPressed,
                         ]}
                       >
                         {creatingCodespace ? (
                           <ActivityIndicator size="small" color={theme.colors.textPrimary} />
                         ) : (
                           <Ionicons
-                            name={templateRepositoryAccessReady ? 'add-circle-outline' : 'open-outline'}
+                            name="add-circle-outline"
                             size={15}
                             color={theme.colors.textPrimary}
                           />
                         )}
-                        <Text style={styles.secondaryButtonText}>
-                          {templateRepositoryAccessReady ? 'Create new' : 'Choose repos'}
-                        </Text>
+                        <Text style={styles.secondaryButtonText}>Create Codespace</Text>
                       </Pressable>
                     ) : null}
                   </View>
@@ -1714,40 +1473,27 @@ export function GitHubCodespacesScreen({
                     <View style={styles.emptyState}>
                       <Text style={styles.emptyStateTitle}>No Codespaces yet</Text>
                       <Text style={styles.cardBody}>
-                        {templateRepositoryAccessReady
-                          ? 'Create one here and Clawdex will bootstrap it for direct connection.'
-                          : 'Choose the template repository in GitHub first, then create the Codespace here.'}
+                        {createEnabled
+                          ? 'Create a Codespace here from the Claudex template, wait for it to finish booting, then connect.'
+                          : 'Configure the Claudex template repository in this build to continue.'}
                       </Text>
                       {createEnabled ? (
                         <Pressable
                           onPress={() => {
-                            if (templateRepositoryAccessReady) {
-                              void handleCreateCodespace();
-                              return;
-                            }
-                            void openGitHubAppAccess();
+                            void handleCreateCodespace();
                           }}
-                          disabled={busy || !env.githubAppSlug}
+                          disabled={busy}
                           style={({ pressed }) => [
                             styles.primaryButton,
-                            pressed &&
-                              !busy &&
-                              Boolean(env.githubAppSlug) &&
-                              styles.primaryButtonPressed,
+                            pressed && !busy && styles.primaryButtonPressed,
                           ]}
                         >
                           {creatingCodespace ? (
                             <ActivityIndicator size="small" color={theme.colors.black} />
                           ) : (
-                            <Ionicons
-                              name={templateRepositoryAccessReady ? 'rocket-outline' : 'open-outline'}
-                              size={16}
-                              color={theme.colors.black}
-                            />
+                            <Ionicons name="rocket-outline" size={16} color={theme.colors.black} />
                           )}
-                          <Text style={styles.primaryButtonText}>
-                            {templateRepositoryAccessReady ? 'Create and connect' : 'Choose repos'}
-                          </Text>
+                          <Text style={styles.primaryButtonText}>Create Codespace</Text>
                         </Pressable>
                       ) : null}
                     </View>
@@ -1782,15 +1528,63 @@ export function GitHubCodespacesScreen({
                     </Pressable>
                   </View>
 
-                  <Text style={styles.helperText}>{creationHint}</Text>
-                  {configuredSourceOwner &&
-                  configuredSourceOwner.toLowerCase() !== session.user.login.toLowerCase() ? (
-                    <Text style={styles.helperText}>
-                      Clawdex prefers `{session.user.login}/{preferredRepositoryName}` and only
-                      forks from `{configuredSourceOwner}/{preferredRepositoryName}` when needed, so
-                      Codespaces usage stays with the user account.
-                    </Text>
-                  ) : null}
+                  <View style={styles.stagePanel}>
+                    <Text style={styles.stagePanelEyebrow}>Optional later</Text>
+                    <Text style={styles.stagePanelTitle}>{repositoryAccessTitle}</Text>
+                    <Text style={styles.stagePanelMeta}>{repositoryAccessDescription}</Text>
+                    {approvedRepositoryPreview ? (
+                      <View style={styles.repoSummaryRow}>
+                        <Text style={styles.repoSummaryLabel}>Approved now</Text>
+                        <Text style={styles.repoSummaryValue}>{approvedRepositoryPreview}</Text>
+                      </View>
+                    ) : null}
+                    {appAccessLoading ? (
+                      <View style={styles.loadingRow}>
+                        <ActivityIndicator color={theme.colors.textPrimary} />
+                        <Text style={styles.cardBody}>Refreshing GitHub access…</Text>
+                      </View>
+                    ) : null}
+                    <View style={styles.actionRow}>
+                      <Pressable
+                        onPress={() => {
+                          void openGitHubAppAccess();
+                        }}
+                        style={({ pressed }) => [
+                          styles.secondaryButton,
+                          pressed && styles.secondaryButtonPressed,
+                        ]}
+                      >
+                        <Ionicons
+                          name="open-outline"
+                          size={15}
+                          color={theme.colors.textPrimary}
+                        />
+                        <Text style={styles.secondaryButtonText}>
+                          {signedInInstallation ? 'Manage repos' : 'Install app'}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => {
+                          void refreshGitHubState();
+                        }}
+                        disabled={appAccessLoading || codespacesLoading}
+                        style={({ pressed }) => [
+                          styles.secondaryButton,
+                          pressed &&
+                            !appAccessLoading &&
+                            !codespacesLoading &&
+                            styles.secondaryButtonPressed,
+                        ]}
+                      >
+                        <Ionicons
+                          name="refresh-outline"
+                          size={15}
+                          color={theme.colors.textPrimary}
+                        />
+                        <Text style={styles.secondaryButtonText}>Refresh access</Text>
+                      </Pressable>
+                    </View>
+                  </View>
                 </>
               ) : null}
 
@@ -1830,9 +1624,6 @@ export function GitHubCodespacesScreen({
                         GitHub is connected. Clawdex is finishing the direct bridge setup.
                       </Text>
                     )}
-                    {creationTargetLabel ? (
-                      <Text style={styles.helperText}>Creation target: {creationTargetLabel}</Text>
-                    ) : null}
                   </View>
 
                   <View style={styles.connectionStepRow}>
@@ -2325,6 +2116,26 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.error,
       flex: 1,
+      lineHeight: 18,
+    },
+    repoSummaryRow: {
+      borderRadius: theme.radius.md,
+      borderWidth: 1,
+      borderColor: cardBorder,
+      backgroundColor: theme.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.72)',
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.sm,
+      gap: 4,
+    },
+    repoSummaryLabel: {
+      ...theme.typography.caption,
+      color: theme.colors.textMuted,
+      textTransform: 'uppercase',
+      letterSpacing: 0.6,
+    },
+    repoSummaryValue: {
+      ...theme.typography.caption,
+      color: theme.colors.textPrimary,
       lineHeight: 18,
     },
     cardHeadlineBlock: {
