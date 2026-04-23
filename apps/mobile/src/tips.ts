@@ -64,7 +64,7 @@ export async function configureRevenueCatIfNeeded(): Promise<boolean> {
     }
 
     try {
-      await Purchases.setLogLevel(__DEV__ ? LOG_LEVEL.DEBUG : LOG_LEVEL.ERROR);
+      await Purchases.setLogLevel(LOG_LEVEL.ERROR);
     } catch {
       // Best effort only.
     }
@@ -210,13 +210,6 @@ function getRevenueCatApiKey(): string | null {
         : null;
 
   const trimmed = value?.trim() ?? '';
-  if (__DEV__) {
-    console.info(
-      `[tips] RevenueCat key source: ${
-        usesTestStore ? 'test-store' : Platform.OS === 'ios' ? 'ios' : Platform.OS
-      }`
-    );
-  }
   return trimmed.length > 0 ? trimmed : null;
 }
 

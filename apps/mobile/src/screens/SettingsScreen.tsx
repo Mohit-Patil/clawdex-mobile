@@ -38,7 +38,7 @@ import type {
   ReasoningEffort,
 } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
-import type { BridgeProfile } from '../bridgeProfiles';
+import { isGitHubBridgeProfile, type BridgeProfile } from '../bridgeProfiles';
 import { BridgeProfileManagerSheet } from '../components/bridge-profile-manager-sheet';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import {
@@ -83,7 +83,6 @@ import {
 interface SettingsScreenProps {
   api: HostBridgeApiClient;
   ws: HostBridgeWsClient;
-  bridgeUrl: string;
   activeBridgeProfileId?: string | null;
   bridgeProfileName: string;
   bridgeProfiles: BridgeProfile[];
@@ -112,7 +111,6 @@ interface SettingsScreenProps {
   onClearSavedBridges?: () => void | Promise<void>;
   onOpenDrawer: () => void;
   onDrawerGestureEnabledChange?: (enabled: boolean) => void;
-  onOpenBrowser?: () => void;
   onOpenPrivacy: () => void;
   onOpenTerms: () => void;
 }
@@ -138,7 +136,6 @@ type SettingsRouteTransitionDirection = 'forward' | 'backward';
 export function SettingsScreen({
   api,
   ws,
-  bridgeUrl,
   activeBridgeProfileId = null,
   bridgeProfileName,
   bridgeProfiles,
@@ -163,7 +160,6 @@ export function SettingsScreen({
   onClearSavedBridges,
   onOpenDrawer,
   onDrawerGestureEnabledChange,
-  onOpenBrowser,
   onOpenPrivacy,
   onOpenTerms,
 }: SettingsScreenProps) {
@@ -192,7 +188,6 @@ export function SettingsScreen({
   const transcriptSwitchActiveColor = theme.isDark ? colors.accent : '#4F5D6D';
   const transcriptSwitchThumbColor = showToolCalls ? colors.white : '#FFFFFF';
   const [healthyAt, setHealthyAt] = useState<string | null>(null);
-  const [uptimeSec, setUptimeSec] = useState<number | null>(null);
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const [error, setError] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
@@ -308,15 +303,52 @@ export function SettingsScreen({
     ? isBridgeMaintenanceInProgress(bridgeUpdateStatus.state)
     : false;
   const bridgeLatestVersion = bridgeRuntime?.latestVersion?.trim() || null;
+  const activeBridgeProfile = useMemo(
+    () =>
+      bridgeProfiles.find((profile) => profile.id === activeBridgeProfileId) ??
+      bridgeProfiles[0] ??
+      null,
+    [activeBridgeProfileId, bridgeProfiles]
+  );
+  const activeConnectionType = activeBridgeProfile
+    ? isGitHubBridgeProfile(activeBridgeProfile)
+      ? 'GitHub Codespace'
+      : 'Private bridge'
+    : 'Bridge';
+  const shouldOpenPrivateBridgeEditor = Boolean(
+    activeBridgeProfile && !isGitHubBridgeProfile(activeBridgeProfile) && onEditBridgeProfile
+  );
+  const connectionStatusSummary = wsConnected
+    ? 'Connected'
+    : healthyAt
+      ? 'Reachable'
+      : 'Unknown';
+  const serverToolsStatus = bridgeUpdateStatus
+    ? formatBridgeUpdaterState(bridgeUpdateStatus.state)
+    : bridgeMaintenanceBusy || bridgeMaintenanceActive
+      ? 'Busy'
+      : canSelfUpdateBridge || canSafeRestartBridge
+        ? 'Ready'
+        : 'Limited';
+  const engineSummary =
+    activeEngine && availableEngines.includes(activeEngine)
+      ? availableEngines.length > 1
+        ? `${getChatEngineLabel(activeEngine)} active · ${availableEngines.length} available`
+        : getChatEngineLabel(activeEngine)
+      : availableEngines.length > 1
+        ? `${availableEngines.length} available`
+        : availableEngines.length === 1
+          ? getChatEngineLabel(availableEngines[0]!)
+          : 'Server managed';
   const headerTitle =
     route === 'chat'
       ? 'Chat Preferences'
       : route === 'account'
-        ? 'Account & Auth'
+        ? 'Account'
         : route === 'limits'
           ? 'Codex Usage Limits'
           : route === 'bridge'
-          ? 'Bridge & Servers'
+          ? 'Connections'
           : route === 'appearance'
             ? 'Appearance'
             : route === 'tips'
@@ -344,9 +376,9 @@ export function SettingsScreen({
     ? `${defaultEngineLabel} · ${defaultModelLabel} · ${defaultEffortLabel}`
     : `${defaultEngineLabel} · Server default`;
   const appearanceSummary = `${appearancePreferenceLabel} theme · ${fontPreferenceLabel}`;
-  const accountSummary = 'View account type, email, and bridge auth details';
+  const accountSummary = 'See sign-in status and plan';
   const usageLimitsSummary = 'View weekly usage and reset times';
-  const bridgeSummary = 'Manage profiles, maintenance, engines, and health';
+  const bridgeSummary = 'Add GitHub Codespaces or private bridges';
   const tipJarSummary = isTipJarAvailable()
     ? 'Support development with a one-time tip'
     : 'Configure RevenueCat to enable tips';
@@ -401,7 +433,6 @@ export function SettingsScreen({
     try {
       const h = await api.health();
       setHealthyAt(h.at);
-      setUptimeSec(h.uptimeSec);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -1094,23 +1125,15 @@ export function SettingsScreen({
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
         <MenuEntry
           icon="person-circle-outline"
-          title="Account & Auth"
+          title="Account"
           description={accountSummary}
           onPress={() => navigateToRoute('account')}
         />
         <MenuEntry
           icon="server-outline"
-          title="Bridge & Servers"
+          title="Connections"
           description={bridgeSummary}
           onPress={() => navigateToRoute('bridge')}
-        />
-        <MenuEntry
-          icon="globe-outline"
-          title="Local Preview Browser"
-          description="Open localhost web apps from the bridge machine inside Clawdex"
-          onPress={() => {
-            onOpenBrowser?.();
-          }}
           isLast
         />
       </BlurView>
@@ -1300,7 +1323,7 @@ export function SettingsScreen({
 
   const renderAccountContent = () => (
     <>
-      <Text style={styles.sectionLabel}>Account & Auth</Text>
+      <Text style={styles.sectionLabel}>Account</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
         {accountLoading ? (
           <View style={styles.accountLoadingState}>
@@ -1310,25 +1333,17 @@ export function SettingsScreen({
         ) : (
           <>
             <Row
-              label="Status"
-              value={formatAccountType(account)}
+              label="Sign-in"
+              value={formatAccountSignInStatus(account)}
               valueColor={account?.type ? colors.statusComplete : colors.textMuted}
+              isLast={!account?.email && !account?.planType}
             />
             {account?.email ? <Row label="Email" value={account.email} /> : null}
-            {account?.planType ? <Row label="Plan" value={formatPlanType(account.planType)} /> : null}
-            <Row
-              label="Bridge auth"
-              value={account?.requiresOpenaiAuth ? 'Required' : 'Optional'}
-              isLast
-            />
+            {account?.planType ? <Row label="Plan" value={formatPlanType(account.planType)} isLast /> : null}
           </>
         )}
       </BlurView>
-      {account?.type === null && account?.requiresOpenaiAuth ? (
-        <Text style={styles.subtleHintText}>
-          The bridge expects OpenAI auth, but mobile does not expose a login flow yet.
-        </Text>
-      ) : null}
+      <Text style={styles.subtleHintText}>{formatAccountHelpText(account)}</Text>
       {accountError ? <Text style={styles.errorText}>{accountError}</Text> : null}
     </>
   );
@@ -1383,97 +1398,74 @@ export function SettingsScreen({
 
   const renderBridgeContent = () => (
     <>
-      <Text style={styles.sectionLabel}>Bridge Profiles</Text>
+      <Text style={styles.sectionLabel}>Connections</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-        <Row label="Active profile" value={bridgeProfileName} />
-        <Row label="Saved profiles" value={String(bridgeProfiles.length)} />
-        <Row label="Storage" value="Secure device keychain" isLast />
-        <Text selectable style={styles.valueText}>
-          {bridgeUrl}
-        </Text>
-        <Pressable
-          onPress={() => setBridgeProfileModalVisible(true)}
-          style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
-        >
-          <Ionicons name="albums-outline" size={15} color={colors.textPrimary} />
-          <Text style={styles.bridgeEditBtnText}>Manage profiles</Text>
-        </Pressable>
-        <Pressable
-          onPress={onAddBridgeProfile}
-          style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
-        >
-          <Ionicons name="add-circle-outline" size={15} color={colors.textPrimary} />
-          <Text style={styles.bridgeEditBtnText}>Add profile</Text>
-        </Pressable>
+        <Row label="Current connection" value={bridgeProfileName} />
+        <Row label="Type" value={activeConnectionType} />
+        <Row label="Saved connections" value={String(bridgeProfiles.length)} isLast />
         {onConnectGitHubCodespaces ? (
-          <Pressable
+          <MenuEntry
+            icon="logo-github"
+            title="GitHub Codespaces"
+            description="Sign in with GitHub and add or manage a Codespace connection."
             onPress={onConnectGitHubCodespaces}
-            style={({ pressed }) => [
-              styles.bridgeEditBtn,
-              pressed && styles.bridgeEditBtnPressed,
-            ]}
-          >
-            <Ionicons name="logo-github" size={15} color={colors.textPrimary} />
-            <Text style={styles.bridgeEditBtnText}>Connect GitHub Codespace</Text>
-          </Pressable>
+          />
         ) : null}
-        <Pressable
-          onPress={onEditBridgeProfile}
-          style={({ pressed }) => [styles.bridgeEditBtn, pressed && styles.bridgeEditBtnPressed]}
-        >
-          <Ionicons name="create-outline" size={15} color={colors.textPrimary} />
-          <Text style={styles.bridgeEditBtnText}>Edit active profile</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => {
-            void onClearSavedBridges?.();
-          }}
-          style={({ pressed }) => [styles.bridgeResetBtn, pressed && styles.bridgeResetBtnPressed]}
-        >
-          <Ionicons name="refresh-circle-outline" size={15} color={colors.error} />
-          <Text style={styles.bridgeResetBtnText}>Clear saved bridges</Text>
-        </Pressable>
+        {(onAddBridgeProfile || shouldOpenPrivateBridgeEditor) ? (
+          <MenuEntry
+            icon="hardware-chip-outline"
+            title="Private bridge"
+            description={
+              shouldOpenPrivateBridgeEditor
+                ? 'Update the URL or token for the bridge you host yourself.'
+                : 'Add your own machine or server with a bridge URL and token.'
+            }
+            onPress={
+              shouldOpenPrivateBridgeEditor
+                ? onEditBridgeProfile!
+                : onAddBridgeProfile!
+            }
+          />
+        ) : null}
+        <MenuEntry
+          icon="albums-outline"
+          title="Manage saved connections"
+          description="Switch, rename, or remove saved connections."
+          onPress={() => setBridgeProfileModalVisible(true)}
+          isLast
+        />
       </BlurView>
       <Text style={styles.subtleHintText}>
-        Bridge URLs and tokens are stored in the secure device keychain so you can switch
-        servers without retyping secrets.
+        Saved connections stay in secure device storage so you can switch later without
+        re-entering everything.
       </Text>
+      {onClearSavedBridges ? (
+        <Pressable
+          onPress={() => {
+            void onClearSavedBridges();
+          }}
+          style={({ pressed }) => [styles.linkRow, pressed && styles.linkRowPressed]}
+        >
+          <View style={styles.linkRowLeft}>
+            <Ionicons name="refresh-circle-outline" size={15} color={colors.error} />
+            <Text style={[styles.linkRowLabel, { color: colors.error }]}>
+              Clear all saved connections
+            </Text>
+          </View>
+        </Pressable>
+      ) : null}
 
-      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Bridge Maintenance</Text>
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Server tools</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
         {bridgeRuntimeLoading ? (
           <View style={styles.accountLoadingState}>
             <ActivityIndicator color={colors.textPrimary} />
-            <Text style={styles.settingValue}>Loading bridge runtime…</Text>
+            <Text style={styles.settingValue}>Loading server tools…</Text>
           </View>
         ) : (
           <>
-            <Row label="Bridge version" value={bridgeRuntime?.version ?? 'Unknown'} />
-            <Row label="Latest available" value={bridgeLatestVersion ?? 'Unknown'} />
-            <Row
-              label="Install type"
-              value={formatInstallKind(bridgeRuntime?.installKind ?? 'unknown')}
-            />
-            {bridgeUpdateStatus ? (
-              <Row
-                label="Last maintenance state"
-                value={formatBridgeUpdaterState(bridgeUpdateStatus.state)}
-              />
-            ) : null}
-            {bridgeUpdateStatus ? (
-              <Row
-                label="Maintenance message"
-                value={bridgeUpdateStatus.message}
-                isLast
-              />
-            ) : null}
-            {!bridgeUpdateStatus ? (
-              <Row
-                label="Maintenance status"
-                value={canSelfUpdateBridge || canSafeRestartBridge ? 'Ready' : 'Unavailable'}
-                isLast
-              />
-            ) : null}
+            <Row label="Service version" value={bridgeRuntime?.version ?? 'Unknown'} />
+            <Row label="Status" value={serverToolsStatus} isLast />
           </>
         )}
         <Pressable
@@ -1492,7 +1484,7 @@ export function SettingsScreen({
         >
           <Ionicons name="refresh-outline" size={15} color={colors.textPrimary} />
           <Text style={styles.bridgeEditBtnText}>
-            {bridgeRestartStarting ? 'Scheduling bridge restart…' : 'Restart bridge safely'}
+            {bridgeRestartStarting ? 'Scheduling restart…' : 'Restart service'}
           </Text>
         </Pressable>
         <Pressable
@@ -1511,49 +1503,30 @@ export function SettingsScreen({
         >
           <Ionicons name="cloud-download-outline" size={15} color={colors.textPrimary} />
           <Text style={styles.bridgeEditBtnText}>
-            {bridgeUpdateStarting ? 'Starting bridge update…' : 'Update bridge'}
+            {bridgeUpdateStarting ? 'Starting update…' : 'Update service'}
           </Text>
         </Pressable>
       </BlurView>
+      <Text style={styles.subtleHintText}>
+        Use these only if support asks you to restart or update the connection service.
+      </Text>
       {bridgeRestartActionError ? <Text style={styles.errorText}>{bridgeRestartActionError}</Text> : null}
       {bridgeUpdateActionError ? <Text style={styles.errorText}>{bridgeUpdateActionError}</Text> : null}
       {bridgeRuntimeError ? <Text style={styles.errorText}>{bridgeRuntimeError}</Text> : null}
 
-      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Engines</Text>
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Advanced</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-        <EngineAvailabilityRow
-          engine="codex"
-          available={availableEngines.includes('codex')}
-          active={activeEngine === 'codex'}
-        />
-        <EngineAvailabilityRow
-          engine="opencode"
-          available={availableEngines.includes('opencode')}
-          active={activeEngine === 'opencode'}
+        <Row label="Connection status" value={connectionStatusSummary} />
+        <Row label="Chat engines" value={engineSummary} />
+        <Row
+          label="Install type"
+          value={formatInstallKind(bridgeRuntime?.installKind ?? 'unknown')}
           isLast
         />
       </BlurView>
       <Text style={styles.subtleHintText}>
-        The new chat engine picker only appears when multiple engines are available on
-        this bridge.
+        Most people can ignore this unless they are troubleshooting or changing backend setup.
       </Text>
-
-      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Health</Text>
-      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
-        <Row
-          label="Status"
-          value={healthyAt ? 'OK' : 'Unknown'}
-          valueColor={healthyAt ? colors.statusComplete : colors.textMuted}
-        />
-        <Row label="Last seen" value={healthyAt ?? '—'} />
-        <Row label="Uptime" value={uptimeSec !== null ? `${uptimeSec}s` : '—'} />
-        <Row
-          label="WebSocket"
-          value={wsConnected ? 'Connected' : 'Disconnected'}
-          valueColor={wsConnected ? colors.statusComplete : colors.statusError}
-          isLast
-        />
-      </BlurView>
 
       <Pressable
         onPress={() => {
@@ -1567,7 +1540,7 @@ export function SettingsScreen({
         style={({ pressed }) => [styles.refreshBtn, pressed && styles.refreshBtnPressed]}
       >
         <Ionicons name="refresh" size={16} color={colors.white} />
-        <Text style={styles.refreshBtnText}>Refresh settings</Text>
+        <Text style={styles.refreshBtnText}>Refresh connection details</Text>
       </Pressable>
     </>
   );
@@ -1962,35 +1935,6 @@ function Row({
         {value}
       </Text>
     </View>
-  );
-}
-
-function EngineAvailabilityRow({
-  engine,
-  available,
-  active,
-  isLast,
-}: {
-  engine: ChatEngine;
-  available: boolean;
-  active: boolean;
-  isLast?: boolean;
-}) {
-  const theme = useAppTheme();
-  const value = available
-    ? active
-      ? 'Available · active'
-      : 'Available'
-    : 'Not installed on bridge';
-  const valueColor = available ? theme.colors.statusComplete : theme.colors.textMuted;
-
-  return (
-    <Row
-      label={getChatEngineLabel(engine)}
-      value={value}
-      valueColor={valueColor}
-      isLast={isLast}
-    />
   );
 }
 
@@ -2573,12 +2517,28 @@ function formatReasoningEffort(effort: ReasoningEffort): string {
   return effort.charAt(0).toUpperCase() + effort.slice(1);
 }
 
-function formatAccountType(account: AccountSnapshot | null): string {
+function formatAccountSignInStatus(account: AccountSnapshot | null): string {
   if (!account?.type) {
-    return 'Signed out';
+    return 'Not signed in';
   }
 
   return account.type === 'chatgpt' ? 'ChatGPT' : 'API key';
+}
+
+function formatAccountHelpText(account: AccountSnapshot | null): string {
+  if (!account) {
+    return 'Check whether this connection is signed in before starting chats.';
+  }
+
+  if (account.type) {
+    return 'This connection is signed in and ready to use.';
+  }
+
+  if (account.requiresOpenaiAuth) {
+    return 'This connection still needs a ChatGPT or API sign-in before chats will work.';
+  }
+
+  return 'This connection can be used without a separate account sign-in.';
 }
 
 function formatPlanType(planType: PlanType): string {

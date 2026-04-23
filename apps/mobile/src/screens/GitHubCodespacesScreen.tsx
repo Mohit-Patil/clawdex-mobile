@@ -25,7 +25,6 @@ import {
 } from '../chatGptAuth';
 import { env } from '../config';
 import {
-  clearStoredGitHubAppAuthTokens,
   loadStoredGitHubAppAuthTokens,
   loginWithGitHubApp,
   refreshGitHubAppAuthTokens,
@@ -56,9 +55,12 @@ import { useAppTheme, type AppTheme } from '../theme';
 interface GitHubCodespacesScreenProps {
   bridgeProfiles: BridgeProfile[];
   activeBridgeProfileId?: string | null;
+  initialSession?: {
+    token: GitHubUserAccessToken;
+    user: GitHubUser;
+  } | null;
   onBack: () => void;
   onConnect: (draft: BridgeProfileDraft) => void | Promise<void>;
-  onLogoutGitHubSessions?: () => void | Promise<void>;
   onSyncGitHubAuthToken?: (
     userLogin: string | null | undefined,
     token: GitHubUserAccessToken
@@ -241,9 +243,9 @@ function HeroStepPill({
 export function GitHubCodespacesScreen({
   bridgeProfiles,
   activeBridgeProfileId = null,
+  initialSession = null,
   onBack,
   onConnect,
-  onLogoutGitHubSessions,
   onSyncGitHubAuthToken,
 }: GitHubCodespacesScreenProps) {
   const theme = useAppTheme();
@@ -251,7 +253,6 @@ export function GitHubCodespacesScreen({
   const [session, setSession] = useState<GitHubSession | null>(null);
   const [restoringSession, setRestoringSession] = useState(true);
   const [authorizing, setAuthorizing] = useState(false);
-  const [loggingOut, setLoggingOut] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [appAccess, setAppAccess] = useState<GitHubAppAccessSnapshot | null>(null);
   const [appAccessLoading, setAppAccessLoading] = useState(false);
@@ -263,6 +264,7 @@ export function GitHubCodespacesScreen({
   const [pendingStopCodespaceName, setPendingStopCodespaceName] = useState<string | null>(null);
   const [stoppingCodespaceName, setStoppingCodespaceName] = useState<string | null>(null);
   const [creatingCodespace, setCreatingCodespace] = useState(false);
+  const [showAllCodespaces, setShowAllCodespaces] = useState(false);
   const [creationTargetLabel, setCreationTargetLabel] = useState<string | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -319,32 +321,45 @@ export function GitHubCodespacesScreen({
 
     const restoreSession = async () => {
       try {
-        let restoredToken =
-          reusableProfile ? bridgeProfileToGitHubToken(reusableProfile) : await loadStoredGitHubAppAuthTokens();
-        if (!restoredToken) {
-          return;
-        }
-        if (
-          env.githubAppAuthBaseUrl &&
-          shouldRefreshGitHubUserAccessToken(restoredToken) &&
-          restoredToken.refreshToken
-        ) {
-          restoredToken = await refreshGitHubAppAuthTokens(
-            env.githubAppAuthBaseUrl,
+        let nextSession: GitHubSession | null = null;
+        if (initialSession) {
+          nextSession = {
+            ...initialSession.token,
+            user: initialSession.user,
+          };
+        } else {
+          let restoredToken =
+            reusableProfile
+              ? bridgeProfileToGitHubToken(reusableProfile)
+              : await loadStoredGitHubAppAuthTokens();
+          if (!restoredToken) {
+            return;
+          }
+          if (
+            env.githubAppAuthBaseUrl &&
+            shouldRefreshGitHubUserAccessToken(restoredToken) &&
             restoredToken.refreshToken
-          );
-          await onSyncGitHubAuthToken?.(reusableProfile?.githubUserLogin, restoredToken);
-        }
+          ) {
+            restoredToken = await refreshGitHubAppAuthTokens(
+              env.githubAppAuthBaseUrl,
+              restoredToken.refreshToken
+            );
+            await onSyncGitHubAuthToken?.(reusableProfile?.githubUserLogin, restoredToken);
+          }
 
-        const user = await fetchGitHubUser(restoredToken.accessToken);
-        if (cancelled) {
+          const user = await fetchGitHubUser(restoredToken.accessToken);
+          if (cancelled) {
+            return;
+          }
+
+          nextSession = {
+            ...restoredToken,
+            user,
+          };
+        }
+        if (!nextSession || cancelled) {
           return;
         }
-
-        const nextSession: GitHubSession = {
-          ...restoredToken,
-          user,
-        };
         setSession(nextSession);
         await Promise.all([
           loadCodespaces(nextSession.accessToken),
@@ -373,6 +388,7 @@ export function GitHubCodespacesScreen({
     activeBridgeProfileId,
     bridgeProfiles,
     githubConfigured,
+    initialSession,
     loadCodespaces,
     loadGitHubAppAccess,
     onSyncGitHubAuthToken,
@@ -456,42 +472,6 @@ export function GitHubCodespacesScreen({
     loadGitHubAppAccess,
     onSyncGitHubAuthToken,
   ]);
-
-  const logoutGitHubSession = useCallback(async () => {
-    authFlowRef.current += 1;
-    connectFlowRef.current += 1;
-    setLoggingOut(true);
-    setAuthorizing(false);
-    setRestoringSession(false);
-    setSession(null);
-    setAppAccess(null);
-    setAppAccessError(null);
-    setAppAccessLoading(false);
-    setCodespaces([]);
-    setCodespacesError(null);
-    setCodespacesLoading(false);
-    setConnectingCodespaceName(null);
-    setPendingStopCodespaceName(null);
-    setStoppingCodespaceName(null);
-    setCreatingCodespace(false);
-    setCreationTargetLabel(null);
-    setConnectionMessage(null);
-    setConnectionError(null);
-    setConnectionPhase(null);
-    setPendingCodexLogin(null);
-    setCodexLoginChecking(false);
-    setCodexLoginSubmitting(false);
-    setAuthError(null);
-
-    try {
-      await clearStoredGitHubAppAuthTokens();
-      await onLogoutGitHubSessions?.();
-    } catch (error) {
-      setAuthError((error as Error).message);
-    } finally {
-      setLoggingOut(false);
-    }
-  }, [onLogoutGitHubSessions]);
 
   const refreshGitHubState = useCallback(async () => {
     if (!session) {
@@ -993,7 +973,6 @@ export function GitHubCodespacesScreen({
     [preferredRepositoryName, session]
   );
 
-  const githubAccountLabel = session?.user.name?.trim() || session?.user.login || 'GitHub account';
   const signedInInstallation = useMemo(() => {
     if (!session) {
       return null;
@@ -1010,25 +989,6 @@ export function GitHubCodespacesScreen({
     );
   }, [appAccess, session]);
   const accessibleRepositoryCount = approvedRepositories.length;
-  const approvedRepositoryPreview = useMemo(() => {
-    const names = approvedRepositories.map((repository) => repository.fullName).filter(Boolean);
-    if (names.length === 0) {
-      return null;
-    }
-    if (names.length <= 3) {
-      return names.join(', ');
-    }
-    return `${names.slice(0, 3).join(', ')} +${String(names.length - 3)} more`;
-  }, [approvedRepositories]);
-  const repositoryAccessTitle = signedInInstallation
-    ? 'Git access for later'
-    : 'Optional Git access';
-  const repositoryAccessDescription =
-    signedInInstallation && accessibleRepositoryCount > 0 && approvedRepositoryPreview
-      ? `GitHub already approved ${accessibleRepositoryCount} ${
-          accessibleRepositoryCount === 1 ? 'repository' : 'repositories'
-        }: ${approvedRepositoryPreview}. When you connect to a Codespace, Claudex installs this GitHub access there so you can clone or push manually later.`
-      : 'If you want git clone or push to work later inside the Codespace, choose repositories in the GitHub App. This is optional for simply connecting to the bridge.';
   const busy =
     Boolean(connectingCodespaceName) ||
     Boolean(stoppingCodespaceName) ||
@@ -1042,6 +1002,21 @@ export function GitHubCodespacesScreen({
     pendingCodexLogin?.profileDraft.githubCodespaceName ??
     creationTargetLabel ??
     null;
+  const suggestedCodespace = codespaces[0] ?? null;
+  const availableCodespaceCount = codespaces.filter((codespace) =>
+    isCodespaceAvailable(codespace)
+  ).length;
+  const visibleCodespaces = showAllCodespaces ? codespaces : codespaces.slice(0, 4);
+  const hiddenCodespaceCount = Math.max(codespaces.length - visibleCodespaces.length, 0);
+  const codespacesSummary = codespacesLoading
+    ? 'Loading Codespaces…'
+    : codespaces.length === 0
+      ? createEnabled
+        ? 'Create a new Codespace to continue.'
+        : 'Codespace creation is not configured in this build.'
+      : availableCodespaceCount > 0
+        ? `${availableCodespaceCount} ready now • ${codespaces.length} total`
+        : `${codespaces.length} saved • none running`;
   const onboardingStage: OnboardingStage = session
     ? statusCardVisible
       ? 'connect'
@@ -1073,16 +1048,16 @@ export function GitHubCodespacesScreen({
     onboardingStage === 'codespace' ? 2 : onboardingStage === 'connect' ? 3 : 1;
   const onboardingStageTitle =
     onboardingStage === 'codespace'
-      ? 'Create or connect'
+      ? 'Pick a workspace'
       : onboardingStage === 'connect'
         ? 'Finish connection'
         : 'Continue with GitHub';
   const onboardingStageDescription =
     onboardingStage === 'codespace'
-      ? 'Create a fresh Codespace from the Claudex template, or reconnect to one you already have.'
+      ? 'Create once from the Claudex template, or jump back into a Codespace you already have.'
       : onboardingStage === 'connect'
-        ? 'Keep this screen open while Clawdex waits for the bridge and finishes setup.'
-        : 'Sign in with GitHub once and return here automatically.';
+        ? 'Keep this screen open while Claudex waits for the bridge and finishes setup.'
+        : 'GitHub opens once, then returns here automatically.';
   const onboardingStageIcon =
     onboardingStage === 'codespace'
       ? 'cube-outline'
@@ -1103,7 +1078,7 @@ export function GitHubCodespacesScreen({
           </Pressable>
           <View style={styles.headerCopy}>
             <Text style={styles.headerEyebrow}>GitHub Codespaces</Text>
-            <Text style={styles.headerTitle}>Direct connect</Text>
+            <Text style={styles.headerTitle}>Codespaces</Text>
           </View>
         </View>
 
@@ -1114,43 +1089,46 @@ export function GitHubCodespacesScreen({
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <LinearGradient
-            colors={
-              theme.isDark
-                ? ['rgba(181, 189, 204, 0.18)', 'rgba(17, 21, 28, 0.92)', 'rgba(7, 9, 12, 0.98)']
-                : ['rgba(56, 79, 106, 0.16)', 'rgba(245, 248, 251, 0.98)', 'rgba(225, 234, 242, 0.98)']
-            }
-            style={styles.hero}
-          >
-            <Text style={styles.heroEyebrow}>No relay needed</Text>
-            <Text style={styles.heroTitle}>Create a Codespace. Connect from your phone.</Text>
-            <Text style={styles.heroDescription}>
-              Sign in, create from the Claudex template, then wait for the bridge to come up.
-            </Text>
-            <View style={styles.heroStepRow}>
-              <HeroStepPill
-                number={1}
-                label="GitHub"
-                state={onboardingStepStates.github}
-                styles={styles}
-                theme={theme}
-              />
-              <HeroStepPill
-                number={2}
-                label="Codespace"
-                state={onboardingStepStates.codespace}
-                styles={styles}
-                theme={theme}
-              />
-              <HeroStepPill
-                number={3}
-                label="Connect"
-                state={onboardingStepStates.connect}
-                styles={styles}
-                theme={theme}
-              />
-            </View>
-          </LinearGradient>
+          {onboardingStage === 'connect' ? (
+            <LinearGradient
+              colors={
+                theme.isDark
+                  ? ['rgba(181, 189, 204, 0.18)', 'rgba(17, 21, 28, 0.92)', 'rgba(7, 9, 12, 0.98)']
+                  : ['rgba(56, 79, 106, 0.16)', 'rgba(245, 248, 251, 0.98)', 'rgba(225, 234, 242, 0.98)']
+              }
+              style={styles.hero}
+            >
+              <Text style={styles.heroEyebrow}>GitHub App + Codespaces</Text>
+              <Text style={styles.heroTitle}>Start the workspace here. Let Claudex do the rest.</Text>
+              <Text style={styles.heroDescription}>
+                Sign in once, create from the Claudex template, then keep this screen open while the
+                bridge comes up.
+              </Text>
+              <View style={styles.heroStepRow}>
+                <HeroStepPill
+                  number={1}
+                  label="GitHub"
+                  state={onboardingStepStates.github}
+                  styles={styles}
+                  theme={theme}
+                />
+                <HeroStepPill
+                  number={2}
+                  label="Codespace"
+                  state={onboardingStepStates.codespace}
+                  styles={styles}
+                  theme={theme}
+                />
+                <HeroStepPill
+                  number={3}
+                  label="Connect"
+                  state={onboardingStepStates.connect}
+                  styles={styles}
+                  theme={theme}
+                />
+              </View>
+            </LinearGradient>
+          ) : null}
 
           {!githubConfigured ? (
             <BlurView intensity={55} tint={theme.blurTint} style={styles.card}>
@@ -1165,33 +1143,72 @@ export function GitHubCodespacesScreen({
 
           {githubConfigured ? (
             <BlurView intensity={55} tint={theme.blurTint} style={styles.card}>
-              <View style={styles.stageHeader}>
-                <View style={styles.stageBadge}>
-                  <Ionicons
-                    name={onboardingStageIcon}
-                    size={18}
-                    color={theme.colors.textPrimary}
-                  />
-                  <Text style={styles.stageBadgeValue}>{String(onboardingStepNumber).padStart(2, '0')}</Text>
-                </View>
-                <View style={styles.stageHeaderCopy}>
-                  <Text style={styles.stageEyebrow}>Step {onboardingStepNumber} of 3</Text>
-                  <Text style={styles.stageTitle}>{onboardingStageTitle}</Text>
-                </View>
-                {session ? (
-                  <View style={styles.statusPill}>
-                    <Ionicons
-                      name="checkmark-circle-outline"
-                      size={14}
-                      color={theme.colors.statusComplete}
-                    />
-                    <Text style={styles.statusPillText}>GitHub App ready</Text>
+              {onboardingStage !== 'codespace' ? (
+                <>
+                  <View style={styles.stageHeader}>
+                    <View style={styles.stageBadge}>
+                      <Ionicons
+                        name={onboardingStageIcon}
+                        size={18}
+                        color={theme.colors.textPrimary}
+                      />
+                      <Text style={styles.stageBadgeValue}>
+                        {String(onboardingStepNumber).padStart(2, '0')}
+                      </Text>
+                    </View>
+                    <View style={styles.stageHeaderCopy}>
+                      <Text style={styles.stageEyebrow}>Step {onboardingStepNumber} of 3</Text>
+                      <Text style={styles.stageTitle}>{onboardingStageTitle}</Text>
+                    </View>
+                    {session ? (
+                      <View style={styles.statusPill}>
+                        <Ionicons
+                          name="checkmark-circle-outline"
+                          size={14}
+                          color={theme.colors.statusComplete}
+                        />
+                        <Text style={styles.statusPillText}>GitHub App ready</Text>
+                      </View>
+                    ) : null}
                   </View>
-                ) : null}
-              </View>
-              <Text style={styles.stageDescription}>{onboardingStageDescription}</Text>
+                  <Text style={styles.stageDescription}>{onboardingStageDescription}</Text>
+                </>
+              ) : session ? (
+                <View style={styles.accountStrip}>
+                  <View style={styles.accountStripCopy}>
+                    <Text style={styles.accountStripLabel}>GitHub</Text>
+                    <Text style={styles.accountStripTitle}>@{session.user.login}</Text>
+                    <Text style={styles.accountStripMeta}>{codespacesSummary}</Text>
+                  </View>
+                  {createEnabled && codespaces.length > 0 ? (
+                    <View style={styles.accountStripActions}>
+                      <Pressable
+                        onPress={() => {
+                          void handleCreateCodespace();
+                        }}
+                        disabled={busy}
+                        style={({ pressed }) => [
+                          styles.secondaryButton,
+                          pressed && !busy && styles.secondaryButtonPressed,
+                        ]}
+                      >
+                        {creatingCodespace ? (
+                          <ActivityIndicator size="small" color={theme.colors.textPrimary} />
+                        ) : (
+                          <Ionicons
+                            name="add-circle-outline"
+                            size={15}
+                            color={theme.colors.textPrimary}
+                          />
+                        )}
+                        <Text style={styles.secondaryButtonText}>Create Codespace</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
 
-              {restoringSession ? (
+              {restoringSession && onboardingStage !== 'github' ? (
                 <View style={styles.loadingRow}>
                   <ActivityIndicator color={theme.colors.textPrimary} />
                   <Text style={styles.cardBody}>Checking saved GitHub access…</Text>
@@ -1231,327 +1248,264 @@ export function GitHubCodespacesScreen({
                 </View>
               ) : null}
 
-              {session && onboardingStage !== 'github' ? (
-                <View style={styles.accountStrip}>
-                  <View style={styles.accountStripCopy}>
-                    <Text style={styles.accountStripLabel}>GitHub session</Text>
-                    <Text style={styles.accountStripTitle}>{githubAccountLabel}</Text>
-                    <Text style={styles.accountStripMeta}>@{session.user.login}</Text>
+              {onboardingStage === 'github' ? (
+                <>
+                  <View style={styles.recommendedActionCard}>
+                    <Text style={styles.recommendedActionEyebrow}>Connecting GitHub</Text>
+                    <Text style={styles.recommendedActionTitle}>Sign in with GitHub</Text>
+                    <Text style={styles.recommendedActionMeta}>
+                      GitHub opens once, then returns here automatically.
+                    </Text>
                   </View>
-                  <View style={styles.accountStripActions}>
+                  {restoringSession ? (
+                    <View style={styles.loadingRow}>
+                      <ActivityIndicator color={theme.colors.textPrimary} />
+                      <Text style={styles.cardBody}>Checking saved GitHub access…</Text>
+                    </View>
+                  ) : (
                     <Pressable
                       onPress={() => {
                         void beginGitHubSignIn();
                       }}
-                      disabled={authorizing || loggingOut}
+                      disabled={authorizing}
                       style={({ pressed }) => [
-                        styles.ghostButton,
-                        pressed &&
-                          !authorizing &&
-                          !loggingOut &&
-                          styles.secondaryButtonPressed,
+                        styles.primaryButton,
+                        pressed && !authorizing && styles.primaryButtonPressed,
                       ]}
                     >
-                      <Text style={styles.ghostButtonText}>Switch</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => {
-                        void logoutGitHubSession();
-                      }}
-                      disabled={authorizing || loggingOut}
-                      style={({ pressed }) => [
-                        styles.ghostButton,
-                        styles.ghostButtonDanger,
-                        pressed &&
-                          !authorizing &&
-                          !loggingOut &&
-                          styles.ghostButtonDangerPressed,
-                      ]}
-                    >
-                      {loggingOut ? (
-                        <ActivityIndicator size="small" color={theme.colors.error} />
+                      {authorizing ? (
+                        <ActivityIndicator size="small" color={theme.colors.black} />
                       ) : (
-                        <Text style={[styles.ghostButtonText, styles.ghostButtonTextDanger]}>
-                          Log out
-                        </Text>
+                        <Ionicons name="logo-github" size={16} color={theme.colors.black} />
                       )}
+                      <Text style={styles.primaryButtonText}>
+                        {authorizing
+                          ? 'Opening GitHub…'
+                          : authError
+                            ? 'Try GitHub again'
+                            : 'Sign in with GitHub'}
+                      </Text>
                     </Pressable>
-                  </View>
-                </View>
-              ) : null}
-
-              {onboardingStage === 'github' ? (
-                <>
-                  <Pressable
-                    onPress={() => {
-                      void beginGitHubSignIn();
-                    }}
-                    disabled={authorizing || restoringSession}
-                    style={({ pressed }) => [
-                      styles.primaryButton,
-                      pressed &&
-                        !authorizing &&
-                        !restoringSession &&
-                        styles.primaryButtonPressed,
-                    ]}
-                  >
-                    {authorizing ? (
-                      <ActivityIndicator size="small" color={theme.colors.black} />
-                    ) : (
-                      <Ionicons name="logo-github" size={16} color={theme.colors.black} />
-                    )}
-                    <Text style={styles.primaryButtonText}>Sign in with GitHub</Text>
-                  </Pressable>
-                  <Text style={styles.helperText}>
-                    GitHub opens once, then returns here automatically.
-                  </Text>
+                  )}
+                  {!restoringSession ? (
+                    <Text style={styles.helperText}>
+                      This screen stays here only when you open GitHub Codespaces directly.
+                    </Text>
+                  ) : null}
                 </>
               ) : null}
 
               {onboardingStage === 'codespace' && session ? (
                 <>
-                  <View style={styles.codespacesHeaderRow}>
-                    <Text style={styles.sectionLabel}>Existing Codespaces</Text>
-                    {createEnabled ? (
-                      <Pressable
-                        onPress={() => {
-                          void handleCreateCodespace();
-                        }}
-                        disabled={busy}
-                        style={({ pressed }) => [
-                          styles.secondaryButton,
-                          pressed && !busy && styles.secondaryButtonPressed,
-                        ]}
-                      >
-                        {creatingCodespace ? (
-                          <ActivityIndicator size="small" color={theme.colors.textPrimary} />
-                        ) : (
-                          <Ionicons
-                            name="add-circle-outline"
-                            size={15}
-                            color={theme.colors.textPrimary}
-                          />
-                        )}
-                        <Text style={styles.secondaryButtonText}>Create Codespace</Text>
-                      </Pressable>
-                    ) : null}
-                  </View>
-
                   {codespacesLoading ? (
                     <View style={styles.loadingRow}>
                       <ActivityIndicator color={theme.colors.textPrimary} />
                       <Text style={styles.cardBody}>Loading Codespaces…</Text>
                     </View>
                   ) : codespaces.length > 0 ? (
-                    <View style={styles.codespaceList}>
-                      {codespaces.map((codespace, index) => {
-                        const codespaceBusy = connectingCodespaceName === codespace.name;
-                        const codespaceStopping = stoppingCodespaceName === codespace.name;
-                        const stopConfirmationVisible =
-                          pendingStopCodespaceName === codespace.name;
-                        const isSuggested = index === 0;
-                        const normalizedState = codespace.state.trim().toLowerCase();
-                        const canStopCodespace = normalizedState === 'available';
-                        const actionLabel =
-                          normalizedState === 'available' ? 'Connect now' : 'Start Codespace';
-                        const actionIcon =
-                          normalizedState === 'available' ? 'flash-outline' : 'play-outline';
-                        const actionHint =
-                          normalizedState === 'available'
-                            ? 'Ready for direct reconnect from this phone.'
-                            : 'Clawdex will start it first, then wait for the bridge.';
+                    <>
+                      <View style={styles.cardHeadlineBlock}>
+                        <Text style={styles.cardHeadline}>Choose a Codespace</Text>
+                        <Text style={styles.cardBody}>
+                          {availableCodespaceCount > 0
+                            ? 'Start one below or create another.'
+                            : 'Start an existing Codespace or create a new one.'}
+                        </Text>
+                      </View>
+                      <View style={styles.codespaceList}>
+                        {visibleCodespaces.map((codespace) => {
+                          const codespaceBusy = connectingCodespaceName === codespace.name;
+                          const codespaceStopping = stoppingCodespaceName === codespace.name;
+                          const stopConfirmationVisible =
+                            pendingStopCodespaceName === codespace.name;
+                          const isSuggested = suggestedCodespace?.name === codespace.name;
+                          const canStopCodespace = isCodespaceAvailable(codespace);
+                          const actionLabel = canStopCodespace ? 'Connect' : 'Start';
+                          const actionIcon = canStopCodespace ? 'flash-outline' : 'play-outline';
 
-                        return (
-                          <View
-                            key={codespace.name}
-                            style={[
-                              styles.codespaceCard,
-                              isSuggested && styles.codespaceCardRecommended,
-                            ]}
-                          >
-                            <View style={styles.codespaceCardTop}>
-                              <View style={styles.codespaceBadgeRow}>
-                                <View
-                                  style={[
-                                    styles.codespaceTag,
-                                    isSuggested
-                                      ? styles.codespaceTagRecommended
-                                      : styles.codespaceTagDefault,
-                                  ]}
-                                >
-                                  <Text
-                                    style={[
-                                      styles.codespaceTagText,
-                                      isSuggested
-                                        ? styles.codespaceTagTextRecommended
-                                        : styles.codespaceTagTextDefault,
-                                    ]}
-                                  >
-                                    {isSuggested ? 'Recommended' : 'Saved'}
-                                  </Text>
-                                </View>
-                                <View style={styles.codespaceStatePill}>
-                                  <Text style={styles.codespaceStateText}>
-                                    {formatCodespaceState(codespace.state)}
-                                  </Text>
-                                </View>
-                              </View>
-
-                              <Text style={styles.codespaceCardTitle}>{codespace.name}</Text>
-                              <Text style={styles.codespaceRepository}>
-                                {codespace.repositoryFullName ?? 'Unknown repository'}
-                              </Text>
-                              <Text style={styles.codespaceHint}>{actionHint}</Text>
-
-                              <View style={styles.codespaceFacts}>
-                                <View style={styles.codespaceFactRow}>
-                                  <Ionicons
-                                    name="time-outline"
-                                    size={13}
-                                    color={theme.colors.textMuted}
-                                  />
-                                  <Text style={styles.codespaceFactText}>
-                                    Last used {formatTimestamp(codespace.lastUsedAt ?? codespace.updatedAt)}
-                                  </Text>
-                                </View>
-                                {codespace.webUrl ? (
-                                  <View style={styles.codespaceFactRow}>
-                                    <Ionicons
-                                      name="globe-outline"
-                                      size={13}
-                                      color={theme.colors.textMuted}
-                                    />
-                                    <Text style={styles.codespaceFactText}>
-                                      GitHub web access available
+                          return (
+                            <View
+                              key={codespace.name}
+                              style={[
+                                styles.codespaceCard,
+                                isSuggested && styles.codespaceCardRecommended,
+                              ]}
+                            >
+                              <View style={styles.codespaceCardTop}>
+                                <View style={styles.codespacesCardHeader}>
+                                  <View style={styles.codespacesCardCopy}>
+                                    <Text style={styles.codespaceCardTitle}>{codespace.name}</Text>
+                                    <Text style={styles.codespaceRepository}>
+                                      {codespace.repositoryFullName ?? 'Unknown repository'}
+                                    </Text>
+                                    <Text style={styles.codespaceMeta}>
+                                      Last used{' '}
+                                      {formatTimestamp(codespace.lastUsedAt ?? codespace.updatedAt)}
                                     </Text>
                                   </View>
-                                ) : null}
-                              </View>
-                            </View>
-
-                            <View style={styles.codespaceCardFooter}>
-                              <Pressable
-                                onPress={() => {
-                                  void handleConnectCodespace(codespace);
-                                }}
-                                disabled={busy}
-                                style={({ pressed }) => [
-                                  styles.codespacePrimaryAction,
-                                  (codespaceBusy || codespaceStopping) && styles.codespaceButtonBusy,
-                                  pressed && !busy && styles.codespaceButtonPressed,
-                                ]}
-                              >
-                                {codespaceBusy || codespaceStopping ? (
-                                  <ActivityIndicator size="small" color={theme.colors.black} />
-                                ) : (
-                                  <Ionicons
-                                    name={actionIcon}
-                                    size={15}
-                                    color={theme.colors.black}
-                                  />
-                                )}
-                                <Text style={styles.codespacePrimaryActionText}>{actionLabel}</Text>
-                              </Pressable>
-                              <View style={styles.codespaceActionRow}>
-                                {codespace.webUrl ? (
-                                  <Pressable
-                                    onPress={() => handleOpenCodespace(codespace)}
-                                    disabled={busy}
-                                    style={({ pressed }) => [
-                                      styles.codespaceSecondaryAction,
-                                      pressed && styles.secondaryButtonPressed,
-                                    ]}
-                                  >
-                                    <Ionicons
-                                      name="open-outline"
-                                      size={14}
-                                      color={theme.colors.textPrimary}
-                                    />
-                                    <Text style={styles.codespaceSecondaryActionText}>
-                                      Open in GitHub
+                                  <View style={styles.codespaceStatePill}>
+                                    <Text style={styles.codespaceStateText}>
+                                      {formatCodespaceStatus(codespace)}
                                     </Text>
-                                  </Pressable>
-                                ) : null}
-                                {canStopCodespace ? (
-                                  <Pressable
-                                    onPress={() => {
-                                      setPendingStopCodespaceName((current) =>
-                                        current === codespace.name ? null : codespace.name
-                                      );
-                                    }}
-                                    disabled={busy}
-                                    style={({ pressed }) => [
-                                      styles.codespaceStopAction,
-                                      pressed && !busy && styles.codespaceStopActionPressed,
-                                    ]}
-                                  >
-                                    <Ionicons
-                                      name="stop-circle-outline"
-                                      size={14}
-                                      color={theme.colors.error}
-                                    />
-                                    <Text style={styles.codespaceStopActionText}>Stop</Text>
-                                  </Pressable>
-                                ) : null}
+                                  </View>
+                                </View>
                               </View>
 
-                              {stopConfirmationVisible ? (
-                                <View style={styles.codespaceStopConfirm}>
-                                  <Text style={styles.codespaceStopConfirmTitle}>
-                                    Stop this Codespace?
+                              <View style={styles.codespaceCardFooter}>
+                                <Pressable
+                                  onPress={() => {
+                                    void handleConnectCodespace(codespace);
+                                  }}
+                                  disabled={busy}
+                                  style={({ pressed }) => [
+                                    styles.codespacePrimaryAction,
+                                    (codespaceBusy || codespaceStopping) &&
+                                      styles.codespaceButtonBusy,
+                                    pressed && !busy && styles.codespaceButtonPressed,
+                                  ]}
+                                >
+                                  {codespaceBusy || codespaceStopping ? (
+                                    <ActivityIndicator size="small" color={theme.colors.black} />
+                                  ) : (
+                                    <Ionicons
+                                      name={actionIcon}
+                                      size={15}
+                                      color={theme.colors.black}
+                                    />
+                                  )}
+                                  <Text style={styles.codespacePrimaryActionText}>
+                                    {actionLabel}
                                   </Text>
-                                  <Text style={styles.codespaceStopConfirmText}>
-                                    Your files stay there, but running processes stop and the app
-                                    disconnects until you start it again.
-                                  </Text>
-                                  <View style={styles.codespaceStopConfirmActions}>
+                                </Pressable>
+                                <View style={styles.codespaceActionRow}>
+                                  {codespace.webUrl ? (
                                     <Pressable
-                                      onPress={() => setPendingStopCodespaceName(null)}
+                                      onPress={() => handleOpenCodespace(codespace)}
+                                      disabled={busy}
                                       style={({ pressed }) => [
-                                        styles.codespaceStopCancel,
+                                        styles.codespaceSecondaryAction,
                                         pressed && styles.secondaryButtonPressed,
                                       ]}
                                     >
-                                      <Text style={styles.codespaceStopCancelText}>Keep running</Text>
+                                      <Ionicons
+                                        name="open-outline"
+                                        size={14}
+                                        color={theme.colors.textPrimary}
+                                      />
+                                      <Text style={styles.codespaceSecondaryActionText}>
+                                        Open
+                                      </Text>
                                     </Pressable>
+                                  ) : null}
+                                  {canStopCodespace ? (
                                     <Pressable
                                       onPress={() => {
-                                        void handleStopCodespace(codespace);
+                                        setPendingStopCodespaceName((current) =>
+                                          current === codespace.name ? null : codespace.name
+                                        );
                                       }}
                                       disabled={busy}
                                       style={({ pressed }) => [
-                                        styles.codespaceStopConfirmButton,
-                                        pressed && !busy && styles.codespaceStopConfirmButtonPressed,
-                                        busy && styles.codespaceButtonBusy,
+                                        styles.codespaceStopAction,
+                                        pressed && !busy && styles.codespaceStopActionPressed,
                                       ]}
                                     >
-                                      {codespaceStopping ? (
-                                        <ActivityIndicator size="small" color={theme.colors.white} />
-                                      ) : (
-                                        <Ionicons
-                                          name="stop-circle-outline"
-                                          size={14}
-                                          color={theme.colors.white}
-                                        />
-                                      )}
-                                      <Text style={styles.codespaceStopConfirmButtonText}>
-                                        Stop Codespace
-                                      </Text>
+                                      <Ionicons
+                                        name="stop-circle-outline"
+                                        size={14}
+                                        color={theme.colors.error}
+                                      />
+                                      <Text style={styles.codespaceStopActionText}>Stop</Text>
                                     </Pressable>
-                                  </View>
+                                  ) : null}
                                 </View>
-                              ) : null}
+
+                                {stopConfirmationVisible ? (
+                                  <View style={styles.codespaceStopConfirm}>
+                                    <Text style={styles.codespaceStopConfirmTitle}>
+                                      Stop this Codespace?
+                                    </Text>
+                                    <Text style={styles.codespaceStopConfirmText}>
+                                      Your files stay there, but running processes stop and the app
+                                      disconnects until you start it again.
+                                    </Text>
+                                    <View style={styles.codespaceStopConfirmActions}>
+                                      <Pressable
+                                        onPress={() => setPendingStopCodespaceName(null)}
+                                        style={({ pressed }) => [
+                                          styles.codespaceStopCancel,
+                                          pressed && styles.secondaryButtonPressed,
+                                        ]}
+                                      >
+                                        <Text style={styles.codespaceStopCancelText}>
+                                          Keep running
+                                        </Text>
+                                      </Pressable>
+                                      <Pressable
+                                        onPress={() => {
+                                          void handleStopCodespace(codespace);
+                                        }}
+                                        disabled={busy}
+                                        style={({ pressed }) => [
+                                          styles.codespaceStopConfirmButton,
+                                          pressed &&
+                                            !busy &&
+                                            styles.codespaceStopConfirmButtonPressed,
+                                          busy && styles.codespaceButtonBusy,
+                                        ]}
+                                      >
+                                        {codespaceStopping ? (
+                                          <ActivityIndicator
+                                            size="small"
+                                            color={theme.colors.white}
+                                          />
+                                        ) : (
+                                          <Ionicons
+                                            name="stop-circle-outline"
+                                            size={14}
+                                            color={theme.colors.white}
+                                          />
+                                        )}
+                                        <Text style={styles.codespaceStopConfirmButtonText}>
+                                          Stop Codespace
+                                        </Text>
+                                      </Pressable>
+                                    </View>
+                                  </View>
+                                ) : null}
+                              </View>
                             </View>
-                          </View>
-                        );
-                      })}
-                    </View>
+                          );
+                        })}
+                      </View>
+
+                      {hiddenCodespaceCount > 0 ? (
+                        <Pressable
+                          onPress={() => setShowAllCodespaces((current) => !current)}
+                          style={({ pressed }) => [
+                            styles.linkButton,
+                            pressed && styles.linkButtonPressed,
+                          ]}
+                        >
+                          <Text style={styles.linkButtonText}>
+                            {showAllCodespaces
+                              ? 'Show less'
+                              : `See ${hiddenCodespaceCount} more`}
+                          </Text>
+                          <Ionicons
+                            name={showAllCodespaces ? 'chevron-up' : 'chevron-down'}
+                            size={15}
+                            color={theme.colors.textPrimary}
+                          />
+                        </Pressable>
+                      ) : null}
+                    </>
                   ) : (
                     <View style={styles.emptyState}>
                       <Text style={styles.emptyStateTitle}>No Codespaces yet</Text>
                       <Text style={styles.cardBody}>
                         {createEnabled
-                          ? 'Create a Codespace here from the Claudex template, wait for it to finish booting, then connect.'
+                          ? 'Create one and it will show up here.'
                           : 'Configure the Claudex template repository in this build to continue.'}
                       </Text>
                       {createEnabled ? (
@@ -1605,62 +1559,35 @@ export function GitHubCodespacesScreen({
                     </Pressable>
                   </View>
 
-                  <View style={styles.stagePanel}>
-                    <Text style={styles.stagePanelEyebrow}>Optional later</Text>
-                    <Text style={styles.stagePanelTitle}>{repositoryAccessTitle}</Text>
-                    <Text style={styles.stagePanelMeta}>{repositoryAccessDescription}</Text>
-                    {approvedRepositoryPreview ? (
-                      <View style={styles.repoSummaryRow}>
-                        <Text style={styles.repoSummaryLabel}>Approved now</Text>
-                        <Text style={styles.repoSummaryValue}>{approvedRepositoryPreview}</Text>
-                      </View>
-                    ) : null}
+                  <View style={styles.deferredActionBlock}>
                     {appAccessLoading ? (
                       <View style={styles.loadingRow}>
                         <ActivityIndicator color={theme.colors.textPrimary} />
-                        <Text style={styles.cardBody}>Refreshing GitHub access…</Text>
+                        <Text style={styles.helperText}>Refreshing repo access…</Text>
                       </View>
                     ) : null}
-                    <View style={styles.actionRow}>
-                      <Pressable
-                        onPress={() => {
-                          void openGitHubAppAccess();
-                        }}
-                        style={({ pressed }) => [
-                          styles.secondaryButton,
-                          pressed && styles.secondaryButtonPressed,
-                        ]}
-                      >
-                        <Ionicons
-                          name="open-outline"
-                          size={15}
-                          color={theme.colors.textPrimary}
-                        />
-                        <Text style={styles.secondaryButtonText}>
-                          {signedInInstallation ? 'Manage repos' : 'Install app'}
-                        </Text>
-                      </Pressable>
-                      <Pressable
-                        onPress={() => {
-                          void refreshGitHubState();
-                        }}
-                        disabled={appAccessLoading || codespacesLoading}
-                        style={({ pressed }) => [
-                          styles.secondaryButton,
-                          pressed &&
-                            !appAccessLoading &&
-                            !codespacesLoading &&
-                            styles.secondaryButtonPressed,
-                        ]}
-                      >
-                        <Ionicons
-                          name="refresh-outline"
-                          size={15}
-                          color={theme.colors.textPrimary}
-                        />
-                        <Text style={styles.secondaryButtonText}>Refresh access</Text>
-                      </Pressable>
-                    </View>
+                    <Pressable
+                      onPress={() => {
+                        void openGitHubAppAccess();
+                      }}
+                      style={({ pressed }) => [
+                        styles.linkButton,
+                        pressed && styles.linkButtonPressed,
+                      ]}
+                    >
+                      <Text style={styles.linkButtonText}>
+                        {signedInInstallation
+                          ? accessibleRepositoryCount > 0
+                            ? `Manage repo access (${accessibleRepositoryCount})`
+                            : 'Manage repo access'
+                          : 'Install GitHub App'}
+                      </Text>
+                      <Ionicons
+                        name="open-outline"
+                        size={15}
+                        color={theme.colors.textPrimary}
+                      />
+                    </Pressable>
                   </View>
                 </>
               ) : null}
@@ -1948,6 +1875,14 @@ function buildCodespaceProfileName(codespace: GitHubCodespace): string {
   }
 
   return codespace.name;
+}
+
+function isCodespaceAvailable(codespace: Pick<GitHubCodespace, 'state'>): boolean {
+  return codespace.state.trim().toLowerCase() === 'available';
+}
+
+function formatCodespaceStatus(codespace: Pick<GitHubCodespace, 'state'>): string {
+  return isCodespaceAvailable(codespace) ? 'Ready' : formatCodespaceState(codespace.state);
 }
 
 function formatCodespaceState(value: string): string {
@@ -2783,6 +2718,25 @@ const createStyles = (theme: AppTheme) => {
     helperText: {
       ...theme.typography.caption,
       color: theme.colors.textSecondary,
+    },
+    deferredActionBlock: {
+      gap: theme.spacing.xs,
+    },
+    linkButton: {
+      minHeight: 34,
+      alignSelf: 'flex-start',
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.xs,
+      paddingVertical: theme.spacing.xs,
+    },
+    linkButtonPressed: {
+      opacity: 0.72,
+    },
+    linkButtonText: {
+      ...theme.typography.caption,
+      color: theme.colors.textPrimary,
+      fontWeight: '600',
     },
     emptyState: {
       gap: theme.spacing.md,
