@@ -436,6 +436,11 @@ Automation verifies tag/version consistency and publishes to npm.
 
 - `bridge/health/read`
 - `bridge/terminal/exec`
+- `bridge/terminal/session/create`
+- `bridge/terminal/session/read`
+- `bridge/terminal/session/input`
+- `bridge/terminal/session/resize`
+- `bridge/terminal/session/close`
 - `bridge/attachments/upload`
 - `bridge/voice/transcribe`
 - `bridge/git/status`
@@ -452,5 +457,8 @@ Automation verifies tag/version consistency and publishes to npm.
 - `bridge/approval.*`
 - `bridge/userInput.*`
 - `bridge/terminal/completed`
+- `bridge/terminal/session/data`
+- `bridge/terminal/session/error`
+- `bridge/terminal/session/exit`
 - `bridge/git/updated`
 - `bridge/connection/state`

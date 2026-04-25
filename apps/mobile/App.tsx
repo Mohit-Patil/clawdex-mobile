@@ -81,6 +81,7 @@ import {
 } from './src/screens/OnboardingScreen';
 import { PrivacyScreen } from './src/screens/PrivacyScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
+import { TerminalScreen } from './src/screens/TerminalScreen';
 import {
   AUTO_STORE_REVIEW_THRESHOLD_MS,
   createDefaultAutoStoreReviewState,
@@ -99,7 +100,7 @@ import {
   type AppearancePreference,
 } from './src/theme';
 
-type AppScreen = 'Main' | 'ChatGit' | 'Browser' | 'Settings' | 'Privacy' | 'Terms';
+type AppScreen = 'Main' | 'ChatGit' | 'Browser' | 'Settings' | 'Privacy' | 'Terms' | 'Terminal';
 type Screen = AppScreen | 'Onboarding' | 'GitHubCodespaces';
 type PendingGitHubCodespacesSession = {
   token: GitHubUserAccessToken;
@@ -125,6 +126,8 @@ function isPendingGitHubCodespacesSession(
 }
 
 const DRAWER_WIDTH = 280;
+const TABLET_SIDEBAR_WIDTH = 312;
+const TABLET_LAYOUT_MIN_WIDTH = 768;
 const EDGE_SWIPE_WIDTH = 24;
 const CHAT_GIT_BACK_DISTANCE = 56;
 const CHAT_GIT_BACK_VELOCITY = 900;
@@ -274,6 +277,7 @@ export default function App() {
     null
   );
   const [drawerVisible, setDrawerVisible] = useState(false);
+  const [tabletSidebarVisible, setTabletSidebarVisible] = useState(true);
   const [fontsLoaded, fontsError] = useFonts(APP_FONT_ASSETS);
   const drawerOpenRef = useRef(false);
   const drawerVisibleRef = useRef(false);
@@ -287,6 +291,7 @@ export default function App() {
   const storeReviewStateRef = useRef<AutoStoreReviewState>(createDefaultAutoStoreReviewState());
   const automaticStoreReviewInFlightRef = useRef(false);
   const { width: screenWidth } = useWindowDimensions();
+  const usesTabletLayout = screenWidth >= TABLET_LAYOUT_MIN_WIDTH;
   const resolvedThemeMode = resolveThemeMode(appearancePreference, systemColorScheme);
   const themeFontPreference = fontsLoaded ? fontPreference : DEFAULT_FONT_PREFERENCE;
   const theme = useMemo(
@@ -300,6 +305,16 @@ export default function App() {
   const drawerGestureDidSettle = useSharedValue(true);
 
   const screenFrameAnimatedStyle = useAnimatedStyle(() => {
+    if (usesTabletLayout) {
+      return {
+        transform: [{ translateX: 0 }, { scale: 1 }],
+        borderRadius: 0,
+        shadowOpacity: 0,
+        shadowRadius: 0,
+        elevation: 0,
+      };
+    }
+
     const progress = getDrawerOpenProgress(drawerOffset.value);
     return {
       transform: [
@@ -311,7 +326,7 @@ export default function App() {
       shadowRadius: DRAWER_MAX_SHADOW_RADIUS * progress,
       elevation: DRAWER_MAX_ELEVATION * progress,
     };
-  }, [contentShiftOpen]);
+  }, [contentShiftOpen, usesTabletLayout]);
 
   const overlayAnimatedStyle = useAnimatedStyle(() => ({
     opacity: getDrawerOpenProgress(drawerOffset.value),
@@ -775,6 +790,12 @@ export default function App() {
 
   const animateDrawerTo = useCallback(
     (shouldOpen: boolean, velocityX = 0) => {
+      if (usesTabletLayout) {
+        handleDrawerSettled(false);
+        drawerOffset.value = -DRAWER_WIDTH;
+        return;
+      }
+
       if (!shouldOpen && !drawerVisibleRef.current) {
         return;
       }
@@ -795,7 +816,13 @@ export default function App() {
         }
       );
     },
-    [dismissKeyboard, drawerOffset, ensureDrawerVisible, handleDrawerSettled]
+    [
+      dismissKeyboard,
+      drawerOffset,
+      ensureDrawerVisible,
+      handleDrawerSettled,
+      usesTabletLayout,
+    ]
   );
 
   const openDrawer = useCallback(() => {
@@ -805,6 +832,15 @@ export default function App() {
   const closeDrawer = useCallback(() => {
     animateDrawerTo(false);
   }, [animateDrawerTo]);
+
+  const handleNavigationToggle = useCallback(() => {
+    if (usesTabletLayout) {
+      setTabletSidebarVisible((visible) => !visible);
+      return;
+    }
+
+    openDrawer();
+  }, [openDrawer, usesTabletLayout]);
 
   const openChatWithTransition = useCallback(
     async (id: string, snapshot?: Chat | null) => {
@@ -884,6 +920,7 @@ export default function App() {
     () =>
       Gesture.Pan()
         .enabled(
+          !usesTabletLayout &&
           currentScreen !== 'ChatGit' &&
             currentScreen !== 'Browser' &&
             currentScreen !== 'GitHubCodespaces' &&
@@ -952,8 +989,18 @@ export default function App() {
       handleDrawerSettled,
       ensureDrawerCapturesTouches,
       settingsAllowsDrawerGesture,
+      usesTabletLayout,
     ]
   );
+
+  useEffect(() => {
+    if (!usesTabletLayout) {
+      return;
+    }
+
+    handleDrawerSettled(false);
+    drawerOffset.value = -DRAWER_WIDTH;
+  }, [drawerOffset, handleDrawerSettled, usesTabletLayout]);
 
   useEffect(() => {
     if (currentScreen !== 'Settings' && !settingsAllowsDrawerGesture) {
@@ -1450,7 +1497,8 @@ export default function App() {
           : currentScreen === 'Settings' ||
               currentScreen === 'Browser' ||
               currentScreen === 'Privacy' ||
-              currentScreen === 'Terms'
+              currentScreen === 'Terms' ||
+              currentScreen === 'Terminal'
             ? currentScreen
             : 'Main';
       setPendingGitHubCodespacesSession(initialSession);
@@ -1683,6 +1731,7 @@ export default function App() {
         setCurrentScreen(browserReturnScreen);
         return true;
       case 'Settings':
+      case 'Terminal':
         setCurrentScreen('Main');
         return true;
       case 'Privacy':
@@ -1835,7 +1884,7 @@ export default function App() {
             ws={activeWs}
             bridgeUrl={bridgeUrl}
             bridgeToken={bridgeToken}
-            onOpenDrawer={openDrawer}
+            onOpenDrawer={handleNavigationToggle}
             onOpenGit={handleOpenChatGit}
             onOpenLocalPreview={openBrowser}
             onOpenBridgeRecoveryGuide={handleOpenBridgeRecoveryGuide}
@@ -1884,7 +1933,7 @@ export default function App() {
             onRenameBridgeProfile={handleRenameBridgeProfile}
             onDeleteBridgeProfile={handleDeleteBridgeProfile}
             onClearSavedBridges={handleClearSavedBridges}
-            onOpenDrawer={openDrawer}
+            onOpenDrawer={handleNavigationToggle}
             onDrawerGestureEnabledChange={setSettingsAllowsDrawerGesture}
             onOpenPrivacy={openPrivacy}
             onOpenTerms={openTerms}
@@ -1896,25 +1945,33 @@ export default function App() {
             ref={browserRef}
             api={activeApi}
             bridgeUrl={bridgeUrl}
-            onOpenDrawer={openDrawer}
+            onOpenDrawer={handleNavigationToggle}
             recentTargetUrls={recentBrowserTargetUrls}
             onRecentTargetUrlsChange={handleRecentBrowserTargetUrlsChange}
             pendingTargetUrl={pendingBrowserTargetUrl}
             onPendingTargetHandled={() => setPendingBrowserTargetUrl(null)}
           />
         );
+      case 'Terminal':
+        return (
+          <TerminalScreen
+            api={activeApi}
+            ws={activeWs}
+            onOpenDrawer={handleNavigationToggle}
+          />
+        );
       case 'Privacy':
         return (
           <PrivacyScreen
             policyUrl={env.privacyPolicyUrl}
-            onOpenDrawer={openDrawer}
+            onOpenDrawer={handleNavigationToggle}
           />
         );
       case 'Terms':
         return (
           <TermsScreen
             termsUrl={env.termsOfServiceUrl}
-            onOpenDrawer={openDrawer}
+            onOpenDrawer={handleNavigationToggle}
           />
         );
       default:
@@ -1925,7 +1982,7 @@ export default function App() {
             ws={activeWs}
             bridgeUrl={bridgeUrl}
             bridgeToken={bridgeToken}
-            onOpenDrawer={openDrawer}
+            onOpenDrawer={handleNavigationToggle}
             onOpenGit={handleOpenChatGit}
             onOpenLocalPreview={openBrowser}
             onOpenBridgeRecoveryGuide={handleOpenBridgeRecoveryGuide}
@@ -1956,14 +2013,28 @@ export default function App() {
             barStyle={theme.statusBarStyle}
             backgroundColor={theme.colors.bgMain}
           />
-          <View style={styles.root}>
+          <View style={[styles.root, usesTabletLayout && styles.tabletShell]}>
+            {usesTabletLayout && tabletSidebarVisible ? (
+              <View style={styles.tabletSidebar}>
+                <DrawerContent
+                  api={activeApi}
+                  ws={activeWs}
+                  active
+                  selectedChatId={selectedChatId}
+                  onSelectChat={handleSelectChat}
+                  onNewChat={handleNewChat}
+                  onNavigate={navigate}
+                />
+              </View>
+            ) : null}
             <GestureDetector gesture={openDrawerGesture}>
               <Animated.View
                 pointerEvents={drawerVisible && drawerCapturesTouches ? 'none' : 'auto'}
                 style={[
                   styles.screenFrame,
+                  usesTabletLayout && styles.tabletScreenFrame,
                   screenFrameAnimatedStyle,
-                  { width: screenWidth },
+                  usesTabletLayout ? null : { width: screenWidth },
                 ]}
               >
                 {renderScreen()}
@@ -1978,36 +2049,38 @@ export default function App() {
               </Animated.View>
             </GestureDetector>
 
-            <View
-              pointerEvents={drawerVisible && drawerCapturesTouches ? 'auto' : 'none'}
-              style={styles.drawerLayer}
-            >
-              <GestureDetector gesture={visibleDrawerGesture}>
-                <View style={styles.drawerGestureSurface}>
-                  <GestureDetector gesture={visibleDrawerTapGesture}>
-                    <Animated.View style={[styles.overlay, overlayAnimatedStyle]} />
-                  </GestureDetector>
+            {!usesTabletLayout ? (
+              <View
+                pointerEvents={drawerVisible && drawerCapturesTouches ? 'auto' : 'none'}
+                style={styles.drawerLayer}
+              >
+                <GestureDetector gesture={visibleDrawerGesture}>
+                  <View style={styles.drawerGestureSurface}>
+                    <GestureDetector gesture={visibleDrawerTapGesture}>
+                      <Animated.View style={[styles.overlay, overlayAnimatedStyle]} />
+                    </GestureDetector>
 
-                  <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
-                    <Animated.View
-                      style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
-                    >
-                      <DrawerContent
-                        api={activeApi}
-                        ws={activeWs}
-                        active={drawerVisible}
-                        selectedChatId={selectedChatId}
-                        onSelectChat={handleSelectChat}
-                        onNewChat={handleNewChat}
-                        onNavigate={navigate}
-                      />
+                    <Animated.View style={[styles.drawer, drawerAnimatedStyle]}>
+                      <Animated.View
+                        style={[styles.drawerContentShell, drawerContentAnimatedStyle]}
+                      >
+                        <DrawerContent
+                          api={activeApi}
+                          ws={activeWs}
+                          active={drawerVisible}
+                          selectedChatId={selectedChatId}
+                          onSelectChat={handleSelectChat}
+                          onNewChat={handleNewChat}
+                          onNavigate={navigate}
+                        />
+                      </Animated.View>
                     </Animated.View>
-                  </Animated.View>
-                </View>
-              </GestureDetector>
-            </View>
+                  </View>
+                </GestureDetector>
+              </View>
+            ) : null}
 
-            {currentScreen === 'ChatGit' ? (
+            {currentScreen === 'ChatGit' && !usesTabletLayout ? (
               <GestureDetector gesture={chatGitBackGesture}>
                 <View
                   pointerEvents={drawerVisible && drawerCapturesTouches ? 'none' : 'auto'}
@@ -2207,6 +2280,17 @@ const createStyles = (theme: ReturnType<typeof createAppTheme>) =>
     screen: {
       flex: 1,
     },
+    tabletShell: {
+      flexDirection: 'row',
+      backgroundColor: theme.colors.bgMain,
+    },
+    tabletSidebar: {
+      width: TABLET_SIDEBAR_WIDTH,
+      maxWidth: '38%',
+      borderRightWidth: StyleSheet.hairlineWidth,
+      borderRightColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgSidebar,
+    },
     screenFrame: {
       flex: 1,
       backgroundColor: theme.colors.bgMain,
@@ -2214,6 +2298,13 @@ const createStyles = (theme: ReturnType<typeof createAppTheme>) =>
       borderCurve: 'continuous',
       shadowColor: theme.colors.shadow,
       shadowOffset: { width: 0, height: 16 },
+    },
+    tabletScreenFrame: {
+      width: undefined,
+      borderRadius: 0,
+      shadowOpacity: 0,
+      shadowRadius: 0,
+      elevation: 0,
     },
     chatTransitionOverlay: {
       ...StyleSheet.absoluteFillObject,

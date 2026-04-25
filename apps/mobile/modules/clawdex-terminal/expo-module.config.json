@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["ClawdexTerminalModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.clawdexterminal.ClawdexTerminalModule"]
+  }
+}

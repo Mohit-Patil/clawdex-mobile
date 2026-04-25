@@ -297,6 +297,59 @@ export interface TerminalExecResponse {
   durationMs: number;
 }
 
+export interface TerminalSessionCreateRequest {
+  cwd?: string;
+  shell?: string;
+  cols?: number;
+  rows?: number;
+  pixelWidth?: number;
+  pixelHeight?: number;
+}
+
+export interface TerminalSessionReadRequest {
+  sessionId: string;
+}
+
+export interface TerminalSessionInputRequest {
+  sessionId: string;
+  dataBase64: string;
+}
+
+export interface TerminalSessionInputResponse {
+  ok: boolean;
+}
+
+export interface TerminalSessionResizeRequest {
+  sessionId: string;
+  cols: number;
+  rows: number;
+  pixelWidth?: number;
+  pixelHeight?: number;
+}
+
+export interface TerminalSessionCloseRequest {
+  sessionId: string;
+}
+
+export interface TerminalSessionSnapshot {
+  id: string;
+  cwd: string;
+  shell: string;
+  cols: number;
+  rows: number;
+  pixelWidth: number;
+  pixelHeight: number;
+  pid?: number | null;
+  startedAt: string;
+  active: boolean;
+  exitedAt?: string | null;
+  exitCode?: number | null;
+  exitSignal?: string | null;
+  lastError?: string | null;
+  outputBase64?: string | null;
+  outputTruncated: boolean;
+}
+
 export interface GitHubAuthInstallRequest {
   accessToken?: string;
   repositories?: string[];

@@ -61,6 +61,13 @@ import type {
   ServiceTier,
   TerminalExecRequest,
   TerminalExecResponse,
+  TerminalSessionCloseRequest,
+  TerminalSessionCreateRequest,
+  TerminalSessionInputRequest,
+  TerminalSessionInputResponse,
+  TerminalSessionReadRequest,
+  TerminalSessionResizeRequest,
+  TerminalSessionSnapshot,
   WorkspaceListResponse,
   FileSystemListRequest,
   FileSystemListResponse,
@@ -932,6 +939,32 @@ export class HostBridgeApiClient {
 
   execTerminal(body: TerminalExecRequest): Promise<TerminalExecResponse> {
     return this.ws.request<TerminalExecResponse>('bridge/terminal/exec', body);
+  }
+
+  createTerminalSession(body: TerminalSessionCreateRequest): Promise<TerminalSessionSnapshot> {
+    return this.ws.request<TerminalSessionSnapshot>('bridge/terminal/session/create', body);
+  }
+
+  readTerminalSession(body: TerminalSessionReadRequest): Promise<TerminalSessionSnapshot> {
+    return this.ws.request<TerminalSessionSnapshot>('bridge/terminal/session/read', body);
+  }
+
+  writeTerminalSessionInput(
+    body: TerminalSessionInputRequest
+  ): Promise<TerminalSessionInputResponse> {
+    return this.ws.request<TerminalSessionInputResponse>('bridge/terminal/session/input', body);
+  }
+
+  sendTerminalSessionInput(body: TerminalSessionInputRequest): Promise<void> {
+    return this.writeTerminalSessionInput(body).then(() => undefined);
+  }
+
+  resizeTerminalSession(body: TerminalSessionResizeRequest): Promise<TerminalSessionSnapshot> {
+    return this.ws.request<TerminalSessionSnapshot>('bridge/terminal/session/resize', body);
+  }
+
+  closeTerminalSession(body: TerminalSessionCloseRequest): Promise<TerminalSessionSnapshot> {
+    return this.ws.request<TerminalSessionSnapshot>('bridge/terminal/session/close', body);
   }
 
   installGitHubAuth(

@@ -30,7 +30,7 @@ import {
 } from './chatThreadTree';
 import { useAppTheme, type AppTheme } from '../theme';
 
-type Screen = 'Main' | 'Browser' | 'Settings' | 'Privacy' | 'Terms';
+type Screen = 'Main' | 'Browser' | 'Settings' | 'Privacy' | 'Terms' | 'Terminal';
 
 interface DrawerContentProps {
   api: HostBridgeApiClient;
@@ -625,6 +625,17 @@ export const DrawerContent = memo(function DrawerContentComponent({
               >
                 <Ionicons name="globe-outline" size={17} color={theme.colors.textPrimary} />
                 <Text style={styles.secondaryActionText}>Browser</Text>
+              </Pressable>
+              <Pressable
+                accessibilityLabel="Open terminal"
+                style={({ pressed }) => [
+                  styles.secondaryActionButton,
+                  pressed && styles.secondaryActionButtonPressed,
+                ]}
+                onPress={() => handleNavigate('Terminal')}
+              >
+                <Ionicons name="terminal-outline" size={17} color={theme.colors.textPrimary} />
+                <Text style={styles.secondaryActionText}>Terminal</Text>
               </Pressable>
             </View>
           </View>

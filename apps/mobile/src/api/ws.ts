@@ -163,6 +163,22 @@ export class HostBridgeWsClient {
     });
   }
 
+  async notify(method: string, params?: unknown): Promise<void> {
+    await this.ensureConnected();
+
+    const payload: Record<string, unknown> = { method };
+    if (params !== undefined) {
+      payload.params = params;
+    }
+
+    const socket = this.socket;
+    if (!socket || socket.readyState !== 1) {
+      throw new Error('Bridge websocket is not connected');
+    }
+
+    socket.send(JSON.stringify(payload));
+  }
+
   async waitForTurnCompletion(
     threadId: string,
     turnId: string,

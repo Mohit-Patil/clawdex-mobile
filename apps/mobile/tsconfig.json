@@ -25,6 +25,8 @@
   },
   "include": [
     "App.tsx",
+    "modules/**/*.ts",
+    "modules/**/*.tsx",
     "src/**/*.ts",
     "src/**/*.tsx",
     "src/**/*.d.ts"

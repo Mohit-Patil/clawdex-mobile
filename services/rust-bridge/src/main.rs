@@ -1685,6 +1685,23 @@ impl ClientHub {
         self.broadcast_json(payload).await;
     }
 
+    async fn broadcast_ephemeral_notification(&self, method: &str, params: Value) {
+        let event_id = self.next_event_id.fetch_add(1, Ordering::Relaxed);
+        let payload = json!({
+            "method": method,
+            "eventId": event_id,
+            "params": params
+        });
+        let params = payload.get("params").cloned().unwrap_or(Value::Null);
+
+        let _ = self.notification_tx.send(HubNotification {
+            event_id,
+            method: method.to_string(),
+            params,
+        });
+        self.broadcast_json(payload).await;
+    }
+
     async fn push_replay(&self, event_id: u64, payload: Value) {
         if self.replay_capacity == 0 {
             return;
@@ -5493,6 +5510,73 @@ struct TerminalExecResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TerminalSessionCreateRequest {
+    cwd: Option<String>,
+    shell: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    pixel_width: Option<u16>,
+    pixel_height: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalSessionReadRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalSessionInputRequest {
+    session_id: String,
+    data_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalSessionInputResponse {
+    ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalSessionResizeRequest {
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    pixel_width: Option<u16>,
+    pixel_height: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalSessionCloseRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalSessionSnapshot {
+    id: String,
+    cwd: String,
+    shell: String,
+    cols: u16,
+    rows: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+    pid: Option<u32>,
+    started_at: String,
+    active: bool,
+    exited_at: Option<String>,
+    exit_code: Option<i32>,
+    exit_signal: Option<String>,
+    last_error: Option<String>,
+    output_base64: Option<String>,
+    output_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BridgeUpdateStartRequest {
     version: Option<String>,
 }
@@ -5985,6 +6069,7 @@ async fn main() {
         config.terminal_allowed_commands.clone(),
         config.disable_terminal_exec,
         config.allow_outside_root_cwd,
+        hub.clone(),
     ));
     let git = Arc::new(GitService::new(
         terminal.clone(),
@@ -6809,7 +6894,14 @@ async fn handle_client_message(client_id: u64, text: String, state: &Arc<AppStat
     };
 
     let Some(id) = object.get("id").cloned() else {
-        // Ignore client-side notifications for now.
+        if is_bridge_notification_method(method) {
+            if let Err(error) = handle_bridge_method(method, object.get("params").cloned(), state).await {
+                eprintln!(
+                    "bridge notification failed: method={method} code={} message={}",
+                    error.code, error.message
+                );
+            }
+        }
         return;
     };
 
@@ -6850,6 +6942,10 @@ async fn handle_client_message(client_id: u64, text: String, state: &Arc<AppStat
     {
         send_rpc_error(state, client_id, id, -32000, &error, None).await;
     }
+}
+
+fn is_bridge_notification_method(method: &str) -> bool {
+    matches!(method, "bridge/terminal/session/input")
 }
 
 async fn handle_bridge_method(
@@ -7000,6 +7096,41 @@ async fn handle_bridge_method(
                 .await;
 
             Ok(result_value)
+        }
+        "bridge/terminal/session/create" => {
+            let request: TerminalSessionCreateRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state.terminal.create_session(request).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/terminal/session/read" => {
+            let request: TerminalSessionReadRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state.terminal.read_session(request).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/terminal/session/input" => {
+            let request: TerminalSessionInputRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state.terminal.write_session_input(request).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/terminal/session/resize" => {
+            let request: TerminalSessionResizeRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state.terminal.resize_session(request).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
+        }
+        "bridge/terminal/session/close" => {
+            let request: TerminalSessionCloseRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            let result = state.terminal.close_session(request).await?;
+            serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
         "bridge/github/auth/install" => {
             let request: GitHubAuthInstallRequest =
@@ -12602,6 +12733,7 @@ mod tests {
             config.terminal_allowed_commands.clone(),
             config.disable_terminal_exec,
             config.allow_outside_root_cwd,
+            hub.clone(),
         ));
         let git = Arc::new(GitService::new(
             terminal.clone(),
@@ -13690,6 +13822,8 @@ mod tests {
         assert!(is_forwarded_method("thread/backgroundTerminals/clean"));
         assert!(is_forwarded_method("thread/loaded/list"));
         assert!(!is_forwarded_method("bridge/terminal/exec"));
+        assert!(!is_forwarded_method("bridge/terminal/session/create"));
+        assert!(!is_forwarded_method("bridge/terminal/session/input"));
         assert!(!is_forwarded_method("thread/delete"));
     }
 
