@@ -2,11 +2,14 @@ import { HostBridgeApiClient } from '../client';
 import type { HostBridgeWsClient } from '../ws';
 
 function createWsMock() {
-  type WsLike = Pick<HostBridgeWsClient, 'request' | 'waitForTurnCompletion'>;
+  type WsLike = Pick<HostBridgeWsClient, 'request' | 'waitForTurnCompletion' | 'onEvent'>;
+  const onEventMock = jest.fn() as jest.MockedFunction<WsLike['onEvent']>;
+  onEventMock.mockReturnValue(jest.fn());
   return {
     request: jest.fn(),
     waitForTurnCompletion: jest.fn().mockResolvedValue(undefined),
-  } as jest.Mocked<WsLike>;
+    onEvent: onEventMock,
+  } as unknown as jest.Mocked<WsLike>;
 }
 
 describe('HostBridgeApiClient', () => {
@@ -335,6 +338,250 @@ describe('HostBridgeApiClient', () => {
     expect(chats).toHaveLength(1);
     expect(chats[0].id).toBe('thr_1');
     expect(chats[0].status).toBe('complete');
+    expect(client.peekChatShell('thr_1')).toMatchObject({
+      id: 'thr_1',
+      title: 'hello world',
+      messages: [],
+    });
+  });
+
+  it('startChatListStream() maps streamed batches and cancels by stream id', async () => {
+    const ws = createWsMock();
+    type EventHandler = Parameters<HostBridgeWsClient['onEvent']>[0];
+    const listenerRef: { current?: EventHandler } = {};
+    const unsubscribe = jest.fn();
+    ws.onEvent.mockImplementation((nextListener) => {
+      listenerRef.current = nextListener;
+      return unsubscribe;
+    });
+    ws.request.mockImplementation((method, params) => {
+      if (method === 'bridge/thread/list/stream/start') {
+        return Promise.resolve({
+          started: true,
+          streamId: (params as { streamId?: string } | undefined)?.streamId,
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const batches: unknown[] = [];
+    const controller = await client.startChatListStream(
+      {
+        limits: [5, 20],
+        delayMs: 900,
+      },
+      (batch) => {
+        batches.push(batch);
+      }
+    );
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'bridge/thread/list/stream/start',
+      expect.objectContaining({
+        streamId: controller.streamId,
+        limits: [5, 20],
+        delayMs: 900,
+      })
+    );
+
+    expect(listenerRef.current).toBeTruthy();
+    const emit = listenerRef.current as EventHandler;
+    emit({
+      method: 'bridge/thread/list/stream/batch',
+      params: {
+        streamId: controller.streamId,
+        limit: 5,
+        done: false,
+        data: [
+          {
+            id: 'thr_stream',
+            preview: 'streamed chat',
+            createdAt: 1700000000,
+            updatedAt: 1700000001,
+            status: { type: 'idle' },
+            turns: [],
+          },
+        ],
+      },
+    });
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toMatchObject({
+      streamId: controller.streamId,
+      limit: 5,
+      done: false,
+      chats: [
+        {
+          id: 'thr_stream',
+          title: 'streamed chat',
+        },
+      ],
+    });
+    expect(client.peekChats({ limit: 5 })?.map((chat) => chat.id)).toEqual(['thr_stream']);
+
+    controller.cancel();
+
+    expect(unsubscribe).toHaveBeenCalled();
+    expect(ws.request).toHaveBeenLastCalledWith('bridge/thread/list/stream/cancel', {
+      streamId: controller.streamId,
+    });
+  });
+
+  it('listAllChats() follows thread/list pagination until nextCursor is empty', async () => {
+    const ws = createWsMock();
+    ws.request
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'thr_1',
+            preview: 'first page',
+            createdAt: 1700000000,
+            updatedAt: 1700000002,
+            status: { type: 'idle' },
+            turns: [],
+          },
+        ],
+        nextCursor: 'cursor_page_2',
+      })
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: 'thr_2',
+            preview: 'second page',
+            createdAt: 1700000000,
+            updatedAt: 1700000001,
+            status: { type: 'idle' },
+            turns: [],
+          },
+        ],
+        nextCursor: null,
+      });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const pageSnapshots: string[][] = [];
+    const chats = await client.listAllChats({
+      pageLimit: 50,
+      onPage: (loadedChats) => {
+        pageSnapshots.push(loadedChats.map((chat) => chat.id));
+      },
+    });
+
+    expect(ws.request).toHaveBeenNthCalledWith(
+      1,
+      'thread/list',
+      expect.objectContaining({
+        cursor: null,
+        limit: 50,
+      })
+    );
+    expect(ws.request).toHaveBeenNthCalledWith(
+      2,
+      'thread/list',
+      expect.objectContaining({
+        cursor: 'cursor_page_2',
+        limit: 50,
+      })
+    );
+    expect(chats.map((chat) => chat.id)).toEqual(['thr_1', 'thr_2']);
+    expect(pageSnapshots).toEqual([['thr_1'], ['thr_1', 'thr_2']]);
+
+    ws.request.mockClear();
+    pageSnapshots.length = 0;
+    const cached = await client.listAllChats({
+      pageLimit: 50,
+      cacheTtlMs: 30_000,
+      onPage: (loadedChats) => {
+        pageSnapshots.push(loadedChats.map((chat) => chat.id));
+      },
+    });
+
+    expect(ws.request).not.toHaveBeenCalled();
+    expect(cached.map((chat) => chat.id)).toEqual(['thr_1', 'thr_2']);
+    expect(pageSnapshots).toEqual([]);
+  });
+
+  it('rememberChats() keeps an already-loaded full chat list monotonic', () => {
+    const ws = createWsMock();
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+
+    client.rememberAllChats([
+      {
+        id: 'thr_old',
+        title: 'old',
+        createdAt: '2023-11-14T22:13:20.000Z',
+        updatedAt: '2023-11-14T22:13:20.000Z',
+        statusUpdatedAt: '2023-11-14T22:13:20.000Z',
+        status: 'complete',
+        lastMessagePreview: 'old chat',
+        engine: 'codex',
+      },
+    ]);
+
+    client.rememberChats(
+      [
+        {
+          id: 'thr_new',
+          title: 'new',
+          createdAt: '2023-11-14T22:13:21.000Z',
+          updatedAt: '2023-11-14T22:13:21.000Z',
+          statusUpdatedAt: '2023-11-14T22:13:21.000Z',
+          status: 'running',
+          lastMessagePreview: 'new chat',
+          engine: 'codex',
+        },
+      ],
+      { limit: 5 }
+    );
+
+    expect(client.peekAllChats()?.map((chat) => chat.id)).toEqual(['thr_new', 'thr_old']);
+  });
+
+  it('getChat() caches full thread snapshots for immediate reuse', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      thread: {
+        id: 'thr_cached',
+        preview: 'cached chat',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            id: 'turn_cached',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'u_cached',
+                content: [{ type: 'text', text: 'Hello cached' }],
+              },
+              {
+                type: 'agentMessage',
+                id: 'a_cached',
+                text: 'Hi cached',
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const chat = await client.getChat('thr_cached');
+    expect(chat.messages.map((message) => message.content)).toEqual([
+      'Hello cached',
+      'Hi cached',
+    ]);
+
+    ws.request.mockClear();
+    const cached = await client.getChat('thr_cached', { cacheTtlMs: 30_000 });
+
+    expect(ws.request).not.toHaveBeenCalled();
+    expect(cached.messages.map((message) => message.content)).toEqual([
+      'Hello cached',
+      'Hi cached',
+    ]);
+    expect(client.peekChat('thr_cached')?.messages).toHaveLength(2);
   });
 
   it('listChats() treats idle thread status as complete even with stale inProgress turn', async () => {
@@ -448,7 +695,7 @@ describe('HostBridgeApiClient', () => {
 
     expect(ws.request).toHaveBeenCalledWith('thread/list', {
       cursor: null,
-      limit: 200,
+      limit: 50,
       sortKey: null,
       modelProviders: null,
       sourceKinds: [

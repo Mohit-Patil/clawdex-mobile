@@ -25,6 +25,8 @@ import Animated, {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { HostBridgeApiClient } from '../api/client';
+import { toRecord } from '../api/chatMapping';
+import { readAccountRateLimitSnapshot } from '../api/rateLimits';
 import type {
   AccountSnapshot,
   AccountRateLimitSnapshot,
@@ -202,7 +204,9 @@ export function SettingsScreen({
   const [account, setAccount] = useState<AccountSnapshot | null>(null);
   const [accountLoading, setAccountLoading] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
-  const [accountRateLimits, setAccountRateLimits] = useState<AccountRateLimitSnapshot | null>(null);
+  const [accountRateLimits, setAccountRateLimits] = useState<AccountRateLimitSnapshot | null>(
+    () => api.peekAccountRateLimits()
+  );
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState<string | null>(null);
   const [bridgeCapabilities, setBridgeCapabilities] = useState<BridgeCapabilities | null>(null);
@@ -491,15 +495,29 @@ export function SettingsScreen({
     }
   }, [api]);
 
-  const loadRateLimits = useCallback(async () => {
-    setRateLimitsLoading(true);
+  const loadRateLimits = useCallback(async (options?: { showLoading?: boolean }) => {
+    const cachedSnapshot = api.peekAccountRateLimits();
+    if (cachedSnapshot) {
+      setAccountRateLimits(cachedSnapshot);
+    }
+
+    const showLoading = options?.showLoading !== false && !cachedSnapshot;
+    setRateLimitsLoading(showLoading);
     try {
-      const snapshot = await api.readAccountRateLimits();
+      const snapshot = await api.readAccountRateLimits({ forceRefresh: true });
       setAccountRateLimits(snapshot);
       setRateLimitsError(null);
     } catch (err) {
       setRateLimitsError((err as Error).message);
     } finally {
+      setRateLimitsLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    const cachedSnapshot = api.peekAccountRateLimits();
+    if (cachedSnapshot) {
+      setAccountRateLimits(cachedSnapshot);
       setRateLimitsLoading(false);
     }
   }, [api]);
@@ -601,14 +619,24 @@ export function SettingsScreen({
     () =>
       ws.onEvent((event) => {
         if (event.method === 'account/rateLimits/updated' && shouldLoadLimitsSettings) {
-          void loadRateLimits();
+          const params = toRecord(event.params);
+          const snapshot = readAccountRateLimitSnapshot(
+            params?.rateLimits ?? params?.rate_limits ?? event.params
+          );
+          api.rememberAccountRateLimits(snapshot);
+          setAccountRateLimits(snapshot);
+          setRateLimitsError(null);
+          setRateLimitsLoading(false);
+          if (!snapshot) {
+            void loadRateLimits({ showLoading: false });
+          }
         }
 
         if (event.method === 'account/updated' && shouldLoadAccountSettings) {
           void loadAccount();
         }
       }),
-    [loadAccount, loadRateLimits, shouldLoadAccountSettings, shouldLoadLimitsSettings, ws]
+    [api, loadAccount, loadRateLimits, shouldLoadAccountSettings, shouldLoadLimitsSettings, ws]
   );
 
   useEffect(() => {

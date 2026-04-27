@@ -43,7 +43,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::{broadcast, mpsc, oneshot, watch, Mutex, RwLock},
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_tungstenite::{
     connect_async,
@@ -68,6 +68,13 @@ const NOTIFICATION_REPLAY_BUFFER_SIZE: usize = 2_000;
 const NOTIFICATION_REPLAY_MAX_LIMIT: usize = 1_000;
 const INTERNAL_NOTIFICATION_CHANNEL_CAPACITY: usize = 1_024;
 const WS_CLIENT_QUEUE_CAPACITY: usize = 256;
+const BRIDGE_THREAD_LIST_CURSOR_PREFIX: &str = "bridge:";
+const THREAD_LIST_STREAM_BATCH_METHOD: &str = "bridge/thread/list/stream/batch";
+const THREAD_LIST_STREAM_ERROR_METHOD: &str = "bridge/thread/list/stream/error";
+const THREAD_LIST_STREAM_DEFAULT_LIMITS: [usize; 3] = [5, 20, 50];
+const THREAD_LIST_STREAM_MAX_LIMIT: usize = 100;
+const THREAD_LIST_STREAM_DEFAULT_DELAY_MS: u64 = 900;
+const THREAD_LIST_STREAM_MAX_DELAY_MS: u64 = 5_000;
 const ROLLOUT_LIVE_SYNC_POLL_INTERVAL_MS: u64 = 900;
 const ROLLOUT_LIVE_SYNC_DISCOVERY_INTERVAL_TICKS: u64 = 1;
 const ROLLOUT_LIVE_SYNC_MAX_TRACKED_FILES: usize = 64;
@@ -781,6 +788,7 @@ struct AppState {
     hub: Arc<ClientHub>,
     backend: Arc<RuntimeBackend>,
     queue: Arc<BridgeQueueService>,
+    thread_list_streams: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     terminal: Arc<TerminalService>,
     git: Arc<GitService>,
     updater: Arc<UpdateService>,
@@ -1314,21 +1322,57 @@ impl RuntimeBackend {
 
     async fn aggregate_thread_list(&self, params: Option<Value>) -> Result<Value, String> {
         let mut results = Vec::new();
+        let bridge_cursor = extract_thread_list_cursor(params.as_ref())
+            .and_then(|cursor| decode_bridge_thread_list_cursor(&cursor));
 
         if let Some(codex) = &self.codex {
-            results.push((
-                BridgeRuntimeEngine::Codex,
-                codex
-                    .request_internal("thread/list", params.clone())
-                    .await?,
-            ));
+            if let Some(cursor_map) = bridge_cursor.as_ref() {
+                if let Some(cursor) = cursor_map.get(&BridgeRuntimeEngine::Codex) {
+                    results.push((
+                        BridgeRuntimeEngine::Codex,
+                        codex
+                            .request_internal(
+                                "thread/list",
+                                Some(thread_list_params_with_cursor(
+                                    params.as_ref(),
+                                    Some(cursor),
+                                )),
+                            )
+                            .await?,
+                    ));
+                }
+            } else {
+                results.push((
+                    BridgeRuntimeEngine::Codex,
+                    codex
+                        .request_internal("thread/list", params.clone())
+                        .await?,
+                ));
+            }
         }
 
         if let Some(opencode) = &self.opencode {
-            results.push((
-                BridgeRuntimeEngine::Opencode,
-                opencode.request_internal("thread/list", params).await?,
-            ));
+            if let Some(cursor_map) = bridge_cursor.as_ref() {
+                if let Some(cursor) = cursor_map.get(&BridgeRuntimeEngine::Opencode) {
+                    results.push((
+                        BridgeRuntimeEngine::Opencode,
+                        opencode
+                            .request_internal(
+                                "thread/list",
+                                Some(thread_list_params_with_cursor(
+                                    params.as_ref(),
+                                    Some(cursor),
+                                )),
+                            )
+                            .await?,
+                    ));
+                }
+            } else {
+                results.push((
+                    BridgeRuntimeEngine::Opencode,
+                    opencode.request_internal("thread/list", params).await?,
+                ));
+            }
         }
 
         Ok(merge_thread_list_results(results))
@@ -5674,6 +5718,21 @@ struct EventReplayRequest {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListStreamStartRequest {
+    stream_id: Option<String>,
+    include_sub_agents: Option<bool>,
+    limits: Option<Vec<usize>>,
+    delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListStreamCancelRequest {
+    stream_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitCommitRequest {
@@ -6014,6 +6073,7 @@ async fn main() {
         hub,
         backend,
         queue,
+        thread_list_streams: Arc::new(Mutex::new(HashMap::new())),
         terminal,
         git,
         updater,
@@ -6816,7 +6876,7 @@ async fn handle_client_message(client_id: u64, text: String, state: &Arc<AppStat
     let params = object.get("params").cloned();
 
     if method.starts_with("bridge/") {
-        match handle_bridge_method(method, params, state).await {
+        match handle_bridge_method(method, params, state, client_id).await {
             Ok(result) => {
                 state
                     .hub
@@ -6856,6 +6916,7 @@ async fn handle_bridge_method(
     method: &str,
     params: Option<Value>,
     state: &Arc<AppState>,
+    client_id: u64,
 ) -> Result<Value, BridgeError> {
     match method {
         "bridge/health/read" => Ok(json!({
@@ -6930,6 +6991,18 @@ async fn handle_bridge_method(
                 "earliestEventId": state.hub.earliest_event_id().await,
                 "latestEventId": state.hub.latest_event_id(),
             }))
+        }
+        "bridge/thread/list/stream/start" => {
+            let request: ThreadListStreamStartRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            start_thread_list_stream(state, client_id, request).await
+        }
+        "bridge/thread/list/stream/cancel" => {
+            let request: ThreadListStreamCancelRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            cancel_thread_list_stream(state, client_id, &request.stream_id).await
         }
         "bridge/thread/queue/read" => {
             let request: BridgeThreadQueueReadRequest =
@@ -7290,6 +7363,251 @@ async fn handle_bridge_method(
             "Unknown bridge method: {method}"
         ))),
     }
+}
+
+async fn start_thread_list_stream(
+    state: &Arc<AppState>,
+    client_id: u64,
+    request: ThreadListStreamStartRequest,
+) -> Result<Value, BridgeError> {
+    let stream_id = normalize_thread_list_stream_id(request.stream_id, client_id);
+    let stream_key = thread_list_stream_key(client_id, &stream_id);
+    let limits = normalize_thread_list_stream_limits(request.limits);
+    let response_limits = limits.clone();
+    let delay_ms = request
+        .delay_ms
+        .unwrap_or(THREAD_LIST_STREAM_DEFAULT_DELAY_MS)
+        .min(THREAD_LIST_STREAM_MAX_DELAY_MS);
+    let include_sub_agents = request.include_sub_agents.unwrap_or(false);
+    let cancellation = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut streams = state.thread_list_streams.lock().await;
+        if let Some(previous) = streams.insert(stream_key.clone(), cancellation.clone()) {
+            previous.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let stream_state = state.clone();
+    let stream_id_for_task = stream_id.clone();
+    tokio::spawn(async move {
+        run_thread_list_stream(
+            stream_state,
+            client_id,
+            stream_id_for_task,
+            stream_key,
+            include_sub_agents,
+            limits,
+            delay_ms,
+            cancellation,
+        )
+        .await;
+    });
+
+    Ok(json!({
+        "streamId": stream_id,
+        "started": true,
+        "limits": response_limits,
+        "delayMs": delay_ms,
+    }))
+}
+
+async fn cancel_thread_list_stream(
+    state: &Arc<AppState>,
+    client_id: u64,
+    stream_id: &str,
+) -> Result<Value, BridgeError> {
+    let stream_id = stream_id.trim();
+    if stream_id.is_empty() {
+        return Err(BridgeError::invalid_params("streamId must not be empty"));
+    }
+
+    let stream_key = thread_list_stream_key(client_id, stream_id);
+    let cancelled = {
+        let mut streams = state.thread_list_streams.lock().await;
+        streams
+            .remove(&stream_key)
+            .map(|cancellation| {
+                cancellation.store(true, Ordering::Relaxed);
+                true
+            })
+            .unwrap_or(false)
+    };
+
+    Ok(json!({
+        "streamId": stream_id,
+        "cancelled": cancelled,
+    }))
+}
+
+async fn run_thread_list_stream(
+    state: Arc<AppState>,
+    client_id: u64,
+    stream_id: String,
+    stream_key: String,
+    include_sub_agents: bool,
+    limits: Vec<usize>,
+    delay_ms: u64,
+    cancellation: Arc<AtomicBool>,
+) {
+    for (index, limit) in limits.iter().copied().enumerate() {
+        if cancellation.load(Ordering::Relaxed) {
+            break;
+        }
+
+        if index > 0 && delay_ms > 0 {
+            sleep(Duration::from_millis(delay_ms)).await;
+            if cancellation.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+
+        let started_at = Instant::now();
+        let result = state
+            .backend
+            .request_internal(
+                "thread/list",
+                Some(thread_list_stream_request_params(include_sub_agents, limit)),
+            )
+            .await;
+
+        if cancellation.load(Ordering::Relaxed) {
+            break;
+        }
+
+        match result {
+            Ok(result) => {
+                let data = result
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                send_thread_list_stream_notification(
+                    &state,
+                    client_id,
+                    THREAD_LIST_STREAM_BATCH_METHOD,
+                    json!({
+                        "streamId": stream_id.clone(),
+                        "includeSubAgents": include_sub_agents,
+                        "limit": limit,
+                        "done": index + 1 == limits.len(),
+                        "elapsedMs": started_at.elapsed().as_millis(),
+                        "data": data,
+                    }),
+                )
+                .await;
+            }
+            Err(error) => {
+                send_thread_list_stream_notification(
+                    &state,
+                    client_id,
+                    THREAD_LIST_STREAM_ERROR_METHOD,
+                    json!({
+                        "streamId": stream_id.clone(),
+                        "includeSubAgents": include_sub_agents,
+                        "limit": limit,
+                        "done": true,
+                        "elapsedMs": started_at.elapsed().as_millis(),
+                        "error": error,
+                    }),
+                )
+                .await;
+                break;
+            }
+        }
+    }
+
+    let mut streams = state.thread_list_streams.lock().await;
+    if streams
+        .get(&stream_key)
+        .map(|active| Arc::ptr_eq(active, &cancellation))
+        .unwrap_or(false)
+    {
+        streams.remove(&stream_key);
+    }
+}
+
+async fn send_thread_list_stream_notification(
+    state: &Arc<AppState>,
+    client_id: u64,
+    method: &str,
+    params: Value,
+) {
+    state
+        .hub
+        .send_json(
+            client_id,
+            json!({
+                "method": method,
+                "params": params,
+            }),
+        )
+        .await;
+}
+
+fn thread_list_stream_request_params(include_sub_agents: bool, limit: usize) -> Value {
+    let source_kinds = if include_sub_agents {
+        json!([
+            "cli",
+            "vscode",
+            "exec",
+            "appServer",
+            "unknown",
+            "subAgent",
+            "subAgentReview",
+            "subAgentCompact",
+            "subAgentThreadSpawn",
+            "subAgentOther",
+        ])
+    } else {
+        json!(["cli", "vscode", "exec", "appServer", "unknown"])
+    };
+
+    json!({
+        "cursor": Value::Null,
+        "limit": limit,
+        "sortKey": Value::Null,
+        "modelProviders": Value::Null,
+        "sourceKinds": source_kinds,
+        "archived": false,
+        "cwd": Value::Null,
+    })
+}
+
+fn normalize_thread_list_stream_limits(limits: Option<Vec<usize>>) -> Vec<usize> {
+    let requested = limits.unwrap_or_else(|| THREAD_LIST_STREAM_DEFAULT_LIMITS.to_vec());
+    let mut normalized = Vec::new();
+    for limit in requested {
+        let clamped = limit.clamp(1, THREAD_LIST_STREAM_MAX_LIMIT);
+        if !normalized.contains(&clamped) {
+            normalized.push(clamped);
+        }
+    }
+
+    if normalized.is_empty() {
+        THREAD_LIST_STREAM_DEFAULT_LIMITS.to_vec()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_thread_list_stream_id(stream_id: Option<String>, client_id: u64) -> String {
+    stream_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| next_thread_list_stream_id(client_id))
+}
+
+fn next_thread_list_stream_id(client_id: u64) -> String {
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("thread-list-{client_id}-{stamp:x}")
+}
+
+fn thread_list_stream_key(client_id: u64, stream_id: &str) -> String {
+    format!("{client_id}:{}", stream_id.trim())
 }
 
 async fn list_workspace_roots(
@@ -10328,6 +10646,85 @@ fn extract_thread_list_entries(result: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn extract_thread_list_cursor(params: Option<&Value>) -> Option<String> {
+    params
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("cursor"))
+        .and_then(|value| read_string(Some(value)))
+}
+
+fn thread_list_params_with_cursor(params: Option<&Value>, cursor: Option<&str>) -> Value {
+    let mut object = params
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    match cursor {
+        Some(cursor) if !cursor.trim().is_empty() => {
+            object.insert("cursor".to_string(), json!(cursor.trim()));
+        }
+        _ => {
+            object.insert("cursor".to_string(), Value::Null);
+        }
+    }
+
+    Value::Object(object)
+}
+
+fn extract_next_cursor(result: &Value) -> Option<String> {
+    read_string(result.get("nextCursor"))
+}
+
+fn extract_backwards_cursor(result: &Value) -> Option<String> {
+    read_string(result.get("backwardsCursor"))
+}
+
+fn encode_bridge_thread_list_cursor(cursors: &[(BridgeRuntimeEngine, String)]) -> Option<String> {
+    if cursors.is_empty() {
+        return None;
+    }
+
+    let mut object = serde_json::Map::new();
+    for (engine, cursor) in cursors {
+        let cursor = cursor.trim();
+        if cursor.is_empty() {
+            continue;
+        }
+        object.insert(engine.as_str().to_string(), json!(cursor));
+    }
+
+    if object.is_empty() {
+        return None;
+    }
+
+    let raw = serde_json::to_vec(&Value::Object(object)).ok()?;
+    Some(format!(
+        "{BRIDGE_THREAD_LIST_CURSOR_PREFIX}{}",
+        general_purpose::URL_SAFE_NO_PAD.encode(raw)
+    ))
+}
+
+fn decode_bridge_thread_list_cursor(raw: &str) -> Option<HashMap<BridgeRuntimeEngine, String>> {
+    let encoded = raw.trim().strip_prefix(BRIDGE_THREAD_LIST_CURSOR_PREFIX)?;
+    let decoded = general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let value: Value = serde_json::from_slice(&decoded).ok()?;
+    let object = value.as_object()?;
+    let mut cursors = HashMap::new();
+
+    for (engine_key, cursor_value) in object {
+        let Some(engine) = parse_bridge_runtime_engine(engine_key) else {
+            continue;
+        };
+        let Some(cursor) = read_string(Some(cursor_value)).filter(|cursor| !cursor.is_empty())
+        else {
+            continue;
+        };
+        cursors.insert(engine, cursor);
+    }
+
+    (!cursors.is_empty()).then_some(cursors)
+}
+
 fn extract_loaded_thread_ids(result: &Value) -> Vec<String> {
     result
         .get("data")
@@ -10344,9 +10741,18 @@ fn extract_loaded_thread_ids(result: &Value) -> Vec<String> {
 
 fn merge_thread_list_results(results: Vec<(BridgeRuntimeEngine, Value)>) -> Value {
     let mut entries = Vec::new();
+    let mut next_cursors = Vec::new();
+    let mut backwards_cursor = None;
+    let result_count = results.len();
 
     for (engine, result) in results {
         let normalized = normalize_forwarded_result("thread/list", result, engine);
+        if let Some(cursor) = extract_next_cursor(&normalized) {
+            next_cursors.push((engine, cursor));
+        }
+        if result_count == 1 {
+            backwards_cursor = extract_backwards_cursor(&normalized);
+        }
         entries.extend(extract_thread_list_entries(&normalized));
     }
 
@@ -10360,7 +10766,17 @@ fn merge_thread_list_results(results: Vec<(BridgeRuntimeEngine, Value)>) -> Valu
         })
     });
 
-    json!({ "data": entries })
+    let next_cursor = if result_count == 1 {
+        next_cursors.first().map(|(_, cursor)| cursor.clone())
+    } else {
+        encode_bridge_thread_list_cursor(&next_cursors)
+    };
+
+    json!({
+        "data": entries,
+        "nextCursor": next_cursor,
+        "backwardsCursor": backwards_cursor,
+    })
 }
 
 fn merge_loaded_thread_ids_results(results: Vec<(BridgeRuntimeEngine, Value)>) -> Value {
@@ -12622,6 +13038,7 @@ mod tests {
             hub,
             backend,
             queue,
+            thread_list_streams: Arc::new(Mutex::new(HashMap::new())),
             terminal,
             git,
             updater,
@@ -13119,6 +13536,65 @@ mod tests {
         assert_eq!(merged["data"][0]["engine"], "opencode");
         assert_eq!(merged["data"][1]["id"], "opencode:ses_mid");
         assert_eq!(merged["data"][2]["id"], "codex:thr_old");
+    }
+
+    #[test]
+    fn merge_thread_list_results_preserves_single_engine_cursor() {
+        let merged = merge_thread_list_results(vec![(
+            BridgeRuntimeEngine::Codex,
+            json!({
+                "data": [
+                    {
+                        "id": "thr_1",
+                        "updatedAt": 100,
+                    }
+                ],
+                "nextCursor": "cursor_2",
+                "backwardsCursor": "cursor_back",
+            }),
+        )]);
+
+        assert_eq!(merged["nextCursor"], "cursor_2");
+        assert_eq!(merged["backwardsCursor"], "cursor_back");
+    }
+
+    #[test]
+    fn merge_thread_list_results_encodes_multi_engine_cursor() {
+        let merged = merge_thread_list_results(vec![
+            (
+                BridgeRuntimeEngine::Codex,
+                json!({
+                    "data": [
+                        {
+                            "id": "thr_1",
+                            "updatedAt": 100,
+                        }
+                    ],
+                    "nextCursor": "codex_cursor_2",
+                }),
+            ),
+            (
+                BridgeRuntimeEngine::Opencode,
+                json!({
+                    "data": [
+                        {
+                            "id": "ses_1",
+                            "updatedAt": 90,
+                        }
+                    ],
+                    "nextCursor": null,
+                }),
+            ),
+        ]);
+
+        let cursor = merged["nextCursor"].as_str().expect("encoded cursor");
+        assert!(cursor.starts_with(BRIDGE_THREAD_LIST_CURSOR_PREFIX));
+        let decoded = decode_bridge_thread_list_cursor(cursor).expect("decoded cursor");
+        assert_eq!(
+            decoded.get(&BridgeRuntimeEngine::Codex).map(String::as_str),
+            Some("codex_cursor_2")
+        );
+        assert!(!decoded.contains_key(&BridgeRuntimeEngine::Opencode));
     }
 
     #[test]

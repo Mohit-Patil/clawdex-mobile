@@ -27,6 +27,8 @@ import Animated, {
 import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 
 import { HostBridgeApiClient } from './src/api/client';
+import { toRecord } from './src/api/chatMapping';
+import { readAccountRateLimitSnapshot } from './src/api/rateLimits';
 import { APP_SETTINGS_VERSION, parseAppSettings } from './src/appSettings';
 import type {
   ApprovalMode,
@@ -138,6 +140,8 @@ const DRAWER_MAX_RADIUS = 28;
 const DRAWER_MAX_SHADOW_OPACITY = 0.24;
 const DRAWER_MAX_SHADOW_RADIUS = 26;
 const DRAWER_MAX_ELEVATION = 18;
+const APP_PREFETCH_DELAY_MS = 0;
+const APP_PREFETCH_CHAT_LIMIT = 5;
 const APP_SETTINGS_FILE = 'clawdex-app-settings.json';
 const AUTO_STORE_REVIEW_RETRY_MS = 24 * 60 * 60 * 1000;
 
@@ -340,6 +344,80 @@ export default function App() {
     ws.connect();
     return () => ws.disconnect();
   }, [ws]);
+
+  useEffect(() => {
+    if (!api || !ws || currentScreen === 'Onboarding') {
+      return;
+    }
+
+    let cancelled = false;
+    let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const runPrefetch = () => {
+      if (cancelled) {
+        return;
+      }
+      void api.primeChats({ limit: APP_PREFETCH_CHAT_LIMIT }).catch(() => {});
+      void api.primeAccountRateLimits().catch(() => {});
+    };
+
+    const schedulePrefetch = () => {
+      if (prefetchTimer) {
+        return;
+      }
+
+      prefetchTimer = setTimeout(() => {
+        prefetchTimer = null;
+        runPrefetch();
+      }, APP_PREFETCH_DELAY_MS);
+    };
+
+    schedulePrefetch();
+    const unsubscribeStatus = ws.onStatus((connected) => {
+      if (connected) {
+        schedulePrefetch();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (prefetchTimer) {
+        clearTimeout(prefetchTimer);
+        prefetchTimer = null;
+      }
+      unsubscribeStatus();
+    };
+  }, [api, currentScreen, ws]);
+
+  useEffect(() => {
+    if (!api || !ws) {
+      return;
+    }
+
+    return ws.onEvent((event) => {
+      if (event.method === 'account/rateLimits/updated') {
+        const params = toRecord(event.params);
+        const snapshot = readAccountRateLimitSnapshot(
+          params?.rateLimits ?? params?.rate_limits ?? event.params
+        );
+        api.rememberAccountRateLimits(snapshot);
+        return;
+      }
+
+      if (!event.method.startsWith('codex/event/')) {
+        return;
+      }
+
+      const params = toRecord(event.params);
+      const msg = toRecord(params?.msg);
+      const snapshot = readAccountRateLimitSnapshot(
+        msg?.rate_limits ?? msg?.rateLimits
+      );
+      if (snapshot && !api.peekAccountRateLimits()) {
+        api.rememberAccountRateLimits(snapshot);
+      }
+    });
+  }, [api, ws]);
 
   useEffect(() => {
     if (
@@ -815,14 +893,8 @@ export default function App() {
       setMainOpeningChatId(id);
       closeDrawer();
 
-      let nextSnapshot = snapshot && snapshot.id === id ? snapshot : null;
-      if (!nextSnapshot && currentScreen !== 'Main' && api) {
-        try {
-          nextSnapshot = await api.getChat(id);
-        } catch {
-          nextSnapshot = null;
-        }
-      }
+      const nextSnapshot =
+        snapshot && snapshot.id === id ? snapshot : api?.peekChatShell(id) ?? null;
 
       const remainingMs = 220 - (Date.now() - startedAt);
       if (remainingMs > 0) {
@@ -844,7 +916,7 @@ export default function App() {
         setMainOpeningChatId(null);
       }
     },
-    [api, closeDrawer, currentScreen]
+    [api, closeDrawer]
   );
 
   const handleChatGitBack = useCallback(() => {

@@ -243,6 +243,7 @@ const BACKGROUND_CHAT_SYNC_INTERVAL_MS = 15_000;
 const AGENT_THREADS_SYNC_INTERVAL_MS = 10_000;
 const AGENT_THREADS_IDLE_SYNC_INTERVAL_MS = 20_000;
 const AGENT_THREADS_BACKGROUND_SYNC_INTERVAL_MS = 30_000;
+const AGENT_THREADS_LIST_LIMIT = 20;
 const APP_FOCUS_DISCONNECT_GRACE_MS = 5_000;
 const ACTIVITY_DETAIL_HOLD_MS = 2_500;
 const GENERIC_RUNNING_ACTIVITY_DELAY_MS = 1_200;
@@ -659,7 +660,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [showDelayedGenericRunningActivity, setShowDelayedGenericRunningActivity] =
       useState(false);
     const [accountRateLimits, setAccountRateLimits] = useState<AccountRateLimitSnapshot | null>(
-      null
+      () => api.peekAccountRateLimits()
     );
     const accountRateLimitsRef = useRef<AccountRateLimitSnapshot | null>(null);
     accountRateLimitsRef.current = accountRateLimits;
@@ -1583,8 +1584,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       let cancelled = false;
 
       const load = async () => {
+        const cachedSnapshot = api.peekAccountRateLimits();
+        if (cachedSnapshot && !cancelled) {
+          accountRateLimitsRef.current = cachedSnapshot;
+          setAccountRateLimits(cachedSnapshot);
+        }
+
         try {
-          const snapshot = await api.readAccountRateLimits();
+          const snapshot = await api.readAccountRateLimits({ forceRefresh: true });
           if (!cancelled) {
             accountRateLimitsRef.current = snapshot;
             setAccountRateLimits(snapshot);
@@ -2654,7 +2661,10 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         try {
           const [listedChats, loadedThreadIds] = await Promise.all([
-            api.listChats({ includeSubAgents: true }),
+            api.listChats({
+              includeSubAgents: true,
+              limit: AGENT_THREADS_LIST_LIMIT,
+            }),
             api.listLoadedChatIds().catch(() => []),
           ]);
           const listedChatIds = new Set(listedChats.map((chat) => chat.id));
@@ -4684,16 +4694,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         loadChatRequestRef.current = requestId;
         let loadedSuccessfully = false;
         try {
-          const [loadedChat, queueState] = await Promise.all([
-            api.getChat(chatId),
-            api.readThreadQueue(chatId),
-          ]);
+          void api
+            .readThreadQueue(chatId)
+            .then((queueState) => {
+              if (requestId === loadChatRequestRef.current) {
+                cacheThreadQueueState(chatId, queueState);
+              }
+            })
+            .catch(() => {});
+          const loadedChat = await api.getChat(chatId, { forceRefresh: true });
           const chat = mergeChatWithPendingOptimisticMessages(loadedChat);
           if (requestId !== loadChatRequestRef.current) {
             return;
           }
           loadedSuccessfully = true;
-          cacheThreadQueueState(chatId, queueState);
           const shouldPreserveRuntimeState = Boolean(
             options?.preserveRuntimeState && chatId === chatIdRef.current
           );
@@ -4816,19 +4830,19 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const openChatThread = useCallback(
       (id: string, optimisticChat?: Chat | null) => {
         const isSameChat = chatIdRef.current === id;
-        const hasSnapshot = Boolean(
-          optimisticChat &&
-            optimisticChat.id === id &&
-            optimisticChat.messages.length > 0
-        );
+        const optimisticSnapshot =
+          optimisticChat && optimisticChat.id === id
+            ? optimisticChat
+            : api.peekChatShell(id);
+        const hasSnapshot = Boolean(optimisticSnapshot);
 
         if (isSameChat) {
           setSelectedChatId(id);
           openingChatStartedAtRef.current = 0;
           setOpeningChatId(null);
           setError(null);
-          if (hasSnapshot && optimisticChat) {
-            setSelectedChat(mergeChatWithPendingOptimisticMessages(optimisticChat));
+          if (optimisticSnapshot) {
+            setSelectedChat(mergeChatWithPendingOptimisticMessages(optimisticSnapshot));
           }
           void refreshPendingApprovalsForThread(id);
           loadChat(id, {
@@ -4862,8 +4876,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         stopSystemMessageLoggedRef.current = false;
         delete autoEnabledPlanTurnIdByThreadRef.current[id];
 
-        if (hasSnapshot && optimisticChat) {
-          setSelectedChat(mergeChatWithPendingOptimisticMessages(optimisticChat));
+        if (optimisticSnapshot) {
+          setSelectedChat(mergeChatWithPendingOptimisticMessages(optimisticSnapshot));
         } else {
           setSelectedChat(null);
         }
@@ -4877,6 +4891,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         loadChat(id, { forceScroll: true }).catch(() => {});
       },
       [
+        api,
         applyThreadRuntimeSnapshot,
         loadChat,
         mergeChatWithPendingOptimisticMessages,
@@ -5643,6 +5658,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           const snapshot = readAccountRateLimitSnapshot(
             params?.rateLimits ?? params?.rate_limits ?? event.params
           );
+          api.rememberAccountRateLimits(snapshot);
           accountRateLimitsRef.current = snapshot;
           setAccountRateLimits(snapshot);
           return;
@@ -5690,6 +5706,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             if (rateLimitSnapshot && !accountRateLimitsRef.current) {
               // Token-count events can lag behind account-level rate-limit reads.
               // Only use them as a bootstrap source when we have no account snapshot yet.
+              api.rememberAccountRateLimits(rateLimitSnapshot);
               accountRateLimitsRef.current = rateLimitSnapshot;
               setAccountRateLimits(rateLimitSnapshot);
             }

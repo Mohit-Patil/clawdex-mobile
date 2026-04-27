@@ -58,6 +58,7 @@ import type {
   ModelOption,
   ReasoningEffort,
   ModelReasoningEffortOption,
+  RpcNotification,
   ServiceTier,
   TerminalExecRequest,
   TerminalExecResponse,
@@ -79,6 +80,15 @@ interface ApiClientOptions {
 
 interface AppServerListResponse {
   data?: unknown[];
+  nextCursor?: string | null;
+  backwardsCursor?: string | null;
+  next_cursor?: string | null;
+  backwards_cursor?: string | null;
+}
+
+interface ThreadListStreamStartResponse {
+  streamId?: string;
+  started?: boolean;
 }
 
 interface AppServerLoadedThreadListResponse {
@@ -147,6 +157,8 @@ const CHAT_LIST_SOURCE_KINDS_WITH_SUBAGENTS = [
 const MOBILE_DEVELOPER_INSTRUCTIONS =
   'When you need clarification, call request_user_input instead of asking only in plain text. Provide 2-3 concise options whenever possible and use isOther when free-form input is appropriate.';
 const MOBILE_DEFAULT_SANDBOX = 'danger-full-access';
+const THREAD_LIST_STREAM_BATCH_METHOD = 'bridge/thread/list/stream/batch';
+const THREAD_LIST_STREAM_ERROR_METHOD = 'bridge/thread/list/stream/error';
 
 interface ChatSnapshot {
   rawThread: RawThread;
@@ -201,7 +213,66 @@ export type SendOrQueueChatMessageResult =
 
 interface ListChatsOptions {
   includeSubAgents?: boolean;
+  limit?: number;
+  cacheTtlMs?: number;
+  forceRefresh?: boolean;
 }
+
+interface ChatListPageOptions extends ListChatsOptions {
+  cursor?: string | null;
+}
+
+interface ChatListPage {
+  chats: ChatSummary[];
+  nextCursor: string | null;
+  backwardsCursor: string | null;
+}
+
+interface ListAllChatsOptions {
+  includeSubAgents?: boolean;
+  pageLimit?: number;
+  cacheTtlMs?: number;
+  forceRefresh?: boolean;
+  onPage?: (chats: ChatSummary[], page: ChatListPage) => void;
+}
+
+interface ChatListStreamOptions {
+  includeSubAgents?: boolean;
+  limits?: number[];
+  delayMs?: number;
+}
+
+interface ChatListStreamBatch {
+  streamId: string;
+  limit: number;
+  done: boolean;
+  chats: ChatSummary[];
+}
+
+interface ChatListStreamController {
+  streamId: string;
+  cancel: () => void;
+}
+
+interface AccountRateLimitsReadOptions {
+  cacheTtlMs?: number;
+  forceRefresh?: boolean;
+}
+
+interface ChatReadOptions {
+  cacheTtlMs?: number;
+  forceRefresh?: boolean;
+}
+
+interface CacheEntry<T> {
+  value: T;
+  loadedAt: number;
+}
+
+const DEFAULT_PREFETCH_CACHE_TTL_MS = 30_000;
+const DEFAULT_CHAT_LIST_LIMIT = 20;
+const DEFAULT_SUB_AGENT_CHAT_LIST_LIMIT = 50;
+const CHAT_LIST_STREAM_INITIAL_LIMIT = 5;
 
 const ACTIVE_TURN_STATUSES = new Set([
   'inprogress',
@@ -215,6 +286,14 @@ const ACTIVE_TURN_STATUSES = new Set([
 export class HostBridgeApiClient {
   private readonly ws: HostBridgeWsClient;
   private readonly renamedTitles = new Map<string, string>();
+  private readonly chatListCache = new Map<string, CacheEntry<ChatSummary[]>>();
+  private readonly chatListInFlight = new Map<string, Promise<ChatSummary[]>>();
+  private readonly allChatListCache = new Map<string, CacheEntry<ChatSummary[]>>();
+  private readonly allChatListInFlight = new Map<string, Promise<ChatSummary[]>>();
+  private readonly chatCache = new Map<string, CacheEntry<Chat>>();
+  private readonly chatInFlight = new Map<string, Promise<Chat>>();
+  private accountRateLimitsCache: CacheEntry<AccountRateLimitSnapshot | null> | null = null;
+  private accountRateLimitsInFlight: Promise<AccountRateLimitSnapshot | null> | null = null;
 
   constructor(options: ApiClientOptions) {
     this.ws = options.ws;
@@ -242,9 +321,54 @@ export class HostBridgeApiClient {
     return this.ws.request<BridgeRestartStartResponse>('bridge/restart/start');
   }
 
-  async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {
-    const response = await this.ws.request<Record<string, unknown>>('account/rateLimits/read');
-    return readSelectedAccountRateLimits(response);
+  peekAccountRateLimits(): AccountRateLimitSnapshot | null {
+    return this.accountRateLimitsCache?.value ?? null;
+  }
+
+  rememberAccountRateLimits(snapshot: AccountRateLimitSnapshot | null): void {
+    this.accountRateLimitsCache = {
+      value: snapshot,
+      loadedAt: Date.now(),
+    };
+  }
+
+  primeAccountRateLimits(
+    options?: AccountRateLimitsReadOptions
+  ): Promise<AccountRateLimitSnapshot | null> {
+    return this.readAccountRateLimits({
+      cacheTtlMs: DEFAULT_PREFETCH_CACHE_TTL_MS,
+      ...options,
+    });
+  }
+
+  async readAccountRateLimits(
+    options: AccountRateLimitsReadOptions = {}
+  ): Promise<AccountRateLimitSnapshot | null> {
+    const cacheTtlMs = Math.max(0, options.cacheTtlMs ?? 0);
+    if (!options.forceRefresh && cacheTtlMs > 0 && this.accountRateLimitsCache) {
+      const ageMs = Date.now() - this.accountRateLimitsCache.loadedAt;
+      if (ageMs <= cacheTtlMs) {
+        return this.accountRateLimitsCache.value;
+      }
+    }
+
+    if (this.accountRateLimitsInFlight) {
+      return this.accountRateLimitsInFlight;
+    }
+
+    const request = this.ws
+      .request<Record<string, unknown>>('account/rateLimits/read')
+      .then((response) => {
+        const snapshot = readSelectedAccountRateLimits(response);
+        this.rememberAccountRateLimits(snapshot);
+        return snapshot;
+      })
+      .finally(() => {
+        this.accountRateLimitsInFlight = null;
+      });
+
+    this.accountRateLimitsInFlight = request;
+    return request;
   }
 
   async readAccount(): Promise<AccountSnapshot> {
@@ -283,11 +407,298 @@ export class HostBridgeApiClient {
     await this.ws.request('account/logout');
   }
 
-  async listChats(options?: ListChatsOptions): Promise<ChatSummary[]> {
+  peekChats(options: ListChatsOptions = {}): ChatSummary[] | null {
+    const cached = this.chatListCache.get(this.chatListCacheKey(options));
+    return cached ? cloneChatSummaries(cached.value) : null;
+  }
+
+  rememberChats(chats: ChatSummary[], options: ListChatsOptions = {}): void {
+    this.chatListCache.set(this.chatListCacheKey(options), {
+      value: cloneChatSummaries(chats),
+      loadedAt: Date.now(),
+    });
+
+    if (chats.length > 0) {
+      this.mergeIntoAllChatListCaches(chats);
+    }
+  }
+
+  peekAllChats(options: ListAllChatsOptions = {}): ChatSummary[] | null {
+    const cached = this.allChatListCache.get(this.allChatListCacheKey(options));
+    return cached ? cloneChatSummaries(cached.value) : null;
+  }
+
+  rememberAllChats(chats: ChatSummary[], options: ListAllChatsOptions = {}): void {
+    this.allChatListCache.set(this.allChatListCacheKey(options), {
+      value: cloneChatSummaries(chats),
+      loadedAt: Date.now(),
+    });
+  }
+
+  peekChat(id: string): Chat | null {
+    const cached = this.chatCache.get(id.trim());
+    return cached ? cloneChat(cached.value) : null;
+  }
+
+  peekChatSummary(id: string): ChatSummary | null {
+    const threadId = id.trim();
+    if (!threadId) {
+      return null;
+    }
+
+    const cachedChat = this.chatCache.get(threadId);
+    if (cachedChat) {
+      return cloneChatSummary(cachedChat.value);
+    }
+
+    for (const cachedList of this.chatListCache.values()) {
+      const match = cachedList.value.find((chat) => chat.id === threadId);
+      if (match) {
+        return cloneChatSummary(match);
+      }
+    }
+
+    return null;
+  }
+
+  peekChatShell(id: string): Chat | null {
+    const cachedChat = this.peekChat(id);
+    if (cachedChat) {
+      return cachedChat;
+    }
+
+    const summary = this.peekChatSummary(id);
+    return summary ? chatShellFromSummary(summary) : null;
+  }
+
+  rememberChat(chat: Chat): void {
+    const cloned = cloneChat(chat);
+    this.chatCache.set(chat.id, {
+      value: cloned,
+      loadedAt: Date.now(),
+    });
+
+    for (const [key, cachedList] of this.chatListCache.entries()) {
+      const index = cachedList.value.findIndex((entry) => entry.id === chat.id);
+      if (index < 0) {
+        continue;
+      }
+
+      const nextList = cloneChatSummaries(cachedList.value);
+      nextList[index] = cloneChatSummary(chat);
+      this.chatListCache.set(key, {
+        value: nextList,
+        loadedAt: cachedList.loadedAt,
+      });
+    }
+
+    for (const [key, cachedList] of this.allChatListCache.entries()) {
+      const index = cachedList.value.findIndex((entry) => entry.id === chat.id);
+      if (index < 0) {
+        continue;
+      }
+
+      const nextList = cloneChatSummaries(cachedList.value);
+      nextList[index] = cloneChatSummary(chat);
+      this.allChatListCache.set(key, {
+        value: nextList,
+        loadedAt: cachedList.loadedAt,
+      });
+    }
+  }
+
+  primeChats(options: ListChatsOptions = {}): Promise<ChatSummary[]> {
+    return this.listChats({
+      cacheTtlMs: DEFAULT_PREFETCH_CACHE_TTL_MS,
+      ...options,
+    });
+  }
+
+  async listChats(options: ListChatsOptions = {}): Promise<ChatSummary[]> {
+    const cacheKey = this.chatListCacheKey(options);
+    const cacheTtlMs = Math.max(0, options.cacheTtlMs ?? 0);
+    const cached = this.chatListCache.get(cacheKey);
+    if (!options.forceRefresh && cacheTtlMs > 0 && cached) {
+      const ageMs = Date.now() - cached.loadedAt;
+      if (ageMs <= cacheTtlMs) {
+        return cloneChatSummaries(cached.value);
+      }
+    }
+
+    const inFlight = this.chatListInFlight.get(cacheKey);
+    if (inFlight) {
+      return cloneChatSummaries(await inFlight);
+    }
+
+    const request = this.fetchChats(options).finally(() => {
+      this.chatListInFlight.delete(cacheKey);
+    });
+
+    this.chatListInFlight.set(cacheKey, request);
+    return cloneChatSummaries(await request);
+  }
+
+  async listAllChats(options: ListAllChatsOptions = {}): Promise<ChatSummary[]> {
+    const cacheKey = this.allChatListCacheKey(options);
+    const cacheTtlMs = Math.max(0, options.cacheTtlMs ?? 0);
+    const cached = this.allChatListCache.get(cacheKey);
+    if (!options.forceRefresh && cacheTtlMs > 0 && cached) {
+      const ageMs = Date.now() - cached.loadedAt;
+      if (ageMs <= cacheTtlMs) {
+        return cloneChatSummaries(cached.value);
+      }
+    }
+
+    const inFlight = this.allChatListInFlight.get(cacheKey);
+    if (inFlight) {
+      return cloneChatSummaries(await inFlight);
+    }
+
+    const request = this.fetchAllChats(options).finally(() => {
+      this.allChatListInFlight.delete(cacheKey);
+    });
+    this.allChatListInFlight.set(cacheKey, request);
+    return cloneChatSummaries(await request);
+  }
+
+  async startChatListStream(
+    options: ChatListStreamOptions = {},
+    onBatch: (batch: ChatListStreamBatch) => void,
+    onError?: (error: Error) => void
+  ): Promise<ChatListStreamController> {
+    const includeSubAgents = options.includeSubAgents === true;
+    const limits = normalizeChatListStreamLimits(
+      options.limits,
+      includeSubAgents ? DEFAULT_SUB_AGENT_CHAT_LIST_LIMIT : DEFAULT_CHAT_LIST_LIMIT
+    );
+    const streamId = `mobile-thread-list-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    let closed = false;
+
+    const unsubscribe = this.ws.onEvent((event: RpcNotification) => {
+      const params = toRecord(event.params);
+      if (!params || readString(params.streamId) !== streamId) {
+        return;
+      }
+
+      if (event.method === THREAD_LIST_STREAM_ERROR_METHOD) {
+        closed = true;
+        unsubscribe();
+        onError?.(new Error(readString(params.error) ?? 'thread list stream failed'));
+        return;
+      }
+
+      if (event.method !== THREAD_LIST_STREAM_BATCH_METHOD) {
+        return;
+      }
+
+      const limit = normalizeListLimit(params.limit);
+      const rawList = Array.isArray(params.data) ? params.data : [];
+      const chats = this.mapChatListItems(rawList, includeSubAgents);
+      this.rememberChats(chats, {
+        includeSubAgents,
+        limit,
+      });
+
+      onBatch({
+        streamId,
+        limit,
+        done: params.done === true,
+        chats,
+      });
+
+      if (params.done === true) {
+        closed = true;
+        unsubscribe();
+      }
+    });
+
+    const cancel = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      unsubscribe();
+      void this.ws
+        .request('bridge/thread/list/stream/cancel', {
+          streamId,
+        })
+        .catch(() => {});
+    };
+
+    try {
+      const response = await this.ws.request<ThreadListStreamStartResponse>(
+        'bridge/thread/list/stream/start',
+        {
+          streamId,
+          includeSubAgents,
+          limits,
+          delayMs:
+            typeof options.delayMs === 'number' && Number.isFinite(options.delayMs)
+              ? Math.max(0, Math.round(options.delayMs))
+              : undefined,
+        }
+      );
+      if (readString(response.streamId) !== streamId || response.started === false) {
+        cancel();
+        throw new Error('thread list stream did not start');
+      }
+    } catch (error) {
+      cancel();
+      throw error;
+    }
+
+    return {
+      streamId,
+      cancel,
+    };
+  }
+
+  private async fetchChats(options: ListChatsOptions): Promise<ChatSummary[]> {
+    const page = await this.fetchChatPage(options);
+    this.rememberChats(page.chats, options);
+    return page.chats;
+  }
+
+  private async fetchAllChats(options: ListAllChatsOptions): Promise<ChatSummary[]> {
+    const includeSubAgents = options.includeSubAgents === true;
+    const pageLimit = normalizeListLimit(
+      options.pageLimit ??
+        (includeSubAgents ? DEFAULT_SUB_AGENT_CHAT_LIST_LIMIT : DEFAULT_CHAT_LIST_LIMIT)
+    );
+    let cursor: string | null = null;
+    let chats: ChatSummary[] = [];
+
+    do {
+      const page = await this.fetchChatPage({
+        includeSubAgents,
+        limit: pageLimit,
+        cursor,
+        forceRefresh: true,
+      });
+      chats = mergeChatSummariesById(chats, page.chats);
+      if (options.onPage) {
+        options.onPage(cloneChatSummaries(chats), {
+          ...page,
+          chats: cloneChatSummaries(page.chats),
+        });
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    this.rememberAllChats(chats, options);
+    return chats;
+  }
+
+  private async fetchChatPage(options: ChatListPageOptions): Promise<ChatListPage> {
     const includeSubAgents = options?.includeSubAgents === true;
+    const limit = normalizeListLimit(
+      options.limit ?? (includeSubAgents ? DEFAULT_SUB_AGENT_CHAT_LIST_LIMIT : DEFAULT_CHAT_LIST_LIMIT)
+    );
     const response = await this.ws.request<AppServerListResponse>('thread/list', {
-      cursor: null,
-      limit: 200,
+      cursor: normalizeCursor(options.cursor),
+      limit,
       sortKey: null,
       modelProviders: null,
       sourceKinds: includeSubAgents
@@ -298,7 +709,18 @@ export class HostBridgeApiClient {
     });
 
     const listRaw = Array.isArray(response.data) ? response.data : [];
+    const chats = this.mapChatListItems(listRaw, includeSubAgents);
 
+    return {
+      chats,
+      nextCursor:
+        readString(response.nextCursor) ?? readString(response.next_cursor) ?? null,
+      backwardsCursor:
+        readString(response.backwardsCursor) ?? readString(response.backwards_cursor) ?? null,
+    };
+  }
+
+  private mapChatListItems(listRaw: unknown[], includeSubAgents: boolean): ChatSummary[] {
     return listRaw
       .map((item) => {
         const rawThread = toRawThread(item);
@@ -324,6 +746,27 @@ export class HostBridgeApiClient {
       .filter((item): item is ChatSummary => item !== null)
       .filter((item) => includeSubAgents || !isSubAgentSource(item.sourceKind))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  private chatListCacheKey(options: ListChatsOptions): string {
+    const includeSubAgents = options.includeSubAgents === true;
+    const limit = normalizeListLimit(
+      options.limit ?? (includeSubAgents ? DEFAULT_SUB_AGENT_CHAT_LIST_LIMIT : DEFAULT_CHAT_LIST_LIMIT)
+    );
+    return `${includeSubAgents ? 'with-subagents' : 'default'}:${String(limit)}`;
+  }
+
+  private allChatListCacheKey(options: ListAllChatsOptions): string {
+    return options.includeSubAgents === true ? 'with-subagents' : 'default';
+  }
+
+  private mergeIntoAllChatListCaches(chats: ChatSummary[]): void {
+    for (const [key, cachedList] of this.allChatListCache.entries()) {
+      this.allChatListCache.set(key, {
+        value: mergeChatSummariesById(cachedList.value, chats),
+        loadedAt: cachedList.loadedAt,
+      });
+    }
   }
 
   async listLoadedChatIds(): Promise<string[]> {
@@ -442,9 +885,33 @@ export class HostBridgeApiClient {
     return this.getChat(chatId);
   }
 
-  async getChat(id: string): Promise<Chat> {
-    const snapshot = await this.readChatSnapshot(id);
-    return snapshot.chat;
+  async getChat(id: string, options: ChatReadOptions = {}): Promise<Chat> {
+    const threadId = id.trim();
+    const cacheTtlMs = Math.max(0, options.cacheTtlMs ?? 0);
+    const cached = this.chatCache.get(threadId);
+    if (!options.forceRefresh && cacheTtlMs > 0 && cached) {
+      const ageMs = Date.now() - cached.loadedAt;
+      if (ageMs <= cacheTtlMs) {
+        return cloneChat(cached.value);
+      }
+    }
+
+    const inFlight = this.chatInFlight.get(threadId);
+    if (inFlight) {
+      return cloneChat(await inFlight);
+    }
+
+    const request = this.readChatSnapshot(threadId)
+      .then((snapshot) => {
+        this.rememberChat(snapshot.chat);
+        return snapshot.chat;
+      })
+      .finally(() => {
+        this.chatInFlight.delete(threadId);
+      });
+
+    this.chatInFlight.set(threadId, request);
+    return cloneChat(await request);
   }
 
   async getChatSummary(id: string): Promise<ChatSummary> {
@@ -463,14 +930,22 @@ export class HostBridgeApiClient {
     }
 
     const cachedTitle = this.renamedTitles.get(mapped.id);
-    if (!cachedTitle) {
-      return mapped;
-    }
-
-    return {
+    const summary = cachedTitle ? {
       ...mapped,
       title: cachedTitle,
-    };
+    } : mapped;
+    const cachedChat = this.peekChat(summary.id);
+    this.rememberChat(
+      cachedChat
+        ? {
+            ...cachedChat,
+            ...summary,
+            messages: cachedChat.messages,
+          }
+        : chatShellFromSummary(summary)
+    );
+
+    return summary;
   }
 
   async renameChat(id: string, name: string): Promise<Chat> {
@@ -1157,14 +1632,12 @@ export class HostBridgeApiClient {
 
     const mapped = mapChat(rawThread);
     const cachedTitle = this.renamedTitles.get(mapped.id);
-    if (!cachedTitle) {
-      return mapped;
-    }
-
-    return {
+    const chat = cachedTitle ? {
       ...mapped,
       title: cachedTitle,
-    };
+    } : mapped;
+    this.rememberChat(chat);
+    return chat;
   }
 
   private async trySetThreadName(
@@ -1259,6 +1732,7 @@ export class HostBridgeApiClient {
       !rawThreadHasTurns(latestSnapshot.rawThread) &&
       chatHasRecentUserMessage(latest, normalizedContent, mentions, localImages);
     if (hasMatchingTurnMessage || hasFallbackRecentMessage) {
+      this.rememberChat(latest);
       return latest;
     }
 
@@ -1279,11 +1753,19 @@ export class HostBridgeApiClient {
         !rawThreadHasTurns(latestSnapshot.rawThread) &&
         chatHasRecentUserMessage(latest, normalizedContent, mentions, localImages);
       if (matchedAfterRetry || matchedByFallback) {
+        this.rememberChat(latest);
         return latest;
       }
     }
 
-    return appendSyntheticUserMessage(latest, normalizedContent, mentions, localImages);
+    const synthetic = appendSyntheticUserMessage(
+      latest,
+      normalizedContent,
+      mentions,
+      localImages
+    );
+    this.rememberChat(synthetic);
+    return synthetic;
   }
 }
 
@@ -1297,6 +1779,47 @@ function normalizeCwd(cwd: string | null | undefined): string | null {
   }
   const trimmed = cwd.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeListLimit(limit: unknown): number {
+  return typeof limit === 'number' && Number.isFinite(limit)
+    ? Math.max(1, Math.min(200, Math.round(limit)))
+    : DEFAULT_CHAT_LIST_LIMIT;
+}
+
+function normalizeCursor(cursor: unknown): string | null {
+  if (typeof cursor !== 'string') {
+    return null;
+  }
+  const trimmed = cursor.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeChatListStreamLimits(limits: unknown, fallbackLimit: number): number[] {
+  const rawLimits = Array.isArray(limits) ? limits : [CHAT_LIST_STREAM_INITIAL_LIMIT, fallbackLimit];
+  const normalized: number[] = [];
+  for (const limit of rawLimits) {
+    const nextLimit = normalizeListLimit(limit);
+    if (!normalized.includes(nextLimit)) {
+      normalized.push(nextLimit);
+    }
+  }
+
+  return normalized.length > 0 ? normalized : [normalizeListLimit(fallbackLimit)];
+}
+
+function mergeChatSummariesById(
+  previous: ChatSummary[],
+  incoming: ChatSummary[]
+): ChatSummary[] {
+  const byId = new Map<string, ChatSummary>();
+  for (const chat of previous) {
+    byId.set(chat.id, chat);
+  }
+  for (const chat of incoming) {
+    byId.set(chat.id, chat);
+  }
+  return [...byId.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 function readTimestampIso(value: unknown): string | null {
@@ -1902,6 +2425,57 @@ function buildExpectedUserMessageContent(
   return [normalized, ...mentionLines, ...localImageLines]
     .filter((part) => part.trim().length > 0)
     .join('\n');
+}
+
+function chatShellFromSummary(summary: ChatSummary): Chat {
+  return {
+    ...cloneChatSummary(summary),
+    messages: [],
+    latestPlan: null,
+    latestTurnPlan: null,
+    latestTurnStatus: null,
+    activeTurnId: null,
+  };
+}
+
+function cloneChatSummary(chat: ChatSummary): ChatSummary {
+  return { ...chat };
+}
+
+function cloneChatSummaries(chats: ChatSummary[]): ChatSummary[] {
+  return chats.map(cloneChatSummary);
+}
+
+function cloneChat(chat: Chat): Chat {
+  return {
+    ...chat,
+    messages: chat.messages.map((message) => ({
+      ...message,
+      subAgentMeta: message.subAgentMeta
+        ? {
+            ...message.subAgentMeta,
+            receiverThreadIds: message.subAgentMeta.receiverThreadIds
+              ? [...message.subAgentMeta.receiverThreadIds]
+              : undefined,
+          }
+        : undefined,
+    })),
+    latestPlan: cloneChatPlan(chat.latestPlan),
+    latestTurnPlan: cloneChatPlan(chat.latestTurnPlan),
+  };
+}
+
+function cloneChatPlan<T extends Chat['latestPlan'] | Chat['latestTurnPlan']>(
+  plan: T
+): T {
+  if (!plan) {
+    return plan;
+  }
+
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => ({ ...step })),
+  } as T;
 }
 
 function appendSyntheticUserMessage(
