@@ -188,10 +188,10 @@ export const DrawerContent = memo(function DrawerContentComponent({
         setChats((previous) =>
           areDrawerChatListsEquivalent(previous, nextChats) ? previous : nextChats
         );
-        const cacheKeyLimit = cacheLimit
-          ? Math.max(cacheLimit, Math.min(nextChats.length, 200))
-          : undefined;
-        api.rememberChats(nextChats, cacheKeyLimit ? { limit: cacheKeyLimit } : undefined);
+        if (cacheLimit) {
+          const cacheKeyLimit = Math.max(cacheLimit, Math.min(nextChats.length, 200));
+          api.rememberChats(nextChats, { limit: cacheKeyLimit });
+        }
         hasHydratedOnceRef.current = true;
         lastLoadedAtRef.current = Date.now();
         setLoading(false);
@@ -335,9 +335,26 @@ export const DrawerContent = memo(function DrawerContentComponent({
 
       try {
         const hasCachedDeepChats = applyCachedDeepChats();
-        const cachedFullChats = hasCachedDeepChats
-          ? null
-          : api.peekChats({ limit: DRAWER_FULL_CHAT_LIST_LIMIT });
+        if (hasCachedDeepChats) {
+          try {
+            const latestChats = await api.listChats({
+              limit: showRefresh ? DRAWER_FULL_CHAT_LIST_LIMIT : DRAWER_FAST_CHAT_LIST_LIMIT,
+              cacheTtlMs: DRAWER_CHAT_CACHE_TTL_MS,
+              forceRefresh,
+            });
+            if (activeRef.current) {
+              applyChats(
+                latestChats,
+                showRefresh ? DRAWER_FULL_CHAT_LIST_LIMIT : DRAWER_FAST_CHAT_LIST_LIMIT
+              );
+            }
+          } catch {
+            // The cached full list is already visible; newest-chat refresh is best effort.
+          }
+          return;
+        }
+
+        const cachedFullChats = api.peekChats({ limit: DRAWER_FULL_CHAT_LIST_LIMIT });
         const cachedFastChats = cachedFullChats
           ? null
           : api.peekChats({ limit: DRAWER_FAST_CHAT_LIST_LIMIT });
@@ -1002,6 +1019,10 @@ export const DrawerContent = memo(function DrawerContentComponent({
               contentContainerStyle={styles.listContent}
               showsVerticalScrollIndicator={false}
               stickySectionHeadersEnabled={false}
+              removeClippedSubviews={false}
+              initialNumToRender={12}
+              maxToRenderPerBatch={10}
+              windowSize={9}
               keyboardShouldPersistTaps="handled"
               refreshControl={
                 <RefreshControl

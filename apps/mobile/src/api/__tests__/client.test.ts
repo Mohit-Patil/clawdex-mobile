@@ -518,6 +518,12 @@ describe('HostBridgeApiClient', () => {
       },
     ]);
 
+    expect(client.peekChatShell('thr_old')).toMatchObject({
+      id: 'thr_old',
+      title: 'old',
+      messages: [],
+    });
+
     client.rememberChats(
       [
         {

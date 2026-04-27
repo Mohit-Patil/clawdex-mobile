@@ -458,6 +458,13 @@ export class HostBridgeApiClient {
       }
     }
 
+    for (const cachedList of this.allChatListCache.values()) {
+      const match = cachedList.value.find((chat) => chat.id === threadId);
+      if (match) {
+        return cloneChatSummary(match);
+      }
+    }
+
     return null;
   }
 

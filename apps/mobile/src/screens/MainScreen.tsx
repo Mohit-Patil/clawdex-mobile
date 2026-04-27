@@ -9198,6 +9198,7 @@ const ChatView = memo(function ChatView({
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const showJumpToLatestRef = useRef(false);
 
   const transcriptView = useMemo(() => {
     const childVisibleMessages = getVisibleTranscriptMessages(
@@ -9265,9 +9266,11 @@ const ChatView = memo(function ChatView({
       const distanceFromBottom = contentOffset.y;
       const shouldStickToBottom = distanceFromBottom <= theme.spacing.xl * 2;
       autoScrollStateRef.current.shouldStickToBottom = shouldStickToBottom;
-      setShowJumpToLatest((current) =>
-        current === !shouldStickToBottom ? current : !shouldStickToBottom
-      );
+      const nextShowJumpToLatest = !shouldStickToBottom;
+      if (showJumpToLatestRef.current !== nextShowJumpToLatest) {
+        showJumpToLatestRef.current = nextShowJumpToLatest;
+        setShowJumpToLatest(nextShowJumpToLatest);
+      }
     },
     [autoScrollStateRef, theme.spacing.xl]
   );
@@ -9276,6 +9279,7 @@ const ChatView = memo(function ChatView({
     autoScrollStateRef.current.shouldStickToBottom = true;
     autoScrollStateRef.current.isUserInteracting = false;
     autoScrollStateRef.current.isMomentumScrolling = false;
+    showJumpToLatestRef.current = false;
     setShowJumpToLatest(false);
   }, [autoScrollStateRef, chat.id]);
   const messageListContentStyle = useMemo(
@@ -9421,15 +9425,15 @@ const ChatView = memo(function ChatView({
           autoScrollStateRef.current.isMomentumScrolling = false;
         }}
         onScroll={handleScroll}
-        scrollEventThrottle={16}
+        scrollEventThrottle={32}
         onContentSizeChange={() => {
           onPinnedAutoScroll(false);
         }}
-        initialNumToRender={Math.min(displayMessages.length, 16)}
-        maxToRenderPerBatch={Math.min(displayMessages.length, 12)}
-        updateCellsBatchingPeriod={isLargeChat ? 16 : undefined}
-        windowSize={isLargeChat ? 15 : 11}
-        removeClippedSubviews={Platform.OS === 'android'}
+        initialNumToRender={Math.min(displayMessages.length, isLargeChat ? 18 : 16)}
+        maxToRenderPerBatch={Math.min(displayMessages.length, isLargeChat ? 12 : 10)}
+        updateCellsBatchingPeriod={isLargeChat ? 32 : undefined}
+        windowSize={isLargeChat ? 13 : 11}
+        removeClippedSubviews={false}
       />
       {showJumpToLatest ? (
         <Pressable
@@ -9437,6 +9441,7 @@ const ChatView = memo(function ChatView({
             autoScrollStateRef.current.shouldStickToBottom = true;
             autoScrollStateRef.current.isUserInteracting = false;
             autoScrollStateRef.current.isMomentumScrolling = false;
+            showJumpToLatestRef.current = false;
             setShowJumpToLatest(false);
             onJumpToLatest();
           }}
