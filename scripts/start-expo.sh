@@ -154,10 +154,10 @@ run_expo() {
       cmd=(npm run -w "$MOBILE_WORKSPACE" start -- "${extra_args[@]}")
       ;;
     ios)
-      cmd=(npm run -w "$MOBILE_WORKSPACE" ios -- "${extra_args[@]}")
+      cmd=(npm run -w "$MOBILE_WORKSPACE" ios)
       ;;
     android)
-      cmd=(npm run -w "$MOBILE_WORKSPACE" android -- "${extra_args[@]}")
+      cmd=(npm run -w "$MOBILE_WORKSPACE" android)
       ;;
     *)
       echo "error: unknown mode '$MODE' (expected: mobile|ios|android)" >&2

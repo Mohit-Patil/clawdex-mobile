@@ -1,9 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useEffect, useMemo, useState } from 'react';
 import {
+  ActionSheetIOS,
   ActivityIndicator,
+  Alert,
   FlatList,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -245,6 +248,8 @@ export function WorkspacePickerModal({
                         iconName="star"
                         selected={workspace.path === pendingSelectionPath}
                         onPress={() => handleBrowsePath(workspace.path)}
+                        isPinned={favoritePathSet.has(workspace.path)}
+                        onPinAction={() => onToggleFavorite?.(workspace.path)}
                       />
                     ))}
                   </View>
@@ -271,6 +276,8 @@ export function WorkspacePickerModal({
                         iconName="time-outline"
                         selected={workspace.path === pendingSelectionPath}
                         onPress={() => handleBrowsePath(workspace.path)}
+                        isPinned={favoritePathSet.has(workspace.path)}
+                        onPinAction={() => onToggleFavorite?.(workspace.path)}
                       />
                     ))}
                   </View>
@@ -347,7 +354,17 @@ export function WorkspacePickerModal({
                       >
                         <Pressable
                           onPress={() => handleBrowsePath(entry.path)}
-                          style={({ pressed }) => [styles.rowMainAction, pressed && styles.pressed]}
+                          onLongPress={() =>
+                            onToggleFavorite &&
+                            showWorkspacePinAction({
+                              isPinned: favoritePathSet.has(entry.path),
+                              onAction: () => onToggleFavorite(entry.path),
+                            })
+                          }
+                          style={({ pressed }) => [
+                            styles.rowMainAction,
+                            pressed && styles.pressed,
+                          ]}
                         >
                           <View style={styles.entryIconWrap}>
                             <Ionicons
@@ -436,11 +453,15 @@ function WorkspaceTile({
   iconName,
   selected,
   onPress,
+  isPinned,
+  onPinAction,
 }: {
   workspace: WorkspaceSummary;
   iconName: IoniconName;
   selected: boolean;
   onPress: () => void;
+  isPinned: boolean;
+  onPinAction: () => void;
 }) {
   const theme = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -448,6 +469,12 @@ function WorkspaceTile({
   return (
     <Pressable
       onPress={onPress}
+      onLongPress={() =>
+        showWorkspacePinAction({
+          isPinned,
+          onAction: onPinAction,
+        })
+      }
       style={[
         styles.workspaceTile,
         selected && styles.workspaceTileSelected,
@@ -472,6 +499,38 @@ function WorkspaceTile({
       )}
     </Pressable>
   );
+}
+
+function showWorkspacePinAction({
+  isPinned,
+  onAction,
+}: {
+  isPinned: boolean;
+  onAction: () => void;
+}) {
+  const actionTitle = isPinned ? 'Unpin workspace' : 'Pin workspace';
+  const promptTitle = isPinned ? 'Unpin this workspace?' : 'Pin this workspace?';
+
+  if (Platform.OS === 'ios') {
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        options: [actionTitle, 'Cancel'],
+        cancelButtonIndex: 1,
+        title: promptTitle,
+      },
+      (buttonIndex) => {
+        if (buttonIndex === 0) {
+          onAction();
+        }
+      }
+    );
+    return;
+  }
+
+  Alert.alert(promptTitle, undefined, [
+    { text: actionTitle, onPress: onAction },
+    { text: 'Cancel', style: 'cancel' },
+  ]);
 }
 
 function LoadingRow({

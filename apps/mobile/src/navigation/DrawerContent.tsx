@@ -1,8 +1,12 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as FileSystem from 'expo-file-system/legacy';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  ActionSheetIOS,
+  Alert,
   AppState,
+  Platform,
   Pressable,
   RefreshControl,
   SectionList,
@@ -55,6 +59,10 @@ const DRAWER_STREAM_BATCH_DELAY_MS = 900;
 const DRAWER_DEEP_CHAT_PAGE_LIMIT = 50;
 const DRAWER_DEEP_LOAD_DELAY_MS = 2500;
 const DRAWER_DEEP_CHAT_CACHE_TTL_MS = Number.MAX_SAFE_INTEGER;
+const PINNED_CHAT_IDS_FILE = 'clawdex-pinned-chats.json';
+const PINNED_WORKSPACE_PATHS_FILE = 'clawdex-workspace-favorites.json';
+const PINNED_WORKSPACE_PATHS_VERSION = 1;
+const PINNED_WORKSPACE_PATHS_LIMIT = 4;
 const RUN_HEARTBEAT_EVENT_TYPES = new Set([
   'task_started',
   'agent_reasoning_delta',
@@ -106,6 +114,8 @@ export const DrawerContent = memo(function DrawerContentComponent({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMenuVisible, setFilterMenuVisible] = useState(false);
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(new Set());
+  const [pinnedChatIds, setPinnedChatIds] = useState<string[]>([]);
+  const [pinnedWorkspacePaths, setPinnedWorkspacePaths] = useState<string[]>([]);
   const [runHeartbeatAtByThread, setRunHeartbeatAtByThread] = useState<Record<string, number>>({});
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const hasAppliedInitialCollapseRef = useRef(false);
@@ -133,11 +143,31 @@ export const DrawerContent = memo(function DrawerContentComponent({
     () => searchDrawerChats(engineFilteredChats, searchQuery),
     [engineFilteredChats, searchQuery]
   );
-  const baseChatSections = useMemo(
-    () => buildChatWorkspaceSections(engineFilteredChats),
-    [engineFilteredChats]
+  const pinnedChatIdSet = useMemo(() => new Set(pinnedChatIds), [pinnedChatIds]);
+  const pinnedWorkspacePathSet = useMemo(
+    () => new Set(pinnedWorkspacePaths),
+    [pinnedWorkspacePaths]
   );
-  const chatSections = useMemo(() => buildChatWorkspaceSections(filteredChats), [filteredChats]);
+  const baseChatSections = useMemo(
+    () =>
+      sortWorkspaceSections(
+        sortPinnedChatsInSections(buildChatWorkspaceSections(engineFilteredChats), pinnedChatIds),
+        pinnedWorkspacePaths
+      ),
+    [engineFilteredChats, pinnedChatIds, pinnedWorkspacePaths]
+  );
+  const workspaceChatSections = useMemo(
+    () =>
+      sortWorkspaceSections(
+        sortPinnedChatsInSections(buildChatWorkspaceSections(filteredChats), pinnedChatIds),
+        pinnedWorkspacePaths
+      ),
+    [filteredChats, pinnedChatIds, pinnedWorkspacePaths]
+  );
+  const chatSections = useMemo(
+    () => workspaceChatSections,
+    [workspaceChatSections]
+  );
   const isSearching = searchQuery.trim().length > 0;
   const visibleChatSections = useMemo(
     () =>
@@ -170,6 +200,187 @@ export const DrawerContent = memo(function DrawerContentComponent({
       scheduledDeepLoadChatsRef.current = null;
     }
   }, []);
+
+  const persistPinnedChatIds = useCallback(async (nextIds: string[]) => {
+    const path = getPinnedChatIdsPath();
+    if (!path) {
+      return;
+    }
+
+    try {
+      await FileSystem.writeAsStringAsync(path, JSON.stringify({ ids: nextIds }));
+    } catch {
+      // Best effort persistence only.
+    }
+  }, []);
+
+  const persistPinnedWorkspacePaths = useCallback(async (nextPaths: string[]) => {
+    const path = getPinnedWorkspacePathsPath();
+    if (!path) {
+      return;
+    }
+
+    try {
+      await FileSystem.writeAsStringAsync(
+        path,
+        JSON.stringify({
+          version: PINNED_WORKSPACE_PATHS_VERSION,
+          paths: nextPaths,
+        })
+      );
+    } catch {
+      // Best effort persistence only.
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPinnedChatIds = async () => {
+      const path = getPinnedChatIdsPath();
+      if (!path) {
+        return;
+      }
+
+      try {
+        const raw = await FileSystem.readAsStringAsync(path);
+        const ids = parsePinnedChatIds(raw);
+        if (!cancelled) {
+          setPinnedChatIds(ids);
+        }
+      } catch {
+        if (!cancelled) {
+          setPinnedChatIds([]);
+        }
+      }
+    };
+
+    void loadPinnedChatIds();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPinnedWorkspacePaths = async () => {
+      const path = getPinnedWorkspacePathsPath();
+      if (!path) {
+        return;
+      }
+
+      try {
+        const raw = await FileSystem.readAsStringAsync(path);
+        const paths = parsePinnedWorkspacePaths(raw);
+        if (!cancelled) {
+          setPinnedWorkspacePaths(paths);
+        }
+      } catch {
+        if (!cancelled) {
+          setPinnedWorkspacePaths([]);
+        }
+      }
+    };
+
+    void loadPinnedWorkspacePaths();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const togglePinnedChat = useCallback(
+    (chatId: string) => {
+      setPinnedChatIds((prev) => {
+        const next = prev.includes(chatId)
+          ? prev.filter((id) => id !== chatId)
+          : [chatId, ...prev.filter((id) => id !== chatId)];
+        void persistPinnedChatIds(next);
+        return next;
+      });
+    },
+    [persistPinnedChatIds]
+  );
+
+  const showChatPinAction = useCallback(
+    (chat: ChatSummary) => {
+      const isPinned = pinnedChatIdSet.has(chat.id);
+      const actionTitle = isPinned ? 'Unpin chat' : 'Pin chat';
+      const promptTitle = isPinned ? 'Unpin this chat?' : 'Pin this chat?';
+      const runAction = () => togglePinnedChat(chat.id);
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            options: [actionTitle, 'Cancel'],
+            cancelButtonIndex: 1,
+            title: promptTitle,
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 0) {
+              runAction();
+            }
+          }
+        );
+        return;
+      }
+
+      Alert.alert(promptTitle, undefined, [
+        { text: actionTitle, onPress: runAction },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    },
+    [pinnedChatIdSet, togglePinnedChat]
+  );
+
+  const togglePinnedWorkspace = useCallback(
+    (workspacePath: string) => {
+      setPinnedWorkspacePaths((prev) => {
+        const next = prev.includes(workspacePath)
+          ? prev.filter((path) => path !== workspacePath)
+          : [workspacePath, ...prev.filter((path) => path !== workspacePath)].slice(
+              0,
+              PINNED_WORKSPACE_PATHS_LIMIT
+            );
+        void persistPinnedWorkspacePaths(next);
+        return next;
+      });
+    },
+    [persistPinnedWorkspacePaths]
+  );
+
+  const showWorkspacePinAction = useCallback(
+    (section: ChatWorkspaceSection) => {
+      const isPinned = pinnedWorkspacePathSet.has(section.key);
+      const actionTitle = isPinned ? 'Unpin workspace' : 'Pin workspace';
+      const promptTitle = isPinned ? 'Unpin this workspace?' : 'Pin this workspace?';
+      const runAction = () => togglePinnedWorkspace(section.key);
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            options: [actionTitle, 'Cancel'],
+            cancelButtonIndex: 1,
+            title: promptTitle,
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 0) {
+              runAction();
+            }
+          }
+        );
+        return;
+      }
+
+      Alert.alert(promptTitle, undefined, [
+        { text: actionTitle, onPress: runAction },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    },
+    [pinnedWorkspacePathSet, togglePinnedWorkspace]
+  );
 
   const loadChatsNow = useCallback(
     async (showRefresh = false, forceRefresh = false) => {
@@ -1041,6 +1252,7 @@ export const DrawerContent = memo(function DrawerContentComponent({
                 ) : null
               }
               renderSectionHeader={({ section }) => {
+                const isPinnedWorkspace = pinnedWorkspacePathSet.has(section.key);
                 const collapsed = !isSearching && collapsedWorkspaceKeys.has(section.key);
                 return (
                   <Pressable
@@ -1050,11 +1262,23 @@ export const DrawerContent = memo(function DrawerContentComponent({
                       collapsed
                         ? styles.workspaceGroupHeaderCollapsed
                         : styles.workspaceGroupHeaderExpanded,
-                      pressed && !isSearching && styles.workspaceGroupHeaderPressed,
+                      isPinnedWorkspace && styles.workspaceGroupHeaderPinned,
+                      pressed &&
+                        !isSearching &&
+                        styles.workspaceGroupHeaderPressed,
                     ]}
                     onPress={() => toggleWorkspaceSection(section.key)}
+                    onLongPress={() => showWorkspacePinAction(section)}
                   >
                     <View style={styles.workspaceGroupHeaderRow}>
+                      {isPinnedWorkspace ? (
+                        <Ionicons
+                          name="pin-outline"
+                          size={11}
+                          color={theme.colors.textMuted}
+                          style={styles.workspaceGroupPinIcon}
+                        />
+                      ) : null}
                       <View style={styles.workspaceGroupTitleBlock}>
                         <Text style={styles.workspaceGroupTitle} numberOfLines={1}>
                           {section.title}
@@ -1091,6 +1315,7 @@ export const DrawerContent = memo(function DrawerContentComponent({
                   (runHeartbeatAtByThread[chat.id] ?? 0) > Date.now() - RUN_HEARTBEAT_STALE_MS;
                 const isRunning = chat.status === 'running' || isRunningFromHeartbeat;
                 const isSubAgent = item.indentLevel > 0 || Boolean(chat.parentThreadId);
+                const isPinnedChat = pinnedChatIdSet.has(chat.id);
                 const previewText = isSubAgent
                   ? `${describeAgentThreadSource(chat, item.rootThreadId)} • ${formatChatPreview(chat)}`
                   : formatChatPreview(chat);
@@ -1106,6 +1331,7 @@ export const DrawerContent = memo(function DrawerContentComponent({
                       isLast && styles.chatItemLast,
                     ]}
                     onPress={() => handleSelectChat(chat.id)}
+                    onLongPress={() => showChatPinAction(chat)}
                   >
                     <View
                       style={[
@@ -1136,6 +1362,14 @@ export const DrawerContent = memo(function DrawerContentComponent({
                         >
                           {chat.title || 'Untitled'}
                         </Text>
+                        {isPinnedChat ? (
+                          <Ionicons
+                            name="pin-outline"
+                            size={10}
+                            color={theme.colors.textMuted}
+                            style={styles.chatPinnedIcon}
+                          />
+                        ) : null}
                         <View
                           style={[
                             styles.engineBadge,
@@ -1261,6 +1495,113 @@ function mergeDrawerChatBatch(
   return sortChats(Array.from(byId.values()));
 }
 
+function sortPinnedChatBranches(
+  rows: ChatWorkspaceSection['data'],
+  pinnedIds: string[]
+): ChatWorkspaceSection['data'] {
+  if (rows.length <= 1 || pinnedIds.length === 0) {
+    return rows;
+  }
+
+  const pinnedOrder = new Map(pinnedIds.map((id, index) => [id, index]));
+  const branches: Array<{
+    rows: ChatWorkspaceSection['data'];
+    pinnedOrder: number;
+    firstUpdatedAt: string;
+    index: number;
+  }> = [];
+
+  let currentBranch: ChatWorkspaceSection['data'] = [];
+  for (const row of rows) {
+    if (row.indentLevel === 0 && currentBranch.length > 0) {
+      branches.push(createChatBranchSortEntry(currentBranch, pinnedOrder, branches.length));
+      currentBranch = [];
+    }
+    currentBranch.push(row);
+  }
+  if (currentBranch.length > 0) {
+    branches.push(createChatBranchSortEntry(currentBranch, pinnedOrder, branches.length));
+  }
+
+  if (!branches.some((branch) => branch.pinnedOrder !== Number.MAX_SAFE_INTEGER)) {
+    return rows;
+  }
+
+  return branches
+    .sort((left, right) => {
+      if (left.pinnedOrder !== right.pinnedOrder) {
+        return left.pinnedOrder - right.pinnedOrder;
+      }
+      if (left.pinnedOrder !== Number.MAX_SAFE_INTEGER) {
+        const updatedDiff = right.firstUpdatedAt.localeCompare(left.firstUpdatedAt);
+        if (updatedDiff !== 0) {
+          return updatedDiff;
+        }
+      }
+      return left.index - right.index;
+    })
+    .flatMap((branch) => branch.rows);
+}
+
+function createChatBranchSortEntry(
+  rows: ChatWorkspaceSection['data'],
+  pinnedOrder: Map<string, number>,
+  index: number
+): {
+  rows: ChatWorkspaceSection['data'];
+  pinnedOrder: number;
+  firstUpdatedAt: string;
+  index: number;
+} {
+  return {
+    rows,
+    pinnedOrder: rows.reduce(
+      (bestOrder, row) => Math.min(bestOrder, pinnedOrder.get(row.chat.id) ?? Number.MAX_SAFE_INTEGER),
+      Number.MAX_SAFE_INTEGER
+    ),
+    firstUpdatedAt: rows[0]?.chat.updatedAt ?? '',
+    index,
+  };
+}
+
+function sortPinnedChatsInSections(
+  sections: ChatWorkspaceSection[],
+  pinnedIds: string[]
+): ChatWorkspaceSection[] {
+  if (sections.length === 0 || pinnedIds.length === 0) {
+    return sections;
+  }
+
+  return sections.map((section) => ({
+    ...section,
+    data: sortPinnedChatBranches(section.data, pinnedIds),
+  }));
+}
+
+function sortWorkspaceSections(
+  sections: ChatWorkspaceSection[],
+  pinnedWorkspacePaths: string[]
+): ChatWorkspaceSection[] {
+  if (sections.length <= 1 || pinnedWorkspacePaths.length === 0) {
+    return sections;
+  }
+
+  const pinnedOrder = new Map(pinnedWorkspacePaths.map((path, index) => [path, index]));
+  return [...sections].sort((left, right) => {
+    const leftOrder = pinnedOrder.get(left.key) ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = pinnedOrder.get(right.key) ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) {
+      return leftOrder - rightOrder;
+    }
+
+    if (leftOrder !== Number.MAX_SAFE_INTEGER) {
+      return left.title.localeCompare(right.title);
+    }
+
+    return 0;
+  });
+}
+
 function areDrawerChatListsEquivalent(
   previous: ChatSummary[],
   next: ChatSummary[]
@@ -1352,6 +1693,62 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function getPinnedChatIdsPath(): string | null {
+  const base = FileSystem.documentDirectory;
+  return base ? `${base}${PINNED_CHAT_IDS_FILE}` : null;
+}
+
+function getPinnedWorkspacePathsPath(): string | null {
+  const base = FileSystem.documentDirectory;
+  return base ? `${base}${PINNED_WORKSPACE_PATHS_FILE}` : null;
+}
+
+function parsePinnedChatIds(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const ids = Array.isArray(parsed)
+      ? parsed
+      : toRecord(parsed)?.ids;
+    if (!Array.isArray(ids)) {
+      return [];
+    }
+
+    return Array.from(
+      new Set(
+        ids
+          .filter((id): id is string => typeof id === 'string')
+          .map((id) => id.trim())
+          .filter((id) => id.length > 0)
+      )
+    );
+  } catch {
+    return [];
+  }
+}
+
+function parsePinnedWorkspacePaths(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const paths = Array.isArray(parsed)
+      ? parsed
+      : toRecord(parsed)?.paths;
+    if (!Array.isArray(paths)) {
+      return [];
+    }
+
+    return Array.from(
+      new Set(
+        paths
+          .filter((path): path is string => typeof path === 'string')
+          .map((path) => path.trim())
+          .filter((path) => path.length > 0)
+      )
+    ).slice(0, PINNED_WORKSPACE_PATHS_LIMIT);
+  } catch {
+    return [];
+  }
 }
 
 function extractThreadId(event: RpcNotification): string | null {
@@ -1757,6 +2154,9 @@ const createStyles = (theme: AppTheme) => {
     marginTop: theme.spacing.xs,
     marginBottom: theme.spacing.md,
   },
+  workspaceGroupHeaderPinned: {
+    borderColor: theme.colors.borderLight,
+  },
   workspaceGroupHeaderPressed: {
     backgroundColor: theme.colors.bgInput,
   },
@@ -1767,6 +2167,9 @@ const createStyles = (theme: AppTheme) => {
   },
   workspaceGroupTitleBlock: {
     flex: 1,
+  },
+  workspaceGroupPinIcon: {
+    opacity: 0.75,
   },
   workspaceGroupTitle: {
     ...theme.typography.body,
@@ -1856,6 +2259,10 @@ const createStyles = (theme: AppTheme) => {
   },
   chatSubAgentIcon: {
     marginRight: -2,
+  },
+  chatPinnedIcon: {
+    flexShrink: 0,
+    opacity: 0.72,
   },
   chatTitle: {
     ...theme.typography.body,
