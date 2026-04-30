@@ -19,7 +19,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ChatEngine, ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
-import { getChatEngineBadgeColors, getChatEngineLabel } from '../chatEngines';
+import { getChatEngineBadgeColors, getChatEngineLabel, resolveChatEngine } from '../chatEngines';
 import { BrandMark } from '../components/BrandMark';
 import {
   DEFAULT_DRAWER_CHAT_ENGINES,
@@ -27,7 +27,6 @@ import {
   filterDrawerChatsByEngines,
   searchDrawerChats,
 } from './drawerChats';
-import { describeAgentThreadSource } from '../screens/agentThreads';
 import {
   buildChatWorkspaceSections,
   type ChatWorkspaceSection,
@@ -76,6 +75,10 @@ const PINNED_CHAT_IDS_FILE = 'clawdex-pinned-chats.json';
 const PINNED_WORKSPACE_PATHS_FILE = 'clawdex-workspace-favorites.json';
 const PINNED_WORKSPACE_PATHS_VERSION = 1;
 const PINNED_WORKSPACE_PATHS_LIMIT = 4;
+const DRAWER_ROW_HEIGHT = 52;
+const DRAWER_ROW_RADIUS = 14;
+const DRAWER_ACTION_HEIGHT = 36;
+const DRAWER_FOOTER_ACTION_HEIGHT = 36;
 const CHAT_FILTER_OPTIONS: ReadonlyArray<{
   key: ChatEngine;
   label: string;
@@ -208,6 +211,13 @@ export const DrawerContent = memo(function DrawerContentComponent({
   const runningChatCount = useMemo(
     () => countDrawerRunningChats(chats, runIndicatorsByThread),
     [chats, runIndicatorsByThread]
+  );
+  const showEngineBadges = useMemo(
+    () =>
+      visibleChatSections.some((section) =>
+        section.data.some((item) => resolveChatEngine(item.chat.engine) !== 'codex')
+      ),
+    [visibleChatSections]
   );
 
   const showAllWorkspaceChats = useCallback(
@@ -1031,7 +1041,7 @@ export const DrawerContent = memo(function DrawerContentComponent({
                 ]}
                 onPress={handleNewChat}
               >
-                <Ionicons name="add" size={18} color={theme.colors.accentText} />
+                <Ionicons name="add" size={16} color={theme.colors.accentText} />
                 <Text style={styles.primaryActionText}>New chat</Text>
               </Pressable>
               <Pressable
@@ -1042,7 +1052,7 @@ export const DrawerContent = memo(function DrawerContentComponent({
                 ]}
                 onPress={() => handleNavigate('Browser')}
               >
-                <Ionicons name="globe-outline" size={17} color={theme.colors.textPrimary} />
+                <Ionicons name="globe-outline" size={15} color={theme.colors.textPrimary} />
                 <Text style={styles.secondaryActionText}>Browser</Text>
               </Pressable>
             </View>
@@ -1236,6 +1246,14 @@ export const DrawerContent = memo(function DrawerContentComponent({
                           style={styles.workspaceGroupLiveDot}
                         />
                       ) : null}
+                      <View style={styles.workspaceGroupIconTile}>
+                        <Ionicons
+                          name="folder-outline"
+                          size={13}
+                          color={theme.colors.textMuted}
+                          style={styles.workspaceGroupIcon}
+                        />
+                      </View>
                       <View style={styles.workspaceGroupTitleBlock}>
                         <Text style={styles.workspaceGroupTitle} numberOfLines={1}>
                           {section.title}
@@ -1296,10 +1314,11 @@ export const DrawerContent = memo(function DrawerContentComponent({
                 const isRunning = isDrawerChatRunning(chat, runIndicatorsByThread);
                 const isSubAgent = item.indentLevel > 0 || Boolean(chat.parentThreadId);
                 const isPinnedChat = pinnedChatIdSet.has(chat.id);
-                const previewText = isSubAgent
-                  ? `${describeAgentThreadSource(chat, item.rootThreadId)} • ${formatChatPreview(chat)}`
-                  : formatChatPreview(chat);
-                const engineBadgeColors = getChatEngineBadgeColors(chat.engine, theme.mode);
+                const showEngineBadge =
+                  showEngineBadges || resolveChatEngine(chat.engine) !== 'codex';
+                const engineBadgeColors = showEngineBadge
+                  ? getChatEngineBadgeColors(chat.engine, theme.mode)
+                  : null;
                 return (
                   <Pressable
                     style={({ pressed }) => [
@@ -1338,7 +1357,7 @@ export const DrawerContent = memo(function DrawerContentComponent({
                             isSubAgent && styles.chatTitleSubAgent,
                             isSelected && styles.chatTitleSelected,
                           ]}
-                          numberOfLines={1}
+                          numberOfLines={2}
                         >
                           {chat.title || 'Untitled'}
                         </Text>
@@ -1350,67 +1369,33 @@ export const DrawerContent = memo(function DrawerContentComponent({
                             style={styles.chatPinnedIcon}
                           />
                         ) : null}
-                        <View
-                          style={[
-                            styles.engineBadge,
-                            {
-                              backgroundColor: engineBadgeColors.backgroundColor,
-                              borderColor: engineBadgeColors.borderColor,
-                            },
-                          ]}
-                        >
-                          <Text
+                        {engineBadgeColors ? (
+                          <View
                             style={[
-                              styles.engineBadgeText,
+                              styles.engineBadge,
                               {
-                                color: engineBadgeColors.textColor,
+                                backgroundColor: engineBadgeColors.backgroundColor,
+                                borderColor: engineBadgeColors.borderColor,
                               },
                             ]}
                           >
-                            {getChatEngineLabel(chat.engine)}
-                          </Text>
-                        </View>
+                            <Text
+                              style={[
+                                styles.engineBadgeText,
+                                {
+                                  color: engineBadgeColors.textColor,
+                                },
+                              ]}
+                            >
+                              {getChatEngineLabel(chat.engine)}
+                            </Text>
+                          </View>
+                        ) : null}
                         <Text
                           style={[styles.chatAge, isSelected && styles.chatAgeSelected]}
                         >
                           {relativeTime(chat.updatedAt)}
                         </Text>
-                      </View>
-                      <View style={styles.chatItemBottomRow}>
-                        <Text
-                          style={[
-                            styles.chatPreview,
-                            isSubAgent && styles.chatPreviewSubAgent,
-                            isSelected && styles.chatPreviewSelected,
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {previewText}
-                        </Text>
-                        {isRunning ? (
-                          <View style={styles.chatMeta}>
-                            <View style={[styles.statusPill, styles.statusPillRunning]}>
-                              <View
-                                style={[styles.statusPillDot, styles.statusPillDotRunning]}
-                              />
-                              <Text
-                                style={[styles.statusPillText, styles.statusPillTextRunning]}
-                              >
-                                Live
-                              </Text>
-                            </View>
-                          </View>
-                        ) : chat.status === 'error' ? (
-                          <View style={styles.chatMeta}>
-                            <View style={[styles.statusPill, styles.statusPillError]}>
-                              <Text
-                                style={[styles.statusPillText, styles.statusPillTextError]}
-                              >
-                                Error
-                              </Text>
-                            </View>
-                          </View>
-                        ) : null}
                       </View>
                     </View>
                   </Pressable>
@@ -1429,7 +1414,7 @@ export const DrawerContent = memo(function DrawerContentComponent({
             ]}
             onPress={() => handleNavigate('Settings')}
           >
-            <Ionicons name="settings-outline" size={16} color={theme.colors.textPrimary} />
+            <Ionicons name="settings-outline" size={15} color={theme.colors.textPrimary} />
             <Text style={styles.footerSettingsText}>Settings</Text>
           </Pressable>
         </View>
@@ -1647,24 +1632,6 @@ function formatCompactCount(value: number): string {
   return String(value);
 }
 
-function formatChatPreview(chat: ChatSummary): string {
-  const preview = chat.lastMessagePreview.trim();
-  if (preview.length > 0) {
-    return preview;
-  }
-
-  const errorPreview = chat.lastError?.trim();
-  if (errorPreview) {
-    return errorPreview;
-  }
-
-  if (chat.status === 'running') {
-    return 'Run in progress';
-  }
-
-  return 'No messages yet';
-}
-
 function normalizeWorkspaceChatLimit(value: WorkspaceChatLimit): WorkspaceChatLimit {
   return value === 10 || value === 25 || value === null ? value : DEFAULT_WORKSPACE_CHAT_LIMIT;
 }
@@ -1751,17 +1718,6 @@ const createStyles = (theme: AppTheme) => {
   const subAgentAccent = theme.isDark
     ? 'rgba(245, 165, 36, 0.35)'
     : 'rgba(217, 119, 6, 0.22)';
-  const subAgentPreview = theme.isDark
-    ? 'rgba(245, 192, 106, 0.9)'
-    : 'rgba(180, 83, 9, 0.82)';
-  const runningPillBg = theme.isDark
-    ? 'rgba(52, 199, 89, 0.12)'
-    : 'rgba(14, 159, 110, 0.14)';
-  const errorPillBg = theme.isDark
-    ? 'rgba(239, 68, 68, 0.14)'
-    : 'rgba(220, 38, 38, 0.10)';
-  const runningPillText = theme.isDark ? '#8EE6AD' : '#0B7A55';
-  const errorPillText = theme.isDark ? '#FFB4B4' : '#B91C1C';
   const cardShadow = theme.isDark
     ? '0 12px 28px rgba(0, 0, 0, 0.24)'
     : '0 12px 24px rgba(15, 23, 42, 0.10)';
@@ -1877,8 +1833,8 @@ const createStyles = (theme: AppTheme) => {
   },
   secondaryActionButton: {
     flex: 1,
-    height: 42,
-    borderRadius: 14,
+    height: DRAWER_ACTION_HEIGHT,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgItem,
@@ -1893,7 +1849,7 @@ const createStyles = (theme: AppTheme) => {
   secondaryActionText: {
     ...theme.typography.body,
     color: theme.colors.textPrimary,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
   },
   actionRow: {
@@ -1902,8 +1858,8 @@ const createStyles = (theme: AppTheme) => {
   },
   primaryActionButton: {
     flex: 1,
-    height: 42,
-    borderRadius: 14,
+    height: DRAWER_ACTION_HEIGHT,
+    borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: drawerPrimaryActionBorder,
     backgroundColor: drawerPrimaryActionBg,
@@ -1920,7 +1876,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.body,
     color: theme.colors.accentText,
     fontWeight: '700',
-    fontSize: 14,
+    fontSize: 13,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -2105,24 +2061,26 @@ const createStyles = (theme: AppTheme) => {
     lineHeight: 15,
   },
   workspaceGroupHeader: {
+    height: DRAWER_ROW_HEIGHT,
     marginHorizontal: theme.spacing.lg,
-    paddingHorizontal: theme.spacing.sm + 2,
+    paddingHorizontal: theme.spacing.sm,
     paddingVertical: theme.spacing.sm,
-    borderRadius: 16,
+    borderRadius: DRAWER_ROW_RADIUS,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
-    backgroundColor: theme.colors.bgItem,
+    backgroundColor: theme.colors.bgElevated,
+    justifyContent: 'center',
   },
   workspaceGroupHeaderExpanded: {
-    marginTop: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
     marginBottom: theme.spacing.xs,
   },
   workspaceGroupHeaderCollapsed: {
-    marginTop: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
     marginBottom: theme.spacing.md,
   },
   workspaceGroupHeaderPinned: {
-    borderColor: theme.colors.borderLight,
+    borderColor: theme.colors.borderHighlight,
   },
   workspaceGroupHeaderPressed: {
     backgroundColor: theme.colors.bgInput,
@@ -2138,6 +2096,20 @@ const createStyles = (theme: AppTheme) => {
   workspaceGroupPinIcon: {
     opacity: 0.75,
   },
+  workspaceGroupIconTile: {
+    width: 26,
+    height: 26,
+    borderRadius: 9,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  workspaceGroupIcon: {
+    opacity: 0.82,
+  },
   workspaceGroupLiveDot: {
     width: 7,
     height: 7,
@@ -2148,20 +2120,22 @@ const createStyles = (theme: AppTheme) => {
   workspaceGroupTitle: {
     ...theme.typography.body,
     color: theme.colors.textPrimary,
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
   },
   workspaceGroupSubtitle: {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
-    fontSize: 11,
+    fontSize: 10,
     lineHeight: 14,
-    marginTop: 2,
   },
   workspaceGroupCountBadge: {
     minWidth: 24,
     borderRadius: 999,
-    backgroundColor: theme.colors.bgInput,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgItem,
     paddingHorizontal: theme.spacing.sm,
     paddingVertical: 3,
     alignItems: 'center',
@@ -2181,9 +2155,10 @@ const createStyles = (theme: AppTheme) => {
     flexShrink: 0,
   },
   workspaceShowMoreRow: {
-    marginHorizontal: theme.spacing.lg,
+    marginLeft: theme.spacing.lg,
+    marginRight: theme.spacing.lg,
     marginTop: -2,
-    marginBottom: theme.spacing.sm,
+    marginBottom: theme.spacing.lg,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
@@ -2204,9 +2179,11 @@ const createStyles = (theme: AppTheme) => {
     fontWeight: '700',
   },
   chatItem: {
-    marginHorizontal: theme.spacing.lg,
+    height: DRAWER_ROW_HEIGHT,
+    marginLeft: theme.spacing.lg,
+    marginRight: theme.spacing.lg,
     marginBottom: theme.spacing.xs,
-    borderRadius: 16,
+    borderRadius: DRAWER_ROW_RADIUS,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgItem,
@@ -2219,11 +2196,12 @@ const createStyles = (theme: AppTheme) => {
     backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.025)' : 'rgba(180, 83, 9, 0.04)',
   },
   chatItemLast: {
-    marginBottom: theme.spacing.md,
+    marginBottom: theme.spacing.lg,
   },
   chatItemSelected: {
     backgroundColor: theme.colors.bgInput,
     borderColor: theme.colors.borderHighlight,
+    borderWidth: 1.5,
   },
   chatItemPressed: {
     backgroundColor: theme.colors.bgInput,
@@ -2237,6 +2215,7 @@ const createStyles = (theme: AppTheme) => {
     backgroundColor: subAgentAccent,
   },
   chatItemAccentSelected: {
+    width: 5,
     backgroundColor: theme.colors.textPrimary,
   },
   chatItemAccentRunning: {
@@ -2247,7 +2226,7 @@ const createStyles = (theme: AppTheme) => {
   },
   chatItemContent: {
     flex: 1,
-    gap: 4,
+    justifyContent: 'center',
   },
   chatItemTopRow: {
     flexDirection: 'row',
@@ -2266,6 +2245,7 @@ const createStyles = (theme: AppTheme) => {
     flex: 1,
     color: theme.colors.textSecondary,
     fontSize: 14,
+    lineHeight: 18,
     fontWeight: '600',
   },
   chatTitleSubAgent: {
@@ -2273,6 +2253,7 @@ const createStyles = (theme: AppTheme) => {
   },
   chatTitleSelected: {
     color: theme.colors.textPrimary,
+    fontWeight: '700',
   },
   engineBadge: {
     borderRadius: 999,
@@ -2297,65 +2278,7 @@ const createStyles = (theme: AppTheme) => {
     flexShrink: 0,
   },
   chatAgeSelected: {
-    color: theme.colors.textSecondary,
-  },
-  chatItemBottomRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.xs + 2,
-  },
-  chatPreview: {
-    ...theme.typography.caption,
-    flex: 1,
-    fontSize: 11,
-    lineHeight: 14,
-    color: theme.colors.textMuted,
-  },
-  chatPreviewSubAgent: {
-    color: subAgentPreview,
-  },
-  chatPreviewSelected: {
-    color: theme.colors.textMuted,
-  },
-  chatMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing.xs,
-    flexShrink: 0,
-  },
-  statusPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    borderRadius: 999,
-    paddingHorizontal: theme.spacing.xs + 6,
-    paddingVertical: 3,
-  },
-  statusPillRunning: {
-    backgroundColor: runningPillBg,
-  },
-  statusPillError: {
-    backgroundColor: errorPillBg,
-  },
-  statusPillText: {
-    ...theme.typography.caption,
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '700',
-  },
-  statusPillTextRunning: {
-    color: runningPillText,
-  },
-  statusPillTextError: {
-    color: errorPillText,
-  },
-  statusPillDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  statusPillDotRunning: {
-    backgroundColor: connectionDotConnected,
+    color: theme.colors.textPrimary,
   },
   footer: {
     marginTop: 'auto',
@@ -2364,9 +2287,9 @@ const createStyles = (theme: AppTheme) => {
     paddingBottom: theme.spacing.sm,
   },
   footerSettingsButton: {
-    height: 42,
-    borderRadius: 14,
-    borderWidth: 1,
+    height: DRAWER_FOOTER_ACTION_HEIGHT,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgItem,
     flexDirection: 'row',
@@ -2380,8 +2303,8 @@ const createStyles = (theme: AppTheme) => {
   footerSettingsText: {
     ...theme.typography.caption,
     color: theme.colors.textPrimary,
-    fontSize: 11,
-    lineHeight: 13,
+    fontSize: 10,
+    lineHeight: 12,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.4,
