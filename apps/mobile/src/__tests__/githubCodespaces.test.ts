@@ -2,6 +2,7 @@ import {
   buildGitHubAppInstallUrl,
   buildGitHubCodespacesRepositoryCandidates,
   buildGitHubCodespacesBridgeUrl,
+  deleteGitHubCodespace,
   findReusableGitHubCodespace,
   getReusableGitHubBridgeProfile,
   hasGitHubAppRepositoryAccess,
@@ -11,6 +12,17 @@ import {
 } from '../githubCodespaces';
 
 describe('githubCodespaces helpers', () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    if (originalFetch) {
+      globalThis.fetch = originalFetch;
+    } else {
+      Reflect.deleteProperty(globalThis, 'fetch');
+    }
+    jest.restoreAllMocks();
+  });
+
   it('builds the forwarded Codespaces bridge URL', () => {
     expect(
       buildGitHubCodespacesBridgeUrl('octocat-codespace', 'app.github.dev')
@@ -205,6 +217,28 @@ describe('githubCodespaces helpers', () => {
     ).toBe(true);
     expect(isRetryableGitHubDeviceFlowError(new Error('GitHub token exchange failed (401)'))).toBe(
       false
+    );
+  });
+
+  it('deletes a Codespace through the GitHub API', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      text: jest.fn().mockResolvedValue(''),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await deleteGitHubCodespace('ghu_token', 'octocat space');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.github.com/user/codespaces/octocat%20space',
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: expect.objectContaining({
+          Accept: 'application/vnd.github+json',
+          Authorization: 'Bearer ghu_token',
+          'X-GitHub-Api-Version': '2022-11-28',
+        }),
+      })
     );
   });
 });

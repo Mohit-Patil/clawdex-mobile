@@ -31,6 +31,7 @@ import {
 import {
   buildGitHubCodespacesBridgeUrl,
   createGitHubCodespaceForAuthenticatedUser,
+  deleteGitHubCodespace,
   fetchGitHubAppAccessSnapshot,
   fetchGitHubCodespaceDefaults,
   fetchGitHubCodespaces,
@@ -221,6 +222,8 @@ export function GitHubCodespacesScreen({
   const [connectingCodespaceName, setConnectingCodespaceName] = useState<string | null>(null);
   const [pendingStopCodespaceName, setPendingStopCodespaceName] = useState<string | null>(null);
   const [stoppingCodespaceName, setStoppingCodespaceName] = useState<string | null>(null);
+  const [pendingDeleteCodespaceName, setPendingDeleteCodespaceName] = useState<string | null>(null);
+  const [deletingCodespaceName, setDeletingCodespaceName] = useState<string | null>(null);
   const [restartingBridgeCodespaceName, setRestartingBridgeCodespaceName] = useState<string | null>(null);
   const [creatingCodespace, setCreatingCodespace] = useState(false);
   const [showAllCodespaces, setShowAllCodespaces] = useState(false);
@@ -890,6 +893,7 @@ export function GitHubCodespacesScreen({
 
       setRestartingBridgeCodespaceName(codespace.name);
       setPendingStopCodespaceName(null);
+      setPendingDeleteCodespaceName(null);
       setConnectionError(null);
       setConnectionPhase('waitingForBridge');
       setConnectionMessage(`Restarting connection in ${codespace.name}...`);
@@ -922,6 +926,7 @@ export function GitHubCodespacesScreen({
 
       setStoppingCodespaceName(codespace.name);
       setPendingStopCodespaceName(null);
+      setPendingDeleteCodespaceName(null);
       setConnectionError(null);
 
       try {
@@ -943,9 +948,54 @@ export function GitHubCodespacesScreen({
     [preferredRepositoryName, session]
   );
 
+  const handleDeleteCodespace = useCallback(
+    async (codespace: GitHubCodespace) => {
+      if (!session) {
+        setConnectionError('Sign in with GitHub first.');
+        return;
+      }
+
+      setDeletingCodespaceName(codespace.name);
+      setPendingDeleteCodespaceName(codespace.name);
+      setPendingStopCodespaceName(null);
+      setExpandedCodespaceName(codespace.name);
+      setConnectionError(null);
+
+      const startedAt = Date.now();
+      try {
+        await deleteGitHubCodespace(session.accessToken, codespace.name);
+        setCodespaces((current) =>
+          current.filter((candidate) => candidate.name !== codespace.name)
+        );
+        const nextCodespaces = sortGitHubCodespaces(
+          await fetchGitHubCodespaces(session.accessToken),
+          preferredRepositoryName
+        ).filter((candidate) => candidate.name !== codespace.name);
+        setCodespaces(nextCodespaces);
+        setExpandedCodespaceName((current) => (current === codespace.name ? null : current));
+        setPendingDeleteCodespaceName((current) => (current === codespace.name ? null : current));
+        setConnectionMessage(null);
+        setConnectionPhase(null);
+        setPendingCodexLogin((current) =>
+          current?.profileDraft.githubCodespaceName === codespace.name ? null : current
+        );
+      } catch (error) {
+        setConnectionError((error as Error).message);
+      } finally {
+        const remainingVisibleMs = 1_500 - (Date.now() - startedAt);
+        if (remainingVisibleMs > 0) {
+          await sleep(remainingVisibleMs);
+        }
+        setDeletingCodespaceName(null);
+      }
+    },
+    [preferredRepositoryName, session]
+  );
+
   const busy =
     Boolean(connectingCodespaceName) ||
     Boolean(stoppingCodespaceName) ||
+    Boolean(deletingCodespaceName) ||
     Boolean(restartingBridgeCodespaceName) ||
     codexLoginChecking ||
     codexLoginSubmitting;
@@ -1020,15 +1070,11 @@ export function GitHubCodespacesScreen({
               {onboardingStage === 'connect' ? (
                 <View style={styles.simpleHeaderBlock}>
                   <View style={styles.loadingRow}>
-                    {busy ? (
-                      <ActivityIndicator color={theme.colors.textPrimary} />
-                    ) : (
-                      <Ionicons
-                        name="checkmark-circle-outline"
-                        size={18}
-                        color={theme.colors.statusComplete}
-                      />
-                    )}
+                    <Ionicons
+                      name="git-network-outline"
+                      size={18}
+                      color={theme.colors.textSecondary}
+                    />
                     <Text style={styles.cardHeadline}>Connecting workspace</Text>
                   </View>
                 </View>
@@ -1108,6 +1154,17 @@ export function GitHubCodespacesScreen({
                   </Text>
                 </View>
               ) : null}
+              {onboardingStage === 'codespace' && deletingCodespaceName ? (
+                <View style={styles.progressBanner}>
+                  <ActivityIndicator size="small" color={theme.colors.textPrimary} />
+                  <View style={styles.progressBannerCopy}>
+                    <Text style={styles.progressBannerTitle}>Deleting Codespace</Text>
+                    <Text style={styles.progressBannerText} numberOfLines={2}>
+                      {deletingCodespaceName}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
 
               {onboardingStage === 'github' ? (
                 <>
@@ -1167,15 +1224,23 @@ export function GitHubCodespacesScreen({
                         {visibleCodespaces.map((codespace) => {
                           const codespaceBusy = connectingCodespaceName === codespace.name;
                           const codespaceStopping = stoppingCodespaceName === codespace.name;
+                          const codespaceDeleting = deletingCodespaceName === codespace.name;
                           const bridgeRestarting = restartingBridgeCodespaceName === codespace.name;
                           const stopConfirmationVisible =
                             pendingStopCodespaceName === codespace.name;
+                          const deleteConfirmationVisible =
+                            pendingDeleteCodespaceName === codespace.name;
                           const isSuggested = suggestedCodespace?.name === codespace.name;
                           const canStopCodespace = isCodespaceAvailable(codespace);
-                          const hasSecondaryActions = Boolean(codespace.webUrl) || canStopCodespace;
                           const secondaryActionsVisible =
-                            expandedCodespaceName === codespace.name || stopConfirmationVisible;
-                          const actionLabel = canStopCodespace ? 'Connect' : 'Start';
+                            expandedCodespaceName === codespace.name ||
+                            stopConfirmationVisible ||
+                            deleteConfirmationVisible;
+                          const actionLabel = codespaceDeleting
+                            ? 'Deleting...'
+                            : canStopCodespace
+                              ? 'Connect'
+                              : 'Start';
                           const actionIcon = canStopCodespace ? 'flash-outline' : 'play-outline';
 
                           return (
@@ -1184,6 +1249,7 @@ export function GitHubCodespacesScreen({
                               style={[
                                 styles.codespaceCard,
                                 isSuggested && styles.codespaceCardRecommended,
+                                codespaceDeleting && styles.codespaceCardDeleting,
                               ]}
                             >
                               <View style={styles.codespaceCardTop}>
@@ -1196,7 +1262,7 @@ export function GitHubCodespacesScreen({
                                   </View>
                                   <View style={styles.codespaceStatePill}>
                                     <Text style={styles.codespaceStateText}>
-                                      {formatCodespaceStatus(codespace)}
+                                      {codespaceDeleting ? 'Deleting' : formatCodespaceStatus(codespace)}
                                     </Text>
                                   </View>
                                 </View>
@@ -1210,12 +1276,15 @@ export function GitHubCodespacesScreen({
                                   disabled={busy}
                                   style={({ pressed }) => [
                                     styles.codespacePrimaryAction,
-                                    (codespaceBusy || codespaceStopping || bridgeRestarting) &&
+                                    (codespaceBusy ||
+                                      codespaceStopping ||
+                                      codespaceDeleting ||
+                                      bridgeRestarting) &&
                                       styles.codespaceButtonBusy,
                                     pressed && !busy && styles.codespaceButtonPressed,
                                   ]}
                                 >
-                                  {codespaceBusy || codespaceStopping || bridgeRestarting ? (
+                                  {codespaceBusy || codespaceStopping || codespaceDeleting || bridgeRestarting ? (
                                     <ActivityIndicator size="small" color={theme.colors.black} />
                                   ) : (
                                     <Ionicons
@@ -1228,29 +1297,25 @@ export function GitHubCodespacesScreen({
                                     {actionLabel}
                                   </Text>
                                 </Pressable>
-                                {hasSecondaryActions ? (
-                                  <Pressable
-                                    onPress={() => {
-                                      setExpandedCodespaceName((current) =>
-                                        current === codespace.name ? null : codespace.name
-                                      );
-                                    }}
-                                    disabled={busy}
-                                    style={({ pressed }) => [
-                                      styles.codespaceMoreAction,
-                                      pressed && !busy && styles.secondaryButtonPressed,
-                                    ]}
-                                  >
-                                    <Text style={styles.codespaceSecondaryActionText}>More</Text>
-                                    <Ionicons
-                                      name={
-                                        secondaryActionsVisible ? 'chevron-up' : 'chevron-down'
-                                      }
-                                      size={14}
-                                      color={theme.colors.textPrimary}
-                                    />
-                                  </Pressable>
-                                ) : null}
+                                <Pressable
+                                  onPress={() => {
+                                    setExpandedCodespaceName((current) =>
+                                      current === codespace.name ? null : codespace.name
+                                    );
+                                  }}
+                                  disabled={busy}
+                                  style={({ pressed }) => [
+                                    styles.codespaceMoreAction,
+                                    pressed && !busy && styles.secondaryButtonPressed,
+                                  ]}
+                                >
+                                  <Text style={styles.codespaceSecondaryActionText}>More</Text>
+                                  <Ionicons
+                                    name={secondaryActionsVisible ? 'chevron-up' : 'chevron-down'}
+                                    size={14}
+                                    color={theme.colors.textPrimary}
+                                  />
+                                </Pressable>
                                 {secondaryActionsVisible ? (
                                   <View style={styles.codespaceActionRow}>
                                     {codespace.webUrl ? (
@@ -1303,6 +1368,7 @@ export function GitHubCodespacesScreen({
                                     {canStopCodespace ? (
                                       <Pressable
                                         onPress={() => {
+                                          setPendingDeleteCodespaceName(null);
                                           setPendingStopCodespaceName((current) =>
                                             current === codespace.name ? null : codespace.name
                                           );
@@ -1321,6 +1387,26 @@ export function GitHubCodespacesScreen({
                                         <Text style={styles.codespaceStopActionText}>Stop</Text>
                                       </Pressable>
                                     ) : null}
+                                    <Pressable
+                                      onPress={() => {
+                                        setPendingStopCodespaceName(null);
+                                        setPendingDeleteCodespaceName((current) =>
+                                          current === codespace.name ? null : codespace.name
+                                        );
+                                      }}
+                                      disabled={busy}
+                                      style={({ pressed }) => [
+                                        styles.codespaceStopAction,
+                                        pressed && !busy && styles.codespaceStopActionPressed,
+                                      ]}
+                                    >
+                                      <Ionicons
+                                        name="trash-outline"
+                                        size={14}
+                                        color={theme.colors.error}
+                                      />
+                                      <Text style={styles.codespaceStopActionText}>Delete</Text>
+                                    </Pressable>
                                   </View>
                                 ) : null}
 
@@ -1368,6 +1454,60 @@ export function GitHubCodespacesScreen({
                                         )}
                                         <Text style={styles.codespaceStopConfirmButtonText}>
                                           Stop Codespace
+                                        </Text>
+                                      </Pressable>
+                                    </View>
+                                  </View>
+                                ) : null}
+
+                                {deleteConfirmationVisible ? (
+                                  <View style={styles.codespaceStopConfirm}>
+                                    <Text style={styles.codespaceStopConfirmTitle}>
+                                      Delete this Codespace?
+                                    </Text>
+                                    <Text style={styles.codespaceStopConfirmText}>
+                                      This permanently removes the Codespace from GitHub. Your
+                                      repository stays intact.
+                                    </Text>
+                                    <View style={styles.codespaceStopConfirmActions}>
+                                      <Pressable
+                                        onPress={() => setPendingDeleteCodespaceName(null)}
+                                        disabled={codespaceDeleting}
+                                        style={({ pressed }) => [
+                                          styles.codespaceStopCancel,
+                                          codespaceDeleting && styles.codespaceActionDisabled,
+                                          pressed && !codespaceDeleting && styles.secondaryButtonPressed,
+                                        ]}
+                                      >
+                                        <Text style={styles.codespaceStopCancelText}>Cancel</Text>
+                                      </Pressable>
+                                      <Pressable
+                                        onPress={() => {
+                                          void handleDeleteCodespace(codespace);
+                                        }}
+                                        disabled={busy}
+                                        style={({ pressed }) => [
+                                          styles.codespaceStopConfirmButton,
+                                          pressed &&
+                                            !busy &&
+                                            styles.codespaceStopConfirmButtonPressed,
+                                          busy && styles.codespaceButtonBusy,
+                                        ]}
+                                      >
+                                        {codespaceDeleting ? (
+                                          <ActivityIndicator
+                                            size="small"
+                                            color={theme.colors.white}
+                                          />
+                                        ) : (
+                                          <Ionicons
+                                            name="trash-outline"
+                                            size={14}
+                                            color={theme.colors.white}
+                                          />
+                                        )}
+                                        <Text style={styles.codespaceStopConfirmButtonText}>
+                                          {codespaceDeleting ? 'Deleting...' : 'Delete Codespace'}
                                         </Text>
                                       </Pressable>
                                     </View>
@@ -1482,9 +1622,6 @@ export function GitHubCodespacesScreen({
                             {formatConnectionPhaseTitle(connectionPhase, activeCodespaceLabel)}
                           </Text>
                         </View>
-                      </View>
-                      <View style={styles.statusPill}>
-                        <Text style={styles.statusPillText}>{busy ? 'Working' : 'Ready'}</Text>
                       </View>
                     </View>
                     {connectionMessage ? (
@@ -1988,6 +2125,32 @@ const createStyles = (theme: AppTheme) => {
       flex: 1,
       lineHeight: 18,
     },
+    progressBanner: {
+      borderRadius: theme.radius.md,
+      borderWidth: 1,
+      borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.22)' : 'rgba(67, 96, 126, 0.20)',
+      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.78)',
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.md,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: theme.spacing.sm,
+    },
+    progressBannerCopy: {
+      flex: 1,
+      minWidth: 0,
+      gap: 2,
+    },
+    progressBannerTitle: {
+      ...theme.typography.caption,
+      color: theme.colors.textPrimary,
+      fontWeight: '700',
+    },
+    progressBannerText: {
+      ...theme.typography.caption,
+      color: theme.colors.textSecondary,
+      lineHeight: 18,
+    },
     repoSummaryRow: {
       borderRadius: theme.radius.md,
       borderWidth: 1,
@@ -2079,20 +2242,6 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       marginTop: 2,
-    },
-    statusPill: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: theme.spacing.xs,
-      borderRadius: 999,
-      paddingHorizontal: theme.spacing.sm,
-      paddingVertical: 6,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.14)' : 'rgba(14, 159, 110, 0.12)',
-    },
-    statusPillText: {
-      ...theme.typography.caption,
-      color: theme.colors.statusComplete,
-      fontWeight: '600',
     },
     recommendedActionCard: {
       borderRadius: theme.radius.md,
@@ -2378,6 +2527,10 @@ const createStyles = (theme: AppTheme) => {
         ? '0px 10px 24px rgba(0, 0, 0, 0.16)'
         : '0px 8px 20px rgba(15, 31, 54, 0.08)',
     },
+    codespaceCardDeleting: {
+      borderColor: theme.isDark ? 'rgba(239, 68, 68, 0.30)' : 'rgba(217, 45, 32, 0.30)',
+      backgroundColor: theme.colors.errorBg,
+    },
     codespaceCardTop: {
       gap: theme.spacing.sm,
     },
@@ -2526,6 +2679,9 @@ const createStyles = (theme: AppTheme) => {
     },
     codespaceStopActionPressed: {
       opacity: 0.9,
+    },
+    codespaceActionDisabled: {
+      opacity: 0.52,
     },
     codespaceStopActionText: {
       ...theme.typography.caption,

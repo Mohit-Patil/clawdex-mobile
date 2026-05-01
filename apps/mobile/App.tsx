@@ -132,8 +132,8 @@ function isPendingGitHubCodespacesSession(
 }
 
 const DRAWER_MIN_WIDTH = 300;
-const DRAWER_MAX_WIDTH = 360;
-const DRAWER_SCREEN_RATIO = 0.88;
+const DRAWER_MAX_WIDTH = 336;
+const DRAWER_SCREEN_RATIO = 0.8;
 const EDGE_SWIPE_WIDTH = 24;
 const CHAT_GIT_BACK_DISTANCE = 56;
 const CHAT_GIT_BACK_VELOCITY = 900;

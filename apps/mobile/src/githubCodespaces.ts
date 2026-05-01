@@ -444,6 +444,15 @@ export async function stopGitHubCodespace(
   });
 }
 
+export async function deleteGitHubCodespace(
+  accessToken: string,
+  codespaceName: string
+): Promise<void> {
+  await githubApiRequest(`/user/codespaces/${encodeURIComponent(codespaceName)}`, accessToken, {
+    method: 'DELETE',
+  });
+}
+
 export async function fetchGitHubCodespaceDefaults(
   accessToken: string,
   repository: GitHubCodespacesRepositoryReference,
