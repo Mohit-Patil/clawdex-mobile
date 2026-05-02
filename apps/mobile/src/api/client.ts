@@ -24,6 +24,7 @@ import type {
   BridgeRestartStartResponse,
   BridgeUpdateStartResponse,
   ChatEngine,
+  CursorCredentialStatus,
   CollaborationMode,
   CreateChatRequest,
   Chat,
@@ -144,6 +145,23 @@ interface AppServerCollaborationMode {
 interface AppServerThreadRuntimeSettings {
   model: string | null;
   effort: ReasoningEffort | null;
+}
+
+interface CursorCredentialStatusResponse {
+  configured?: boolean;
+  valid?: boolean | null;
+  source?: string | null;
+  apiKeyName?: string | null;
+  api_key_name?: string | null;
+  userEmail?: string | null;
+  user_email?: string | null;
+  createdAt?: string | null;
+  created_at?: string | null;
+  enabled?: boolean;
+  runtimeAvailable?: boolean;
+  runtime_available?: boolean;
+  active?: boolean;
+  error?: string | null;
 }
 
 type AppServerThreadSetNameResponse = Record<string, never>;
@@ -312,6 +330,13 @@ export class HostBridgeApiClient {
 
   readBridgeRuntime(): Promise<BridgeRuntimeInfo> {
     return this.ws.request<BridgeRuntimeInfo>('bridge/runtime/read');
+  }
+
+  async readCursorCredentials(): Promise<CursorCredentialStatus> {
+    const response = await this.ws.request<CursorCredentialStatusResponse>(
+      'bridge/cursor/credentials/read'
+    );
+    return readCursorCredentialStatus(response);
   }
 
   startBridgeUpdate(version = 'latest'): Promise<BridgeUpdateStartResponse> {
@@ -2260,7 +2285,7 @@ function normalizeChatEngine(value: string | null | undefined): ChatEngine | nul
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'opencode') {
+  if (normalized === 'codex' || normalized === 'opencode' || normalized === 'cursor') {
     return normalized;
   }
 
@@ -2274,6 +2299,26 @@ function readThreadRuntimeSettings(value: unknown): AppServerThreadRuntimeSettin
     effort: normalizeEffort(
       readString(record?.reasoningEffort) ?? readString(record?.reasoning_effort)
     ),
+  };
+}
+
+function readCursorCredentialStatus(value: unknown): CursorCredentialStatus {
+  const record = toRecord(value) ?? {};
+  const sourceRaw = readString(record.source);
+  const source = sourceRaw === 'env' ? sourceRaw : null;
+
+  return {
+    configured: record.configured === true,
+    valid: typeof record.valid === 'boolean' ? record.valid : null,
+    source,
+    apiKeyName: readString(record.apiKeyName) ?? readString(record.api_key_name),
+    userEmail: readString(record.userEmail) ?? readString(record.user_email),
+    createdAt: readString(record.createdAt) ?? readString(record.created_at),
+    enabled: record.enabled === true,
+    runtimeAvailable:
+      record.runtimeAvailable === true || record.runtime_available === true,
+    active: record.active === true,
+    error: readString(record.error),
   };
 }
 

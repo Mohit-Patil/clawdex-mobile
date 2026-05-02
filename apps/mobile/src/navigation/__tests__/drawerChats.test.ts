@@ -75,12 +75,14 @@ describe('drawerChats', () => {
       chat('codex-explicit', { engine: 'codex' }),
       chat('codex-implicit'),
       chat('opencode', { engine: 'opencode' }),
+      chat('cursor', { engine: 'cursor' }),
     ];
 
     expect(filterDrawerChatsByEngines(chats, DEFAULT_DRAWER_CHAT_ENGINES).map((entry) => entry.id)).toEqual([
       'codex-explicit',
       'codex-implicit',
       'opencode',
+      'cursor',
     ]);
     expect(filterDrawerChatsByEngines(chats, ['codex']).map((entry) => entry.id)).toEqual([
       'codex-explicit',
@@ -89,10 +91,14 @@ describe('drawerChats', () => {
     expect(filterDrawerChatsByEngines(chats, ['opencode']).map((entry) => entry.id)).toEqual([
       'opencode',
     ]);
+    expect(filterDrawerChatsByEngines(chats, ['cursor']).map((entry) => entry.id)).toEqual([
+      'cursor',
+    ]);
     expect(filterDrawerChatsByEngines(chats, []).map((entry) => entry.id)).toEqual([
       'codex-explicit',
       'codex-implicit',
       'opencode',
+      'cursor',
     ]);
   });
 

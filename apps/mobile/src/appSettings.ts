@@ -204,7 +204,7 @@ function normalizeChatEngine(value: unknown): ChatEngine | null {
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'opencode') {
+  if (normalized === 'codex' || normalized === 'opencode' || normalized === 'cursor') {
     return normalized;
   }
 
@@ -230,6 +230,10 @@ function createEmptyEngineDefaultSettingsMap(): EngineDefaultSettingsMap {
       modelId: null,
       effort: null,
     },
+    cursor: {
+      modelId: null,
+      effort: null,
+    },
   };
 }
 
@@ -241,7 +245,7 @@ function normalizeEngineDefaultSettingsMap(
   const base = createEmptyEngineDefaultSettingsMap();
   const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 
-  for (const engine of ['codex', 'opencode'] as const) {
+  for (const engine of ['codex', 'opencode', 'cursor'] as const) {
     const entry =
       record && typeof record[engine] === 'object'
         ? (record[engine] as Record<string, unknown>)

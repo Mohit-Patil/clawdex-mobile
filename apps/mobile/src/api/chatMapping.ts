@@ -321,7 +321,10 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
 
 function readChatEngine(value: unknown): ChatEngine {
   const normalized = normalizeLifecycleStatus(readString(value));
-  return normalized === 'opencode' ? 'opencode' : 'codex';
+  if (normalized === 'opencode' || normalized === 'cursor') {
+    return normalized;
+  }
+  return 'codex';
 }
 
 function readThreadSourceMetadata(source: unknown): ThreadSourceMetadata {
@@ -828,6 +831,23 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
     return withNestedDetail(title, detail);
   }
 
+  if (type === 'toolcall') {
+    const tool = normalizeInline(readString(item.tool) ?? readString(item.name), 120) ?? 'unknown';
+    const status = normalizeType(readString(item.status) ?? '');
+    const title =
+      status === 'failed' || status === 'error'
+        ? `• Tool failed \`${tool}\``
+        : status === 'running' || status === 'inprogress'
+          ? `• Calling tool \`${tool}\``
+          : `• Called tool \`${tool}\``;
+    const argsDetail = toCursorToolArgsPreview(item);
+    const resultDetail = toCursorToolResultPreview(item.result);
+    const detail = [argsDetail ? `Input: ${argsDetail}` : null, resultDetail]
+      .filter(Boolean)
+      .join('\n');
+    return withNestedDetail(title, detail || null);
+  }
+
   if (type === 'collabtoolcall') {
     const tool = normalizeType(readString(item.tool) ?? '');
     const status = normalizeType(readString(item.status) ?? '');
@@ -951,6 +971,78 @@ function toToolLikeMessage(item: Record<string, unknown>): string | null {
   }
 
   return null;
+}
+
+function toCursorToolArgsPreview(item: Record<string, unknown>): string | null {
+  const args = toRecord(item.args);
+  if (!args) {
+    return toStructuredPreview(item.args, 320);
+  }
+
+  const directTarget =
+    normalizeInline(readString(args.path), 180) ??
+    normalizeInline(readString(args.filePath), 180) ??
+    normalizeInline(readString(args.file_path), 180) ??
+    normalizeInline(readString(args.globPattern), 180) ??
+    normalizeInline(readString(args.glob_pattern), 180) ??
+    normalizeInline(readString(args.command), 220);
+  if (directTarget) {
+    return directTarget;
+  }
+
+  return toStructuredPreview(args, 320);
+}
+
+function toCursorToolResultPreview(value: unknown): string | null {
+  const record = toRecord(value);
+  const status = normalizeType(readString(record?.status) ?? '');
+  const isError = status === 'error' || status === 'failed';
+  const gitPreview = toCursorGitResultPreview(record ?? toRecord(toRecord(value)?.value));
+  if (gitPreview) {
+    return gitPreview;
+  }
+  const preview = toStructuredPreview(record?.value ?? record?.result ?? value, 600);
+  if (isError) {
+    const error =
+      normalizeMultiline(readString(record?.error), 600) ??
+      normalizeMultiline(readString(toRecord(record?.error)?.message), 600);
+    return error ? `Error: ${error}` : preview;
+  }
+  return preview;
+}
+
+function toCursorGitResultPreview(record: Record<string, unknown> | null): string | null {
+  const rawBranches = Array.isArray(record?.branches) ? record.branches : [];
+  if (rawBranches.length === 0) {
+    return null;
+  }
+
+  const lines = rawBranches
+    .map((entry) => {
+      const branchRecord = toRecord(entry);
+      if (!branchRecord) {
+        return null;
+      }
+      const branch = normalizeInline(readString(branchRecord.branch), 180);
+      const prUrl = normalizeInline(
+        readString(branchRecord.prUrl) ?? readString(branchRecord.pr_url),
+        220
+      );
+      const repoUrl = normalizeInline(
+        readString(branchRecord.repoUrl) ?? readString(branchRecord.repo_url),
+        220
+      );
+      return [
+        branch ? `Branch: ${branch}` : null,
+        prUrl ? `PR: ${prUrl}` : null,
+        repoUrl ? `Repo: ${repoUrl}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    })
+    .filter((line): line is string => Boolean(line));
+
+  return lines.length > 0 ? lines.join('\n') : null;
 }
 
 function toSubAgentMeta(item: Record<string, unknown>): ChatMessageSubAgentMeta | undefined {

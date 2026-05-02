@@ -54,6 +54,9 @@ run_secure_setup() {
   local preview_port="$4"
   local bridge_token="$5"
   local opencode_cli_bin="$6"
+  local cursor_app_server_bin="$7"
+  local cursor_api_key="$8"
+  local cursor_model="$9"
 
   info "Refreshing secure config for network mode: $NETWORK_MODE"
   (
@@ -65,6 +68,9 @@ run_secure_setup() {
     BRIDGE_PREVIEW_PORT_OVERRIDE="$preview_port" \
     BRIDGE_AUTH_TOKEN="$bridge_token" \
     OPENCODE_CLI_BIN="$opencode_cli_bin" \
+    CURSOR_APP_SERVER_BIN="$cursor_app_server_bin" \
+    CURSOR_API_KEY="$cursor_api_key" \
+    CURSOR_MODEL="$cursor_model" \
     npm run secure:setup
   )
 }
@@ -132,12 +138,18 @@ EXISTING_BRIDGE_PORT="$(trim_value "$(extract_env_value "$SECURE_ENV_FILE" "BRID
 EXISTING_PREVIEW_PORT="$(trim_value "$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_PREVIEW_PORT")")"
 EXISTING_TOKEN="$(trim_value "$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_AUTH_TOKEN")")"
 EXISTING_OPENCODE_CLI_BIN="$(trim_value "$(extract_env_value "$SECURE_ENV_FILE" "OPENCODE_CLI_BIN")")"
+EXISTING_CURSOR_APP_SERVER_BIN="$(trim_value "$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_APP_SERVER_BIN")")"
+EXISTING_CURSOR_API_KEY="$(trim_value "$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_API_KEY")")"
+EXISTING_CURSOR_MODEL="$(trim_value "$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_MODEL")")"
 
 ACTIVE_ENGINE="${EXISTING_ACTIVE_ENGINE:-codex}"
 ENABLED_ENGINES="${EXISTING_ENABLED_ENGINES:-$ACTIVE_ENGINE}"
 BRIDGE_PORT="${EXISTING_BRIDGE_PORT:-8787}"
 PREVIEW_PORT="${EXISTING_PREVIEW_PORT:-$((BRIDGE_PORT + 1))}"
 OPENCODE_CLI_BIN="${EXISTING_OPENCODE_CLI_BIN:-opencode}"
+CURSOR_APP_SERVER_BIN="${EXISTING_CURSOR_APP_SERVER_BIN:-cursor-app-server}"
+CURSOR_API_KEY="${EXISTING_CURSOR_API_KEY:-}"
+CURSOR_MODEL="${EXISTING_CURSOR_MODEL:-}"
 
 if [[ "$SKIP_STOP" != "true" ]]; then
   info "Stopping existing Clawdex services for a clean restart"
@@ -147,7 +159,7 @@ if [[ "$SKIP_STOP" != "true" ]]; then
   )
 fi
 
-run_secure_setup "$ACTIVE_ENGINE" "$ENABLED_ENGINES" "$BRIDGE_PORT" "$PREVIEW_PORT" "$EXISTING_TOKEN" "$OPENCODE_CLI_BIN"
+run_secure_setup "$ACTIVE_ENGINE" "$ENABLED_ENGINES" "$BRIDGE_PORT" "$PREVIEW_PORT" "$EXISTING_TOKEN" "$OPENCODE_CLI_BIN" "$CURSOR_APP_SERVER_BIN" "$CURSOR_API_KEY" "$CURSOR_MODEL"
 
 info "Starting secure bridge in background"
 (

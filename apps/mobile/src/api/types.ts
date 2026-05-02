@@ -1,5 +1,5 @@
 export type ChatStatus = 'idle' | 'running' | 'error' | 'complete';
-export type ChatEngine = 'codex' | 'opencode';
+export type ChatEngine = 'codex' | 'opencode' | 'cursor';
 
 export interface EngineDefaultSettings {
   modelId: string | null;
@@ -619,6 +619,19 @@ export interface BridgeRuntimeInfo {
   safeRestartSupported: boolean;
   latestVersion?: string | null;
   updaterStatus?: BridgeUpdaterStatus | null;
+}
+
+export interface CursorCredentialStatus {
+  configured: boolean;
+  valid: boolean | null;
+  source: 'env' | null;
+  apiKeyName: string | null;
+  userEmail: string | null;
+  createdAt: string | null;
+  enabled: boolean;
+  runtimeAvailable: boolean;
+  active: boolean;
+  error: string | null;
 }
 
 export interface BridgeUpdateStartResponse {

@@ -100,6 +100,7 @@ const GITHUB_HOST: &str = "github.com";
 const GITHUB_CREDENTIALS_DIR_NAME: &str = ".clawdex";
 const GITHUB_CREDENTIALS_FILE_NAME: &str = "github-credentials";
 const GITHUB_GIT_CONFIG_FILE_NAME: &str = "github-git-auth.gitconfig";
+const CURSOR_API_BASE_URL: &str = "https://api.cursor.com";
 
 #[derive(Debug, Clone)]
 struct GitHubCodespacesAuthConfig {
@@ -117,6 +118,7 @@ struct BridgeConfig {
     workdir: PathBuf,
     cli_bin: String,
     opencode_cli_bin: String,
+    cursor_app_server_bin: String,
     active_engine: BridgeRuntimeEngine,
     enabled_engines: Vec<BridgeRuntimeEngine>,
     opencode_host: String,
@@ -159,6 +161,8 @@ impl BridgeConfig {
         let cli_bin = env::var("CODEX_CLI_BIN").unwrap_or_else(|_| "codex".to_string());
         let opencode_cli_bin =
             env::var("OPENCODE_CLI_BIN").unwrap_or_else(|_| "opencode".to_string());
+        let cursor_app_server_bin =
+            env::var("CURSOR_APP_SERVER_BIN").unwrap_or_else(|_| "cursor-app-server".to_string());
         let requested_active_engine = match env::var("BRIDGE_ACTIVE_ENGINE") {
             Ok(raw) => parse_bridge_runtime_engine(raw.trim())
                 .ok_or_else(|| format!("unsupported BRIDGE_ACTIVE_ENGINE value: {raw}"))?,
@@ -223,6 +227,7 @@ impl BridgeConfig {
             workdir,
             cli_bin,
             opencode_cli_bin,
+            cursor_app_server_bin,
             active_engine,
             enabled_engines,
             opencode_host,
@@ -802,6 +807,7 @@ struct AppState {
 enum BridgeRuntimeEngine {
     Codex,
     Opencode,
+    Cursor,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -911,6 +917,151 @@ struct BrowserPreviewCreateRequest {
 #[serde(rename_all = "camelCase")]
 struct BrowserPreviewCloseRequest {
     session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CursorApiKeyInfo {
+    api_key_name: String,
+    created_at: String,
+    user_email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CursorCredentialSource {
+    Env,
+}
+
+#[derive(Debug, Clone)]
+struct CursorRuntimeCredential {
+    api_key: String,
+    source: CursorCredentialSource,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorCredentialStatus {
+    configured: bool,
+    valid: Option<bool>,
+    source: Option<CursorCredentialSource>,
+    api_key_name: Option<String>,
+    user_email: Option<String>,
+    created_at: Option<String>,
+    enabled: bool,
+    runtime_available: bool,
+    active: bool,
+    error: Option<String>,
+}
+
+async fn start_cursor_app_server_from_config(
+    config: &Arc<BridgeConfig>,
+    hub: Arc<ClientHub>,
+) -> Result<Arc<AppServerBridge>, String> {
+    let credential = resolve_cursor_runtime_credential()
+        .await
+        .map_err(|error| error.message)?;
+    AppServerBridge::start_cursor(
+        &config.cursor_app_server_bin,
+        &credential.api_key,
+        &config.workdir,
+        hub,
+    )
+    .await
+}
+
+async fn resolve_cursor_runtime_credential() -> Result<CursorRuntimeCredential, BridgeError> {
+    if let Some(api_key) = read_non_empty_env("CURSOR_API_KEY") {
+        return Ok(CursorRuntimeCredential {
+            api_key,
+            source: CursorCredentialSource::Env,
+        });
+    }
+
+    Err(BridgeError::server(
+        "CURSOR_API_KEY is required for Cursor; run clawdex init with Cursor selected to save it in .env.secure",
+    ))
+}
+
+async fn read_cursor_credential_status(
+    state: &Arc<AppState>,
+) -> Result<CursorCredentialStatus, BridgeError> {
+    let enabled = state
+        .config
+        .enabled_engines
+        .contains(&BridgeRuntimeEngine::Cursor);
+    let active = state.config.active_engine == BridgeRuntimeEngine::Cursor;
+    let runtime_available = state.backend.cursor_backend().is_some();
+
+    let credential = match resolve_cursor_runtime_credential().await {
+        Ok(credential) => credential,
+        Err(error) => {
+            return Ok(CursorCredentialStatus {
+                configured: false,
+                valid: None,
+                source: None,
+                api_key_name: None,
+                user_email: None,
+                created_at: None,
+                enabled,
+                runtime_available,
+                active,
+                error: Some(error.message),
+            });
+        }
+    };
+
+    match validate_cursor_api_key(&credential.api_key).await {
+        Ok(info) => Ok(CursorCredentialStatus {
+            configured: true,
+            valid: Some(true),
+            source: Some(credential.source),
+            api_key_name: Some(info.api_key_name),
+            user_email: info.user_email,
+            created_at: Some(info.created_at),
+            enabled,
+            runtime_available,
+            active,
+            error: None,
+        }),
+        Err(error) => Ok(CursorCredentialStatus {
+            configured: true,
+            valid: Some(false),
+            source: Some(credential.source),
+            api_key_name: None,
+            user_email: None,
+            created_at: None,
+            enabled,
+            runtime_available,
+            active,
+            error: Some(error.message),
+        }),
+    }
+}
+
+async fn validate_cursor_api_key(api_key: &str) -> Result<CursorApiKeyInfo, BridgeError> {
+    let response = HttpClient::new()
+        .get(format!("{CURSOR_API_BASE_URL}/v0/me"))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|error| {
+            BridgeError::server(&format!("failed to validate Cursor API key: {error}"))
+        })?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(BridgeError::server("Cursor API key was rejected by Cursor"));
+    }
+    if !status.is_success() {
+        return Err(BridgeError::server(&format!(
+            "Cursor API key validation failed with HTTP {status}"
+        )));
+    }
+
+    response
+        .json::<CursorApiKeyInfo>()
+        .await
+        .map_err(|error| BridgeError::server(&format!("invalid Cursor API key response: {error}")))
 }
 
 #[derive(Debug, Clone)]
@@ -1108,6 +1259,7 @@ struct RuntimeBackend {
     preferred_engine: BridgeRuntimeEngine,
     codex: Option<Arc<AppServerBridge>>,
     opencode: Option<Arc<OpencodeBackend>>,
+    cursor: Arc<StdRwLock<Option<Arc<AppServerBridge>>>>,
 }
 
 impl RuntimeBackend {
@@ -1117,27 +1269,36 @@ impl RuntimeBackend {
         let opencode_enabled = config
             .enabled_engines
             .contains(&BridgeRuntimeEngine::Opencode);
+        let cursor_enabled = config
+            .enabled_engines
+            .contains(&BridgeRuntimeEngine::Cursor);
         let mut codex = None;
         let mut opencode = None;
+        let cursor = Arc::new(StdRwLock::new(None));
 
         match preferred_engine {
             BridgeRuntimeEngine::Codex => {
                 if codex_enabled {
-                    let app_server = AppServerBridge::start(
-                        &config.cli_bin,
-                        BridgeRuntimeEngine::Codex,
-                        hub.clone(),
-                    )
-                    .await?;
+                    let app_server =
+                        AppServerBridge::start_codex(&config.cli_bin, hub.clone()).await?;
                     spawn_rollout_live_sync(hub.clone());
                     codex = Some(app_server);
                 }
 
                 if opencode_enabled {
-                    match OpencodeBackend::start(config, hub).await {
+                    match OpencodeBackend::start(config, hub.clone()).await {
                         Ok(backend) => opencode = Some(backend),
                         Err(error) => eprintln!(
                             "opencode backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
+                    }
+                }
+
+                if cursor_enabled {
+                    match start_cursor_app_server_from_config(config, hub.clone()).await {
+                        Ok(app_server) => Self::store_cursor_backend(&cursor, app_server),
+                        Err(error) => eprintln!(
+                            "cursor backend unavailable; continuing with selected harnesses only: {error}"
                         ),
                     }
                 }
@@ -1149,19 +1310,58 @@ impl RuntimeBackend {
                 }
 
                 if codex_enabled {
-                    match AppServerBridge::start(
+                    match AppServerBridge::start_codex(
                         &config.cli_bin,
-                        BridgeRuntimeEngine::Codex,
                         hub.clone(),
                     )
                     .await
                     {
                         Ok(app_server) => {
-                            spawn_rollout_live_sync(hub);
+                            spawn_rollout_live_sync(hub.clone());
                             codex = Some(app_server);
                         }
                         Err(error) => eprintln!(
                             "codex backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
+                    }
+                }
+
+                if cursor_enabled {
+                    match start_cursor_app_server_from_config(config, hub.clone()).await {
+                        Ok(app_server) => Self::store_cursor_backend(&cursor, app_server),
+                        Err(error) => eprintln!(
+                            "cursor backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
+                    }
+                }
+            }
+            BridgeRuntimeEngine::Cursor => {
+                if cursor_enabled {
+                    match start_cursor_app_server_from_config(config, hub.clone()).await {
+                        Ok(app_server) => Self::store_cursor_backend(&cursor, app_server),
+                        Err(error) => {
+                            eprintln!("cursor backend is waiting for credentials: {error}");
+                        }
+                    }
+                }
+
+                if codex_enabled {
+                    match AppServerBridge::start_codex(&config.cli_bin, hub.clone()).await {
+                        Ok(app_server) => {
+                            spawn_rollout_live_sync(hub.clone());
+                            codex = Some(app_server);
+                        }
+                        Err(error) => eprintln!(
+                            "codex backend unavailable; continuing with selected harnesses only: {error}"
+                        ),
+                    }
+                }
+
+                if opencode_enabled {
+                    match OpencodeBackend::start(config, hub.clone()).await {
+                        Ok(backend) => opencode = Some(backend),
+                        Err(error) => eprintln!(
+                            "opencode backend unavailable; continuing with selected harnesses only: {error}"
                         ),
                     }
                 }
@@ -1172,7 +1372,21 @@ impl RuntimeBackend {
             preferred_engine,
             codex,
             opencode,
+            cursor,
         }))
+    }
+
+    fn cursor_backend(&self) -> Option<Arc<AppServerBridge>> {
+        self.cursor.read().ok().and_then(|guard| guard.clone())
+    }
+
+    fn store_cursor_backend(
+        cursor_slot: &Arc<StdRwLock<Option<Arc<AppServerBridge>>>>,
+        bridge: Arc<AppServerBridge>,
+    ) {
+        if let Ok(mut guard) = cursor_slot.write() {
+            *guard = Some(bridge);
+        }
     }
 
     async fn shutdown(&self) {
@@ -1181,6 +1395,9 @@ impl RuntimeBackend {
         }
         if let Some(opencode) = &self.opencode {
             opencode.request_shutdown().await;
+        }
+        if let Some(cursor) = self.cursor_backend() {
+            cursor.request_shutdown().await;
         }
     }
 
@@ -1196,6 +1413,9 @@ impl RuntimeBackend {
         if self.opencode.is_some() {
             engines.push(BridgeRuntimeEngine::Opencode);
         }
+        if self.cursor_backend().is_some() {
+            engines.push(BridgeRuntimeEngine::Cursor);
+        }
         engines
     }
 
@@ -1210,6 +1430,13 @@ impl RuntimeBackend {
                 browser_preview: false,
             },
             BridgeRuntimeEngine::Opencode => BridgeCapabilitySupport {
+                review_start: false,
+                turn_steer: false,
+                command_output_delta: false,
+                self_update: false,
+                browser_preview: false,
+            },
+            BridgeRuntimeEngine::Cursor => BridgeCapabilitySupport {
                 review_start: false,
                 turn_steer: false,
                 command_output_delta: false,
@@ -1242,6 +1469,10 @@ impl RuntimeBackend {
                 .as_ref()
                 .map(RuntimeBackendRef::Opencode)
                 .ok_or_else(|| "opencode backend is unavailable".to_string()),
+            BridgeRuntimeEngine::Cursor => self
+                .cursor_backend()
+                .map(RuntimeBackendRef::Cursor)
+                .ok_or_else(|| "cursor backend is unavailable".to_string()),
         }
     }
 
@@ -1284,6 +1515,11 @@ impl RuntimeBackend {
                     .forward_request(client_id, client_request_id, method, normalized_params)
                     .await
             }
+            RuntimeBackendRef::Cursor(bridge) => {
+                bridge
+                    .forward_request(client_id, client_request_id, method, normalized_params)
+                    .await
+            }
         }
     }
 
@@ -1305,6 +1541,9 @@ impl RuntimeBackend {
                 RuntimeBackendRef::Opencode(backend) => {
                     backend.request_internal(method, normalized_params).await
                 }
+                RuntimeBackendRef::Cursor(bridge) => {
+                    bridge.request_internal(method, normalized_params).await
+                }
             };
         }
 
@@ -1316,6 +1555,9 @@ impl RuntimeBackend {
             }
             RuntimeBackendRef::Opencode(backend) => {
                 backend.request_internal(method, normalized_params).await
+            }
+            RuntimeBackendRef::Cursor(bridge) => {
+                bridge.request_internal(method, normalized_params).await
             }
         }
     }
@@ -1370,7 +1612,35 @@ impl RuntimeBackend {
             } else {
                 results.push((
                     BridgeRuntimeEngine::Opencode,
-                    opencode.request_internal("thread/list", params).await?,
+                    opencode
+                        .request_internal("thread/list", params.clone())
+                        .await?,
+                ));
+            }
+        }
+
+        if let Some(cursor_backend) = self.cursor_backend() {
+            if let Some(cursor_map) = bridge_cursor.as_ref() {
+                if let Some(cursor) = cursor_map.get(&BridgeRuntimeEngine::Cursor) {
+                    results.push((
+                        BridgeRuntimeEngine::Cursor,
+                        cursor_backend
+                            .request_internal(
+                                "thread/list",
+                                Some(thread_list_params_with_cursor(
+                                    params.as_ref(),
+                                    Some(cursor),
+                                )),
+                            )
+                            .await?,
+                    ));
+                }
+            } else {
+                results.push((
+                    BridgeRuntimeEngine::Cursor,
+                    cursor_backend
+                        .request_internal("thread/list", params.clone())
+                        .await?,
                 ));
             }
         }
@@ -1397,6 +1667,13 @@ impl RuntimeBackend {
             ));
         }
 
+        if let Some(cursor) = self.cursor_backend() {
+            results.push((
+                BridgeRuntimeEngine::Cursor,
+                cursor.request_internal("thread/loaded/list", None).await?,
+            ));
+        }
+
         Ok(merge_loaded_thread_ids_results(results))
     }
 
@@ -1407,6 +1684,9 @@ impl RuntimeBackend {
         }
         if let Some(opencode) = &self.opencode {
             approvals.extend(opencode.list_pending_approvals().await);
+        }
+        if let Some(cursor) = self.cursor_backend() {
+            approvals.extend(cursor.list_pending_approvals().await);
         }
         approvals.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
         approvals
@@ -1419,6 +1699,9 @@ impl RuntimeBackend {
         }
         if let Some(opencode) = &self.opencode {
             requests.extend(opencode.list_pending_user_inputs().await);
+        }
+        if let Some(cursor) = self.cursor_backend() {
+            requests.extend(cursor.list_pending_user_inputs().await);
         }
         requests.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
         requests
@@ -1441,6 +1724,12 @@ impl RuntimeBackend {
             }
         }
 
+        if let Some(cursor) = self.cursor_backend() {
+            if let Some(approval) = cursor.resolve_approval(approval_id, decision).await? {
+                return Ok(Some(approval));
+            }
+        }
+
         Ok(None)
     }
 
@@ -1457,6 +1746,12 @@ impl RuntimeBackend {
 
         if let Some(opencode) = &self.opencode {
             if let Some(request) = opencode.resolve_user_input(request_id, answers).await? {
+                return Ok(Some(request));
+            }
+        }
+
+        if let Some(cursor) = self.cursor_backend() {
+            if let Some(request) = cursor.resolve_user_input(request_id, answers).await? {
                 return Ok(Some(request));
             }
         }
@@ -1492,6 +1787,8 @@ impl RuntimeBackend {
             codex.hub.send_json(client_id, payload).await;
         } else if let Some(opencode) = &self.opencode {
             opencode.hub.send_json(client_id, payload).await;
+        } else if let Some(cursor) = self.cursor_backend() {
+            cursor.hub.send_json(client_id, payload).await;
         }
     }
 }
@@ -1588,6 +1885,7 @@ async fn terminate_process_tree_windows(pid: u32, label: &str) {
 enum RuntimeBackendRef<'a> {
     Codex(&'a Arc<AppServerBridge>),
     Opencode(&'a Arc<OpencodeBackend>),
+    Cursor(Arc<AppServerBridge>),
 }
 
 struct ClientHub {
@@ -2501,11 +2799,7 @@ struct PendingUserInputEntry {
 }
 
 impl AppServerBridge {
-    async fn start(
-        cli_bin: &str,
-        engine: BridgeRuntimeEngine,
-        hub: Arc<ClientHub>,
-    ) -> Result<Arc<Self>, String> {
+    async fn start_codex(cli_bin: &str, hub: Arc<ClientHub>) -> Result<Arc<Self>, String> {
         let mut command = Command::new(cli_bin);
         command
             .arg("app-server")
@@ -2514,6 +2808,30 @@ impl AppServerBridge {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        Self::start_with_command(command, BridgeRuntimeEngine::Codex, hub).await
+    }
+
+    async fn start_cursor(
+        cursor_app_server_bin: &str,
+        api_key: &str,
+        workdir: &Path,
+        hub: Arc<ClientHub>,
+    ) -> Result<Arc<Self>, String> {
+        let mut command = Command::new(cursor_app_server_bin);
+        command
+            .env("CURSOR_API_KEY", api_key)
+            .env("CURSOR_WORKDIR", workdir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Self::start_with_command(command, BridgeRuntimeEngine::Cursor, hub).await
+    }
+
+    async fn start_with_command(
+        mut command: Command,
+        engine: BridgeRuntimeEngine,
+        hub: Arc<ClientHub>,
+    ) -> Result<Arc<Self>, String> {
         configure_managed_child_command(&mut command);
 
         let mut child = command
@@ -6966,6 +7284,10 @@ async fn handle_bridge_method(
             .map_err(|error| BridgeError::server(&error.to_string())),
         "bridge/runtime/read" => serde_json::to_value(state.updater.runtime_info().await)
             .map_err(|error| BridgeError::server(&error.to_string())),
+        "bridge/cursor/credentials/read" => {
+            let status = read_cursor_credential_status(state).await?;
+            serde_json::to_value(status).map_err(|error| BridgeError::server(&error.to_string()))
+        }
         "bridge/browser/session/create" => {
             let request: BrowserPreviewCreateRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
@@ -10459,7 +10781,8 @@ fn parse_enabled_bridge_engines_csv(raw: &str) -> Result<Vec<BridgeRuntimeEngine
 
     if parsed.is_empty() {
         return Err(
-            "BRIDGE_ENABLED_ENGINES must include one or more of: codex, opencode".to_string(),
+            "BRIDGE_ENABLED_ENGINES must include one or more of: codex, opencode, cursor"
+                .to_string(),
         );
     }
 
@@ -10485,6 +10808,9 @@ fn legacy_default_enabled_engines(
         BridgeRuntimeEngine::Opencode => {
             vec![BridgeRuntimeEngine::Opencode, BridgeRuntimeEngine::Codex]
         }
+        BridgeRuntimeEngine::Cursor => {
+            vec![BridgeRuntimeEngine::Cursor, BridgeRuntimeEngine::Codex]
+        }
     }
 }
 
@@ -10493,6 +10819,7 @@ impl BridgeRuntimeEngine {
         match self {
             Self::Codex => "codex",
             Self::Opencode => "opencode",
+            Self::Cursor => "cursor",
         }
     }
 }
@@ -10501,18 +10828,21 @@ fn parse_bridge_runtime_engine(value: &str) -> Option<BridgeRuntimeEngine> {
     match value.trim().to_ascii_lowercase().as_str() {
         "codex" => Some(BridgeRuntimeEngine::Codex),
         "opencode" => Some(BridgeRuntimeEngine::Opencode),
+        "cursor" => Some(BridgeRuntimeEngine::Cursor),
         _ => None,
     }
 }
 
 fn is_known_engine(value: &str) -> bool {
-    matches!(value, "codex" | "opencode")
+    matches!(value, "codex" | "opencode" | "cursor")
 }
 
 fn decode_engine_qualified_id(value: &str) -> String {
     let trimmed = value.trim();
     match trimmed.split_once(':') {
-        Some(("codex", raw)) | Some(("opencode", raw)) if !raw.trim().is_empty() => {
+        Some(("codex", raw)) | Some(("opencode", raw)) | Some(("cursor", raw))
+            if !raw.trim().is_empty() =>
+        {
             raw.trim().to_string()
         }
         _ => trimmed.to_string(),
@@ -10697,16 +11027,23 @@ fn route_engine_from_params(params: Option<&Value>) -> Option<BridgeRuntimeEngin
             .or_else(|| params.get("parentThreadId"))
             .or_else(|| params.get("parent_thread_id")),
     );
-    if let Some(thread_id) = thread_id {
+    if let Some(thread_id) = thread_id.as_deref() {
         if let Some((engine, _)) = parse_engine_qualified_id(&thread_id) {
             return Some(engine);
         }
     }
 
-    params
+    let explicit_engine = params
         .get("engine")
         .and_then(Value::as_str)
-        .and_then(parse_bridge_runtime_engine)
+        .and_then(parse_bridge_runtime_engine);
+    if explicit_engine.is_some() {
+        return explicit_engine;
+    }
+
+    thread_id
+        .as_deref()
+        .and_then(infer_unqualified_thread_engine)
 }
 
 fn parse_engine_qualified_id(value: &str) -> Option<(BridgeRuntimeEngine, String)> {
@@ -10718,6 +11055,14 @@ fn parse_engine_qualified_id(value: &str) -> Option<(BridgeRuntimeEngine, String
         return None;
     }
     Some((engine, raw.to_string()))
+}
+
+fn infer_unqualified_thread_engine(value: &str) -> Option<BridgeRuntimeEngine> {
+    let trimmed = value.trim();
+    if trimmed.starts_with("agent-") {
+        return Some(BridgeRuntimeEngine::Cursor);
+    }
+    None
 }
 
 fn extract_thread_list_entries(result: &Value) -> Vec<Value> {
@@ -13043,6 +13388,9 @@ mod tests {
         if let Some(opencode) = &backend.opencode {
             shutdown_test_opencode_backend(opencode).await;
         }
+        if let Some(cursor) = backend.cursor_backend() {
+            shutdown_test_bridge(&cursor).await;
+        }
     }
 
     async fn build_test_runtime_backend(
@@ -13061,6 +13409,7 @@ mod tests {
             preferred_engine,
             codex,
             opencode,
+            cursor: Arc::new(StdRwLock::new(None)),
         })
     }
 
@@ -13075,6 +13424,7 @@ mod tests {
             workdir: workdir.clone(),
             cli_bin: "cat".to_string(),
             opencode_cli_bin: "opencode".to_string(),
+            cursor_app_server_bin: "cursor-app-server".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
             enabled_engines: vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode],
             opencode_host: "127.0.0.1".to_string(),
@@ -13414,6 +13764,7 @@ mod tests {
     fn decode_engine_qualified_id_strips_known_prefixes() {
         assert_eq!(decode_engine_qualified_id("codex:thr_123"), "thr_123");
         assert_eq!(decode_engine_qualified_id("opencode:ses_456"), "ses_456");
+        assert_eq!(decode_engine_qualified_id("cursor:agt_789"), "agt_789");
         assert_eq!(
             decode_engine_qualified_id(" custom-prefix:value "),
             "custom-prefix:value"
@@ -13430,6 +13781,10 @@ mod tests {
         assert_eq!(
             encode_engine_qualified_id(BridgeRuntimeEngine::Opencode, "opencode:ses_456"),
             "opencode:ses_456"
+        );
+        assert_eq!(
+            encode_engine_qualified_id(BridgeRuntimeEngine::Cursor, "cursor:agt_789"),
+            "cursor:agt_789"
         );
         assert_eq!(
             encode_engine_qualified_id(BridgeRuntimeEngine::Codex, " opencode:ses_789 "),
@@ -13717,8 +14072,25 @@ mod tests {
             None
         );
         assert_eq!(
+            route_engine_from_params(Some(
+                &json!({ "threadId": "agent-ab0ce28c-b5f8-47d5-b68d-73a151f02b55" })
+            )),
+            Some(BridgeRuntimeEngine::Cursor)
+        );
+        assert_eq!(
             route_engine_from_params(Some(&json!({ "engine": "opencode" }))),
             Some(BridgeRuntimeEngine::Opencode)
+        );
+        assert_eq!(
+            route_engine_from_params(Some(&json!({
+                "threadId": "agent-ab0ce28c-b5f8-47d5-b68d-73a151f02b55",
+                "engine": "codex"
+            }))),
+            Some(BridgeRuntimeEngine::Codex)
+        );
+        assert_eq!(
+            route_engine_from_params(Some(&json!({ "threadId": "cursor:agt_1" }))),
+            Some(BridgeRuntimeEngine::Cursor)
         );
         assert_eq!(
             route_engine_from_params(Some(&json!({
@@ -14084,11 +14456,29 @@ mod tests {
     #[test]
     fn parse_enabled_bridge_engines_csv_preserves_order_and_removes_duplicates() {
         let parsed =
-            parse_enabled_bridge_engines_csv("opencode,codex,opencode").expect("engine csv");
+            parse_enabled_bridge_engines_csv("opencode,cursor,codex,opencode").expect("engine csv");
         assert_eq!(
             parsed,
-            vec![BridgeRuntimeEngine::Opencode, BridgeRuntimeEngine::Codex]
+            vec![
+                BridgeRuntimeEngine::Opencode,
+                BridgeRuntimeEngine::Cursor,
+                BridgeRuntimeEngine::Codex
+            ]
         );
+    }
+
+    #[test]
+    fn cursor_api_key_info_accepts_cursor_api_shape() {
+        let parsed: CursorApiKeyInfo = serde_json::from_value(json!({
+            "apiKeyName": "Mobile Cursor key",
+            "createdAt": "2026-05-01T00:00:00Z",
+            "userEmail": "mohit@example.com"
+        }))
+        .expect("cursor key info");
+
+        assert_eq!(parsed.api_key_name, "Mobile Cursor key");
+        assert_eq!(parsed.created_at, "2026-05-01T00:00:00Z");
+        assert_eq!(parsed.user_email.as_deref(), Some("mohit@example.com"));
     }
 
     #[test]
@@ -14929,6 +15319,7 @@ mod tests {
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
+            cursor_app_server_bin: "cursor-app-server".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
             enabled_engines: vec![BridgeRuntimeEngine::Codex],
             opencode_host: "127.0.0.1".to_string(),
@@ -14965,6 +15356,7 @@ mod tests {
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
+            cursor_app_server_bin: "cursor-app-server".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
             enabled_engines: vec![BridgeRuntimeEngine::Codex],
             opencode_host: "127.0.0.1".to_string(),
@@ -15002,6 +15394,7 @@ mod tests {
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
+            cursor_app_server_bin: "cursor-app-server".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
             enabled_engines: vec![BridgeRuntimeEngine::Codex],
             opencode_host: "127.0.0.1".to_string(),
@@ -15038,6 +15431,7 @@ mod tests {
             workdir: PathBuf::from("/tmp/workdir"),
             cli_bin: "codex".to_string(),
             opencode_cli_bin: "opencode".to_string(),
+            cursor_app_server_bin: "cursor-app-server".to_string(),
             active_engine: BridgeRuntimeEngine::Codex,
             enabled_engines: vec![BridgeRuntimeEngine::Codex, BridgeRuntimeEngine::Opencode],
             opencode_host: "127.0.0.1".to_string(),

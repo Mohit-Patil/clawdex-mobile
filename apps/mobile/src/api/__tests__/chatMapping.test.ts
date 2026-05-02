@@ -99,6 +99,56 @@ describe('chatMapping', () => {
     expect(systemMessages[3].content).toContain('apps/mobile/src/screens/MainScreen.tsx');
   });
 
+  it('maps generic Cursor tool calls into visible tool timeline entries', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_cursor_tool',
+        engine: 'cursor',
+        preview: 'tools',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'userMessage',
+                id: 'u1',
+                content: [{ type: 'text', text: 'Inspect package' }],
+              },
+              {
+                type: 'toolCall',
+                id: 'cursor_tool_read',
+                tool: 'read',
+                status: 'completed',
+                args: { path: '/repo/package.json' },
+                result: {
+                  status: 'success',
+                  value: {
+                    content: '{ "name": "clawdex-mobile" }',
+                  },
+                },
+              },
+              {
+                type: 'agentMessage',
+                id: 'a1',
+                text: 'The package is clawdex-mobile.',
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    const systemMessages = chat.messages.filter((message) => message.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0].systemKind).toBe('tool');
+    expect(systemMessages[0].content).toContain('• Called tool `read`');
+    expect(systemMessages[0].content).toContain('Input: /repo/package.json');
+    expect(systemMessages[0].content).toContain('clawdex-mobile');
+  });
+
   it('maps reasoning items into visible transcript system messages', () => {
     const chat = mapChat(
       toRawThread({

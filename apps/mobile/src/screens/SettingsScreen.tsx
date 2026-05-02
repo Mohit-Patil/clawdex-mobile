@@ -34,6 +34,7 @@ import type {
   BridgeCapabilities,
   BridgeRuntimeInfo,
   ChatEngine,
+  CursorCredentialStatus,
   EngineDefaultSettingsMap,
   ModelOption,
   PlanType,
@@ -131,6 +132,7 @@ type SettingsRoute =
   | 'account'
   | 'limits'
   | 'bridge'
+  | 'credentials'
   | 'appearance'
   | 'tips'
   | 'legal';
@@ -225,6 +227,10 @@ export function SettingsScreen({
   const [bridgeRuntime, setBridgeRuntime] = useState<BridgeRuntimeInfo | null>(null);
   const [bridgeRuntimeLoading, setBridgeRuntimeLoading] = useState(false);
   const [bridgeRuntimeError, setBridgeRuntimeError] = useState<string | null>(null);
+  const [cursorCredentials, setCursorCredentials] =
+    useState<CursorCredentialStatus | null>(null);
+  const [cursorCredentialsLoading, setCursorCredentialsLoading] = useState(false);
+  const [cursorCredentialsError, setCursorCredentialsError] = useState<string | null>(null);
   const [bridgeRestartModalVisible, setBridgeRestartModalVisible] = useState(false);
   const [bridgeRestartActionError, setBridgeRestartActionError] = useState<string | null>(null);
   const [bridgeRestartStarting, setBridgeRestartStarting] = useState(false);
@@ -253,14 +259,18 @@ export function SettingsScreen({
     setRoute(nextRoute);
   }, []);
 
-  const availableEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
-    ? bridgeCapabilities.availableEngines
-    : defaultChatEngine
-      ? [defaultChatEngine]
-      : ['codex'];
-  const normalizedDefaultChatEngine = availableEngines.includes(defaultChatEngine ?? 'codex')
-    ? (defaultChatEngine ?? 'codex')
-    : availableEngines[0] ?? 'codex';
+  const runtimeAvailableEngines = bridgeCapabilities?.availableEngines ?? [];
+  const availableEngines = useMemo(
+    () =>
+      mergeChatEngines(
+        runtimeAvailableEngines,
+        defaultChatEngine,
+        bridgeCapabilities?.activeEngine
+      ),
+    [bridgeCapabilities?.activeEngine, defaultChatEngine, runtimeAvailableEngines]
+  );
+  const normalizedDefaultChatEngine =
+    defaultChatEngine ?? bridgeCapabilities?.activeEngine ?? 'codex';
   const selectedEngineDefaults = defaultEngineSettings?.[normalizedDefaultChatEngine] ?? null;
   const normalizedDefaultModelId = normalizeModelId(selectedEngineDefaults?.modelId);
   const normalizedDefaultEffort = normalizeReasoningEffort(selectedEngineDefaults?.effort);
@@ -309,7 +319,10 @@ export function SettingsScreen({
     () => buildComposerUsageLimitBadges(accountRateLimits),
     [accountRateLimits]
   );
-  const showCodexUsageLimits = availableEngines.includes('codex');
+  const showCodexUsageLimits =
+    runtimeAvailableEngines.length > 0
+      ? runtimeAvailableEngines.includes('codex')
+      : availableEngines.includes('codex');
   const canSelfUpdateBridge =
     bridgeCapabilities?.supports.selfUpdate === true &&
     bridgeRuntime?.selfUpdateSupported === true;
@@ -348,14 +361,14 @@ export function SettingsScreen({
         ? 'Ready'
         : 'Limited';
   const engineSummary =
-    activeEngine && availableEngines.includes(activeEngine)
-      ? availableEngines.length > 1
-        ? `${getChatEngineLabel(activeEngine)} active · ${availableEngines.length} available`
+    activeEngine && runtimeAvailableEngines.includes(activeEngine)
+      ? runtimeAvailableEngines.length > 1
+        ? `${getChatEngineLabel(activeEngine)} active · ${runtimeAvailableEngines.length} available`
         : getChatEngineLabel(activeEngine)
-      : availableEngines.length > 1
-        ? `${availableEngines.length} available`
-        : availableEngines.length === 1
-          ? getChatEngineLabel(availableEngines[0]!)
+      : runtimeAvailableEngines.length > 1
+        ? `${runtimeAvailableEngines.length} available`
+        : runtimeAvailableEngines.length === 1
+          ? getChatEngineLabel(runtimeAvailableEngines[0]!)
           : 'Server managed';
   const headerTitle =
     route === 'chat'
@@ -365,14 +378,16 @@ export function SettingsScreen({
         : route === 'limits'
           ? 'Codex Usage Limits'
           : route === 'bridge'
-          ? 'Connections'
-          : route === 'appearance'
-            ? 'Appearance'
-            : route === 'tips'
-              ? 'Support Clawdex'
-              : route === 'legal'
-                ? 'Legal'
-                : 'Settings';
+            ? 'Connections'
+            : route === 'credentials'
+              ? 'Credentials'
+              : route === 'appearance'
+                ? 'Appearance'
+                : route === 'tips'
+                  ? 'Support Clawdex'
+                  : route === 'legal'
+                    ? 'Legal'
+                    : 'Settings';
   const headerIcon =
     route === 'chat'
       ? ('sparkles-outline' as const)
@@ -381,14 +396,16 @@ export function SettingsScreen({
         : route === 'limits'
           ? ('speedometer-outline' as const)
           : route === 'bridge'
-          ? ('link-outline' as const)
-          : route === 'appearance'
-            ? ('color-palette-outline' as const)
-            : route === 'tips'
-              ? ('heart-outline' as const)
-              : route === 'legal'
-                ? ('document-text-outline' as const)
-                : ('settings' as const);
+            ? ('link-outline' as const)
+            : route === 'credentials'
+              ? ('key-outline' as const)
+              : route === 'appearance'
+                ? ('color-palette-outline' as const)
+                : route === 'tips'
+                  ? ('heart-outline' as const)
+                  : route === 'legal'
+                    ? ('document-text-outline' as const)
+                    : ('settings' as const);
   const chatDefaultsSummary = normalizedDefaultModelId
     ? `${defaultEngineLabel} · ${defaultModelLabel} · ${defaultEffortLabel}`
     : `${defaultEngineLabel} · Server default`;
@@ -396,6 +413,10 @@ export function SettingsScreen({
   const accountSummary = 'See sign-in status and plan';
   const usageLimitsSummary = 'View weekly usage and reset times';
   const bridgeSummary = 'Add GitHub Codespaces or private connections';
+  const credentialsSummary = formatCursorCredentialSummary(
+    cursorCredentials,
+    cursorCredentialsLoading
+  );
   const tipJarSummary = isTipJarAvailable()
     ? 'Support development with a one-time tip'
     : 'Configure RevenueCat to enable tips';
@@ -409,6 +430,7 @@ export function SettingsScreen({
   const shouldLoadAccountSettings = route === 'account';
   const shouldLoadLimitsSettings = route === 'limits';
   const shouldLoadBridgeSettings = route === 'bridge';
+  const shouldLoadCredentialsSettings = route === 'credentials';
 
   useEffect(() => {
     onDrawerGestureEnabledChange?.(route === 'home');
@@ -477,6 +499,19 @@ export function SettingsScreen({
       setBridgeRuntimeError((err as Error).message);
     } finally {
       setBridgeRuntimeLoading(false);
+    }
+  }, [api]);
+
+  const loadCursorCredentials = useCallback(async () => {
+    setCursorCredentialsLoading(true);
+    try {
+      const status = await api.readCursorCredentials();
+      setCursorCredentials(status);
+      setCursorCredentialsError(null);
+    } catch (err) {
+      setCursorCredentialsError((err as Error).message);
+    } finally {
+      setCursorCredentialsLoading(false);
     }
   }, [api]);
 
@@ -566,6 +601,10 @@ export function SettingsScreen({
         void loadBridgeCapabilities();
         void loadBridgeRuntime();
       }
+      if (shouldLoadCredentialsSettings) {
+        void loadBridgeCapabilities();
+        void loadCursorCredentials();
+      }
       if (shouldLoadChatSettings) {
         void loadBridgeCapabilities();
         void refreshModelOptions();
@@ -583,11 +622,13 @@ export function SettingsScreen({
     loadAccount,
     loadBridgeCapabilities,
     loadBridgeRuntime,
+    loadCursorCredentials,
     loadRateLimits,
     refreshModelOptions,
     shouldLoadAccountSettings,
     shouldLoadBridgeSettings,
     shouldLoadChatSettings,
+    shouldLoadCredentialsSettings,
     shouldLoadLimitsSettings,
   ]);
 
@@ -600,6 +641,10 @@ export function SettingsScreen({
             void checkHealth();
             void loadBridgeCapabilities();
             void loadBridgeRuntime();
+          }
+          if (shouldLoadCredentialsSettings) {
+            void loadBridgeCapabilities();
+            void loadCursorCredentials();
           }
           if (shouldLoadChatSettings) {
             void loadBridgeCapabilities();
@@ -618,11 +663,13 @@ export function SettingsScreen({
       loadAccount,
       loadBridgeCapabilities,
       loadBridgeRuntime,
+      loadCursorCredentials,
       loadRateLimits,
       refreshModelOptions,
       shouldLoadAccountSettings,
       shouldLoadBridgeSettings,
       shouldLoadChatSettings,
+      shouldLoadCredentialsSettings,
       shouldLoadLimitsSettings,
       ws,
     ]
@@ -648,8 +695,25 @@ export function SettingsScreen({
         if (event.method === 'account/updated' && shouldLoadAccountSettings) {
           void loadAccount();
         }
+
+        if (event.method === 'bridge/capabilities/changed') {
+          void loadBridgeCapabilities();
+          if (shouldLoadCredentialsSettings) {
+            void loadCursorCredentials();
+          }
+        }
       }),
-    [api, loadAccount, loadRateLimits, shouldLoadAccountSettings, shouldLoadLimitsSettings, ws]
+    [
+      api,
+      loadAccount,
+      loadBridgeCapabilities,
+      loadCursorCredentials,
+      loadRateLimits,
+      shouldLoadAccountSettings,
+      shouldLoadCredentialsSettings,
+      shouldLoadLimitsSettings,
+      ws,
+    ]
   );
 
   useEffect(() => {
@@ -1086,8 +1150,15 @@ export function SettingsScreen({
         description:
           engine === 'opencode'
             ? 'Use OpenCode defaults for new chats.'
-            : 'Use Codex defaults for new chats.',
-        icon: engine === 'opencode' ? ('layers-outline' as const) : ('sparkles-outline' as const),
+            : engine === 'cursor'
+              ? 'Use Cursor SDK defaults for new chats.'
+              : 'Use Codex defaults for new chats.',
+        icon:
+          engine === 'opencode'
+            ? ('layers-outline' as const)
+            : engine === 'cursor'
+              ? ('code-slash-outline' as const)
+              : ('sparkles-outline' as const),
         selected: engine === normalizedDefaultChatEngine,
         onPress: () => selectDefaultEngine(engine),
       })),
@@ -1188,6 +1259,12 @@ export function SettingsScreen({
           title="Account"
           description={accountSummary}
           onPress={() => navigateToRoute('account')}
+        />
+        <MenuEntry
+          icon="key-outline"
+          title="Credentials"
+          description={credentialsSummary}
+          onPress={() => navigateToRoute('credentials')}
         />
         <MenuEntry
           icon="server-outline"
@@ -1639,6 +1716,68 @@ export function SettingsScreen({
     </>
   );
 
+  const renderCredentialsContent = () => {
+    const statusColor =
+      cursorCredentials?.valid === true
+        ? colors.statusComplete
+        : cursorCredentials?.configured
+          ? colors.error
+          : colors.textMuted;
+    return (
+      <>
+        <Text style={styles.sectionLabel}>Cursor</Text>
+        <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+          {cursorCredentialsLoading && !cursorCredentials ? (
+            <View style={styles.accountLoadingState}>
+              <ActivityIndicator color={colors.textPrimary} />
+              <Text style={styles.settingValue}>Checking Cursor credentials…</Text>
+            </View>
+          ) : (
+            <>
+              <Row
+                label="Status"
+                value={formatCursorCredentialStatus(cursorCredentials)}
+                valueColor={statusColor}
+              />
+              <Row
+                label="Source"
+                value={formatCursorCredentialSource(cursorCredentials)}
+              />
+              <Row
+                label="Runtime"
+                value={formatCursorRuntimeStatus(cursorCredentials)}
+              />
+              {cursorCredentials?.apiKeyName ? (
+                <Row label="Key" value={cursorCredentials.apiKeyName} />
+              ) : null}
+              {cursorCredentials?.userEmail ? (
+                <Row label="Email" value={cursorCredentials.userEmail} />
+              ) : null}
+              {cursorCredentials?.createdAt ? (
+                <Row
+                  label="Created"
+                  value={formatCursorCredentialDate(cursorCredentials.createdAt)}
+                />
+              ) : null}
+              <Row label="Usage" value="Not exposed by Cursor API" isLast />
+            </>
+          )}
+
+        </BlurView>
+
+        <Text style={styles.subtleHintText}>
+          Manage the Cursor API key from clawdex init on the host.
+        </Text>
+        {cursorCredentialsError ? (
+          <Text style={styles.errorText}>{cursorCredentialsError}</Text>
+        ) : null}
+        {cursorCredentials?.error ? (
+          <Text style={styles.errorText}>{cursorCredentials.error}</Text>
+        ) : null}
+      </>
+    );
+  };
+
   const renderLegalContent = () => (
     <>
       <Text style={styles.sectionLabel}>Legal</Text>
@@ -1843,6 +1982,8 @@ export function SettingsScreen({
         return renderLimitsContent();
       case 'bridge':
         return renderBridgeContent();
+      case 'credentials':
+        return renderCredentialsContent();
       case 'tips':
         return renderTipsContent();
       case 'legal':
@@ -2369,6 +2510,35 @@ const createStyles = (theme: AppTheme) => {
       color: theme.colors.accentText,
       fontSize: 15,
     },
+    credentialInput: {
+      ...theme.typography.body,
+      minHeight: 48,
+      marginTop: theme.spacing.md,
+      marginBottom: theme.spacing.md,
+      borderRadius: theme.radius.md,
+      borderWidth: 1,
+      borderColor: settingsCardBorder,
+      backgroundColor: neutralControlBackground,
+      color: settingsPrimaryText,
+      paddingHorizontal: theme.spacing.md,
+    },
+    credentialPrimaryBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: theme.spacing.sm,
+      marginBottom: theme.spacing.md,
+      paddingVertical: theme.spacing.md,
+      paddingHorizontal: theme.spacing.md,
+      backgroundColor: theme.colors.accent,
+      borderRadius: theme.radius.md,
+      boxShadow: `0px 4px 8px ${theme.colors.accent}4D`,
+    },
+    credentialPrimaryBtnText: {
+      ...theme.typography.headline,
+      color: theme.colors.accentText,
+      fontSize: 15,
+    },
     linkRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -2642,6 +2812,92 @@ function formatAccountHelpText(account: AccountSnapshot | null): string {
   }
 
   return 'This connection can be used without a separate account sign-in.';
+}
+
+function mergeChatEngines(
+  engines: readonly ChatEngine[],
+  ...extraEngines: Array<ChatEngine | null | undefined>
+): ChatEngine[] {
+  const merged: ChatEngine[] = [];
+  for (const engine of [...engines, ...extraEngines]) {
+    if (
+      (engine === 'codex' || engine === 'opencode' || engine === 'cursor') &&
+      !merged.includes(engine)
+    ) {
+      merged.push(engine);
+    }
+  }
+
+  return merged.length > 0 ? merged : ['codex'];
+}
+
+function formatCursorCredentialSummary(
+  status: CursorCredentialStatus | null,
+  loading: boolean
+): string {
+  if (loading && !status) {
+    return 'Checking Cursor credentials';
+  }
+  if (!status) {
+    return 'Manage Cursor API key';
+  }
+  if (!status.configured) {
+    return 'Cursor API key required';
+  }
+  if (status.valid === true) {
+    return status.runtimeAvailable ? 'Cursor connected' : 'Cursor key saved';
+  }
+  if (status.valid === false) {
+    return 'Cursor key invalid';
+  }
+  return 'Cursor key status unknown';
+}
+
+function formatCursorCredentialStatus(status: CursorCredentialStatus | null): string {
+  if (!status) {
+    return 'Not checked';
+  }
+  if (!status.configured) {
+    return 'Not configured';
+  }
+  if (status.valid === true) {
+    return 'Connected';
+  }
+  if (status.valid === false) {
+    return 'Invalid';
+  }
+  return 'Unknown';
+}
+
+function formatCursorCredentialSource(status: CursorCredentialStatus | null): string {
+  if (!status?.source) {
+    return 'None';
+  }
+  if (status.source === 'env') {
+    return 'clawdex init';
+  }
+  return 'None';
+}
+
+function formatCursorRuntimeStatus(status: CursorCredentialStatus | null): string {
+  if (!status) {
+    return 'Unknown';
+  }
+  if (!status.enabled) {
+    return 'Not enabled';
+  }
+  if (status.runtimeAvailable) {
+    return status.active ? 'Active' : 'Ready';
+  }
+  return 'Waiting for key';
+}
+
+function formatCursorCredentialDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString();
 }
 
 function formatPlanType(planType: PlanType): string {

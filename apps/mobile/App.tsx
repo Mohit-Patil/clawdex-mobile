@@ -2224,7 +2224,7 @@ function normalizeChatEngine(value: unknown): ChatEngine | null {
   }
 
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'codex' || normalized === 'opencode') {
+  if (normalized === 'codex' || normalized === 'opencode' || normalized === 'cursor') {
     return normalized;
   }
 
@@ -2238,6 +2238,10 @@ function createEmptyEngineDefaultSettingsMap(): EngineDefaultSettingsMap {
       effort: null,
     },
     opencode: {
+      modelId: null,
+      effort: null,
+    },
+    cursor: {
       modelId: null,
       effort: null,
     },

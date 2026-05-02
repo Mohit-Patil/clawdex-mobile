@@ -848,8 +848,8 @@ async function start() {
 
   const fileEnv = readEnvFile(secureEnvFile);
   const env = {
-    ...fileEnv,
     ...process.env,
+    ...fileEnv,
     CLAWDEX_WORKSPACE_ROOT: workspaceDir,
     INIT_CWD: process.env.INIT_CWD || workspaceDir,
   };

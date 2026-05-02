@@ -26,6 +26,7 @@ jobs:
       matrix:
         workspace:
           - "@codex/mac-bridge"
+          - "@clawdex/cursor-app-server"
           - "clawdex-mobile"
     steps:
       - name: Checkout

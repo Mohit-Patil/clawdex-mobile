@@ -37,6 +37,7 @@ declare -a SELECTED_ENGINES=()
 ENGINE_SELECTION_PRESET="false"
 AUTO_START="true"
 SECURE_ENV_FILE="$ROOT_DIR/.env.secure"
+CURSOR_CONFIG_NEEDS_WRITE="false"
 MENU_RESULT=""
 MENU_MULTI_RESULT=""
 MENU_MULTI_PRESELECTED=""
@@ -86,9 +87,9 @@ Usage: $(basename "$0") [options]
 
 Options:
   --no-start               Configure everything but do not start bridge
-  --engine <codex|opencode>
+  --engine <codex|opencode|cursor>
                            Select a single harness non-interactively
-  --engines <codex,opencode>
+  --engines <codex,opencode,cursor>
                            Select one or more harnesses non-interactively
   -h, --help               Show this help
 EOF
@@ -96,7 +97,7 @@ EOF
 
 validate_engine_name() {
   case "$1" in
-    codex|opencode)
+    codex|opencode|cursor)
       return 0
       ;;
     *)
@@ -109,6 +110,9 @@ format_engine_name() {
   case "$1" in
     opencode)
       printf 'OpenCode'
+      ;;
+    cursor)
+      printf 'Cursor'
       ;;
     *)
       printf 'Codex'
@@ -251,6 +255,9 @@ engine_from_menu_label() {
     "OpenCode")
       printf 'opencode'
       ;;
+    "Cursor")
+      printf 'cursor'
+      ;;
     *)
       return 1
       ;;
@@ -295,12 +302,12 @@ parse_args() {
         ;;
       --engine)
         if (($# < 2)); then
-          echo "error: --engine requires a value ('codex' or 'opencode')." >&2
+          echo "error: --engine requires a value ('codex', 'opencode', or 'cursor')." >&2
           print_usage >&2
           exit 1
         fi
         if ! validate_engine_name "$2"; then
-          echo "error: unsupported engine '$2'. Use 'codex' or 'opencode'." >&2
+          echo "error: unsupported engine '$2'. Use 'codex', 'opencode', or 'cursor'." >&2
           print_usage >&2
           exit 1
         fi
@@ -311,12 +318,12 @@ parse_args() {
         ;;
       --engines)
         if (($# < 2)); then
-          echo "error: --engines requires a comma-separated value (for example: codex,opencode)." >&2
+          echo "error: --engines requires a comma-separated value (for example: codex,opencode,cursor)." >&2
           print_usage >&2
           exit 1
         fi
         if ! parse_engine_list_csv "$2"; then
-          echo "error: unsupported --engines value '$2'. Use one or more of 'codex' and 'opencode'." >&2
+          echo "error: unsupported --engines value '$2'. Use one or more of 'codex', 'opencode', and 'cursor'." >&2
           print_usage >&2
           exit 1
         fi
@@ -916,6 +923,25 @@ prompt_manual_ipv4() {
   done
 }
 
+prompt_secret_value() {
+  local prompt="$1"
+  local value=""
+
+  while true; do
+    printf "%s %s %s " "$RAIL_GLYPH" "$RAIL_BRANCH" "$prompt" >&2
+    IFS= read -rs value || abort_wizard
+    printf "\n" >&2
+    value="$(printf '%s' "$value" | tr -d '\r\n')"
+
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+
+    printf "%s %s %s\n" "$RAIL_GLYPH" "$RAIL_CHILD" "${YELLOW}Value cannot be empty.${RESET}" >&2
+  done
+}
+
 extract_env_value() {
   local file="$1"
   local key="$2"
@@ -1141,9 +1167,15 @@ choose_runtime_engine() {
     fi
     MENU_MULTI_PRESELECTED+="OpenCode"
   fi
+  if selected_engines_contains "cursor"; then
+    if [[ -n "$MENU_MULTI_PRESELECTED" ]]; then
+      MENU_MULTI_PRESELECTED+=","
+    fi
+    MENU_MULTI_PRESELECTED+="Cursor"
+  fi
 
   info "Select the harnesses this phone should control."
-  menu_multiselect "Harnesses to control" "Codex" "OpenCode"
+  menu_multiselect "Harnesses to control" "Codex" "OpenCode" "Cursor"
   SELECTED_ENGINES=()
   for label in "${MENU_MULTI_RESULT_ITEMS[@]}"; do
     SELECTED_ENGINES+=("$(engine_from_menu_label "$label")")
@@ -1274,6 +1306,66 @@ ensure_opencode_cli() {
   fi
 }
 
+ensure_cursor_app_server() {
+  local existing_api_key=""
+  local existing_model=""
+  local provided_api_key="${CURSOR_API_KEY:-}"
+
+  if [[ -f "$ROOT_DIR/services/cursor-app-server/package.json" ]]; then
+    info "Building Cursor app-server package."
+    npm run build -w @clawdex/cursor-app-server
+    hash -r
+  fi
+
+  while ! command -v cursor-app-server >/dev/null 2>&1; do
+    warn "Cursor app-server command not found in PATH."
+    if confirm_prompt "Try installing @clawdex/cursor-app-server via npm now?" "N"; then
+      if npm install -g @clawdex/cursor-app-server; then
+        hash -r
+      else
+        warn "Automatic install failed."
+      fi
+    fi
+
+    if ! command -v cursor-app-server >/dev/null 2>&1 && ! confirm_prompt "Retry Cursor app-server check?" "Y"; then
+      abort_wizard "Install @clawdex/cursor-app-server and rerun: clawdex init --engine cursor"
+    fi
+  done
+
+  ok "Found cursor-app-server: $(command -v cursor-app-server)"
+
+  existing_api_key="$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_API_KEY")"
+  existing_model="$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_MODEL")"
+  CURSOR_API_KEY="${CURSOR_API_KEY:-$existing_api_key}"
+  CURSOR_MODEL="${CURSOR_MODEL:-$existing_model}"
+
+  if [[ -n "$CURSOR_API_KEY" ]]; then
+    if [[ -n "$provided_api_key" ]]; then
+      ok "Cursor API key: provided from environment."
+      if [[ "$provided_api_key" != "$existing_api_key" ]]; then
+        CURSOR_CONFIG_NEEDS_WRITE="true"
+      fi
+    else
+      ok "Cursor API key: configured in secure bridge config."
+    fi
+    if [[ "$FLOW" == "manual" ]] && confirm_prompt "Replace saved Cursor API key now?" "N"; then
+      CURSOR_API_KEY="$(prompt_secret_value "Enter Cursor API key:")"
+      CURSOR_CONFIG_NEEDS_WRITE="true"
+      ok "Cursor API key will be updated in $SECURE_ENV_FILE."
+    fi
+  else
+    warn "Cursor requires a Cursor API key on the bridge host."
+    if ! confirm_prompt "Add Cursor API key now?" "Y"; then
+      abort_wizard "Cursor was selected but CURSOR_API_KEY is missing. Re-run clawdex init after creating a Cursor API key."
+    fi
+    CURSOR_API_KEY="$(prompt_secret_value "Enter Cursor API key:")"
+    CURSOR_CONFIG_NEEDS_WRITE="true"
+    ok "Cursor API key will be saved in $SECURE_ENV_FILE."
+  fi
+
+  export CURSOR_API_KEY CURSOR_MODEL
+}
+
 ensure_selected_engine_clis() {
   local engine=""
 
@@ -1288,6 +1380,9 @@ ensure_selected_engine_clis() {
         ;;
       opencode)
         ensure_opencode_cli
+        ;;
+      cursor)
+        ensure_cursor_app_server
         ;;
       *)
         abort_wizard "Unsupported harness '$engine'."
@@ -1793,6 +1888,9 @@ else
     section "Write secure config"
     BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(selected_engines_csv)" "$SCRIPT_DIR/setup-secure-dev.sh"
   elif [[ "$(extract_env_value "$SECURE_ENV_FILE" "BRIDGE_ENABLED_ENGINES")" != "$(selected_engines_csv)" ]]; then
+    section "Write secure config"
+    BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(selected_engines_csv)" "$SCRIPT_DIR/setup-secure-dev.sh"
+  elif [[ "$CURSOR_CONFIG_NEEDS_WRITE" == "true" ]]; then
     section "Write secure config"
     BRIDGE_NETWORK_MODE="$NETWORK_MODE" BRIDGE_HOST_OVERRIDE="$BRIDGE_HOST" BRIDGE_ACTIVE_ENGINE="$ACTIVE_ENGINE" BRIDGE_ENABLED_ENGINES="$(selected_engines_csv)" "$SCRIPT_DIR/setup-secure-dev.sh"
   fi

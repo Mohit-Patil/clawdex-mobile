@@ -25,6 +25,7 @@ Before you start:
 - `git`
 - `codex` in `PATH` for the default Codex flow
 - `opencode` in `PATH` if you want the OpenCode flow
+- `cursor-app-server` in `PATH` if you want the Cursor SDK flow
 
 Install the mobile app:
 
@@ -92,23 +93,24 @@ The published npm package now includes that bootstrap script too, so a minimal C
 
 In Codespaces mode, the bootstrap also enables bridge-side GitHub bearer auth for the current `CODESPACE_NAME`, so the mobile app can authenticate with the same GitHub App user token it used to discover and start the Codespace.
 
-## OpenCode Setup
+## Extra Harness Setup
 
-OpenCode is supported directly from the CLI now.
+OpenCode and Cursor can run beside Codex from the same bridge.
 
 ```bash
 npm install -g opencode-ai
+npm install -g @clawdex/cursor-app-server
 npm install -g clawdex-mobile@latest
-clawdex init --engines codex,opencode
+clawdex init --engines codex,opencode,cursor
 ```
 
-That writes `BRIDGE_ENABLED_ENGINES=codex,opencode` to `.env.secure`, so the mobile app can control both harnesses from one bridge.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` to `.env.secure`, so the mobile app can control the selected harnesses from one bridge. When Cursor is selected, `clawdex init` asks for the Cursor API key and saves it in `.env.secure`.
 
 Notes:
 
 - `clawdex init` without flags now lets you multi-select harnesses in the wizard with Space, then Enter to continue.
-- Use `clawdex init --engine codex` or `clawdex init --engine opencode` if you want a single-harness setup.
-- Use `clawdex init --engines codex,opencode` if you want both non-interactively.
+- Use `clawdex init --engine codex`, `clawdex init --engine opencode`, or `clawdex init --engine cursor` if you want a single-harness setup.
+- For non-interactive host automation, set `CURSOR_API_KEY` before running setup. `CURSOR_MODEL` is optional; the app model picker sends the model for normal chats.
 
 ## Monorepo Development
 
@@ -140,7 +142,7 @@ Use `npm run setup:wizard -- --no-start` if you only want to write config.
 
 ## Main Commands
 
-- `clawdex init [--engine codex|opencode] [--engines codex,opencode] [--no-start]`
+- `clawdex init [--engine codex|opencode|cursor] [--engines codex,opencode,cursor] [--no-start]`
 - `clawdex stop`
 - `clawdex upgrade` / `clawdex update`
 - `clawdex version`

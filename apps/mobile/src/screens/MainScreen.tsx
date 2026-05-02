@@ -963,15 +963,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
     const draftScopeKey = getDraftScopeKey(selectedChatId);
     const persistedDefaultChatEngine = resolveChatEngine(defaultChatEngine ?? 'codex');
-    const availableNewChatEngines: ChatEngine[] = bridgeCapabilities?.availableEngines?.length
-      ? bridgeCapabilities.availableEngines
-      : ['codex'];
-    const fallbackDefaultChatEngine = availableNewChatEngines.includes(persistedDefaultChatEngine)
-      ? persistedDefaultChatEngine
-      : availableNewChatEngines[0] ?? 'codex';
+    const availableNewChatEngines = mergeChatEngines(
+      bridgeCapabilities?.availableEngines ?? [],
+      persistedDefaultChatEngine,
+      bridgeCapabilities?.activeEngine
+    );
     const preferredNewChatEngine = availableNewChatEngines.includes(pendingChatEngine)
       ? pendingChatEngine
-      : fallbackDefaultChatEngine;
+      : persistedDefaultChatEngine;
     const activeChatEngine = selectedChat?.engine
       ? resolveChatEngine(selectedChat.engine)
       : preferredNewChatEngine;
@@ -2537,7 +2536,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       loadChatRequestRef.current += 1;
       setSelectedChat(null);
       setSelectedChatId(null);
-      setPendingChatEngine(fallbackDefaultChatEngine);
+      setPendingChatEngine(persistedDefaultChatEngine);
       setSelectedCollaborationMode('default');
       openingChatStartedAtRef.current = 0;
       setOpeningChatId(null);
@@ -2588,7 +2587,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       clearExternalStatusFullSync,
       clearRunWatchdog,
       defaultServiceTier,
-      fallbackDefaultChatEngine,
+      persistedDefaultChatEngine,
     ]);
 
     const startNewChat = useCallback(() => {
@@ -3847,10 +3846,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           description:
             engine === 'opencode'
               ? 'Use the OpenCode backend and its connected provider models.'
-              : 'Use the Codex backend and its model catalog.',
+              : engine === 'cursor'
+                ? 'Use the Cursor SDK harness and Cursor model catalog.'
+                : 'Use the Codex backend and its model catalog.',
           icon:
             engine === 'opencode'
               ? ('layers-outline' as const)
+              : engine === 'cursor'
+                ? ('code-slash-outline' as const)
               : ('sparkles-outline' as const),
           selected: activeChatEngine === engine,
           onPress: () => selectPendingChatEngine(engine),
@@ -4096,6 +4099,77 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                     id: messageId,
                     role: 'system',
                     systemKind: 'reasoning',
+                    content,
+                    createdAt,
+                  },
+                ],
+          };
+        });
+
+        schedulePinnedScrollToBottom(true);
+      },
+      [schedulePinnedScrollToBottom]
+    );
+
+    const upsertLiveCursorToolMessage = useCallback(
+      (threadId: string, item: Record<string, unknown> | null) => {
+        if (
+          !threadId ||
+          chatIdRef.current !== threadId ||
+          selectedChatRef.current?.engine !== 'cursor'
+        ) {
+          return;
+        }
+
+        const itemId =
+          readString(item?.id) ??
+          readString(item?.callId) ??
+          readString(item?.call_id) ??
+          null;
+        if (!itemId) {
+          return;
+        }
+
+        const content = formatLiveCursorToolMessage(item);
+        if (!content) {
+          return;
+        }
+
+        const createdAt = new Date().toISOString();
+        const messageId = `cursor-tool-${itemId}`;
+        setSelectedChat((prev) => {
+          if (!prev || prev.id !== threadId) {
+            return prev;
+          }
+
+          let found = false;
+          const messages = prev.messages.map((message) => {
+            if (message.id !== messageId) {
+              return message;
+            }
+
+            found = true;
+            return {
+              ...message,
+              role: 'system' as const,
+              systemKind: 'tool' as const,
+              content,
+              createdAt: message.createdAt,
+            };
+          });
+
+          return {
+            ...prev,
+            updatedAt: createdAt,
+            statusUpdatedAt: createdAt,
+            messages: found
+              ? messages
+              : [
+                  ...messages,
+                  {
+                    id: messageId,
+                    role: 'system',
+                    systemKind: 'tool',
                     content,
                     createdAt,
                   },
@@ -6357,6 +6431,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
+          if (itemType === 'toolCall') {
+            upsertLiveCursorToolMessage(threadId, item);
+            setActivity({
+              tone: 'running',
+              title: 'Working',
+            });
+            return;
+          }
+
           if (itemType === 'plan') {
             setSelectedCollaborationMode('plan');
             setActivity({
@@ -6736,6 +6819,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               tone: failed ? 'error' : 'running',
               title: failed ? 'Turn failed' : 'Working',
             });
+          }
+          if (itemType === 'toolCall') {
+            upsertLiveCursorToolMessage(threadId, item);
           }
           return;
         }
@@ -7173,6 +7259,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       registerTurnStarted,
       pushActiveCommand,
       scrollToBottomIfPinned,
+      upsertLiveCursorToolMessage,
       upsertLiveReasoningMessage,
       upsertThreadRuntimeSnapshot,
     ]);
@@ -9469,6 +9556,7 @@ const ChatView = memo(function ChatView({
           <View style={styles.chatMessageBlock}>
             <ToolActivityGroup
               messages={item.messages}
+              engine={chat.engine}
               bridgeUrl={bridgeUrl}
               bridgeToken={bridgeToken}
             />
@@ -9482,6 +9570,7 @@ const ChatView = memo(function ChatView({
         <View style={styles.chatMessageBlock}>
           <ChatMessage
             message={msg}
+            engine={chat.engine}
             bridgeUrl={bridgeUrl}
             bridgeToken={bridgeToken}
             onOpenLocalPreview={onOpenLocalPreview}
@@ -11011,6 +11100,23 @@ function draftContainsMentionLabel(draft: string, label: string): boolean {
   return pattern.test(draft);
 }
 
+function mergeChatEngines(
+  engines: readonly ChatEngine[],
+  ...extraEngines: Array<ChatEngine | null | undefined>
+): ChatEngine[] {
+  const merged: ChatEngine[] = [];
+  for (const engine of [...engines, ...extraEngines]) {
+    if (
+      (engine === 'codex' || engine === 'opencode' || engine === 'cursor') &&
+      !merged.includes(engine)
+    ) {
+      merged.push(engine);
+    }
+  }
+
+  return merged.length > 0 ? merged : ['codex'];
+}
+
 function normalizeModelId(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
     return null;
@@ -11739,6 +11845,131 @@ function formatLiveReasoningMessage(text: string): string {
   return ['• Reasoning', `  └ ${first}`, ...rest.map((line) => `    ${line}`)].join('\n');
 }
 
+function formatLiveCursorToolMessage(item: Record<string, unknown> | null): string | null {
+  const tool = readString(item?.tool) ?? readString(item?.name) ?? 'unknown';
+  const status = normalizeCursorToolStatus(readString(item?.status));
+  const title =
+    status === 'error'
+      ? `• Tool failed \`${tool}\``
+      : status === 'running'
+        ? `• Calling tool \`${tool}\``
+        : `• Called tool \`${tool}\``;
+  const argsPreview = toLiveCursorToolArgsPreview(item);
+  const resultPreview = toLiveCursorToolResultPreview(item?.result);
+  const details = [
+    argsPreview ? `Input: ${argsPreview}` : null,
+    resultPreview,
+  ].filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+
+  return formatTimelineSystemMessage(title, details);
+}
+
+function normalizeCursorToolStatus(value: string | null): 'running' | 'complete' | 'error' {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'error' || normalized === 'failed') {
+    return 'error';
+  }
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'finished') {
+    return 'complete';
+  }
+  return 'running';
+}
+
+function toLiveCursorToolArgsPreview(item: Record<string, unknown> | null): string | null {
+  const args = toRecord(item?.args);
+  if (!args) {
+    return stringifyLiveCursorPreview(item?.args, 320);
+  }
+
+  return (
+    toTickerSnippet(readString(args.path), 180) ??
+    toTickerSnippet(readString(args.filePath), 180) ??
+    toTickerSnippet(readString(args.file_path), 180) ??
+    toTickerSnippet(readString(args.globPattern), 180) ??
+    toTickerSnippet(readString(args.glob_pattern), 180) ??
+    toTickerSnippet(readString(args.command), 220) ??
+    stringifyLiveCursorPreview(args, 320)
+  );
+}
+
+function toLiveCursorToolResultPreview(value: unknown): string | null {
+  const record = toRecord(value);
+  const branchPreview = toLiveCursorGitBranchPreview(record);
+  if (branchPreview) {
+    return branchPreview;
+  }
+
+  const status = readString(record?.status)?.trim().toLowerCase();
+  const error =
+    status === 'error' || status === 'failed'
+      ? toTickerSnippet(
+          readString(record?.error) ?? readString(toRecord(record?.error)?.message),
+          600
+        )
+      : null;
+  if (error) {
+    return `Error: ${error}`;
+  }
+
+  return stringifyLiveCursorPreview(record?.value ?? record?.result ?? value, 600);
+}
+
+function toLiveCursorGitBranchPreview(record: Record<string, unknown> | null): string | null {
+  const branches = Array.isArray(record?.branches) ? record.branches : [];
+  if (branches.length === 0) {
+    return null;
+  }
+
+  const lines = branches
+    .map((entry) => {
+      const branch = toRecord(entry);
+      if (!branch) {
+        return null;
+      }
+      return [
+        readString(branch.branch) ? `Branch: ${readString(branch.branch)}` : null,
+        readString(branch.prUrl) || readString(branch.pr_url)
+          ? `PR: ${readString(branch.prUrl) ?? readString(branch.pr_url)}`
+          : null,
+        readString(branch.repoUrl) || readString(branch.repo_url)
+          ? `Repo: ${readString(branch.repoUrl) ?? readString(branch.repo_url)}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    })
+    .filter((line): line is string => Boolean(line));
+
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
+function stringifyLiveCursorPreview(value: unknown, maxLength: number): string | null {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return toTickerSnippet(value, maxLength);
+  }
+
+  try {
+    return toTickerSnippet(JSON.stringify(value), maxLength);
+  } catch {
+    return null;
+  }
+}
+
+function formatTimelineSystemMessage(title: string, details: string[]): string {
+  const normalizedDetails = details
+    .flatMap((detail) => detail.split('\n'))
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  const [first, ...rest] = normalizedDetails;
+  if (!first) {
+    return title;
+  }
+  return [title, `  └ ${first}`, ...rest.map((line) => `    ${line}`)].join('\n');
+}
+
 function filterReasoningMessagesForEngine(
   messages: ChatTranscriptMessage[],
   engine: Chat['engine'] | undefined
@@ -11773,6 +12004,14 @@ function describeStartedToolEvent(
     const detail = [readString(item?.server), readString(item?.tool)]
       .filter(Boolean)
       .join(' / ') || 'Tool call';
+    return {
+      eventType: 'tool.running',
+      detail: buildToolEventDetail(detail, 'running'),
+    };
+  }
+
+  if (itemType === 'toolCall') {
+    const detail = readString(item?.tool) ?? readString(item?.name) ?? 'Tool call';
     return {
       eventType: 'tool.running',
       detail: buildToolEventDetail(detail, 'running'),
@@ -11816,6 +12055,14 @@ function describeCompletedToolEvent(
     const detail = [readString(item?.server), readString(item?.tool)]
       .filter(Boolean)
       .join(' / ') || 'Tool call';
+    return {
+      eventType: 'tool.completed',
+      detail: buildToolEventDetail(detail, status),
+    };
+  }
+
+  if (itemType === 'toolCall') {
+    const detail = readString(item?.tool) ?? readString(item?.name) ?? 'Tool call';
     return {
       eventType: 'tool.completed',
       detail: buildToolEventDetail(detail, status),

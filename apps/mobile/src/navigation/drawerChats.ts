@@ -1,7 +1,11 @@
 import type { ChatEngine, ChatSummary } from '../api/types';
 import { resolveChatEngine } from '../chatEngines';
 
-export const DEFAULT_DRAWER_CHAT_ENGINES: ReadonlyArray<ChatEngine> = ['codex', 'opencode'];
+export const DEFAULT_DRAWER_CHAT_ENGINES: ReadonlyArray<ChatEngine> = [
+  'codex',
+  'opencode',
+  'cursor',
+];
 
 export function filterDrawerChats(chats: ChatSummary[]): ChatSummary[] {
   return chats.filter((chat) => !isSubAgentChat(chat));

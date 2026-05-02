@@ -4,6 +4,7 @@ import {
   Image,
   Modal,
   Pressable,
+  ScrollView,
   type ImageSourcePropType,
   Linking,
   StyleSheet,
@@ -21,7 +22,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import type { ChatMessage as ApiChatMessage } from '../api/types';
+import type { ChatEngine, ChatMessage as ApiChatMessage } from '../api/types';
 import { extractLocalPreviewUrls } from '../browserPreview';
 import { useAppTheme, type AppTheme } from '../theme';
 import { toMarkdownImageSource } from './chatImageSource';
@@ -33,6 +34,7 @@ import {
 
 interface ChatMessageProps {
   message: ApiChatMessage;
+  engine?: ChatEngine | null;
   bridgeUrl?: string | null;
   bridgeToken?: string | null;
   onOpenLocalPreview?: (targetUrl: string) => void;
@@ -40,6 +42,7 @@ interface ChatMessageProps {
 
 interface ToolActivityGroupProps {
   messages: ApiChatMessage[];
+  engine?: ChatEngine | null;
   bridgeUrl?: string | null;
   bridgeToken?: string | null;
 }
@@ -78,6 +81,7 @@ type MessageBlock =
 
 function ChatMessageComponent({
   message,
+  engine = null,
   bridgeUrl = null,
   bridgeToken = null,
   onOpenLocalPreview,
@@ -86,6 +90,7 @@ function ChatMessageComponent({
   const styles = useMemo(() => createStyles(theme), [theme]);
   const markdownStyles = useMemo(() => createMarkdownStyles(theme), [theme]);
   const isUser = message.role === 'user';
+  const isCursor = engine === 'cursor';
   const markdownRules = useMemo(
     () => createMarkdownRules(bridgeUrl, bridgeToken, onOpenLocalPreview),
     [bridgeToken, bridgeUrl, onOpenLocalPreview]
@@ -248,6 +253,21 @@ function ChatMessageComponent({
           <View style={styles.compactionLine} />
         </View>
       </View>
+    );
+  }
+  if (
+    isCursor &&
+    message.role === 'system' &&
+    (message.systemKind === 'reasoning' ||
+      message.systemKind === 'tool' ||
+      message.systemKind === 'subAgent')
+  ) {
+    return (
+      <CursorSystemMessage
+        message={message}
+        bridgeUrl={bridgeUrl}
+        bridgeToken={bridgeToken}
+      />
     );
   }
   if (message.role === 'system' && message.systemKind === 'reasoning') {
@@ -537,6 +557,7 @@ function areChatMessagePropsEqual(
     previous.content === next.content &&
     previous.createdAt === next.createdAt &&
     previous.systemKind === next.systemKind &&
+    prevProps.engine === nextProps.engine &&
     prevProps.bridgeUrl === nextProps.bridgeUrl &&
     prevProps.bridgeToken === nextProps.bridgeToken &&
     prevProps.onOpenLocalPreview === nextProps.onOpenLocalPreview
@@ -548,6 +569,7 @@ ChatMessage.displayName = 'ChatMessage';
 
 export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
   messages,
+  engine = null,
   bridgeUrl = null,
   bridgeToken = null,
 }: ToolActivityGroupProps) {
@@ -581,6 +603,16 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
 
   if (entries.length === 0) {
     return null;
+  }
+
+  if (engine === 'cursor') {
+    return (
+      <CursorActivityMessage
+        entries={entries}
+        bridgeUrl={bridgeUrl}
+        bridgeToken={bridgeToken}
+      />
+    );
   }
 
   if (entriesAreComputerUseTimeline(entries)) {
@@ -745,6 +777,159 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
 });
 ToolActivityGroup.displayName = 'ToolActivityGroup';
 
+function CursorSystemMessage({
+  message,
+  bridgeUrl,
+  bridgeToken,
+}: {
+  message: ApiChatMessage;
+  bridgeUrl: string | null;
+  bridgeToken: string | null;
+}): ReactElement | null {
+  const parsed = parseTimelineEntries(message.content);
+  const fallbackTitle =
+    message.systemKind === 'reasoning'
+      ? 'Thinking'
+      : message.systemKind === 'subAgent'
+        ? 'Task'
+        : message.content.trim();
+  const entries =
+    parsed && parsed.length > 0
+      ? parsed.map((entry, index) => ({
+          id: `${message.id}-cursor-${String(index)}`,
+          title: entry.title,
+          details: entry.details,
+        }))
+      : [
+          {
+            id: `${message.id}-cursor`,
+            title: fallbackTitle,
+            details:
+              fallbackTitle === message.content.trim() ? [] : [message.content],
+          },
+        ];
+
+  return (
+    <CursorActivityMessage
+      entries={entries}
+      bridgeUrl={bridgeUrl}
+      bridgeToken={bridgeToken}
+      systemKind={message.systemKind}
+    />
+  );
+}
+
+function CursorActivityMessage({
+  entries,
+  bridgeUrl,
+  bridgeToken,
+  systemKind,
+}: {
+  entries: ToolGroupEntry[];
+  bridgeUrl: string | null;
+  bridgeToken: string | null;
+  systemKind?: ApiChatMessage['systemKind'];
+}): ReactElement | null {
+  const theme = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const [expandedEntryIds, setExpandedEntryIds] = useState<Record<string, boolean>>({});
+  const visibleEntries = entries.filter((entry) => entry.title.trim().length > 0);
+
+  if (visibleEntries.length === 0) {
+    return null;
+  }
+
+  return (
+    <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
+      <View style={styles.cursorActivityList}>
+        {visibleEntries.map((entry) => {
+          const detailPreview = toTimelineDetailPreview(entry, bridgeUrl, bridgeToken);
+          const textDetails = detailPreview.textDetails;
+          const visual = toCursorActivityVisual(entry.title, textDetails, systemKind);
+          const hasDetails = textDetails.length > 0 || detailPreview.images.length > 0;
+          const expanded = expandedEntryIds[entry.id] === true;
+          const preview = toCursorActivityPreview(textDetails, visual);
+
+          return (
+            <Pressable
+              key={entry.id}
+              disabled={!hasDetails}
+              onPress={() => {
+                if (!hasDetails) {
+                  return;
+                }
+                setExpandedEntryIds((previous) => ({
+                  ...previous,
+                  [entry.id]: !previous[entry.id],
+                }));
+              }}
+              style={({ pressed }) => [
+                styles.cursorActivityRow,
+                pressed && hasDetails && styles.cursorActivityRowPressed,
+              ]}
+            >
+              <View style={styles.cursorActivityRail}>
+                <View
+                  style={[
+                    styles.cursorActivityMarker,
+                    visual.kind === 'thought' && styles.cursorActivityMarkerThought,
+                    visual.kind === 'terminal' && styles.cursorActivityMarkerTerminal,
+                    visual.isError && styles.cursorActivityMarkerError,
+                  ]}
+                />
+              </View>
+              <View style={styles.cursorActivityBody}>
+                <View style={styles.cursorActivityHeader}>
+                  <Text
+                    style={styles.cursorActivityTitle}
+                    numberOfLines={expanded ? 2 : 1}
+                  >
+                    {visual.title}
+                  </Text>
+                  {hasDetails ? (
+                    <Ionicons
+                      name={expanded ? 'chevron-up' : 'chevron-down'}
+                      size={13}
+                      color={theme.colors.textMuted}
+                    />
+                  ) : null}
+                </View>
+                {!expanded && preview ? (
+                  <SelectableMessageText
+                    style={styles.cursorActivityPreview}
+                    numberOfLines={1}
+                  >
+                    {preview}
+                  </SelectableMessageText>
+                ) : null}
+                {expanded ? (
+                  <View style={styles.cursorActivityDetails}>
+                    {detailPreview.images.map((image, imageIndex) => (
+                      <MarkdownImage
+                        key={`${entry.id}-cursor-image-${String(imageIndex)}`}
+                        source={image.source}
+                        accessibilityLabel={image.accessibilityLabel}
+                      />
+                    ))}
+                    {textDetails.map((line, lineIndex) => (
+                      <SelectableMessageText
+                        key={`${entry.id}-cursor-line-${String(lineIndex)}`}
+                        style={styles.cursorActivityDetailLine}
+                      >
+                        {line}
+                      </SelectableMessageText>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 function ComputerUseTimeline({
   entries,
   bridgeUrl,
@@ -843,6 +1028,72 @@ const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
     ...theme.typography.body,
     color: theme.colors.textPrimary,
   },
+  heading1: {
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
+    fontSize: 18,
+    lineHeight: 24,
+    letterSpacing: 0,
+    marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.xs,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  heading2: {
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
+    fontSize: 17,
+    lineHeight: 23,
+    letterSpacing: 0,
+    marginTop: theme.spacing.md,
+    marginBottom: theme.spacing.xs,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  heading3: {
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
+    fontSize: 15,
+    lineHeight: 21,
+    letterSpacing: 0,
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.xs,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  heading4: {
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
+    fontSize: 14,
+    lineHeight: 20,
+    letterSpacing: 0,
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.xs,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  heading5: {
+    ...theme.typography.headline,
+    color: theme.colors.textPrimary,
+    fontSize: 14,
+    lineHeight: 20,
+    letterSpacing: 0,
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.xs,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  heading6: {
+    ...theme.typography.headline,
+    color: theme.colors.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+    letterSpacing: 0,
+    marginTop: theme.spacing.sm,
+    marginBottom: theme.spacing.xs,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
   code_inline: {
     fontFamily: theme.fonts.monoRegular,
     fontSize: 12,
@@ -892,6 +1143,47 @@ const createMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
   },
   list_item: {
     marginVertical: 2,
+  },
+  table_scroll: {
+    maxWidth: '100%',
+    marginVertical: theme.spacing.sm,
+  },
+  table_scroll_content: {
+    paddingBottom: theme.spacing.xs,
+  },
+  table: {
+    minWidth: 560,
+    alignSelf: 'flex-start',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderHighlight,
+    borderRadius: theme.radius.sm,
+    overflow: 'hidden',
+    backgroundColor: theme.colors.bgElevated,
+  },
+  thead: {
+    backgroundColor: theme.colors.bgItem,
+  },
+  tbody: {
+    backgroundColor: theme.colors.bgElevated,
+  },
+  tr: {
+    flexDirection: 'row',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.borderLight,
+  },
+  th: {
+    flex: 0,
+    width: 176,
+    minWidth: 176,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
+  },
+  td: {
+    flex: 0,
+    width: 176,
+    minWidth: 176,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.sm,
   },
   strong: {
     fontWeight: '700',
@@ -960,6 +1252,19 @@ function createMarkdownRules(
         </SelectableMessageText>
       );
     },
+    table: (node, children, _parent, styles) => (
+      <ScrollView
+        key={node.key}
+        horizontal
+        nestedScrollEnabled
+        bounces={false}
+        showsHorizontalScrollIndicator={false}
+        style={styles.table_scroll}
+        contentContainerStyle={styles.table_scroll_content}
+      >
+        <View style={styles._VIEW_SAFE_table}>{children}</View>
+      </ScrollView>
+    ),
     hardbreak: (node, _children, _parent, styles) => (
       <SelectableMessageText key={node.key} style={styles.hardbreak}>
         {'\n'}
@@ -1235,6 +1540,86 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     marginTop: theme.spacing.xs,
+  },
+  cursorActivityList: {
+    gap: 2,
+    alignSelf: 'stretch',
+  },
+  cursorActivityRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: theme.spacing.xs,
+    paddingVertical: 2,
+  },
+  cursorActivityRowPressed: {
+    opacity: 0.78,
+  },
+  cursorActivityRail: {
+    width: 14,
+    minHeight: 22,
+    alignItems: 'center',
+    paddingTop: 7,
+  },
+  cursorActivityMarker: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: theme.colors.textMuted,
+    opacity: 0.62,
+  },
+  cursorActivityMarkerThought: {
+    backgroundColor: theme.colors.textSecondary,
+    opacity: 0.72,
+  },
+  cursorActivityMarkerTerminal: {
+    backgroundColor: theme.colors.warning,
+    opacity: 0.74,
+  },
+  cursorActivityMarkerError: {
+    backgroundColor: theme.colors.errorBg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.statusError,
+    opacity: 1,
+  },
+  cursorActivityBody: {
+    flex: 1,
+    minWidth: 0,
+    paddingBottom: 3,
+  },
+  cursorActivityHeader: {
+    minHeight: 19,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.xs,
+  },
+  cursorActivityTitle: {
+    ...theme.typography.caption,
+    color: theme.colors.textSecondary,
+    flex: 1,
+    lineHeight: 17,
+    fontWeight: '500',
+  },
+  cursorActivityPreview: {
+    fontFamily: theme.fonts.monoRegular,
+    fontSize: 11,
+    color: theme.colors.textMuted,
+    lineHeight: 16,
+    marginTop: 1,
+  },
+  cursorActivityDetails: {
+    marginTop: theme.spacing.xs,
+    gap: theme.spacing.xs,
+    borderRadius: theme.radius.sm,
+    borderWidth: 0,
+    backgroundColor: theme.colors.bgItem,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
+  },
+  cursorActivityDetailLine: {
+    fontFamily: theme.fonts.monoRegular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: theme.colors.textSecondary,
   },
   localPreviewLinkList: {
     marginTop: theme.spacing.sm,
@@ -2226,6 +2611,211 @@ function summarizeToolGroup(titles: string[]): string {
     return `${String(titles.length)} file change${titles.length === 1 ? '' : 's'}`;
   }
   return `${String(titles.length)} tool call${titles.length === 1 ? '' : 's'}`;
+}
+
+function toCursorActivityVisual(
+  rawTitle: string,
+  details: string[],
+  systemKind?: ApiChatMessage['systemKind']
+): {
+  title: string;
+  kind: 'thought' | 'terminal' | 'tool' | 'task' | 'git';
+  isRunning: boolean;
+  isError: boolean;
+} {
+  const normalized = rawTitle.toLowerCase();
+  const isError =
+    normalized.includes('failed') || normalized.includes('error') || normalized.includes('aborted');
+  const isRunning =
+    normalized.startsWith('calling ') ||
+    normalized.includes(' running') ||
+    normalized.includes('in progress') ||
+    normalized.startsWith('spawning ');
+  const toolName = readBacktickedText(rawTitle);
+  const title =
+    systemKind === 'reasoning'
+      ? 'Thought'
+      : systemKind === 'subAgent'
+        ? toCursorSubAgentTitle(rawTitle)
+        : toolName
+          ? toCursorToolTitle(toolName, details, isRunning, isError)
+          : toCursorPlainActivityTitle(rawTitle);
+
+  return {
+    title,
+    kind: toCursorActivityKind(rawTitle, toolName, systemKind),
+    isRunning,
+    isError,
+  };
+}
+
+function toCursorActivityPreview(
+  details: string[],
+  visual: ReturnType<typeof toCursorActivityVisual>
+): string | null {
+  const first = details.map((line) => line.trim()).find((line) => line.length > 0);
+  if (!first) {
+    return null;
+  }
+
+  if (visual.isError) {
+    return first.replace(/^(Error|Result|Output):\s*/i, '').trim();
+  }
+
+  if (visual.kind !== 'terminal') {
+    return null;
+  }
+
+  const command = first.replace(/^(Input|Command):\s*/i, '').trim();
+  return command ? `$ ${command}` : null;
+}
+
+function readBacktickedText(value: string): string | null {
+  const match = value.match(/`([^`]+)`/);
+  return match?.[1]?.trim() || null;
+}
+
+function toCursorToolTitle(
+  toolName: string,
+  details: string[],
+  isRunning: boolean,
+  isError: boolean
+): string {
+  const normalized = toolName.trim().toLowerCase().replace(/[^a-z0-9_./:-]+/g, '');
+  const target = cursorToolTargetLabel(details);
+  if (isError) {
+    return target ? `Failed ${formatCursorToolName(toolName)} on ${target}` : `${formatCursorToolName(toolName)} failed`;
+  }
+  switch (normalized) {
+    case 'read':
+      return target ? `Reading ${target}` : 'Reading file';
+    case 'grep':
+    case 'sem_search':
+    case 'semsearch':
+      return target ? `Searching ${target}` : 'Searching codebase';
+    case 'glob':
+      return target ? `Finding ${target}` : 'Finding files';
+    case 'ls':
+      return target ? `Listing ${target}` : 'Listing directory';
+    case 'shell':
+    case 'bash':
+    case 'terminal':
+      return isRunning ? 'Running terminal command' : 'Ran terminal command';
+    case 'edit':
+      return target ? `Editing ${target}` : 'Editing file';
+    case 'write':
+      return target ? `Writing ${target}` : 'Writing file';
+    case 'delete':
+      return target ? `Deleting ${target}` : 'Deleting file';
+    case 'read_lints':
+    case 'readlints':
+      return 'Checking diagnostics';
+    case 'update_todos':
+    case 'updatetodos':
+    case 'create_plan':
+    case 'createplan':
+      return 'Updating plan';
+    case 'take_screenshot':
+    case 'takescreenshot':
+    case 'screenshot':
+      return 'Taking screenshot';
+    case 'task':
+      return target ? `Running ${target}` : 'Running task';
+    case 'git':
+      return 'Updating git changes';
+    default:
+      return target
+        ? `${formatCursorToolName(toolName)} ${target}`
+        : formatCursorToolName(toolName);
+  }
+}
+
+function cursorToolTargetLabel(details: string[]): string | null {
+  const rawTarget =
+    details
+      .map((line) => line.trim())
+      .map((line) => line.replace(/^(Input|Path|File|Command|Query|Pattern):\s*/i, '').trim())
+      .find((line) => line.length > 0 && !line.startsWith('{') && !line.startsWith('[')) ??
+    null;
+  if (!rawTarget) {
+    return null;
+  }
+
+  const cleaned = rawTarget.replace(/^["']|["']$/g, '').trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  const firstTarget = cleaned.split(/\s*,\s*/)[0] ?? cleaned;
+  if (/^[~/]|\.[A-Za-z0-9]{1,8}$/.test(firstTarget) || firstTarget.includes('/')) {
+    const basename = firstTarget.replace(/\\/g, '/').split('/').filter(Boolean).pop();
+    if (basename) {
+      return basename;
+    }
+  }
+
+  return cleaned.length > 64 ? `${cleaned.slice(0, 63)}…` : cleaned;
+}
+
+function formatCursorToolName(toolName: string): string {
+  const cleaned = toolName.trim().replace(/[_-]+/g, ' ');
+  if (!cleaned) {
+    return 'Tool call';
+  }
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+function toCursorPlainActivityTitle(rawTitle: string): string {
+  const cleaned = rawTitle
+    .replace(/^(Calling tool|Called tool|Tool failed|Ran)\s+/i, '')
+    .replace(/`/g, '')
+    .trim();
+  if (!cleaned) {
+    return 'Tool call';
+  }
+  if (/^reasoning$/i.test(cleaned)) {
+    return 'Thought';
+  }
+  return cleaned;
+}
+
+function toCursorSubAgentTitle(rawTitle: string): string {
+  const normalized = rawTitle.toLowerCase();
+  if (normalized.includes('failed')) {
+    return 'Task failed';
+  }
+  if (normalized.includes('spawn')) {
+    return 'Started task';
+  }
+  if (normalized.includes('waiting')) {
+    return 'Waiting on task';
+  }
+  if (normalized.includes('closed')) {
+    return 'Closed task';
+  }
+  return 'Task';
+}
+
+function toCursorActivityKind(
+  rawTitle: string,
+  toolName: string | null,
+  systemKind: ApiChatMessage['systemKind'] | undefined
+): 'thought' | 'terminal' | 'tool' | 'task' | 'git' {
+  if (systemKind === 'reasoning') {
+    return 'thought';
+  }
+  if (systemKind === 'subAgent') {
+    return 'task';
+  }
+
+  const normalized = (toolName ?? rawTitle).toLowerCase();
+  if (normalized.includes('shell') || normalized.includes('bash') || normalized.includes('ran ')) {
+    return 'terminal';
+  }
+  if (normalized.includes('git')) {
+    return 'git';
+  }
+  return 'tool';
 }
 
 function toTimelineVisual(title: string): {

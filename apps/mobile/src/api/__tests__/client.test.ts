@@ -90,6 +90,39 @@ describe('HostBridgeApiClient', () => {
     expect(result.latestVersion).toBe('5.0.5');
   });
 
+  it('readCursorCredentials() maps Cursor credential status', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      configured: true,
+      valid: true,
+      source: 'env',
+      api_key_name: 'Cursor key',
+      user_email: 'mohit@example.com',
+      created_at: '2026-05-01T00:00:00Z',
+      enabled: true,
+      runtime_available: true,
+      active: true,
+      error: null,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.readCursorCredentials();
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/cursor/credentials/read');
+    expect(result).toEqual({
+      configured: true,
+      valid: true,
+      source: 'env',
+      apiKeyName: 'Cursor key',
+      userEmail: 'mohit@example.com',
+      createdAt: '2026-05-01T00:00:00Z',
+      enabled: true,
+      runtimeAvailable: true,
+      active: true,
+      error: null,
+    });
+  });
+
   it('startBridgeUpdate() calls bridge/update/start with latest by default', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({
@@ -1069,6 +1102,30 @@ describe('HostBridgeApiClient', () => {
       'thread/start',
       expect.objectContaining({
         engine: 'opencode',
+      })
+    );
+  });
+
+  it('createChat() forwards Cursor as a selected engine to thread/start', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValueOnce({
+      thread: {
+        id: 'cursor:agt_new',
+        preview: '',
+        createdAt: 1700000000,
+        updatedAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      },
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.createChat({ engine: 'cursor' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({
+        engine: 'cursor',
       })
     );
   });
@@ -2191,6 +2248,22 @@ describe('HostBridgeApiClient', () => {
       expect.objectContaining({
         includeHidden: false,
         engine: 'opencode',
+      })
+    );
+  });
+
+  it('listModels() can request Cursor models for a pending new chat', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({ data: [] });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.listModels(false, { engine: 'cursor' });
+
+    expect(ws.request).toHaveBeenCalledWith(
+      'model/list',
+      expect.objectContaining({
+        includeHidden: false,
+        engine: 'cursor',
       })
     );
   });

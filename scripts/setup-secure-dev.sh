@@ -13,6 +13,9 @@ MOBILE_ENV_EXAMPLE="$ROOT_DIR/apps/mobile/.env.example"
 BRIDGE_ACTIVE_ENGINE="${BRIDGE_ACTIVE_ENGINE:-codex}"
 BRIDGE_ENABLED_ENGINES="${BRIDGE_ENABLED_ENGINES:-$BRIDGE_ACTIVE_ENGINE}"
 OPENCODE_CLI_BIN="${OPENCODE_CLI_BIN:-opencode}"
+CURSOR_APP_SERVER_BIN="${CURSOR_APP_SERVER_BIN:-cursor-app-server}"
+CURSOR_API_KEY="${CURSOR_API_KEY:-}"
+CURSOR_MODEL="${CURSOR_MODEL:-}"
 BRIDGE_CONNECT_URL=""
 BRIDGE_PREVIEW_CONNECT_URL=""
 
@@ -278,10 +281,10 @@ case "$BRIDGE_NETWORK_MODE" in
 esac
 
 case "$BRIDGE_ACTIVE_ENGINE" in
-  codex|opencode)
+  codex|opencode|cursor)
     ;;
   *)
-    echo "error: BRIDGE_ACTIVE_ENGINE must be 'codex' or 'opencode'." >&2
+    echo "error: BRIDGE_ACTIVE_ENGINE must be 'codex', 'opencode', or 'cursor'." >&2
     exit 1
     ;;
 esac
@@ -301,7 +304,7 @@ validate_enabled_engines() {
       continue
     fi
     case "$normalized" in
-      codex|opencode)
+      codex|opencode|cursor)
         ;;
       *)
         return 1
@@ -323,7 +326,7 @@ validate_enabled_engines() {
 }
 
 if ! validate_enabled_engines "$BRIDGE_ENABLED_ENGINES"; then
-  echo "error: BRIDGE_ENABLED_ENGINES must contain one or more of 'codex' and 'opencode'." >&2
+  echo "error: BRIDGE_ENABLED_ENGINES must contain one or more of 'codex', 'opencode', and 'cursor'." >&2
   exit 1
 fi
 
@@ -403,6 +406,9 @@ BRIDGE_ACTIVE_ENGINE=$BRIDGE_ACTIVE_ENGINE
 BRIDGE_ENABLED_ENGINES=$BRIDGE_ENABLED_ENGINES
 CODEX_CLI_BIN=codex
 OPENCODE_CLI_BIN=$OPENCODE_CLI_BIN
+CURSOR_APP_SERVER_BIN=$CURSOR_APP_SERVER_BIN
+CURSOR_API_KEY=$CURSOR_API_KEY
+CURSOR_MODEL=$CURSOR_MODEL
 BRIDGE_WORKDIR=$ROOT_DIR
 EOT
 

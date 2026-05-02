@@ -6,21 +6,23 @@ This guide is the detailed companion to the top-level `README.md`.
 
 The setup wizard now lets you choose which harnesses the phone should control.
 
-If you want both Codex and OpenCode:
+If you want Codex, OpenCode, and Cursor:
 
 ```bash
-clawdex init --engines codex,opencode
+clawdex init --engines codex,opencode,cursor
 ```
 
 From a source checkout, the equivalent command is:
 
 ```bash
-npm run setup:wizard -- --engines codex,opencode
+npm run setup:wizard -- --engines codex,opencode,cursor
 ```
 
-That writes `BRIDGE_ENABLED_ENGINES=codex,opencode` into `.env.secure`, so the bridge starts both backends and the mobile app can control both from one UI.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` into `.env.secure`, so the bridge starts the selected backends and the mobile app can control them from one UI. When Cursor is selected, `clawdex init` asks for the Cursor API key and saves it in `.env.secure`.
 
-If you want only one harness, use `--engine codex` or `--engine opencode`.
+If you want only one harness, use `--engine codex`, `--engine opencode`, or `--engine cursor`.
+
+Cursor usage limits are not exposed by Cursor's public API today. The app shows key status, key metadata, runtime state, and models from Cursor; plan or weekly usage details remain in Cursor.
 
 ## Onboarding Output Cues
 
@@ -129,10 +131,10 @@ npm install
 npm run secure:setup
 ```
 
-To generate OpenCode-first config instead:
+To generate multi-harness config instead:
 
 ```bash
-BRIDGE_ENABLED_ENGINES=codex,opencode npm run secure:setup
+BRIDGE_ENABLED_ENGINES=codex,opencode,cursor npm run secure:setup
 ```
 
 Creates/updates:
@@ -146,13 +148,13 @@ Creates/updates:
 npm run secure:bridge
 ```
 
-If you want a one-off OpenCode launch without rewriting `.env.secure`:
+If you want a one-off multi-harness launch without rewriting `.env.secure`:
 
 ```bash
-BRIDGE_ENABLED_ENGINES=codex,opencode npm run secure:bridge
+BRIDGE_ENABLED_ENGINES=codex,opencode,cursor npm run secure:bridge
 ```
 
-When both CLIs are selected, the bridge starts both backends and merges chat lists while still routing each thread by engine.
+When multiple harnesses are selected, the bridge starts each backend and merges chat lists while still routing each thread by engine.
 
 ### 4) Pair from the mobile app
 
@@ -276,8 +278,11 @@ npm run teardown -- --yes
 | `BRIDGE_GITHUB_API_URL` | GitHub REST API base URL for Codespaces auth checks |
 | `CODEX_CLI_BIN` | codex executable |
 | `BRIDGE_ACTIVE_ENGINE` | internal preferred routing backend used when multiple harnesses are enabled |
-| `BRIDGE_ENABLED_ENGINES` | selected harnesses to expose (`codex`, `opencode`, or both) |
+| `BRIDGE_ENABLED_ENGINES` | selected harnesses to expose (`codex`, `opencode`, `cursor`, or a comma-separated mix) |
 | `OPENCODE_CLI_BIN` | opencode executable for dual-engine startup |
+| `CURSOR_APP_SERVER_BIN` | Cursor app-server executable, usually `cursor-app-server` |
+| `CURSOR_API_KEY` | Cursor API key used by the Cursor SDK harness; collected by `clawdex init` when Cursor is selected |
+| `CURSOR_MODEL` | optional Cursor model id for non-interactive host defaults; normal mobile chats send the selected model |
 | `BRIDGE_OPENCODE_HOST` | loopback host for spawned opencode server |
 | `BRIDGE_OPENCODE_PORT` | loopback port for spawned opencode server |
 | `BRIDGE_OPENCODE_SERVER_USERNAME` | basic-auth username passed to opencode server |
