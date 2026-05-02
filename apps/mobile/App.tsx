@@ -104,6 +104,7 @@ import {
   createAppTheme,
   resolveThemeMode,
   type AppearancePreference,
+  type DarkUiPalette,
 } from './src/theme';
 
 type AppScreen = 'Main' | 'ChatGit' | 'Browser' | 'Settings' | 'Privacy' | 'Terms';
@@ -269,6 +270,7 @@ export default function App() {
   );
   const [appearancePreference, setAppearancePreference] =
     useState<AppearancePreference>('system');
+  const [darkUiPalette, setDarkUiPalette] = useState<DarkUiPalette>('classic');
   const [fontPreference, setFontPreference] = useState<FontPreference>(
     DEFAULT_FONT_PREFERENCE
   );
@@ -304,8 +306,13 @@ export default function App() {
   const resolvedThemeMode = resolveThemeMode(appearancePreference, systemColorScheme);
   const themeFontPreference = fontsLoaded ? fontPreference : DEFAULT_FONT_PREFERENCE;
   const theme = useMemo(
-    () => createAppTheme(resolvedThemeMode, themeFontPreference),
-    [resolvedThemeMode, themeFontPreference]
+    () =>
+      createAppTheme(
+        resolvedThemeMode,
+        themeFontPreference,
+        resolvedThemeMode === 'dark' ? darkUiPalette : 'classic'
+      ),
+    [resolvedThemeMode, themeFontPreference, darkUiPalette]
   );
   const styles = useMemo(() => createStyles(theme), [theme]);
   const drawerWidth = useMemo(() => getDrawerWidth(screenWidth), [screenWidth]);
@@ -713,6 +720,7 @@ export default function App() {
       nextShowToolCalls: boolean,
       nextWorkspaceChatLimit: WorkspaceChatLimit,
       nextAppearancePreference: AppearancePreference,
+      nextDarkUiPalette: DarkUiPalette,
       nextFontPreference: FontPreference,
       nextRecentBrowserTargetUrls: string[]
     ) => {
@@ -730,6 +738,7 @@ export default function App() {
         showToolCalls: nextShowToolCalls,
         workspaceChatLimit: nextWorkspaceChatLimit,
         appearancePreference: nextAppearancePreference,
+        darkUiPalette: nextDarkUiPalette,
         fontPreference: nextFontPreference,
         recentBrowserTargetUrls: nextRecentBrowserTargetUrls,
       });
@@ -754,6 +763,7 @@ export default function App() {
       setShowToolCalls(true);
       setWorkspaceChatLimit(DEFAULT_WORKSPACE_CHAT_LIMIT);
       setAppearancePreference('system');
+      setDarkUiPalette('classic');
       setFontPreference(DEFAULT_FONT_PREFERENCE);
       setRecentBrowserTargetUrls([]);
     };
@@ -800,6 +810,7 @@ export default function App() {
         setShowToolCalls(parsed.showToolCalls);
         setWorkspaceChatLimit(parsed.workspaceChatLimit);
         setAppearancePreference(parsed.appearancePreference);
+        setDarkUiPalette(parsed.darkUiPalette);
         setFontPreference(parsed.fontPreference);
         setRecentBrowserTargetUrls(parsed.recentBrowserTargetUrls);
 
@@ -812,6 +823,7 @@ export default function App() {
             parsed.showToolCalls,
             parsed.workspaceChatLimit,
             parsed.appearancePreference,
+            parsed.darkUiPalette,
             parsed.fontPreference,
             parsed.recentBrowserTargetUrls
           );
@@ -1200,6 +1212,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1213,6 +1226,7 @@ export default function App() {
       showToolCalls,
       workspaceChatLimit,
       appearancePreference,
+      darkUiPalette,
       fontPreference,
     ]
   );
@@ -1238,6 +1252,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1252,6 +1267,7 @@ export default function App() {
       showToolCalls,
       workspaceChatLimit,
       appearancePreference,
+      darkUiPalette,
       fontPreference,
     ]
   );
@@ -1268,6 +1284,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1281,6 +1298,7 @@ export default function App() {
       showToolCalls,
       workspaceChatLimit,
       appearancePreference,
+      darkUiPalette,
       fontPreference,
     ]
   );
@@ -1296,6 +1314,7 @@ export default function App() {
         nextValue,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1325,6 +1344,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1338,6 +1358,7 @@ export default function App() {
       showToolCalls,
       workspaceChatLimit,
       appearancePreference,
+      darkUiPalette,
       fontPreference,
     ]
   );
@@ -1353,6 +1374,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         nextPreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1362,11 +1384,43 @@ export default function App() {
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
+      darkUiPalette,
       recentBrowserTargetUrls,
       saveAppSettings,
       showToolCalls,
       workspaceChatLimit,
       fontPreference,
+    ]
+  );
+
+  const handleDarkUiPaletteChange = useCallback(
+    (nextPalette: DarkUiPalette) => {
+      const normalized = nextPalette === 'grey' ? 'grey' : 'classic';
+      setDarkUiPalette(normalized);
+      void saveAppSettings(
+        defaultStartCwd,
+        defaultChatEngine,
+        defaultEngineSettings,
+        approvalMode,
+        showToolCalls,
+        workspaceChatLimit,
+        appearancePreference,
+        normalized,
+        fontPreference,
+        recentBrowserTargetUrls
+      );
+    },
+    [
+      approvalMode,
+      appearancePreference,
+      defaultChatEngine,
+      defaultEngineSettings,
+      defaultStartCwd,
+      fontPreference,
+      recentBrowserTargetUrls,
+      saveAppSettings,
+      showToolCalls,
+      workspaceChatLimit,
     ]
   );
 
@@ -1382,6 +1436,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         normalizedPreference,
         recentBrowserTargetUrls
       );
@@ -1389,6 +1444,7 @@ export default function App() {
     [
       approvalMode,
       appearancePreference,
+      darkUiPalette,
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
@@ -1410,6 +1466,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         nextTargets
       );
@@ -1417,6 +1474,7 @@ export default function App() {
     [
       approvalMode,
       appearancePreference,
+      darkUiPalette,
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
@@ -1438,6 +1496,7 @@ export default function App() {
         showToolCalls,
         nextLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1445,6 +1504,7 @@ export default function App() {
     [
       approvalMode,
       appearancePreference,
+      darkUiPalette,
       defaultChatEngine,
       defaultEngineSettings,
       defaultStartCwd,
@@ -1516,6 +1576,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1540,6 +1601,7 @@ export default function App() {
       showToolCalls,
       workspaceChatLimit,
       appearancePreference,
+      darkUiPalette,
     ]
   );
 
@@ -1570,6 +1632,7 @@ export default function App() {
         showToolCalls,
         workspaceChatLimit,
         appearancePreference,
+        darkUiPalette,
         fontPreference,
         recentBrowserTargetUrls
       );
@@ -1592,6 +1655,7 @@ export default function App() {
       showToolCalls,
       workspaceChatLimit,
       appearancePreference,
+      darkUiPalette,
     ]
   );
 
@@ -2030,7 +2094,9 @@ export default function App() {
             workspaceChatLimit={workspaceChatLimit}
             onWorkspaceChatLimitChange={handleWorkspaceChatLimitChange}
             appearancePreference={appearancePreference}
+            darkUiPalette={darkUiPalette}
             onAppearancePreferenceChange={handleAppearancePreferenceChange}
+            onDarkUiPaletteChange={handleDarkUiPaletteChange}
             fontPreference={fontPreference}
             onFontPreferenceChange={handleFontPreferenceChange}
             onEditBridgeProfile={handleEditBridgeProfile}

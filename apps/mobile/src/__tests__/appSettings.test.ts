@@ -11,6 +11,7 @@ describe('parseAppSettings', () => {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      darkUiPalette: 'classic',
       fontPreference: DEFAULT_FONT_PREFERENCE,
       workspaceChatLimit: DEFAULT_WORKSPACE_CHAT_LIMIT,
     });
@@ -56,6 +57,7 @@ describe('parseAppSettings', () => {
     );
 
     expect(parsed.appearancePreference).toBe('dark');
+    expect(parsed.darkUiPalette).toBe('classic');
     expect(parsed.defaultEngineSettings.codex).toEqual({
       modelId: 'gpt-5.4',
       effort: 'high',
@@ -97,6 +99,17 @@ describe('parseAppSettings', () => {
     );
 
     expect(parsed.fontPreference).toBe('spaceGrotesk');
+  });
+
+  it('preserves darkUiPalette for version 10 settings', () => {
+    const parsed = parseAppSettings(
+      JSON.stringify({
+        version: 10,
+        darkUiPalette: 'grey',
+      })
+    );
+
+    expect(parsed.darkUiPalette).toBe('grey');
   });
 
   it('normalizes the workspace chat limit for version 9 settings', () => {

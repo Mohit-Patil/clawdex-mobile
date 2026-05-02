@@ -1,3 +1,4 @@
+import { DEFAULT_FONT_PREFERENCE } from '../fonts';
 import { createAppTheme, resolveThemeMode } from '../theme';
 
 describe('theme', () => {
@@ -33,6 +34,13 @@ describe('theme', () => {
     expect(theme.statusBarStyle).toBe('light-content');
     expect(theme.colors.bgMain).toBe('#000000');
     expect(theme.colors.accentText).toBe('#000000');
+  });
+
+  it('uses grey charcoal tokens when dark grey palette is selected', () => {
+    const theme = createAppTheme('dark', DEFAULT_FONT_PREFERENCE, 'grey');
+
+    expect(theme.colors.bgMain).toBe('#1e1e1e');
+    expect(theme.colors.accentText).toBe('#1e1e1e');
   });
 
   it('switches typography families for a custom font preset', () => {

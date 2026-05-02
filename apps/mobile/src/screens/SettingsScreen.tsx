@@ -71,6 +71,7 @@ import {
   useAppTheme,
   type AppearancePreference,
   type AppTheme,
+  type DarkUiPalette,
 } from '../theme';
 import {
   getTipJarUnavailableReason,
@@ -101,6 +102,7 @@ interface SettingsScreenProps {
   showToolCalls?: boolean;
   workspaceChatLimit?: WorkspaceChatLimit;
   appearancePreference?: AppearancePreference;
+  darkUiPalette?: DarkUiPalette;
   fontPreference?: FontPreference;
   onDefaultChatEngineChange?: (engine: ChatEngine) => void;
   onDefaultModelSettingsChange?: (
@@ -112,6 +114,7 @@ interface SettingsScreenProps {
   onShowToolCallsChange?: (value: boolean) => void;
   onWorkspaceChatLimitChange?: (limit: WorkspaceChatLimit) => void;
   onAppearancePreferenceChange?: (preference: AppearancePreference) => void;
+  onDarkUiPaletteChange?: (palette: DarkUiPalette) => void;
   onFontPreferenceChange?: (preference: FontPreference) => void;
   onEditBridgeProfile?: () => void;
   onAddBridgeProfile?: () => void;
@@ -156,6 +159,7 @@ export function SettingsScreen({
   approvalMode,
   showToolCalls = true,
   appearancePreference = 'system',
+  darkUiPalette = 'classic',
   fontPreference = DEFAULT_FONT_PREFERENCE,
   onDefaultChatEngineChange,
   onDefaultModelSettingsChange,
@@ -164,6 +168,7 @@ export function SettingsScreen({
   workspaceChatLimit = DEFAULT_WORKSPACE_CHAT_LIMIT,
   onWorkspaceChatLimitChange,
   onAppearancePreferenceChange,
+  onDarkUiPaletteChange,
   onFontPreferenceChange,
   onEditBridgeProfile,
   onAddBridgeProfile,
@@ -212,6 +217,7 @@ export function SettingsScreen({
   const [approvalModeModalVisible, setApprovalModeModalVisible] = useState(false);
   const [workspaceChatLimitModalVisible, setWorkspaceChatLimitModalVisible] = useState(false);
   const [appearanceModalVisible, setAppearanceModalVisible] = useState(false);
+  const [darkPaletteModalVisible, setDarkPaletteModalVisible] = useState(false);
   const [fontModalVisible, setFontModalVisible] = useState(false);
   const [bridgeProfileModalVisible, setBridgeProfileModalVisible] = useState(false);
   const [showConnectionTroubleshooting, setShowConnectionTroubleshooting] = useState(false);
@@ -302,6 +308,9 @@ export function SettingsScreen({
       ? appearancePreference
       : 'system';
   const normalizedFontPreference = normalizeFontPreference(fontPreference);
+  const normalizedDarkUiPalette = darkUiPalette === 'grey' ? 'grey' : 'classic';
+  const darkUiPaletteLabel =
+    normalizedDarkUiPalette === 'grey' ? 'Grey (IDE-style)' : 'Classic (pure black)';
   const approvalModeLabel =
     normalizedApprovalMode === 'yolo'
       ? 'YOLO (no approval prompts)'
@@ -409,7 +418,7 @@ export function SettingsScreen({
   const chatDefaultsSummary = normalizedDefaultModelId
     ? `${defaultEngineLabel} · ${defaultModelLabel} · ${defaultEffortLabel}`
     : `${defaultEngineLabel} · Server default`;
-  const appearanceSummary = `${appearancePreferenceLabel} theme · ${fontPreferenceLabel}`;
+  const appearanceSummary = `${appearancePreferenceLabel} · ${darkUiPaletteLabel} · ${fontPreferenceLabel}`;
   const accountSummary = 'See sign-in status and plan';
   const usageLimitsSummary = 'View weekly usage and reset times';
   const bridgeSummary = 'Add GitHub Codespaces or private connections';
@@ -1017,6 +1026,34 @@ export function SettingsScreen({
     [normalizedAppearancePreference, onAppearancePreferenceChange]
   );
 
+  const darkPaletteOptions = useMemo<SelectionSheetOption[]>(
+    () => [
+      {
+        key: 'classic',
+        title: 'Classic',
+        description: 'Deep black and blue-gray tones. Often nicest on OLED battery-wise.',
+        icon: 'contrast-outline',
+        selected: normalizedDarkUiPalette === 'classic',
+        onPress: () => {
+          onDarkUiPaletteChange?.('classic');
+          setDarkPaletteModalVisible(false);
+        },
+      },
+      {
+        key: 'grey',
+        title: 'Grey',
+        description: 'Lifted charcoal neutrals inspired by IDE dark themes.',
+        icon: 'layers-outline',
+        selected: normalizedDarkUiPalette === 'grey',
+        onPress: () => {
+          onDarkUiPaletteChange?.('grey');
+          setDarkPaletteModalVisible(false);
+        },
+      },
+    ],
+    [normalizedDarkUiPalette, onDarkUiPaletteChange]
+  );
+
   const fontOptions = useMemo<SelectionSheetOption[]>(
     () =>
       FONT_PREFERENCE_OPTIONS.map((option) => {
@@ -1443,14 +1480,28 @@ export function SettingsScreen({
           onPress={() => setAppearanceModalVisible(true)}
           style={({ pressed }) => [
             styles.settingRow,
-            styles.settingRowLast,
             pressed && styles.linkRowPressed,
           ]}
         >
           <View style={styles.settingRowLeft}>
-            <Text style={styles.rowLabel}>Theme</Text>
+            <Text style={styles.rowLabel}>Light / Dark</Text>
             <Text style={styles.settingValue} numberOfLines={2}>
               {appearancePreferenceLabel}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+        </Pressable>
+        <Pressable
+          onPress={() => setDarkPaletteModalVisible(true)}
+          style={({ pressed }) => [
+            styles.settingRow,
+            pressed && styles.linkRowPressed,
+          ]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Dark palette</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              {darkUiPaletteLabel}
             </Text>
           </View>
           <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
@@ -1473,7 +1524,8 @@ export function SettingsScreen({
         </Pressable>
       </BlurView>
       <Text style={styles.subtleHintText}>
-        System follows your phone appearance. Existing installs stay dark until changed.
+        Light / Dark follows System when chosen. Dark palette applies whenever the interface is in
+        dark mode (including System when your phone is set to dark).
       </Text>
     </>
   );
@@ -2065,10 +2117,19 @@ export function SettingsScreen({
       <SelectionSheet
         visible={appearanceModalVisible}
         eyebrow="Appearance"
-        title="Theme"
-        subtitle="Choose whether the mobile app follows the system appearance or uses an explicit mode."
+        title="Light / Dark"
+        subtitle="Choose whether the app follows system appearance or stays light or dark."
         options={appearanceOptions}
         onClose={() => setAppearanceModalVisible(false)}
+      />
+
+      <SelectionSheet
+        visible={darkPaletteModalVisible}
+        eyebrow="Appearance"
+        title="Dark palette"
+        subtitle="Used whenever the app is in dark mode."
+        options={darkPaletteOptions}
+        onClose={() => setDarkPaletteModalVisible(false)}
       />
 
       <SelectionSheet

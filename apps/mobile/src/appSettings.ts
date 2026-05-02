@@ -11,9 +11,9 @@ import {
   normalizeFontPreference,
   type FontPreference,
 } from './fonts';
-import type { AppearancePreference } from './theme';
+import type { AppearancePreference, DarkUiPalette } from './theme';
 
-export const APP_SETTINGS_VERSION = 9;
+export const APP_SETTINGS_VERSION = 10;
 export const DEFAULT_WORKSPACE_CHAT_LIMIT = 5;
 export const WORKSPACE_CHAT_LIMIT_OPTIONS = [5, 10, 25, null] as const;
 export type WorkspaceChatLimit = (typeof WORKSPACE_CHAT_LIMIT_OPTIONS)[number];
@@ -27,6 +27,7 @@ export function parseAppSettings(raw: string): {
   approvalMode: ApprovalMode;
   showToolCalls: boolean;
   appearancePreference: AppearancePreference;
+  darkUiPalette: DarkUiPalette;
   fontPreference: FontPreference;
   workspaceChatLimit: WorkspaceChatLimit;
   recentBrowserTargetUrls: string[];
@@ -41,6 +42,7 @@ export function parseAppSettings(raw: string): {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      darkUiPalette: 'classic',
       fontPreference: DEFAULT_FONT_PREFERENCE,
       workspaceChatLimit: DEFAULT_WORKSPACE_CHAT_LIMIT,
       recentBrowserTargetUrls: [],
@@ -61,6 +63,7 @@ export function parseAppSettings(raw: string): {
         parsedVersion !== 6 &&
         parsedVersion !== 7 &&
         parsedVersion !== 8 &&
+        parsedVersion !== 9 &&
         parsedVersion !== APP_SETTINGS_VERSION)
     ) {
       return {
@@ -72,6 +75,7 @@ export function parseAppSettings(raw: string): {
         approvalMode: 'yolo',
         showToolCalls: true,
         appearancePreference: 'system',
+        darkUiPalette: 'classic',
         fontPreference: DEFAULT_FONT_PREFERENCE,
         workspaceChatLimit: DEFAULT_WORKSPACE_CHAT_LIMIT,
         recentBrowserTargetUrls: [],
@@ -113,6 +117,9 @@ export function parseAppSettings(raw: string): {
         (parsed as { appearancePreference?: unknown }).appearancePreference,
         parsedVersion === 4 ? 'dark' : 'system'
       ),
+      darkUiPalette: normalizeStoredDarkUiPalette(
+        (parsed as { darkUiPalette?: unknown }).darkUiPalette
+      ),
       fontPreference: normalizeFontPreference(
         (parsed as { fontPreference?: unknown }).fontPreference
       ),
@@ -133,6 +140,7 @@ export function parseAppSettings(raw: string): {
       approvalMode: 'yolo',
       showToolCalls: true,
       appearancePreference: 'system',
+      darkUiPalette: 'classic',
       fontPreference: DEFAULT_FONT_PREFERENCE,
       workspaceChatLimit: DEFAULT_WORKSPACE_CHAT_LIMIT,
       recentBrowserTargetUrls: [],
@@ -313,6 +321,10 @@ function normalizeStoredApprovalMode(value: unknown): ApprovalMode {
 
 function normalizeBoolean(value: unknown): boolean {
   return value === true;
+}
+
+function normalizeStoredDarkUiPalette(value: unknown): DarkUiPalette {
+  return value === 'grey' ? 'grey' : 'classic';
 }
 
 function normalizeStoredAppearancePreference(

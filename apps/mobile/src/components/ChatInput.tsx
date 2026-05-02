@@ -101,6 +101,12 @@ export function ChatInput({
   const showVoiceRecordingUi = voiceState === 'recording';
   const showVoiceTranscribingUi = voiceState === 'transcribing';
   const showVoiceStatusUi = showVoiceRecordingUi || showVoiceTranscribingUi;
+  /** Cursor-style prominent circular submit control (not mic/stop). */
+  const submitUsesPrimaryChrome =
+    showSendButton &&
+    !canStop &&
+    voiceState !== 'recording' &&
+    voiceState !== 'transcribing';
   const shouldShowActionButton =
     canStop || showSendButton || showVoiceButton || voiceState !== 'idle';
   const composerBottomSpacing = resolveComposerBottomSpacing(
@@ -297,15 +303,22 @@ export function ChatInput({
                 {showSendButton ? (
                   <Pressable
                     onPress={canSend ? onSubmit : undefined}
-                    style={styles.sendBtn}
+                    style={[styles.sendBtn, submitUsesPrimaryChrome && styles.sendBtnPrimary]}
                     disabled={!canSend}
                     hitSlop={ACTION_BUTTON_HIT_SLOP}
                     pressRetentionOffset={ACTION_BUTTON_PRESS_RETENTION_OFFSET}
                   >
                     {isLoading && !canSend ? (
-                      <ActivityIndicator size="small" color={colors.textMuted} />
+                      <ActivityIndicator
+                        size="small"
+                        color={submitUsesPrimaryChrome ? colors.accentText : colors.textMuted}
+                      />
                     ) : (
-                      <Ionicons name="arrow-up" size={14} color={colors.textPrimary} />
+                      <Ionicons
+                        name="arrow-up"
+                        size={14}
+                        color={submitUsesPrimaryChrome ? colors.accentText : colors.textPrimary}
+                      />
                     )}
                   </Pressable>
                 ) : null}
@@ -469,6 +482,9 @@ const createStyles = (theme: AppTheme) =>
       backgroundColor: theme.colors.bgItem,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    sendBtnPrimary: {
+      backgroundColor: theme.colors.accent,
     },
     micBtnRecording: {
       borderWidth: 1.5,
