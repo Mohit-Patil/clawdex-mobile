@@ -161,7 +161,7 @@ export function SelectionSheet({
                     const iconColor =
                       option.iconColor ??
                       (tone === 'danger'
-                        ? '#FF8A8A'
+                        ? colors.error
                         : option.selected || tone === 'accent'
                           ? colors.textPrimary
                           : colors.textMuted);
@@ -335,7 +335,7 @@ const createStyles = (theme: AppTheme) =>
       lineHeight: 12,
       fontWeight: '700',
       textTransform: 'uppercase',
-      letterSpacing: 1,
+      letterSpacing: 0,
     },
     title: {
       ...theme.typography.headline,
@@ -466,7 +466,7 @@ const createStyles = (theme: AppTheme) =>
       lineHeight: 12,
       fontWeight: '700',
       textTransform: 'uppercase',
-      letterSpacing: 0.6,
+      letterSpacing: 0,
     },
     accessory: {
       flexShrink: 0,

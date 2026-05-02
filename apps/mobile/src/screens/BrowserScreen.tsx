@@ -1186,7 +1186,7 @@ export const BrowserScreen = forwardRef<BrowserScreenHandle, BrowserScreenProps>
                 styles.previewSurface,
                 {
                   marginBottom: Platform.OS === 'web' ? bottomBarReservedSpace : 0,
-                  backgroundColor: desktopModeEnabled ? '#000' : theme.colors.bgMain,
+                  backgroundColor: desktopModeEnabled ? theme.colors.black : theme.colors.bgMain,
                 },
               ]}
             >
@@ -1715,7 +1715,7 @@ const createStyles = (theme: AppTheme) =>
     },
     viewportMenuBackdrop: {
       flex: 1,
-      backgroundColor: 'rgba(0, 0, 0, 0.48)',
+      backgroundColor: theme.colors.overlayBackdrop,
       justifyContent: 'center',
       paddingHorizontal: theme.spacing.md,
     },
@@ -1878,11 +1878,11 @@ const createStyles = (theme: AppTheme) =>
     },
     statusBannerWarning: {
       backgroundColor: theme.colors.warningBg,
-      borderColor: 'rgba(247, 210, 126, 0.22)',
+      borderColor: theme.colors.warningBorder,
     },
     statusBannerError: {
       backgroundColor: theme.colors.errorBg,
-      borderColor: 'rgba(239, 68, 68, 0.28)',
+      borderColor: theme.colors.errorBorder,
     },
     statusBannerText: {
       ...theme.typography.caption,
@@ -2001,7 +2001,7 @@ const createStyles = (theme: AppTheme) =>
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     sectionSubtitle: {
       ...theme.typography.caption,

@@ -1131,7 +1131,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.headline,
     color: theme.colors.textPrimary,
     fontSize: 18,
-    letterSpacing: -0.2,
+    letterSpacing: 0,
   },
   introBody: {
     flex: 1,
@@ -1204,7 +1204,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.largeTitle,
     fontSize: 28,
     lineHeight: 32,
-    letterSpacing: -0.7,
+    letterSpacing: 0,
     textAlign: 'center',
     color: theme.colors.textPrimary,
   },
@@ -1300,7 +1300,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.9,
+    letterSpacing: 0,
   },
   introSectionSubtitle: {
     ...theme.typography.body,
@@ -1519,7 +1519,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.85,
+    letterSpacing: 0,
   },
   formSectionTitle: {
     ...theme.typography.headline,
@@ -1605,7 +1605,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textSecondary,
     fontWeight: '600',
-    letterSpacing: 0.2,
+    letterSpacing: 0,
   },
   commandCopyButton: {
     minHeight: 30,
@@ -1660,7 +1660,7 @@ const createStyles = (theme: AppTheme) => {
   label: {
     ...theme.typography.caption,
     textTransform: 'uppercase',
-    letterSpacing: 0.85,
+    letterSpacing: 0,
     color: theme.colors.textMuted,
   },
   tokenHeaderRow: {

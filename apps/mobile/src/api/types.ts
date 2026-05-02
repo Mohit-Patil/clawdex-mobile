@@ -273,6 +273,7 @@ export interface ModelOption {
   description?: string;
   providerId?: string;
   providerName?: string;
+  contextWindow?: number;
   connected?: boolean;
   authRequired?: boolean;
   hidden?: boolean;

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   ActionSheetIOS,
@@ -75,7 +75,7 @@ const PINNED_CHAT_IDS_FILE = 'clawdex-pinned-chats.json';
 const PINNED_WORKSPACE_PATHS_FILE = 'clawdex-workspace-favorites.json';
 const PINNED_WORKSPACE_PATHS_VERSION = 1;
 const PINNED_WORKSPACE_PATHS_LIMIT = 4;
-const DRAWER_ROW_HEIGHT = 52;
+const DRAWER_ROW_HEIGHT = 50;
 const DRAWER_ROW_RADIUS = 14;
 const DRAWER_ACTION_HEIGHT = 36;
 const DRAWER_FOOTER_ACTION_HEIGHT = 36;
@@ -1327,88 +1327,99 @@ export const DrawerContent = memo(function DrawerContentComponent({
                 const chatSubtitle = getDrawerChatSubtitle(chat);
                 return (
                   <Pressable
-                    style={({ pressed }) => [
-                      styles.chatItem,
-                      isSubAgent && styles.chatItemSubAgent,
-                      isSubAgent && { marginLeft: Math.min(item.indentLevel, 4) * 18 },
-                      isSelected && styles.chatItemSelected,
-                      pressed && styles.chatItemPressed,
+                    style={[
+                      styles.chatItemFrame,
+                      isSubAgent && { marginLeft: Math.min(item.indentLevel, 4) * 14 },
                       isLast && styles.chatItemLast,
                     ]}
                     onPress={() => handleSelectChat(chat.id)}
                     onLongPress={() => showChatPinAction(chat)}
                   >
-                    <View
-                      style={[
-                        styles.chatItemAccent,
-                        isSubAgent && styles.chatItemAccentSubAgent,
-                        isSelected && styles.chatItemAccentSelected,
-                        isRunning && styles.chatItemAccentRunning,
-                        chat.status === 'error' && styles.chatItemAccentError,
-                      ]}
-                    />
-                    <View style={styles.chatItemContent}>
-                      <View style={styles.chatItemTopRow}>
-                        <Text
+                    {({ pressed }) => (
+                      <View
+                        style={[
+                          styles.chatItem,
+                          isSubAgent && styles.chatItemSubAgent,
+                          isSelected && styles.chatItemSelected,
+                          pressed && styles.chatItemPressed,
+                        ]}
+                      >
+                        <View
                           style={[
-                            styles.chatTitle,
-                            isSubAgent && styles.chatTitleSubAgent,
-                            isSelected && styles.chatTitleSelected,
+                            styles.chatItemAccent,
+                            isSubAgent && styles.chatItemAccentSubAgent,
+                            isSelected && styles.chatItemAccentSelected,
+                            isRunning && styles.chatItemAccentRunning,
+                            chat.status === 'error' && styles.chatItemAccentError,
                           ]}
-                          numberOfLines={chatSubtitle ? 1 : 2}
-                        >
-                          {chat.title || 'Untitled'}
-                        </Text>
-                        <View style={styles.chatItemMeta}>
-                          {isPinnedChat ? (
-                            <Ionicons
-                              name="pin-outline"
-                              size={10}
-                              color={theme.colors.textMuted}
-                              style={styles.chatPinnedIcon}
-                            />
-                          ) : null}
-                          {engineBadgeColors ? (
-                            <View
+                        />
+                        <View style={styles.chatItemContent}>
+                          <View style={styles.chatItemTopRow}>
+                            <Text
                               style={[
-                                styles.engineBadge,
-                                {
-                                  backgroundColor: engineBadgeColors.backgroundColor,
-                                  borderColor: engineBadgeColors.borderColor,
-                                },
+                                styles.chatTitle,
+                                isSubAgent && styles.chatTitleSubAgent,
+                                isSelected && styles.chatTitleSelected,
                               ]}
+                              numberOfLines={chatSubtitle ? 1 : 2}
                             >
+                              {chat.title || 'Untitled'}
+                            </Text>
+                            <View style={styles.chatItemMeta}>
+                              {isPinnedChat ? (
+                                <Ionicons
+                                  name="pin-outline"
+                                  size={10}
+                                  color={theme.colors.textMuted}
+                                  style={styles.chatPinnedIcon}
+                                />
+                              ) : null}
+                              {engineBadgeColors ? (
+                                <View
+                                  style={[
+                                    styles.engineBadge,
+                                    {
+                                      backgroundColor: engineBadgeColors.backgroundColor,
+                                      borderColor: engineBadgeColors.borderColor,
+                                    },
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.engineBadgeText,
+                                      {
+                                        color: engineBadgeColors.textColor,
+                                      },
+                                    ]}
+                                  >
+                                    {getChatEngineLabel(chat.engine)}
+                                  </Text>
+                                </View>
+                              ) : null}
                               <Text
                                 style={[
-                                  styles.engineBadgeText,
-                                  {
-                                    color: engineBadgeColors.textColor,
-                                  },
+                                  styles.chatAge,
+                                  isSelected && styles.chatAgeSelected,
                                 ]}
                               >
-                                {getChatEngineLabel(chat.engine)}
+                                {relativeTime(chat.updatedAt)}
                               </Text>
                             </View>
+                          </View>
+                          {chatSubtitle ? (
+                            <Text
+                              style={[
+                                styles.chatSubtitle,
+                                isSelected && styles.chatSubtitleSelected,
+                              ]}
+                              numberOfLines={1}
+                            >
+                              {chatSubtitle}
+                            </Text>
                           ) : null}
-                          <Text
-                            style={[styles.chatAge, isSelected && styles.chatAgeSelected]}
-                          >
-                            {relativeTime(chat.updatedAt)}
-                          </Text>
                         </View>
                       </View>
-                      {chatSubtitle ? (
-                        <Text
-                          style={[
-                            styles.chatSubtitle,
-                            isSelected && styles.chatSubtitleSelected,
-                          ]}
-                          numberOfLines={1}
-                        >
-                          {chatSubtitle}
-                        </Text>
-                      ) : null}
-                    </View>
+                    )}
                   </Pressable>
                 );
               }}
@@ -1725,33 +1736,11 @@ function parsePinnedWorkspacePaths(raw: string): string[] {
 }
 
 const createStyles = (theme: AppTheme) => {
-  const connectionBadgeConnectedBg = theme.isDark
-    ? 'rgba(52, 199, 89, 0.12)'
-    : 'rgba(14, 159, 110, 0.16)';
-  const connectionBadgeConnectedBorder = theme.isDark
-    ? 'rgba(52, 199, 89, 0.32)'
-    : 'rgba(14, 159, 110, 0.32)';
-  const connectionBadgeDisconnectedBg = theme.isDark
-    ? 'rgba(245, 158, 11, 0.12)'
-    : 'rgba(197, 106, 18, 0.14)';
-  const connectionBadgeDisconnectedBorder = theme.isDark
-    ? 'rgba(245, 158, 11, 0.28)'
-    : 'rgba(197, 106, 18, 0.28)';
-  const connectionDotConnected = theme.isDark ? '#34C759' : theme.colors.statusComplete;
-  const connectionDotDisconnected = theme.isDark ? '#F59E0B' : theme.colors.warning;
-  const connectionTextConnected = theme.isDark ? '#8EE6AD' : '#0B7A55';
-  const connectionTextDisconnected = theme.isDark ? '#F6C875' : '#9A4A0C';
-  const subAgentAccent = theme.isDark
-    ? 'rgba(245, 165, 36, 0.35)'
-    : 'rgba(217, 119, 6, 0.22)';
+  const connectionDotConnected = theme.colors.success;
+  const connectionDotDisconnected = theme.colors.warning;
   const cardShadow = theme.isDark
-    ? '0 12px 28px rgba(0, 0, 0, 0.24)'
-    : '0 12px 24px rgba(15, 23, 42, 0.10)';
-  const drawerPrimaryActionBg = theme.isDark ? theme.colors.accent : '#3F4854';
-  const drawerPrimaryActionPressed = theme.isDark ? theme.colors.accentPressed : '#2F3945';
-  const drawerPrimaryActionBorder = theme.isDark
-    ? theme.colors.accent
-    : 'rgba(63, 72, 84, 0.18)';
+    ? '0 10px 24px rgba(0, 0, 0, 0.22)'
+    : '0 10px 20px rgba(15, 23, 42, 0.10)';
   const drawerPrimaryActionShadow = theme.isDark
     ? undefined
     : '0 10px 20px rgba(47, 57, 69, 0.12)';
@@ -1770,9 +1759,9 @@ const createStyles = (theme: AppTheme) => {
     position: 'relative',
   },
   topDeck: {
-    paddingHorizontal: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.md,
     paddingTop: theme.spacing.sm,
-    paddingBottom: theme.spacing.md,
+    paddingBottom: theme.spacing.sm,
     gap: theme.spacing.xs + 2,
   },
   heroCard: {
@@ -1825,12 +1814,12 @@ const createStyles = (theme: AppTheme) => {
     borderWidth: 1,
   },
   connectionBadgeConnected: {
-    backgroundColor: connectionBadgeConnectedBg,
-    borderColor: connectionBadgeConnectedBorder,
+    backgroundColor: theme.colors.successBg,
+    borderColor: theme.colors.successBorder,
   },
   connectionBadgeDisconnected: {
-    backgroundColor: connectionBadgeDisconnectedBg,
-    borderColor: connectionBadgeDisconnectedBorder,
+    backgroundColor: theme.colors.warningBg,
+    borderColor: theme.colors.warningBorder,
   },
   connectionDot: {
     width: 6,
@@ -1849,13 +1838,13 @@ const createStyles = (theme: AppTheme) => {
     lineHeight: 12,
     fontWeight: '700',
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 0,
   },
   connectionTextConnected: {
-    color: connectionTextConnected,
+    color: theme.colors.success,
   },
   connectionTextDisconnected: {
-    color: connectionTextDisconnected,
+    color: theme.colors.warning,
   },
   secondaryActionButton: {
     flex: 1,
@@ -1887,8 +1876,8 @@ const createStyles = (theme: AppTheme) => {
     height: DRAWER_ACTION_HEIGHT,
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: drawerPrimaryActionBorder,
-    backgroundColor: drawerPrimaryActionBg,
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accent,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1896,7 +1885,8 @@ const createStyles = (theme: AppTheme) => {
     boxShadow: drawerPrimaryActionShadow,
   },
   primaryActionButtonPressed: {
-    backgroundColor: drawerPrimaryActionPressed,
+    backgroundColor: theme.colors.accentPressed,
+    borderColor: theme.colors.accentPressed,
   },
   primaryActionText: {
     ...theme.typography.body,
@@ -1908,7 +1898,7 @@ const createStyles = (theme: AppTheme) => {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.md,
     paddingBottom: theme.spacing.sm,
   },
   sectionHeaderRight: {
@@ -1923,7 +1913,7 @@ const createStyles = (theme: AppTheme) => {
     textTransform: 'uppercase',
     fontSize: 10,
     lineHeight: 12,
-    letterSpacing: 0.9,
+    letterSpacing: 0,
     fontWeight: '700',
   },
   sectionCountBadge: {
@@ -1969,7 +1959,7 @@ const createStyles = (theme: AppTheme) => {
     opacity: 0.9,
   },
   filterPanel: {
-    marginHorizontal: theme.spacing.lg,
+    marginHorizontal: theme.spacing.md,
     marginBottom: theme.spacing.sm,
     borderRadius: 14,
     borderWidth: 1,
@@ -2055,7 +2045,7 @@ const createStyles = (theme: AppTheme) => {
     paddingBottom: theme.spacing.lg,
   },
   emptyStateCard: {
-    marginHorizontal: theme.spacing.lg,
+    marginHorizontal: theme.spacing.md,
     marginTop: theme.spacing.sm,
     borderRadius: 16,
     borderWidth: 1,
@@ -2088,9 +2078,9 @@ const createStyles = (theme: AppTheme) => {
   },
   workspaceGroupHeader: {
     height: DRAWER_ROW_HEIGHT,
-    marginHorizontal: theme.spacing.lg,
+    marginHorizontal: theme.spacing.md,
     paddingHorizontal: theme.spacing.sm,
-    paddingVertical: theme.spacing.sm,
+    paddingVertical: 6,
     borderRadius: DRAWER_ROW_RADIUS,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
@@ -2098,12 +2088,12 @@ const createStyles = (theme: AppTheme) => {
     justifyContent: 'center',
   },
   workspaceGroupHeaderExpanded: {
-    marginTop: theme.spacing.sm,
-    marginBottom: theme.spacing.xs,
+    marginTop: 3,
+    marginBottom: 6,
   },
   workspaceGroupHeaderCollapsed: {
-    marginTop: theme.spacing.sm,
-    marginBottom: theme.spacing.md,
+    marginTop: 3,
+    marginBottom: 6,
   },
   workspaceGroupHeaderPinned: {
     borderColor: theme.colors.borderHighlight,
@@ -2114,7 +2104,7 @@ const createStyles = (theme: AppTheme) => {
   workspaceGroupHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.sm,
+    gap: 6,
   },
   workspaceGroupTitleBlock: {
     flex: 1,
@@ -2125,7 +2115,7 @@ const createStyles = (theme: AppTheme) => {
   workspaceGroupIconTile: {
     width: DRAWER_ICON_TILE_SIZE,
     height: DRAWER_ICON_TILE_SIZE,
-    borderRadius: 9,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgItem,
@@ -2137,9 +2127,9 @@ const createStyles = (theme: AppTheme) => {
     opacity: 0.82,
   },
   workspaceGroupLiveDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: connectionDotConnected,
     flexShrink: 0,
   },
@@ -2147,23 +2137,23 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.body,
     color: theme.colors.textPrimary,
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 16,
     fontWeight: '700',
   },
   workspaceGroupSubtitle: {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     fontSize: 10,
-    lineHeight: 14,
+    lineHeight: 12,
   },
   workspaceGroupCountBadge: {
-    minWidth: 24,
+    minWidth: 22,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.sm,
-    paddingVertical: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2181,10 +2171,10 @@ const createStyles = (theme: AppTheme) => {
     flexShrink: 0,
   },
   workspaceShowMoreRow: {
-    marginLeft: theme.spacing.lg,
-    marginRight: theme.spacing.lg,
-    marginTop: -2,
-    marginBottom: theme.spacing.lg,
+    marginLeft: theme.spacing.md,
+    marginRight: theme.spacing.md,
+    marginTop: theme.spacing.xs,
+    marginBottom: 6,
     minHeight: DRAWER_ACTION_HEIGHT,
     borderRadius: DRAWER_ROW_RADIUS,
     borderWidth: 1,
@@ -2194,7 +2184,7 @@ const createStyles = (theme: AppTheme) => {
     alignItems: 'center',
     justifyContent: 'center',
     gap: theme.spacing.xs,
-    paddingVertical: theme.spacing.sm,
+    paddingVertical: 6,
   },
   workspaceShowMoreRowPressed: {
     backgroundColor: theme.colors.bgInput,
@@ -2205,25 +2195,28 @@ const createStyles = (theme: AppTheme) => {
     fontSize: 11,
     fontWeight: '700',
   },
+  chatItemFrame: {
+    marginLeft: theme.spacing.md,
+    marginRight: theme.spacing.md,
+    marginBottom: 6,
+  },
   chatItem: {
-    height: DRAWER_ROW_HEIGHT,
-    marginLeft: theme.spacing.lg,
-    marginRight: theme.spacing.lg,
-    marginBottom: theme.spacing.xs,
+    minHeight: DRAWER_ROW_HEIGHT,
     borderRadius: DRAWER_ROW_RADIUS,
     borderWidth: 1,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgItem,
-    padding: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 6,
     flexDirection: 'row',
-    gap: theme.spacing.xs + 2,
+    gap: 6,
     alignItems: 'center',
   },
   chatItemSubAgent: {
-    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.025)' : 'rgba(180, 83, 9, 0.04)',
+    backgroundColor: theme.colors.bgElevated,
   },
   chatItemLast: {
-    marginBottom: theme.spacing.lg,
+    marginBottom: 6,
   },
   chatItemSelected: {
     backgroundColor: theme.colors.bgInput,
@@ -2234,16 +2227,16 @@ const createStyles = (theme: AppTheme) => {
     backgroundColor: theme.colors.bgInput,
   },
   chatItemAccent: {
-    width: 4,
+    width: 3,
     alignSelf: 'stretch',
     borderRadius: 999,
     backgroundColor: theme.colors.bgCanvasAccent,
   },
   chatItemAccentSubAgent: {
-    backgroundColor: subAgentAccent,
+    backgroundColor: theme.colors.warningBorder,
   },
   chatItemAccentSelected: {
-    width: 5,
+    width: 4,
     backgroundColor: theme.colors.textPrimary,
   },
   chatItemAccentRunning: {
@@ -2256,24 +2249,24 @@ const createStyles = (theme: AppTheme) => {
     flex: 1,
     minWidth: 0,
     justifyContent: 'center',
-    gap: 2,
+    gap: 1,
   },
   chatItemTopRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    gap: theme.spacing.xs,
+    gap: 6,
   },
   chatItemMeta: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing.xs,
+    gap: 4,
     flexShrink: 0,
-    marginTop: 2,
+    marginTop: 1,
   },
   chatIconTile: {
     width: DRAWER_ICON_TILE_SIZE,
     height: DRAWER_ICON_TILE_SIZE,
-    borderRadius: 9,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: theme.colors.borderLight,
     backgroundColor: theme.colors.bgElevated,
@@ -2300,12 +2293,12 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.body,
     flex: 1,
     color: theme.colors.textSecondary,
-    fontSize: 14,
-    lineHeight: 18,
+    fontSize: 13,
+    lineHeight: 17,
     fontWeight: '600',
   },
   chatTitleSubAgent: {
-    color: theme.colors.warning,
+    color: theme.colors.textSecondary,
   },
   chatTitleSelected: {
     color: theme.colors.textPrimary,
@@ -2315,7 +2308,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     fontSize: 10,
-    lineHeight: 13,
+    lineHeight: 12,
     flex: 1,
   },
   chatSubtitleSelected: {
@@ -2324,15 +2317,15 @@ const createStyles = (theme: AppTheme) => {
   engineBadge: {
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
     flexShrink: 0,
   },
   engineBadgeText: {
     ...theme.typography.caption,
     fontSize: 9,
     fontWeight: '700',
-    letterSpacing: 0.3,
+    letterSpacing: 0,
     textTransform: 'uppercase',
   },
   chatAge: {
@@ -2348,7 +2341,7 @@ const createStyles = (theme: AppTheme) => {
   },
   footer: {
     marginTop: 'auto',
-    paddingHorizontal: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.md,
     paddingTop: theme.spacing.xs,
     paddingBottom: theme.spacing.sm,
   },

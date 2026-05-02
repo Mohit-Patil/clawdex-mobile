@@ -13,6 +13,7 @@ import type {
   CursorAgentMessage,
   CursorDriver,
   CursorModelListItem,
+  CursorRunInfo,
   CursorRunHandle,
   CursorStreamMessage,
   ModelSelection,
@@ -85,6 +86,22 @@ export class CursorSdkDriver implements CursorDriver {
     })) as CursorAgentMessage[];
   }
 
+  async listRuns(
+    agentId: string,
+    options: { cwd: string; limit?: number; cursor?: string }
+  ): Promise<{ items: CursorRunInfo[]; nextCursor?: string }> {
+    const result = await Agent.listRuns(agentId, {
+      runtime: 'local',
+      cwd: options.cwd,
+      limit: options.limit,
+      cursor: options.cursor,
+    });
+    return {
+      items: result.items.map(toRunInfo),
+      nextCursor: result.nextCursor,
+    };
+  }
+
   async listModels(options: { apiKey: string }): Promise<CursorModelListItem[]> {
     return (await Cursor.models.list({ apiKey: options.apiKey })).map(toModelListItem);
   }
@@ -130,12 +147,68 @@ function toAgentInfo(info: SDKAgentInfo): CursorAgentInfo {
 }
 
 function toModelListItem(model: ModelListItem): CursorModelListItem {
+  const contextWindow = modelDefaultContextWindow(model);
   return {
     id: model.id,
     displayName: model.displayName,
     description: model.description,
     providerId: 'cursor',
     providerName: 'Cursor',
+    contextWindow,
     isDefault: model.variants?.some((variant) => variant.isDefault === true) ?? false,
+  };
+}
+
+function modelDefaultContextWindow(model: ModelListItem): number | undefined {
+  const defaultVariant =
+    model.variants?.find((variant) => variant.isDefault === true) ??
+    (model.variants?.length === 1 ? model.variants[0] : undefined);
+  const variantContext = defaultVariant?.params.find((param) => param.id === 'context');
+  const parsedVariantContext = parseContextWindowValue(variantContext?.value);
+  if (parsedVariantContext) {
+    return parsedVariantContext;
+  }
+
+  const contextParameter = model.parameters?.find((parameter) => parameter.id === 'context');
+  const contextValues = new Set<number>();
+  for (const value of contextParameter?.values ?? []) {
+    const parsed = parseContextWindowValue(value.value);
+    if (parsed) {
+      contextValues.add(parsed);
+    }
+  }
+
+  if (contextValues.size === 1) {
+    return [...contextValues][0];
+  }
+  return undefined;
+}
+
+function parseContextWindowValue(value: string | undefined): number | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+
+  const match = /^([0-9]+(?:\.[0-9]+)?)([km])?$/.exec(normalized);
+  if (!match) {
+    return undefined;
+  }
+
+  const numeric = Number(match[1]);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return undefined;
+  }
+
+  const multiplier = match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1_000 : 1;
+  return Math.floor(numeric * multiplier);
+}
+
+function toRunInfo(run: Run): CursorRunInfo {
+  return {
+    id: run.id,
+    status: run.status,
+    model: run.model,
+    createdAt: run.createdAt,
   };
 }

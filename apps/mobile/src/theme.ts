@@ -52,10 +52,15 @@ export interface AppColors {
   statusComplete: string;
   statusError: string;
   statusIdle: string;
+  success: string;
+  successBg: string;
+  successBorder: string;
   warning: string;
   warningBg: string;
+  warningBorder: string;
   error: string;
   errorBg: string;
+  errorBorder: string;
   shadow: string;
   overlayBackdrop: string;
   white: string;
@@ -114,13 +119,18 @@ const darkClassicColors: AppColors = {
   toolBlockBg: 'rgba(255, 255, 255, 0.09)',
   toolBlockBorder: '#5A6376',
   statusRunning: '#C2C9D8',
-  statusComplete: '#C6CDD9',
+  statusComplete: '#34C759',
   statusError: '#EF4444',
   statusIdle: '#B4BCCB',
+  success: '#34C759',
+  successBg: 'rgba(52, 199, 89, 0.12)',
+  successBorder: 'rgba(52, 199, 89, 0.32)',
   warning: '#F7D27E',
   warningBg: 'rgba(247, 210, 126, 0.08)',
+  warningBorder: 'rgba(247, 210, 126, 0.24)',
   error: '#EF4444',
   errorBg: 'rgba(239, 68, 68, 0.15)',
+  errorBorder: 'rgba(239, 68, 68, 0.30)',
   shadow: '#000000',
   overlayBackdrop: 'rgba(0, 0, 0, 0.52)',
   white: '#FFFFFF',
@@ -158,10 +168,15 @@ const darkGreyColors: AppColors = {
   statusComplete: '#89d185',
   statusError: '#f14c4c',
   statusIdle: '#858585',
+  success: '#89d185',
+  successBg: 'rgba(137, 209, 133, 0.12)',
+  successBorder: 'rgba(137, 209, 133, 0.28)',
   warning: '#cca700',
   warningBg: 'rgba(204, 167, 0, 0.12)',
+  warningBorder: 'rgba(204, 167, 0, 0.28)',
   error: '#f14c4c',
   errorBg: 'rgba(241, 76, 76, 0.14)',
+  errorBorder: 'rgba(241, 76, 76, 0.30)',
   shadow: '#000000',
   overlayBackdrop: 'rgba(0, 0, 0, 0.52)',
   white: '#FFFFFF',
@@ -198,10 +213,15 @@ const lightColors: AppColors = {
   statusComplete: '#0E9F6E',
   statusError: '#D92D20',
   statusIdle: '#566C87',
+  success: '#0E9F6E',
+  successBg: 'rgba(14, 159, 110, 0.10)',
+  successBorder: 'rgba(14, 159, 110, 0.24)',
   warning: '#C56A12',
   warningBg: 'rgba(197, 106, 18, 0.14)',
+  warningBorder: 'rgba(197, 106, 18, 0.24)',
   error: '#D92D20',
   errorBg: 'rgba(217, 45, 32, 0.10)',
+  errorBorder: 'rgba(217, 45, 32, 0.24)',
   shadow: '#0F1F36',
   overlayBackdrop: 'rgba(15, 31, 54, 0.20)',
   white: '#FFFFFF',
@@ -243,7 +263,7 @@ function createTypography(colors: AppColors, fonts: AppFontFamilies): AppTypogra
     largeTitle: {
       fontSize: 24,
       color: colors.textPrimary,
-      letterSpacing: -0.3,
+      letterSpacing: 0,
       ...withWeightedFamily(fonts.bold, '700'),
     },
     headline: {

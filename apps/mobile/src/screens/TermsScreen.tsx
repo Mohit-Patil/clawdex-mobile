@@ -152,7 +152,7 @@ const createStyles = (theme: AppTheme) =>
     sectionLabel: {
       ...theme.typography.caption,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
       marginTop: theme.spacing.sm,
       marginBottom: theme.spacing.sm,
       color: theme.colors.textMuted,

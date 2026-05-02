@@ -156,7 +156,7 @@ const createStyles = (theme: AppTheme) =>
       color: theme.colors.textMuted,
       fontSize: 11,
       fontWeight: '600',
-      letterSpacing: 0.4,
+      letterSpacing: 0,
       textTransform: 'uppercase',
     },
     timer: {

@@ -2,11 +2,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import type { ChatEngine } from '../api/types';
+import { getChatEngineBadgeColors } from '../chatEngines';
 import { useAppTheme, type AppTheme } from '../theme';
 
 interface ChatHeaderProps {
   onOpenDrawer: () => void;
   title: string;
+  engine?: ChatEngine | null;
   engineLabel?: string;
   onOpenTitleMenu?: () => void;
   rightIconName?: keyof typeof Ionicons.glyphMap;
@@ -16,6 +19,7 @@ interface ChatHeaderProps {
 export function ChatHeader({
   onOpenDrawer,
   title,
+  engine,
   engineLabel,
   onOpenTitleMenu,
   rightIconName,
@@ -24,6 +28,10 @@ export function ChatHeader({
   const theme = useAppTheme();
   const { colors } = theme;
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const engineBadgeColors = useMemo(
+    () => (engineLabel ? getChatEngineBadgeColors(engine, theme.mode) : null),
+    [engine, engineLabel, theme.mode]
+  );
   const titleDisplay = title.trim() || 'New chat';
 
   return (
@@ -43,8 +51,23 @@ export function ChatHeader({
                 {titleDisplay}
               </Text>
               {engineLabel ? (
-                <View style={styles.engineBadge}>
-                  <Text style={styles.engineBadgeText}>{engineLabel}</Text>
+                <View
+                  style={[
+                    styles.engineBadge,
+                    engineBadgeColors && {
+                      backgroundColor: engineBadgeColors.backgroundColor,
+                      borderColor: engineBadgeColors.borderColor,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.engineBadgeText,
+                      engineBadgeColors && { color: engineBadgeColors.textColor },
+                    ]}
+                  >
+                    {engineLabel}
+                  </Text>
                 </View>
               ) : null}
               <Ionicons name="chevron-down" size={12} color={colors.textMuted} />
@@ -55,8 +78,23 @@ export function ChatHeader({
                 {titleDisplay}
               </Text>
               {engineLabel ? (
-                <View style={styles.engineBadge}>
-                  <Text style={styles.engineBadgeText}>{engineLabel}</Text>
+                <View
+                  style={[
+                    styles.engineBadge,
+                    engineBadgeColors && {
+                      backgroundColor: engineBadgeColors.backgroundColor,
+                      borderColor: engineBadgeColors.borderColor,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.engineBadgeText,
+                      engineBadgeColors && { color: engineBadgeColors.textColor },
+                    ]}
+                  >
+                    {engineLabel}
+                  </Text>
                 </View>
               ) : null}
             </View>
@@ -134,7 +172,7 @@ const createStyles = (theme: AppTheme) =>
       color: theme.isDark ? theme.colors.textSecondary : theme.colors.textPrimary,
       fontSize: 10,
       fontWeight: '600',
-      letterSpacing: 0.3,
+      letterSpacing: 0,
       textTransform: 'uppercase',
     },
   });

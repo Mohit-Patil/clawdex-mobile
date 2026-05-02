@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { CursorAppServer } from '../appServer.js';
@@ -8,6 +11,7 @@ import type {
   CursorAgentMessage,
   CursorDriver,
   CursorModelListItem,
+  CursorRunInfo,
   CursorRunHandle,
   CursorRunResult,
   CursorStreamMessage,
@@ -85,6 +89,7 @@ class MockDriver implements CursorDriver {
   readonly agents = new Map<string, MockAgent>();
   readonly agentInfos = new Map<string, CursorAgentInfo>();
   readonly messages = new Map<string, CursorAgentMessage[]>();
+  readonly runInfos = new Map<string, CursorRunInfo[]>();
   readonly models: CursorModelListItem[] = [
     {
       id: 'cursor-small',
@@ -158,6 +163,12 @@ class MockDriver implements CursorDriver {
 
   async listMessages(agentId: string): Promise<CursorAgentMessage[]> {
     return this.messages.get(agentId) ?? [];
+  }
+
+  async listRuns(agentId: string): Promise<{ items: CursorRunInfo[]; nextCursor?: string }> {
+    return {
+      items: this.runInfos.get(agentId) ?? [],
+    };
   }
 
   async listModels(): Promise<CursorModelListItem[]> {
@@ -272,6 +283,65 @@ describe('CursorAppServer', () => {
     expect(toolItems?.[0]?.tool).toBe('read');
   });
 
+  it('keeps local image entries on the persisted Cursor user turn', async () => {
+    const imageBytes = Buffer.from('89504e470d0a1a0a', 'hex');
+    const tempDir = await mkdtemp(join(tmpdir(), 'cursor-app-server-'));
+    const imagePath = join(tempDir, 'sidebar.png');
+    await writeFile(imagePath, imageBytes);
+
+    try {
+      const driver = new MockDriver();
+      const server = new CursorAppServer({
+        runtime: 'local',
+        cwd: '/workspace/app',
+        apiKey: 'cursor-key',
+        defaultModel: 'cursor-small',
+        driver,
+      });
+      const notifications: string[] = [];
+      server.onNotification((event) => notifications.push(event.method));
+
+      const created = await server.request('thread/start', {});
+      const thread = created.thread as { id: string };
+      await server.request('turn/start', {
+        threadId: thread.id,
+        input: [
+          { type: 'text', text: 'Can you improve the sidebar?' },
+          { type: 'localImage', path: imagePath },
+        ],
+      });
+
+      const sent = driver.agents.get(thread.id)?.sent[0]?.message;
+      expect(sent).toMatchObject({
+        text: 'Can you improve the sidebar?',
+        images: [
+          {
+            data: imageBytes.toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      });
+
+      await waitFor(() => notifications.includes('turn/completed'));
+      const read = await server.request('thread/read', { threadId: thread.id });
+      const readThread = read.thread as {
+        turns: Array<{
+          items: Array<{
+            type: string;
+            content?: Array<{ type: string; text?: string; path?: string }>;
+          }>;
+        }>;
+      };
+      const userItem = readThread.turns[0]?.items.find((item) => item.type === 'userMessage');
+      expect(userItem?.content).toEqual([
+        { type: 'text', text: 'Can you improve the sidebar?' },
+        { type: 'localImage', path: imagePath },
+      ]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('projects Cursor git run metadata as a completed git activity item', async () => {
     const driver = new MockDriver();
     driver.nextRunResult = {
@@ -375,6 +445,93 @@ describe('CursorAppServer', () => {
     expect(agentItems?.[0]?.text).toBe('Exploring the code.');
   });
 
+  it('projects nested historical Cursor conversation turns', async () => {
+    const driver = new MockDriver();
+    const now = Date.UTC(2026, 4, 1, 10, 0, 0);
+    driver.agentInfos.set('cursor-agent-nested-history', {
+      agentId: 'cursor-agent-nested-history',
+      name: 'New Agent',
+      summary: '',
+      lastModified: now,
+      createdAt: now,
+      status: 'finished',
+      runtime: 'local',
+      cwd: '/workspace/app',
+    });
+    driver.messages.set('cursor-agent-nested-history', [
+      {
+        type: 'user',
+        uuid: 'nested-turn-1',
+        agent_id: 'cursor-agent-nested-history',
+        message: {
+          turn: {
+            case: 'agentConversationTurn',
+            value: {
+              userMessage: {
+                text: 'Explain the bridge.',
+              },
+              steps: [
+                {
+                  message: {
+                    case: 'thinkingMessage',
+                    value: {
+                      text: 'Inspecting bridge structure.',
+                    },
+                  },
+                },
+                {
+                  message: {
+                    case: 'toolCall',
+                    value: {
+                      tool: {
+                        case: 'readToolCall',
+                        value: {
+                          args: { path: '/workspace/app/package.json' },
+                          result: { status: 'success', value: { content: '{}' } },
+                        },
+                      },
+                    },
+                  },
+                },
+                {
+                  message: {
+                    case: 'assistantMessage',
+                    value: {
+                      text: 'The bridge is a local gateway.',
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+    const server = new CursorAppServer({
+      runtime: 'local',
+      cwd: '/workspace/app',
+      apiKey: 'cursor-key',
+      defaultModel: 'cursor-small',
+      driver,
+    });
+
+    const read = await server.request('thread/read', {
+      threadId: 'cursor-agent-nested-history',
+    });
+    const readThread = read.thread as {
+      title: string | null;
+      turns: Array<{ items: Array<{ type: string; text?: string; tool?: string }> }>;
+    };
+
+    expect(readThread.title).toBe('Explain the bridge.');
+    expect(readThread.turns[0]?.items).toMatchObject([
+      { type: 'userMessage' },
+      { type: 'reasoning', text: 'Inspecting bridge structure.' },
+      { type: 'toolCall', tool: 'read' },
+      { type: 'agentMessage', text: 'The bridge is a local gateway.' },
+    ]);
+  });
+
   it('fails when no cwd is configured instead of falling back to process.cwd()', async () => {
     const server = new CursorAppServer({
       runtime: 'local',
@@ -421,6 +578,90 @@ describe('CursorAppServer', () => {
     });
 
     expect(driver.agents.get(thread.id)?.sent[0]?.model?.id).toBe('cursor-small');
+  });
+
+  it('reuses the requested model for follow-up turns on a resumed thread', async () => {
+    const driver = new MockDriver();
+    const agent = new MockAgent('cursor-agent-existing', (id) =>
+      new MockRun(id, driver.nextRunResult.id, driver.nextRunMessages, driver.nextRunResult)
+    );
+    driver.agents.set(agent.agentId, agent);
+    driver.agentInfos.set(agent.agentId, {
+      agentId: agent.agentId,
+      name: 'Existing Cursor Agent',
+      summary: '',
+      lastModified: Date.UTC(2026, 4, 1, 10, 0, 0),
+      createdAt: Date.UTC(2026, 4, 1, 10, 0, 0),
+      status: 'finished',
+      runtime: 'local',
+      cwd: '/workspace/app',
+    });
+    const server = new CursorAppServer({
+      runtime: 'local',
+      cwd: '/workspace/app',
+      apiKey: 'cursor-key',
+      driver,
+    });
+
+    await server.request('turn/start', {
+      threadId: agent.agentId,
+      input: [{ type: 'text', text: 'Use this model' }],
+      model: 'cursor-small',
+    });
+    await server.request('turn/start', {
+      threadId: agent.agentId,
+      input: [{ type: 'text', text: 'Reuse the model' }],
+    });
+
+    expect(agent.sent.map((entry) => entry.model?.id)).toEqual([
+      'cursor-small',
+      'cursor-small',
+    ]);
+  });
+
+  it('recovers the thread model from persisted Cursor runs when resuming', async () => {
+    const driver = new MockDriver();
+    const agent = new MockAgent('cursor-agent-existing', (id) =>
+      new MockRun(id, driver.nextRunResult.id, driver.nextRunMessages, driver.nextRunResult)
+    );
+    driver.agents.set(agent.agentId, agent);
+    driver.agentInfos.set(agent.agentId, {
+      agentId: agent.agentId,
+      name: 'Existing Cursor Agent',
+      summary: '',
+      lastModified: Date.UTC(2026, 4, 1, 10, 0, 0),
+      createdAt: Date.UTC(2026, 4, 1, 10, 0, 0),
+      status: 'finished',
+      runtime: 'local',
+      cwd: '/workspace/app',
+    });
+    driver.runInfos.set(agent.agentId, [
+      {
+        id: 'run-old',
+        status: 'finished',
+        model: { id: 'cursor-small' },
+        createdAt: 100,
+      },
+      {
+        id: 'run-new',
+        status: 'finished',
+        model: { id: 'composer-2' },
+        createdAt: 200,
+      },
+    ]);
+    const server = new CursorAppServer({
+      runtime: 'local',
+      cwd: '/workspace/app',
+      apiKey: 'cursor-key',
+      driver,
+    });
+
+    await server.request('turn/start', {
+      threadId: agent.agentId,
+      input: [{ type: 'text', text: 'Resume with persisted model' }],
+    });
+
+    expect(agent.sent[0]?.model?.id).toBe('composer-2');
   });
 
   it('fails resumed turns without a configured, requested, or thread model', async () => {

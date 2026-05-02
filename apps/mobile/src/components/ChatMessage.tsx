@@ -1417,12 +1417,8 @@ function entriesAreComputerUseTimeline(entries: Array<Pick<ToolGroupEntry, 'titl
 }
 
 const createStyles = (theme: AppTheme) => {
-  const subAgentBorder = theme.isDark
-    ? 'rgba(245, 165, 36, 0.35)'
-    : 'rgba(217, 119, 6, 0.24)';
-  const subAgentBackground = theme.isDark
-    ? 'rgba(245, 165, 36, 0.08)'
-    : 'rgba(217, 119, 6, 0.08)';
+  const subAgentBorder = theme.colors.warningBorder;
+  const subAgentBackground = theme.colors.warningBg;
 
   return StyleSheet.create({
   messageWrapper: {
@@ -1593,7 +1589,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textSecondary,
     fontSize: 12,
-    letterSpacing: 0.2,
+    letterSpacing: 0,
     textTransform: 'none',
     flex: 1,
   },
@@ -1794,7 +1790,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     fontSize: 10,
     fontWeight: '700',
-    letterSpacing: 0.6,
+    letterSpacing: 0,
     color: theme.colors.textSecondary,
     textTransform: 'uppercase',
   },
@@ -1802,7 +1798,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     fontSize: 11,
     fontWeight: '600',
-    letterSpacing: 0.45,
+    letterSpacing: 0,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
   },

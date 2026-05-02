@@ -18,6 +18,7 @@ export interface CursorModelListItem {
   description?: string;
   providerId?: string;
   providerName?: string;
+  contextWindow?: number;
   isDefault?: boolean;
 }
 
@@ -48,6 +49,13 @@ export interface CursorRunResult {
   durationMs?: number;
   model?: ModelSelection;
   git?: CursorRunGitInfo;
+}
+
+export interface CursorRunInfo {
+  id: string;
+  status: CursorRunStatus;
+  model?: ModelSelection;
+  createdAt?: number;
 }
 
 export interface CursorRunGitBranchInfo {
@@ -143,13 +151,22 @@ export interface CursorDriver {
     agentId: string,
     options: { cwd: string; limit?: number; offset?: number }
   ): Promise<CursorAgentMessage[]>;
+  listRuns(
+    agentId: string,
+    options: { cwd: string; limit?: number; cursor?: string }
+  ): Promise<{ items: CursorRunInfo[]; nextCursor?: string }>;
   listModels(options: { apiKey: string }): Promise<CursorModelListItem[]>;
 }
+
+export type ThreadContentEntry =
+  | { type: 'text'; text: string }
+  | { type: 'localImage'; path: string }
+  | { type: 'image'; path?: string; url?: string };
 
 export interface ThreadItem {
   type: 'userMessage' | 'agentMessage' | 'reasoning' | 'toolCall';
   id: string;
-  content?: Array<{ type: 'text'; text: string }>;
+  content?: ThreadContentEntry[];
   text?: string;
   tool?: string;
   status?: string;

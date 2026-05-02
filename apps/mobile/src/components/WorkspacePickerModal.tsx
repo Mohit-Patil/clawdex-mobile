@@ -824,7 +824,7 @@ const createStyles = (theme: AppTheme) => {
     color: theme.colors.textSecondary,
     fontWeight: '600',
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
+    letterSpacing: 0,
   },
   refreshBadge: {
     minHeight: 22,
@@ -992,7 +992,7 @@ const createStyles = (theme: AppTheme) => {
     color: theme.colors.textMuted,
     fontWeight: '700',
     textTransform: 'uppercase',
-    letterSpacing: 0.7,
+    letterSpacing: 0,
   },
   selectionTitle: {
     ...theme.typography.body,

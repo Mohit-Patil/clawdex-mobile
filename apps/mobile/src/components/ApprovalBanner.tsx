@@ -193,7 +193,7 @@ const createStyles = (theme: AppTheme) =>
       opacity: 0.7,
     },
     denyBtn: {
-      borderColor: 'rgba(239, 68, 68, 0.3)',
+      borderColor: theme.colors.errorBorder,
       backgroundColor: theme.colors.errorBg,
     },
     acceptBtn: {

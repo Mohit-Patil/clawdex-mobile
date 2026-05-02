@@ -7709,7 +7709,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       (displayedActivity.tone !== 'idle' &&
         (!isGenericRunningActivity || showDelayedGenericRunningActivity)) ||
       Boolean(activityDetail);
-    const activeContextWindow = threadContextUsage?.modelContextWindow ?? null;
+    const activeContextWindow =
+      threadContextUsage?.modelContextWindow ?? activeModel?.contextWindow ?? null;
     const contextUsedTokens = threadContextUsage?.lastTokens ?? null;
     const contextWindowLabel =
       activeContextWindow !== null ? formatTokenCount(activeContextWindow) : null;
@@ -7741,8 +7742,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             contextRemainingPercent !== null ? ` · ${String(contextRemainingPercent)}% left` : ''
           }`
         : contextWindowLabel
-          ? `${contextWindowLabel} window`
-          : 'Context --';
+          ? `Context ${contextWindowLabel}`
+          : 'Context';
     const contextIndicatorColor =
       contextRemainingPercent === null
         ? contextWindowLabel
@@ -8289,6 +8290,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         <ChatHeader
           onOpenDrawer={onOpenDrawer}
           title={headerTitle}
+          engine={selectedChat?.engine}
           engineLabel={selectedChat ? getChatEngineLabel(selectedChat.engine) : undefined}
           onOpenTitleMenu={selectedChat ? openChatTitleMenu : undefined}
           rightIconName={selectedChat ? 'git-branch-outline' : undefined}
@@ -12530,7 +12532,7 @@ const createWorkflowMarkdownStyles = (theme: AppTheme) => StyleSheet.create({
     marginTop: theme.spacing.xs,
     marginBottom: theme.spacing.xs / 2,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
   },
   heading4: {
     ...theme.typography.caption,
@@ -12715,7 +12717,7 @@ const createStyles = (theme: AppTheme) => {
     color: theme.colors.textMuted,
     fontWeight: '700',
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
+    letterSpacing: 0,
   },
   agentPanelSummary: {
     ...theme.typography.caption,
@@ -12799,13 +12801,14 @@ const createStyles = (theme: AppTheme) => {
   contextChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
+    gap: 5,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.xs + 6,
-    paddingVertical: 4,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgElevated,
+    minHeight: 28,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 5,
     flexShrink: 0,
   },
   contextChipIndicator: {
@@ -12824,42 +12827,45 @@ const createStyles = (theme: AppTheme) => {
   modelChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
+    gap: 5,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.xs + 6,
-    paddingVertical: 4,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgElevated,
+    minHeight: 28,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 5,
     flexShrink: 0,
   },
   modeChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
+    gap: 5,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.xs + 6,
-    paddingVertical: 4,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgElevated,
+    minHeight: 28,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 5,
     flexShrink: 0,
   },
   fastChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
+    gap: 5,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: theme.colors.border,
-    backgroundColor: theme.colors.bgItem,
-    paddingHorizontal: theme.spacing.xs + 6,
-    paddingVertical: 4,
+    borderColor: theme.colors.borderLight,
+    backgroundColor: theme.colors.bgElevated,
+    minHeight: 28,
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 5,
     flexShrink: 0,
   },
   fastChipEnabled: {
-    borderColor: theme.colors.borderHighlight,
-    backgroundColor: theme.colors.inlineCodeBg,
+    borderColor: theme.colors.successBorder,
+    backgroundColor: theme.colors.successBg,
   },
   modelChipPressed: {
     opacity: 0.86,
@@ -12872,6 +12878,7 @@ const createStyles = (theme: AppTheme) => {
     color: theme.colors.textSecondary,
     fontSize: 11,
     lineHeight: 14,
+    fontWeight: '600',
   },
   fastChipTextEnabled: {
     color: theme.colors.textPrimary,
@@ -12932,7 +12939,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
   },
   workflowScrollViewport: {
     marginTop: theme.spacing.xs,

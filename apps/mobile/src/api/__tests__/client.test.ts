@@ -2181,6 +2181,7 @@ describe('HostBridgeApiClient', () => {
           description: 'Default coding model',
           providerId: 'openai',
           providerName: 'OpenAI',
+          contextWindow: '1m',
           connected: true,
           authRequired: false,
           hidden: false,
@@ -2209,6 +2210,7 @@ describe('HostBridgeApiClient', () => {
     expect(models[0].id).toBe('gpt-5.3-codex');
     expect(models[0].providerId).toBe('openai');
     expect(models[0].providerName).toBe('OpenAI');
+    expect(models[0].contextWindow).toBe(1_000_000);
     expect(models[0].connected).toBe(true);
     expect(models[0].authRequired).toBe(false);
     expect(models[0].isDefault).toBe(true);

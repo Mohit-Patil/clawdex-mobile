@@ -1906,10 +1906,10 @@ function sleep(durationMs: number): Promise<void> {
 }
 
 const createStyles = (theme: AppTheme) => {
-  const cardBackground = theme.isDark ? theme.colors.bgCanvasAccent : '#F3F7FB';
-  const cardBorder = theme.isDark ? theme.colors.borderHighlight : 'rgba(71, 85, 105, 0.20)';
-  const secondaryBackground = theme.isDark ? theme.colors.bgMain : '#D9E2EB';
-  const secondaryPressed = theme.isDark ? theme.colors.bgItem : '#CCD6E0';
+  const cardBackground = theme.colors.bgCanvasAccent;
+  const cardBorder = theme.colors.borderHighlight;
+  const secondaryBackground = theme.colors.bgInput;
+  const secondaryPressed = theme.colors.bgItem;
 
   return StyleSheet.create({
     container: {
@@ -1938,7 +1938,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     headerTitle: {
       ...theme.typography.headline,
@@ -1967,7 +1967,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     heroTitle: {
       ...theme.typography.largeTitle,
@@ -1981,8 +1981,8 @@ const createStyles = (theme: AppTheme) => {
     heroMonitor: {
       borderRadius: theme.radius.md,
       borderWidth: 1,
-      borderColor: theme.isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(56, 79, 106, 0.16)',
-      backgroundColor: theme.isDark ? 'rgba(5, 7, 10, 0.62)' : 'rgba(255, 255, 255, 0.62)',
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgElevated,
       paddingHorizontal: theme.spacing.md,
       paddingVertical: theme.spacing.md,
       gap: theme.spacing.sm,
@@ -2025,15 +2025,15 @@ const createStyles = (theme: AppTheme) => {
     },
     heroStepPending: {
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.7)',
+      backgroundColor: theme.colors.bgInput,
     },
     heroStepActive: {
       borderColor: theme.colors.textPrimary,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.14)' : 'rgba(255, 255, 255, 0.92)',
+      backgroundColor: theme.colors.bgItem,
     },
     heroStepDone: {
-      borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.28)' : 'rgba(14, 159, 110, 0.28)',
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.12)' : 'rgba(14, 159, 110, 0.10)',
+      borderColor: theme.colors.successBorder,
+      backgroundColor: theme.colors.successBg,
     },
     heroStepNumber: {
       ...theme.typography.caption,
@@ -2060,7 +2060,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textPrimary,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     cardBody: {
       ...theme.typography.body,
@@ -2078,7 +2078,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.72)',
+      backgroundColor: theme.colors.bgInput,
       alignItems: 'center',
       justifyContent: 'center',
       gap: theme.spacing.xs,
@@ -2097,7 +2097,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     stageTitle: {
       ...theme.typography.headline,
@@ -2111,7 +2111,7 @@ const createStyles = (theme: AppTheme) => {
     errorBanner: {
       borderRadius: theme.radius.md,
       borderWidth: 1,
-      borderColor: theme.isDark ? 'rgba(239, 68, 68, 0.28)' : 'rgba(217, 45, 32, 0.24)',
+      borderColor: theme.colors.errorBorder,
       backgroundColor: theme.colors.errorBg,
       paddingHorizontal: theme.spacing.md,
       paddingVertical: theme.spacing.md,
@@ -2128,8 +2128,8 @@ const createStyles = (theme: AppTheme) => {
     progressBanner: {
       borderRadius: theme.radius.md,
       borderWidth: 1,
-      borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.22)' : 'rgba(67, 96, 126, 0.20)',
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.78)',
+      borderColor: theme.colors.borderLight,
+      backgroundColor: theme.colors.bgInput,
       paddingHorizontal: theme.spacing.md,
       paddingVertical: theme.spacing.md,
       flexDirection: 'row',
@@ -2155,7 +2155,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.72)',
+      backgroundColor: theme.colors.bgItem,
       paddingHorizontal: theme.spacing.md,
       paddingVertical: theme.spacing.sm,
       gap: 4,
@@ -2164,7 +2164,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.6,
+      letterSpacing: 0,
     },
     repoSummaryValue: {
       ...theme.typography.caption,
@@ -2200,7 +2200,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.72)',
+      backgroundColor: theme.colors.bgItem,
       padding: theme.spacing.md,
       flexDirection: 'row',
       alignItems: 'center',
@@ -2222,7 +2222,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     accountStripTitle: {
       ...theme.typography.body,
@@ -2247,7 +2247,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.72)',
+      backgroundColor: theme.colors.bgItem,
       padding: theme.spacing.md,
       gap: theme.spacing.sm,
     },
@@ -2255,7 +2255,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     recommendedActionTitle: {
       ...theme.typography.body,
@@ -2270,7 +2270,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.72)',
+      backgroundColor: theme.colors.bgItem,
       padding: theme.spacing.md,
       gap: theme.spacing.sm,
       boxShadow: theme.isDark
@@ -2281,7 +2281,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     stagePanelTitle: {
       ...theme.typography.body,
@@ -2361,11 +2361,11 @@ const createStyles = (theme: AppTheme) => {
       justifyContent: 'center',
     },
     ghostButtonDanger: {
-      borderColor: theme.isDark ? 'rgba(248, 113, 113, 0.28)' : 'rgba(220, 38, 38, 0.18)',
-      backgroundColor: theme.isDark ? 'rgba(127, 29, 29, 0.18)' : 'rgba(254, 242, 242, 0.92)',
+      borderColor: theme.colors.errorBorder,
+      backgroundColor: theme.colors.errorBg,
     },
     ghostButtonDangerPressed: {
-      backgroundColor: theme.isDark ? 'rgba(127, 29, 29, 0.24)' : 'rgba(254, 226, 226, 0.96)',
+      backgroundColor: theme.colors.errorBg,
     },
     ghostButtonText: {
       ...theme.typography.caption,
@@ -2389,7 +2389,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.mono,
       color: theme.colors.textPrimary,
       fontSize: 18,
-      letterSpacing: 1.1,
+      letterSpacing: 0,
       textAlign: 'center',
       includeFontPadding: false,
     },
@@ -2417,7 +2417,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.06)' : 'rgba(255, 255, 255, 0.78)',
+      backgroundColor: theme.colors.bgItem,
       paddingHorizontal: theme.spacing.md,
       paddingVertical: theme.spacing.sm,
       flexDirection: 'row',
@@ -2425,8 +2425,8 @@ const createStyles = (theme: AppTheme) => {
       gap: theme.spacing.sm,
     },
     deviceCodeStatusRowActive: {
-      borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.28)' : 'rgba(14, 159, 110, 0.24)',
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.10)' : 'rgba(14, 159, 110, 0.08)',
+      borderColor: theme.colors.successBorder,
+      backgroundColor: theme.colors.successBg,
     },
     deviceCodeStatusText: {
       ...theme.typography.caption,
@@ -2453,7 +2453,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: 999,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.7)',
+      backgroundColor: theme.colors.bgInput,
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -2491,7 +2491,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     codespacesHeaderRow: {
       flexDirection: 'row',
@@ -2516,19 +2516,19 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       borderWidth: 1,
       borderColor: cardBorder,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.06)' : 'rgba(255, 255, 255, 0.72)',
+      backgroundColor: theme.colors.bgItem,
       padding: theme.spacing.md,
       gap: theme.spacing.md,
     },
     codespaceCardRecommended: {
-      borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.26)' : 'rgba(14, 159, 110, 0.20)',
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.10)' : 'rgba(14, 159, 110, 0.08)',
+      borderColor: theme.colors.successBorder,
+      backgroundColor: theme.colors.successBg,
       boxShadow: theme.isDark
         ? '0px 10px 24px rgba(0, 0, 0, 0.16)'
         : '0px 8px 20px rgba(15, 31, 54, 0.08)',
     },
     codespaceCardDeleting: {
-      borderColor: theme.isDark ? 'rgba(239, 68, 68, 0.30)' : 'rgba(217, 45, 32, 0.30)',
+      borderColor: theme.colors.errorBorder,
       backgroundColor: theme.colors.errorBg,
     },
     codespaceCardTop: {
@@ -2547,16 +2547,16 @@ const createStyles = (theme: AppTheme) => {
       paddingVertical: 4,
     },
     codespaceTagRecommended: {
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.16)' : 'rgba(14, 159, 110, 0.16)',
+      backgroundColor: theme.colors.successBg,
     },
     codespaceTagDefault: {
-      backgroundColor: theme.isDark ? theme.colors.bgMain : '#E6EEF6',
+      backgroundColor: theme.colors.bgInput,
     },
     codespaceTagText: {
       ...theme.typography.caption,
       fontWeight: '700',
       textTransform: 'uppercase',
-      letterSpacing: 0.7,
+      letterSpacing: 0,
     },
     codespaceTagTextRecommended: {
       color: theme.colors.statusComplete,
@@ -2583,7 +2583,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: 999,
       paddingHorizontal: theme.spacing.sm,
       paddingVertical: 4,
-      backgroundColor: theme.isDark ? theme.colors.bgMain : '#E6EEF6',
+      backgroundColor: theme.colors.bgInput,
     },
     codespaceStateText: {
       ...theme.typography.caption,
@@ -2669,7 +2669,7 @@ const createStyles = (theme: AppTheme) => {
       minHeight: 38,
       borderRadius: theme.radius.md,
       borderWidth: 1,
-      borderColor: theme.isDark ? 'rgba(239, 68, 68, 0.24)' : 'rgba(217, 45, 32, 0.22)',
+      borderColor: theme.colors.errorBorder,
       backgroundColor: theme.colors.errorBg,
       paddingHorizontal: theme.spacing.md,
       flexDirection: 'row',
@@ -2691,7 +2691,7 @@ const createStyles = (theme: AppTheme) => {
     codespaceStopConfirm: {
       borderRadius: theme.radius.md,
       borderWidth: 1,
-      borderColor: theme.isDark ? 'rgba(239, 68, 68, 0.22)' : 'rgba(217, 45, 32, 0.18)',
+      borderColor: theme.colors.errorBorder,
       backgroundColor: theme.colors.errorBg,
       padding: theme.spacing.md,
       gap: theme.spacing.sm,
@@ -2799,8 +2799,8 @@ const createStyles = (theme: AppTheme) => {
       backgroundColor: theme.colors.warningBg,
     },
     connectionStepDone: {
-      borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.28)' : 'rgba(14, 159, 110, 0.28)',
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.12)' : 'rgba(14, 159, 110, 0.10)',
+      borderColor: theme.colors.successBorder,
+      backgroundColor: theme.colors.successBg,
     },
     connectionStepLabel: {
       ...theme.typography.caption,

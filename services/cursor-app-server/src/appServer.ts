@@ -189,6 +189,7 @@ export class CursorAppServer {
       await this.buildUserMessage(parsed.prompt, parsed.imagePaths),
       { model }
     );
+    state.model = model;
     const turn: ThreadTurn = {
       id: run.id,
       status: 'in_progress',
@@ -196,7 +197,7 @@ export class CursorAppServer {
         {
           type: 'userMessage',
           id: `${run.id}-user`,
-          content: [{ type: 'text', text: parsed.prompt }],
+          content: this.buildUserThreadContent(parsed.prompt, parsed.imagePaths),
         },
       ],
     };
@@ -275,16 +276,17 @@ export class CursorAppServer {
     const cwd = this.requireCwd(null);
     const apiKey = this.requireApiKey();
     const configuredModel = this.configuredModelOrUndefined();
-    const [agent, info, messages] = await Promise.all([
+    const [agent, info, messages, persistedModel] = await Promise.all([
       this.driver.resumeAgent(threadId, { cwd, apiKey, model: configuredModel }),
       this.driver.getAgent(threadId, { cwd, apiKey }),
       this.driver.listMessages(threadId, { cwd, limit: 1000 }),
+      this.latestPersistedRunModel(threadId, cwd),
     ]);
     const state: LiveThreadState = {
       agent,
       info,
       cwd,
-      model: agent.model ?? configuredModel,
+      model: agent.model ?? configuredModel ?? persistedModel,
       turns: messagesToTurns(messages),
       nameLocked: !isGenericCursorAgentName(info.name, info.agentId),
     };
@@ -527,6 +529,41 @@ export class CursorAppServer {
     return this.defaultModel ? this.toModelSelection(this.defaultModel) : undefined;
   }
 
+  private async latestPersistedRunModel(
+    threadId: string,
+    cwd: string
+  ): Promise<ModelSelection | undefined> {
+    const result = await this.driver.listRuns(threadId, { cwd, limit: 50 });
+    let latest: { index: number; createdAt: number; model: ModelSelection } | null = null;
+
+    for (const [index, run] of result.items.entries()) {
+      if (!run.model) {
+        continue;
+      }
+
+      const createdAt =
+        typeof run.createdAt === 'number' && Number.isFinite(run.createdAt)
+          ? run.createdAt
+          : index;
+      if (
+        !latest ||
+        createdAt > latest.createdAt ||
+        (createdAt === latest.createdAt && index > latest.index)
+      ) {
+        latest = {
+          index,
+          createdAt,
+          model: run.model,
+        };
+      }
+    }
+
+    if (!latest) {
+      return undefined;
+    }
+    return latest.model;
+  }
+
   private requireApiKey(): string {
     if (!this.apiKey) {
       throw new Error('CURSOR_API_KEY is required for Cursor SDK operations');
@@ -553,6 +590,13 @@ export class CursorAppServer {
     }
 
     return { text, images };
+  }
+
+  private buildUserThreadContent(text: string, imagePaths: string[]): ThreadItem['content'] {
+    return [
+      { type: 'text', text },
+      ...imagePaths.map((path) => ({ type: 'localImage' as const, path })),
+    ];
   }
 
   private toModelSelection(model: string): ModelSelection {

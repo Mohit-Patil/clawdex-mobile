@@ -1328,6 +1328,9 @@ export class HostBridgeApiClient {
       const description = readString(record.description) ?? undefined;
       const providerId = readString(record.providerId) ?? readString(record.providerID);
       const providerName = readString(record.providerName);
+      const contextWindow = readPositiveIntegerLike(
+        record.contextWindow ?? record.modelContextWindow ?? record.model_context_window
+      );
       const connected =
         typeof record.connected === 'boolean' ? record.connected : undefined;
       const authRequired =
@@ -1352,6 +1355,7 @@ export class HostBridgeApiClient {
         description,
         providerId: providerId ?? undefined,
         providerName: providerName ?? undefined,
+        contextWindow: contextWindow ?? undefined,
         connected,
         authRequired,
         hidden,
@@ -2358,6 +2362,30 @@ function toReasoningEffortOptions(raw: unknown): ModelReasoningEffortOption[] {
   }
 
   return options;
+}
+
+function readPositiveIntegerLike(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  const match = /^([0-9]+(?:\.[0-9]+)?)([km])?$/.exec(normalized);
+  if (!match) {
+    return null;
+  }
+
+  const numeric = Number(match[1]);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+
+  const multiplier = match[2] === 'm' ? 1_000_000 : match[2] === 'k' ? 1_000 : 1;
+  return Math.floor(numeric * multiplier);
 }
 
 function chatHasRecentUserMessage(

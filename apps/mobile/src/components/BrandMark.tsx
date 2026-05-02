@@ -35,7 +35,7 @@ const createStyles = (theme: AppTheme) =>
     container: {
       backgroundColor: theme.isDark ? theme.colors.bgItem : theme.colors.textPrimary,
       borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.isDark ? theme.colors.borderLight : 'rgba(255, 255, 255, 0.16)',
+      borderColor: theme.colors.borderLight,
       alignItems: 'center',
       justifyContent: 'center',
       overflow: 'hidden',

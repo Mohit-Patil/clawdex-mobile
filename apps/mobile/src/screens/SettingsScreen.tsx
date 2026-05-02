@@ -203,9 +203,9 @@ export function SettingsScreen({
     nativeBuildVersion ??
     configuredBuildVersion ??
     (Platform.OS === 'web' ? 'Web runtime' : 'Unavailable');
-  const transcriptSwitchTrackColor = theme.isDark ? colors.borderLight : 'rgba(95, 105, 118, 0.32)';
-  const transcriptSwitchActiveColor = theme.isDark ? colors.accent : '#4F5D6D';
-  const transcriptSwitchThumbColor = showToolCalls ? colors.white : '#FFFFFF';
+  const transcriptSwitchTrackColor = colors.borderLight;
+  const transcriptSwitchActiveColor = colors.accent;
+  const transcriptSwitchThumbColor = colors.white;
   const [healthyAt, setHealthyAt] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(ws.isConnected);
   const [error, setError] = useState<string | null>(null);
@@ -1863,11 +1863,7 @@ export function SettingsScreen({
       <Text style={styles.sectionLabel}>Support Clawdex</Text>
       <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
         <LinearGradient
-          colors={
-            theme.isDark
-              ? ['rgba(26, 33, 44, 0.96)', 'rgba(17, 22, 31, 0.94)']
-              : ['#FFFFFF', '#EEF4FB']
-          }
+          colors={[theme.colors.bgElevated, theme.colors.bgItem]}
           style={styles.tipHeroPanel}
         >
           <View style={styles.tipHero}>
@@ -2386,22 +2382,15 @@ function isBridgeMaintenanceInProgress(state: string): boolean {
 }
 
 const createStyles = (theme: AppTheme) => {
-  const settingsCardBackground = theme.isDark ? theme.colors.bgCanvasAccent : '#F3F7FB';
-  const settingsCardBorder = theme.isDark
-    ? theme.colors.borderHighlight
-    : 'rgba(71, 85, 105, 0.22)';
-  const settingsDivider = theme.isDark
-    ? theme.colors.borderLight
-    : 'rgba(71, 85, 105, 0.16)';
-  const settingsCardShadow = theme.isDark
-    ? undefined
-    : '0px 14px 30px rgba(15, 31, 54, 0.10)';
-  const neutralControlBackground = theme.isDark ? theme.colors.bgMain : '#D9E2EB';
-  const neutralControlPressed = theme.isDark ? theme.colors.bgItem : '#CCD6E0';
-  const settingsLabelColor = theme.isDark ? theme.colors.textMuted : '#536172';
-  const settingsValueColor = theme.isDark ? theme.colors.textSecondary : '#3F4C5A';
-  const settingsPrimaryText = theme.isDark ? theme.colors.textPrimary : '#263341';
-  const hintTextColor = theme.isDark ? theme.colors.textMuted : '#556270';
+  const settingsCardBackground = theme.colors.bgCanvasAccent;
+  const settingsCardBorder = theme.colors.borderHighlight;
+  const settingsDivider = theme.colors.borderLight;
+  const neutralControlBackground = theme.colors.bgInput;
+  const neutralControlPressed = theme.colors.bgItem;
+  const settingsLabelColor = theme.colors.textMuted;
+  const settingsValueColor = theme.colors.textSecondary;
+  const settingsPrimaryText = theme.colors.textPrimary;
+  const hintTextColor = theme.colors.textMuted;
   return StyleSheet.create({
     container: { flex: 1, backgroundColor: theme.colors.bgMain },
     safeArea: { flex: 1 },
@@ -2441,12 +2430,11 @@ const createStyles = (theme: AppTheme) => {
       marginBottom: theme.spacing.xs,
       overflow: 'hidden',
       backgroundColor: settingsCardBackground,
-      boxShadow: settingsCardShadow,
     },
     sectionLabel: {
       ...theme.typography.caption,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
       marginTop: theme.spacing.sm,
       marginBottom: theme.spacing.sm,
       color: settingsLabelColor,
@@ -2676,7 +2664,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: settingsLabelColor,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     tipHeroTitle: {
       ...theme.typography.headline,
@@ -2698,7 +2686,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: theme.radius.md,
       paddingHorizontal: theme.spacing.md,
       paddingVertical: theme.spacing.md,
-      backgroundColor: theme.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.78)',
+      backgroundColor: theme.colors.bgItem,
       borderWidth: 1,
       borderColor: settingsCardBorder,
       gap: 4,

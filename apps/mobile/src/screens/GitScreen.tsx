@@ -1376,10 +1376,10 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     gap: theme.spacing.md,
   },
   reviewCardClean: {
-    borderColor: theme.isDark ? 'rgba(52, 199, 89, 0.24)' : 'rgba(22, 163, 74, 0.2)',
+    borderColor: theme.colors.successBorder,
   },
   reviewCardDirty: {
-    borderColor: theme.isDark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(15, 23, 42, 0.12)',
+    borderColor: theme.colors.borderLight,
   },
   reviewHeader: {
     flexDirection: 'row',
@@ -1529,7 +1529,7 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 0,
   },
   branchPanelSelected: {
     ...theme.typography.caption,
@@ -1598,16 +1598,16 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     borderRadius: theme.radius.full,
   },
   repoStateBadgeClean: {
-    backgroundColor: 'rgba(86, 182, 92, 0.18)',
+    backgroundColor: theme.colors.successBg,
   },
   repoStateBadgeDirty: {
-    backgroundColor: 'rgba(239, 68, 68, 0.18)',
+    backgroundColor: theme.colors.errorBg,
   },
   repoStateBadgeText: {
     ...theme.typography.caption,
     color: theme.colors.textPrimary,
     fontWeight: '700',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
     textTransform: 'uppercase',
   },
   statsGrid: {
@@ -1630,7 +1630,7 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
   },
   statTileValue: {
     ...theme.typography.headline,
@@ -1640,7 +1640,7 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
   sectionLabel: {
     ...theme.typography.caption,
     textTransform: 'uppercase',
-    letterSpacing: 0.7,
+    letterSpacing: 0,
     marginTop: theme.spacing.sm,
     marginBottom: theme.spacing.xs,
   },
@@ -1711,7 +1711,7 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
   },
   infoValue: {
     ...theme.typography.body,
@@ -1738,7 +1738,7 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
   },
   latestCommitHash: {
     ...theme.typography.mono,
@@ -1891,12 +1891,12 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     paddingVertical: 6,
   },
   fileActionBtnStage: {
-    borderColor: 'rgba(136, 218, 149, 0.45)',
-    backgroundColor: 'rgba(86, 182, 92, 0.16)',
+    borderColor: theme.colors.successBorder,
+    backgroundColor: theme.colors.successBg,
   },
   fileActionBtnUnstage: {
-    borderColor: 'rgba(242, 155, 155, 0.45)',
-    backgroundColor: 'rgba(239, 68, 68, 0.16)',
+    borderColor: theme.colors.errorBorder,
+    backgroundColor: theme.colors.errorBg,
   },
   fileActionBtnPressed: {
     opacity: 0.8,
@@ -1916,12 +1916,12 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     paddingVertical: 7,
   },
   bulkActionBtnStage: {
-    borderColor: 'rgba(136, 218, 149, 0.5)',
-    backgroundColor: 'rgba(86, 182, 92, 0.2)',
+    borderColor: theme.colors.successBorder,
+    backgroundColor: theme.colors.successBg,
   },
   bulkActionBtnUnstage: {
-    borderColor: 'rgba(242, 155, 155, 0.5)',
-    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+    borderColor: theme.colors.errorBorder,
+    backgroundColor: theme.colors.errorBg,
   },
   bulkActionText: {
     ...theme.typography.caption,
@@ -2028,7 +2028,7 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
   diffFileStatus: {
     ...theme.typography.caption,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    letterSpacing: 0,
     color: theme.colors.textMuted,
   },
   diffLoadingContainer: {
@@ -2058,7 +2058,7 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
   hunkHeader: {
     ...theme.typography.mono,
     color: theme.colors.accent,
-    backgroundColor: theme.isDark ? 'rgba(175, 198, 247, 0.14)' : 'rgba(175, 198, 247, 0.3)',
+    backgroundColor: theme.colors.toolBlockBg,
     paddingHorizontal: theme.spacing.md,
     paddingVertical: theme.spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -2072,10 +2072,10 @@ const createStyles = (theme: AppTheme) => StyleSheet.create({
     minWidth: '100%',
   },
   diffLineRowAdd: {
-    backgroundColor: 'rgba(86, 182, 92, 0.14)',
+    backgroundColor: theme.colors.successBg,
   },
   diffLineRowRemove: {
-    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+    backgroundColor: theme.colors.errorBg,
   },
   diffLineRowMeta: {
     backgroundColor: theme.colors.bgCanvasAccent,

@@ -379,9 +379,9 @@ export function BridgeProfileManagerSheet({
 }
 
 const createStyles = (theme: AppTheme) => {
-  const cardBorder = theme.isDark ? theme.colors.borderHighlight : 'rgba(67, 96, 126, 0.24)';
-  const raisedFill = theme.isDark ? 'rgba(198, 205, 217, 0.08)' : 'rgba(255, 255, 255, 0.86)';
-  const subtleFill = theme.isDark ? theme.colors.bgItem : '#E8EEF4';
+  const cardBorder = theme.colors.borderHighlight;
+  const raisedFill = theme.isDark ? theme.colors.bgCanvasAccent : theme.colors.bgItem;
+  const subtleFill = theme.colors.bgInput;
 
   return StyleSheet.create({
     backdrop: {
@@ -425,7 +425,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     title: {
       ...theme.typography.largeTitle,
@@ -439,7 +439,7 @@ const createStyles = (theme: AppTheme) => {
     errorBanner: {
       borderRadius: theme.radius.md,
       borderWidth: 1,
-      borderColor: theme.isDark ? 'rgba(239, 68, 68, 0.28)' : 'rgba(217, 45, 32, 0.24)',
+      borderColor: theme.colors.errorBorder,
       backgroundColor: theme.colors.errorBg,
       paddingHorizontal: theme.spacing.md,
       paddingVertical: theme.spacing.sm,
@@ -468,8 +468,8 @@ const createStyles = (theme: AppTheme) => {
       gap: theme.spacing.sm,
     },
     profileRowActive: {
-      borderColor: theme.isDark ? 'rgba(198, 205, 217, 0.34)' : 'rgba(14, 159, 110, 0.30)',
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.11)' : 'rgba(14, 159, 110, 0.08)',
+      borderColor: theme.colors.successBorder,
+      backgroundColor: theme.colors.successBg,
     },
     profileHeader: {
       flexDirection: 'row',
@@ -496,7 +496,7 @@ const createStyles = (theme: AppTheme) => {
       borderRadius: 999,
       paddingHorizontal: theme.spacing.sm,
       paddingVertical: 4,
-      backgroundColor: theme.isDark ? 'rgba(198, 205, 217, 0.16)' : 'rgba(14, 159, 110, 0.14)',
+      backgroundColor: theme.colors.successBg,
     },
     activeBadgeText: {
       ...theme.typography.caption,
@@ -579,7 +579,7 @@ const createStyles = (theme: AppTheme) => {
     },
     toolButtonDanger: {
       backgroundColor: theme.colors.errorBg,
-      borderColor: theme.isDark ? 'rgba(239, 68, 68, 0.24)' : 'rgba(217, 45, 32, 0.22)',
+      borderColor: theme.colors.errorBorder,
     },
     toolButtonDangerPressed: {
       opacity: 0.9,
@@ -599,7 +599,7 @@ const createStyles = (theme: AppTheme) => {
       ...theme.typography.caption,
       color: theme.colors.textMuted,
       textTransform: 'uppercase',
-      letterSpacing: 0.8,
+      letterSpacing: 0,
     },
     inlineInput: {
       minHeight: 46,

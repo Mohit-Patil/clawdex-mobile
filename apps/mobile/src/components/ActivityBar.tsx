@@ -92,9 +92,7 @@ const createStyles = (theme: AppTheme) =>
       overflow: 'hidden',
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: theme.colors.borderLight,
-      backgroundColor: theme.isDark
-        ? 'rgba(18, 22, 28, 0.16)'
-        : 'rgba(255, 255, 255, 0.70)',
+      backgroundColor: theme.colors.bgCanvasAccent,
       marginHorizontal: theme.spacing.lg,
       marginBottom: theme.spacing.xs / 2,
     },

@@ -103,59 +103,30 @@ function formatPercent(value: number): string {
 }
 
 function createToneColors(theme: AppTheme) {
-  if (theme.isDark) {
-    return {
-      neutral: {
-        badgeBackground: 'rgba(52, 199, 89, 0.14)',
-        badgeBorder: 'rgba(52, 199, 89, 0.24)',
-        batteryBackground: 'rgba(255, 255, 255, 0.06)',
-        batteryBorder: 'rgba(52, 199, 89, 0.30)',
-        accent: '#34C759',
-        valueText: '#A7F3C1',
-      },
-      warning: {
-        badgeBackground: 'rgba(245, 158, 11, 0.14)',
-        badgeBorder: 'rgba(245, 158, 11, 0.24)',
-        batteryBackground: 'rgba(255, 255, 255, 0.06)',
-        batteryBorder: 'rgba(245, 158, 11, 0.28)',
-        accent: '#F59E0B',
-        valueText: '#FFE2A8',
-      },
-      critical: {
-        badgeBackground: 'rgba(239, 68, 68, 0.14)',
-        badgeBorder: 'rgba(239, 68, 68, 0.24)',
-        batteryBackground: 'rgba(255, 255, 255, 0.06)',
-        batteryBorder: 'rgba(239, 68, 68, 0.28)',
-        accent: '#EF4444',
-        valueText: '#FFC1C1',
-      },
-    } as const;
-  }
-
   return {
     neutral: {
-      badgeBackground: 'rgba(14, 159, 110, 0.10)',
-      badgeBorder: 'rgba(14, 159, 110, 0.22)',
-      batteryBackground: 'rgba(255, 255, 255, 0.80)',
-      batteryBorder: 'rgba(14, 159, 110, 0.34)',
-      accent: '#0E9F6E',
-      valueText: '#0B7A55',
+      badgeBackground: theme.colors.successBg,
+      badgeBorder: theme.colors.successBorder,
+      batteryBackground: theme.colors.bgCanvasAccent,
+      batteryBorder: theme.colors.successBorder,
+      accent: theme.colors.success,
+      valueText: theme.colors.success,
     },
     warning: {
-      badgeBackground: 'rgba(197, 106, 18, 0.10)',
-      badgeBorder: 'rgba(197, 106, 18, 0.22)',
-      batteryBackground: 'rgba(255, 255, 255, 0.80)',
-      batteryBorder: 'rgba(197, 106, 18, 0.34)',
-      accent: '#C56A12',
-      valueText: '#9A4A0C',
+      badgeBackground: theme.colors.warningBg,
+      badgeBorder: theme.colors.warningBorder,
+      batteryBackground: theme.colors.bgCanvasAccent,
+      batteryBorder: theme.colors.warningBorder,
+      accent: theme.colors.warning,
+      valueText: theme.colors.warning,
     },
     critical: {
-      badgeBackground: 'rgba(217, 45, 32, 0.09)',
-      badgeBorder: 'rgba(217, 45, 32, 0.20)',
-      batteryBackground: 'rgba(255, 255, 255, 0.80)',
-      batteryBorder: 'rgba(217, 45, 32, 0.30)',
-      accent: '#D92D20',
-      valueText: '#B42318',
+      badgeBackground: theme.colors.errorBg,
+      badgeBorder: theme.colors.errorBorder,
+      batteryBackground: theme.colors.bgCanvasAccent,
+      batteryBorder: theme.colors.errorBorder,
+      accent: theme.colors.error,
+      valueText: theme.colors.error,
     },
   } as const;
 }
