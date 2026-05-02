@@ -77,19 +77,11 @@ export function buildTranscriptDisplayItems(
       return;
     }
 
-    if (toolBuffer.length === 1) {
-      items.push({
-        kind: 'message',
-        message: toolBuffer[0],
-        renderKey: toolBuffer[0]?.id ?? 'tool-message',
-      });
-    } else {
-      items.push({
-        kind: 'toolGroup',
-        id: `tool-group-${toolBuffer[0]?.id ?? 'start'}-${toolBuffer[toolBuffer.length - 1]?.id ?? 'end'}`,
-        messages: toolBuffer,
-      });
-    }
+    items.push({
+      kind: 'toolGroup',
+      id: `tool-group-${toolBuffer[0]?.id ?? 'start'}-${toolBuffer[toolBuffer.length - 1]?.id ?? 'end'}`,
+      messages: [...toolBuffer],
+    });
 
     toolBuffer = [];
   };

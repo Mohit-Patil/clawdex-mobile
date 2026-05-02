@@ -632,6 +632,10 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
   return (
     <View style={[styles.messageWrapper, styles.messageWrapperAssistant]}>
       <View style={styles.toolGroupCard}>
+        <View style={styles.toolGroupEyebrowRow}>
+          <Ionicons name="hardware-chip-outline" size={12} color={theme.colors.textMuted} />
+          <Text style={styles.toolGroupEyebrowText}>Tools</Text>
+        </View>
         <Pressable
           onPress={() => setExpanded((previous) => !previous)}
           style={({ pressed }) => [
@@ -641,7 +645,7 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
           ]}
         >
           <View style={styles.toolGroupHeader}>
-            <Ionicons name="construct-outline" size={14} color={theme.colors.textMuted} />
+            <Ionicons name="chevron-expand-outline" size={14} color={theme.colors.textMuted} />
             <Text style={styles.toolGroupTitle}>{summary}</Text>
             <Ionicons
               name={expanded ? 'chevron-up' : 'chevron-down'}
@@ -653,7 +657,6 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
 
         <View style={styles.toolGroupList}>
           {previewEntries.map((entry) => {
-            const visual = toTimelineVisual(entry.title);
             const detailPreview = toTimelineDetailPreview(
               entry,
               bridgeUrl,
@@ -663,13 +666,21 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
             const textDetails = detailPreview.textDetails;
             const hasDetails = textDetails.length > 0;
             const entryExpanded = expandedEntryIds[entry.id] === true;
+            const rowVisual = toTimelineVisual(entry.title);
 
             if (!expanded) {
               const previewImage = detailPreview.images[0] ?? null;
               return (
                 <View key={entry.id} style={styles.toolGroupPreviewEntry}>
                   <View style={styles.toolGroupRow}>
-                    <Text style={styles.toolGroupBullet}>{'\u2022'}</Text>
+                    <Ionicons
+                      name={rowVisual.icon}
+                      size={13}
+                      color={
+                        rowVisual.isError ? theme.colors.statusError : theme.colors.textMuted
+                      }
+                      style={styles.toolGroupPreviewIcon}
+                    />
                     <Text style={styles.toolGroupRowText} numberOfLines={1}>
                       {entry.title}
                     </Text>
@@ -701,16 +712,16 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
                 style={({ pressed }) => [
                   styles.toolGroupEntryCard,
                   hasDetails && styles.toolGroupEntryCardInteractive,
-                  visual.isError && styles.timelineCardError,
+                  rowVisual.isError && styles.timelineCardError,
                   pressed && hasDetails && styles.toolGroupEntryCardPressed,
                 ]}
               >
                 <View style={styles.toolGroupEntryHeader}>
                   <Ionicons
-                    name={visual.icon}
+                    name={rowVisual.icon}
                     size={14}
                     color={
-                      visual.isError
+                      rowVisual.isError
                         ? theme.colors.statusError
                         : theme.colors.statusRunning
                     }
@@ -718,7 +729,7 @@ export const ToolActivityGroup = memo(function ToolActivityGroupComponent({
                   <Text
                     style={[
                       styles.toolGroupEntryTitle,
-                      visual.useMonospaceTitle && styles.toolGroupEntryTitleMono,
+                      rowVisual.useMonospaceTitle && styles.toolGroupEntryTitleMono,
                     ]}
                     numberOfLines={entryExpanded ? 3 : 1}
                   >
@@ -1679,11 +1690,25 @@ const createStyles = (theme: AppTheme) => {
     paddingHorizontal: theme.spacing.md,
     paddingVertical: theme.spacing.sm + 2,
   },
+  toolGroupEyebrowRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 2,
+  },
+  toolGroupEyebrowText: {
+    ...theme.typography.caption,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.45,
+    color: theme.colors.textMuted,
+    textTransform: 'uppercase',
+  },
   toolGroupHeaderPressable: {
     marginHorizontal: -theme.spacing.md,
-    marginTop: -(theme.spacing.sm + 2),
+    marginTop: 0,
     paddingHorizontal: theme.spacing.md,
-    paddingTop: theme.spacing.sm + 2,
+    paddingTop: 2,
     paddingBottom: 2,
   },
   toolGroupCardInteractive: {
@@ -1716,11 +1741,10 @@ const createStyles = (theme: AppTheme) => {
   toolGroupPreviewEntry: {
     gap: theme.spacing.xs,
   },
-  toolGroupBullet: {
-    ...theme.typography.caption,
-    color: theme.colors.textMuted,
-    lineHeight: 16,
-    width: 8,
+  toolGroupPreviewIcon: {
+    marginTop: 2,
+    width: 20,
+    alignSelf: 'flex-start',
   },
   toolGroupRowText: {
     ...theme.typography.caption,
@@ -1733,7 +1757,7 @@ const createStyles = (theme: AppTheme) => {
     ...theme.typography.caption,
     color: theme.colors.textMuted,
     marginTop: 2,
-    paddingLeft: theme.spacing.lg,
+    paddingLeft: theme.spacing.md + 22,
   },
   toolGroupEntryCard: {
     borderRadius: theme.radius.sm,
@@ -2596,8 +2620,12 @@ function summarizeReasoningPreview(details: string[]): string | null {
   return preview.length > 0 ? preview : null;
 }
 
+function stripLeadingTimelineBullet(title: string): string {
+  return title.trim().replace(/^[•\u2022]\s*/, '').trim();
+}
+
 function summarizeToolGroup(titles: string[]): string {
-  const normalized = titles.map((title) => title.trim().toLowerCase());
+  const normalized = titles.map((title) => stripLeadingTimelineBullet(title).toLowerCase());
   if (normalized.every((title) => title.startsWith('ran '))) {
     return `${String(titles.length)} command${titles.length === 1 ? '' : 's'}`;
   }
@@ -2610,7 +2638,16 @@ function summarizeToolGroup(titles: string[]): string {
   if (normalized.every((title) => title.startsWith('applied file changes'))) {
     return `${String(titles.length)} file change${titles.length === 1 ? '' : 's'}`;
   }
-  return `${String(titles.length)} tool call${titles.length === 1 ? '' : 's'}`;
+  if (normalized.every((title) => title.startsWith('reading'))) {
+    return `${String(titles.length)} file read${titles.length === 1 ? '' : 's'}`;
+  }
+  if (normalized.every((title) => title.startsWith('listing'))) {
+    return `${String(titles.length)} folder listing${titles.length === 1 ? '' : 's'}`;
+  }
+  if (normalized.every((title) => title.startsWith('explored'))) {
+    return `${String(titles.length)} exploration${titles.length === 1 ? '' : 's'}`;
+  }
+  return `${String(titles.length)} tool step${titles.length === 1 ? '' : 's'}`;
 }
 
 function toCursorActivityVisual(
@@ -2823,7 +2860,7 @@ function toTimelineVisual(title: string): {
   useMonospaceTitle: boolean;
   isError: boolean;
 } {
-  const normalized = title.toLowerCase();
+  const normalized = stripLeadingTimelineBullet(title).toLowerCase();
   const isError =
     normalized.includes('failed') || normalized.includes('error') || normalized.includes('aborted');
 
@@ -2862,6 +2899,30 @@ function toTimelineVisual(title: string): {
   if (normalized.startsWith('searched web')) {
     return {
       icon: 'globe-outline',
+      useMonospaceTitle: false,
+      isError: false,
+    };
+  }
+
+  if (normalized.startsWith('reading')) {
+    return {
+      icon: 'eye-outline',
+      useMonospaceTitle: true,
+      isError: false,
+    };
+  }
+
+  if (normalized.startsWith('listing')) {
+    return {
+      icon: 'folder-open-outline',
+      useMonospaceTitle: false,
+      isError: false,
+    };
+  }
+
+  if (normalized.startsWith('applied file')) {
+    return {
+      icon: 'create-outline',
       useMonospaceTitle: false,
       isError: false,
     };

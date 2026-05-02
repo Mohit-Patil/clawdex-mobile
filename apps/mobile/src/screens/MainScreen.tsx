@@ -9605,7 +9605,7 @@ const ChatView = memo(function ChatView({
         </View>
       );
     },
-    [bridgeToken, bridgeUrl, inlineChoiceSet, onInlineOptionSelect]
+    [bridgeToken, bridgeUrl, chat.engine, inlineChoiceSet, onInlineOptionSelect, onOpenLocalPreview]
   );
 
   return (

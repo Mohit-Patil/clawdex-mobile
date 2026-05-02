@@ -183,9 +183,9 @@ describe('buildTranscriptDisplayItems', () => {
 
     expect(buildTranscriptDisplayItems(messages)).toEqual([
       {
-        kind: 'message',
-        message: messages[0],
-        renderKey: 't1',
+        kind: 'toolGroup',
+        id: 'tool-group-t1-t1',
+        messages: [messages[0]],
       },
       {
         kind: 'message',
@@ -193,14 +193,14 @@ describe('buildTranscriptDisplayItems', () => {
         renderKey: 'c1',
       },
       {
-        kind: 'message',
-        message: messages[2],
-        renderKey: 't2',
+        kind: 'toolGroup',
+        id: 'tool-group-t2-t2',
+        messages: [messages[2]],
       },
     ]);
   });
 
-  it('keeps a single tool message as a normal message', () => {
+  it('wraps a single tool message in a toolGroup for consistent UI', () => {
     const messages = [
       message('u1', 'user', 'Audit this'),
       message('t1', 'system', '• Ran `pwd`', { systemKind: 'tool' }),
@@ -214,9 +214,9 @@ describe('buildTranscriptDisplayItems', () => {
         renderKey: 'user-1-Audit this',
       },
       {
-        kind: 'message',
-        message: messages[1],
-        renderKey: 't1',
+        kind: 'toolGroup',
+        id: 'tool-group-t1-t1',
+        messages: [messages[1]],
       },
       {
         kind: 'message',
