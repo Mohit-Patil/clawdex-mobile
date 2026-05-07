@@ -94,6 +94,7 @@ The repo devcontainer now includes:
 - installs the Codex CLI via `npm install -g @openai/codex` if it is missing
 - in `--prepare-only` mode, prebuilds the Rust bridge binary without starting it
 - rewrites `.env.secure` for `BRIDGE_NETWORK_MODE=codespaces`, `BRIDGE_GITHUB_CODESPACES_AUTH=true`, and the selected engine list
+- writes `CODEX_HOME=$HOME/.codex` in Codespaces so Codex-managed ChatGPT auth survives bridge restarts and Codespace wakes
 - starts the bridge in the background unless you set `CLAWDEX_CODESPACES_SKIP_START=true` or pass `--no-start`
 
 Clawdex-created Codespaces request a 45-minute idle timeout. The bridge emits a lightweight active-turn keepalive while a Codex, OpenCode, or Cursor turn is running, so active work has activity even if a long step is otherwise quiet. When no turn is running, the keepalive stops and GitHub can pause the Codespace normally to save cost.
@@ -278,6 +279,7 @@ npm run teardown -- --yes
 | `BRIDGE_GITHUB_CODESPACES_AUTH` | accept GitHub bearer tokens for the current codespace |
 | `BRIDGE_GITHUB_CODESPACE_NAME` | codespace name used when validating GitHub bearer tokens |
 | `BRIDGE_GITHUB_API_URL` | GitHub REST API base URL for Codespaces auth checks |
+| `CODEX_HOME` | Codex auth/config home; set to `$HOME/.codex` in Codespaces so ChatGPT auth persists across bridge restarts |
 | `CODEX_CLI_BIN` | codex executable |
 | `BRIDGE_ACTIVE_ENGINE` | internal preferred routing backend used when multiple harnesses are enabled |
 | `BRIDGE_ENABLED_ENGINES` | selected harnesses to expose (`codex`, `opencode`, `cursor`, or a comma-separated mix) |

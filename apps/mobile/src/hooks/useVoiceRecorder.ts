@@ -32,13 +32,14 @@ const MIN_RECORDING_DURATION_MS = 1_000;
 const MAX_RECORDING_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_RECORDING_FILE_MB = MAX_RECORDING_FILE_BYTES / (1024 * 1024);
 const RECORDER_STATE_POLL_INTERVAL_MS = 80;
+const VOICE_RECORDING_BITRATE = 64_000;
 
 const RECORDING_OPTIONS: RecordingOptions = {
   isMeteringEnabled: true,
   extension: '.m4a',
-  sampleRate: 16_000,
+  sampleRate: 44_100,
   numberOfChannels: 1,
-  bitRate: 256_000,
+  bitRate: VOICE_RECORDING_BITRATE,
   android: {
     extension: '.m4a',
     outputFormat: 'mpeg4',
@@ -46,34 +47,23 @@ const RECORDING_OPTIONS: RecordingOptions = {
     sampleRate: 16_000,
   },
   ios: {
-    extension: '.wav',
-    outputFormat: IOSOutputFormat.LINEARPCM,
-    audioQuality: AudioQuality.HIGH,
-    sampleRate: 16_000,
+    extension: '.m4a',
+    outputFormat: IOSOutputFormat.MPEG4AAC,
+    audioQuality: AudioQuality.MIN,
+    sampleRate: 44_100,
     linearPCMBitDepth: 16,
     linearPCMIsBigEndian: false,
     linearPCMIsFloat: false,
   },
   web: {
     mimeType: 'audio/webm',
-    bitsPerSecond: 256_000,
+    bitsPerSecond: VOICE_RECORDING_BITRATE,
   },
 };
 
-function estimateBase64DecodedSize(base64: string): number {
-  const payload = base64.split(',').pop()?.trim() ?? '';
-  if (!payload) {
-    return 0;
-  }
-
-  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0;
-  const blockCount = Math.ceil(payload.length / 4);
-  return Math.max(0, blockCount * 3 - padding);
-}
-
 function getTranscriptionUploadMetadata(): { fileName: string; mimeType: string } {
   if (Platform.OS === 'ios') {
-    return { fileName: 'audio.wav', mimeType: 'audio/wav' };
+    return { fileName: 'audio.m4a', mimeType: 'audio/mp4' };
   }
   if (Platform.OS === 'android') {
     return { fileName: 'audio.m4a', mimeType: 'audio/mp4' };
@@ -162,17 +152,22 @@ export function useVoiceRecorder({
 
     try {
       const elapsed = Date.now() - startTimeRef.current;
+      if (elapsed < MIN_RECORDING_DURATION_MS) {
+        await safeStopRecorder(currentRecorder);
+        await setAudioModeAsync({
+          allowsRecording: false,
+        });
+        onError('Recording too short — hold longer to record.');
+        setVoiceState('idle');
+        return;
+      }
+
+      setVoiceState('transcribing');
       await safeStopRecorder(currentRecorder);
 
       await setAudioModeAsync({
         allowsRecording: false,
       });
-
-      if (elapsed < MIN_RECORDING_DURATION_MS) {
-        onError('Recording too short — hold longer to record.');
-        setVoiceState('idle');
-        return;
-      }
 
       const uri = safeGetRecorderUri(currentRecorder);
       if (!uri) {
@@ -194,16 +189,9 @@ export function useVoiceRecorder({
         return;
       }
 
-      setVoiceState('transcribing');
-
       const base64 = await FileSystem.readAsStringAsync(uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
-      if (estimateBase64DecodedSize(base64) > MAX_RECORDING_FILE_BYTES) {
-        onError(`Recording too long — maximum size is ${String(MAX_RECORDING_FILE_MB)}MB.`);
-        setVoiceState('idle');
-        return;
-      }
 
       const prompt = composerContext?.trim() || undefined;
       const result = await transcribe(base64, prompt, getTranscriptionUploadMetadata());

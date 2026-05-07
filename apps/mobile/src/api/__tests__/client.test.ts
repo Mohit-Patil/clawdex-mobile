@@ -274,6 +274,23 @@ describe('HostBridgeApiClient', () => {
     });
   });
 
+  it('readAccount() can request a managed auth token refresh', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      account: {
+        type: 'chatgpt',
+        email: 'mohit@example.com',
+        planType: 'pro',
+      },
+      requiresOpenaiAuth: false,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.readAccount({ refreshToken: true });
+
+    expect(ws.request).toHaveBeenCalledWith('account/read', { refreshToken: true });
+  });
+
   it('logoutAccount() requests account/logout', async () => {
     const ws = createWsMock();
     ws.request.mockResolvedValue({});
@@ -290,6 +307,7 @@ describe('HostBridgeApiClient', () => {
       type: 'chatgpt',
       loginId: 'login_123',
       authUrl: 'https://chatgpt.com/auth/start',
+      userCode: 'ABCD-EFGH',
     });
 
     const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
@@ -300,6 +318,46 @@ describe('HostBridgeApiClient', () => {
       type: 'chatgpt',
       loginId: 'login_123',
       authUrl: 'https://chatgpt.com/auth/start',
+      userCode: 'ABCD-EFGH',
+    });
+  });
+
+  it('startChatGptDeviceCodeAccountLogin() requests Codex-managed device login', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      type: 'chatgptDeviceCode',
+      loginId: 'login_device_123',
+      verificationUrl: 'https://chatgpt.com/activate',
+      userCode: 'WXYZ-1234',
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    const result = await client.startChatGptDeviceCodeAccountLogin();
+
+    expect(ws.request).toHaveBeenCalledWith('account/login/start', {
+      type: 'chatgptDeviceCode',
+    });
+    expect(result).toEqual({
+      type: 'chatgptDeviceCode',
+      loginId: 'login_device_123',
+      verificationUrl: 'https://chatgpt.com/activate',
+      userCode: 'WXYZ-1234',
+    });
+  });
+
+  it('forwardCodexAuthCallback() forwards the loopback callback to the bridge', async () => {
+    const ws = createWsMock();
+    ws.request.mockResolvedValue({
+      forwarded: true,
+    });
+
+    const client = new HostBridgeApiClient({ ws: ws as unknown as HostBridgeWsClient });
+    await client.forwardCodexAuthCallback(
+      'http://localhost:1455/auth/callback?code=abc&state=xyz'
+    );
+
+    expect(ws.request).toHaveBeenCalledWith('bridge/codex/auth/callback/forward', {
+      callbackUrl: 'http://localhost:1455/auth/callback?code=abc&state=xyz',
     });
   });
 

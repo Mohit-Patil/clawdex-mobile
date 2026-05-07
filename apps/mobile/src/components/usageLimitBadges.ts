@@ -54,10 +54,10 @@ export function buildComposerUsageLimitAlert(
   );
   const body =
     specificLabels.length === 0
-      ? 'Your Codex usage limit is reached. Try again after it resets.'
+      ? 'Your Codex usage limit has been reached. Try again after it resets.'
       : `Your ${formatUsageLimitLabelList(specificLabels)} Codex ${
-          specificLabels.length === 1 ? 'limit is' : 'limits are'
-        } reached. Try again after the reset.`;
+          specificLabels.length === 1 ? 'limit has' : 'limits have'
+        } been reached. Try again after the reset.`;
   const resetTimes = uniqueResetTimes(exhaustedBadges);
   const status =
     resetTimes.length === 1

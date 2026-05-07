@@ -567,7 +567,7 @@ export function SettingsScreen({
       setAccountRateLimits(snapshot);
       setRateLimitsError(null);
     } catch (err) {
-      setRateLimitsError((err as Error).message);
+      setRateLimitsError(formatRateLimitsError(err));
     } finally {
       setRateLimitsLoading(false);
     }
@@ -2855,6 +2855,23 @@ function formatReasoningEffort(effort: ReasoningEffort): string {
   }
 
   return effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
+function formatRateLimitsError(error: unknown): string {
+  const message = String((error as Error)?.message ?? error).trim();
+  const normalized = message.toLowerCase();
+  const authRequired =
+    normalized.includes('codex account authentication required') ||
+    normalized.includes('account authentication required') ||
+    normalized.includes('authentication required to read rate limits') ||
+    normalized.includes('requires openai auth') ||
+    normalized.includes('chatgptauthtokens/refresh');
+
+  if (authRequired) {
+    return 'Codex is not signed in on this connection. For GitHub Codespaces, finish the Codex login step and it will persist in the Codespace.';
+  }
+
+  return message || 'Unable to read Codex usage limits.';
 }
 
 function formatAccountSignInStatus(account: AccountSnapshot | null): string {

@@ -100,19 +100,26 @@ npm run codespaces:bootstrap -- --no-start
 
 ## Voice transcription says no credentials were found
 
-- The bridge can transcribe with either `OPENAI_API_KEY`, `BRIDGE_CHATGPT_ACCESS_TOKEN`, or the same ChatGPT auth tokens already used for Codex login.
-- In GitHub Codespaces, finish the ChatGPT/Codex login step from the app first. The bridge will persist those tokens to `BRIDGE_WORKDIR/.clawdex-chatgpt-auth.json` and reuse them for voice transcription.
-- If you still see the error after logging in, restart the bridge once so it reloads the persisted auth cache:
+- The bridge can transcribe with `OPENAI_API_KEY`, `BRIDGE_CHATGPT_ACCESS_TOKEN`, a legacy bridge token cache, or the Codex-managed ChatGPT token in `$CODEX_HOME/auth.json`.
+- In GitHub Codespaces, finish the Codex login step from the app first. Codex writes the login to `$HOME/.codex/auth.json`, and `.env.secure` sets `CODEX_HOME` to that persistent location.
+- If you still see the error after logging in, restart the bridge once so app-server reloads the Codex auth home:
 
 ```bash
 npm run secure:bridge
 ```
 
-- You can inspect whether the bridge captured the token bundle:
+- You can inspect whether Codex saved auth in the Codespace:
 
 ```bash
-ls -la .clawdex-chatgpt-auth.json
+ls -la "${CODEX_HOME:-$HOME/.codex}/auth.json"
 ```
+
+## Codespace wakes but Codex says account authentication is required
+
+- Codespaces should use Codex-managed auth, the same as a local bridge. The login is stored in `${CODEX_HOME:-$HOME/.codex}/auth.json`.
+- The app starts Codex's normal ChatGPT web login first. It captures the OAuth callback on the phone and forwards that callback to the Codex loopback server inside the Codespace, so device-code login is only a fallback.
+- Run `source .env.secure && ls -la "$CODEX_HOME/auth.json"` in the Codespace to confirm the auth file exists.
+- If the file is missing, reopen GitHub Codespaces setup in the app and complete the Codex login step once. After that, bridge restarts and Codespace wakes should not require reauthentication.
 
 ## Local browser preview does not open
 

@@ -176,7 +176,7 @@ describe('composerUsageLimits', () => {
 
     expect(alert).toEqual({
       title: 'Rate limit reached',
-      body: 'Your 5h Codex limit is reached. Try again after the reset.',
+      body: 'Your 5h Codex limit has been reached. Try again after the reset.',
       status: `Resets ${formatComposerUsageLimitResetAt(resetAt)}.`,
     });
   });

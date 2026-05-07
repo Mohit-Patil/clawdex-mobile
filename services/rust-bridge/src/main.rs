@@ -922,6 +922,12 @@ struct BrowserPreviewCloseRequest {
     session_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexAuthCallbackForwardRequest {
+    callback_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct CursorApiKeyInfo {
@@ -3591,7 +3597,7 @@ impl AppServerBridge {
                         "id": id,
                         "error": {
                             "code": -32001,
-                            "message": "account/chatgptAuthTokens/refresh is not configured (set BRIDGE_CHATGPT_ACCESS_TOKEN and BRIDGE_CHATGPT_ACCOUNT_ID, or complete ChatGPT login from the mobile app)"
+                            "message": "account/chatgptAuthTokens/refresh is not configured (set BRIDGE_CHATGPT_ACCESS_TOKEN and BRIDGE_CHATGPT_ACCOUNT_ID, or use Codex-managed ChatGPT login instead)"
                         }
                     }))
                     .await;
@@ -7456,6 +7462,12 @@ async fn handle_bridge_method(
             let result = state.preview.discover_targets().await;
             serde_json::to_value(result).map_err(|error| BridgeError::server(&error.to_string()))
         }
+        "bridge/codex/auth/callback/forward" => {
+            let request: CodexAuthCallbackForwardRequest =
+                serde_json::from_value(params.unwrap_or_else(|| json!({})))
+                    .map_err(|error| BridgeError::invalid_params(&error.to_string()))?;
+            forward_codex_auth_callback(state, &request.callback_url).await
+        }
         "bridge/update/start" => {
             let request: BridgeUpdateStartRequest =
                 serde_json::from_value(params.unwrap_or_else(|| json!({})))
@@ -7897,6 +7909,50 @@ async fn handle_bridge_method(
             "Unknown bridge method: {method}"
         ))),
     }
+}
+
+async fn forward_codex_auth_callback(
+    state: &Arc<AppState>,
+    callback_url: &str,
+) -> Result<Value, BridgeError> {
+    let callback = Url::parse(callback_url)
+        .map_err(|error| BridgeError::invalid_params(&format!("invalid callbackUrl: {error}")))?;
+    if callback.scheme() != "http"
+        || !matches!(callback.host_str(), Some("localhost") | Some("127.0.0.1"))
+        || callback.port_or_known_default() != Some(1455)
+        || callback.path() != "/auth/callback"
+    {
+        return Err(BridgeError::invalid_params(
+            "callbackUrl must be the Codex loopback auth callback",
+        ));
+    }
+
+    let mut upstream = Url::parse("http://127.0.0.1:1455/auth/callback")
+        .map_err(|error| BridgeError::server(&format!("invalid Codex callback URL: {error}")))?;
+    upstream.set_query(callback.query());
+
+    let response = state
+        .preview
+        .http
+        .get(upstream)
+        .send()
+        .await
+        .map_err(|error| {
+            BridgeError::server(&format!("failed to forward Codex auth callback: {error}"))
+        })?;
+    let status = response.status();
+    if status.as_u16() >= 400 {
+        let body = response.text().await.unwrap_or_default();
+        return Err(BridgeError::server(&format!(
+            "Codex auth callback returned HTTP {status}: {}",
+            body.trim().chars().take(300).collect::<String>()
+        )));
+    }
+
+    Ok(json!({
+        "forwarded": true,
+        "status": status.as_u16(),
+    }))
 }
 
 async fn start_thread_list_stream(
@@ -8361,8 +8417,7 @@ async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, Brid
         }
     }
 
-    let client = reqwest::Client::new();
-    let response = client
+    let response = transcription_http_client()
         .post(&endpoint)
         .bearer_auth(&bearer_token)
         .multipart(form)
@@ -8392,6 +8447,11 @@ async fn transcribe_voice(request: VoiceTranscribeRequest) -> Result<Value, Brid
 
     Ok(serde_json::to_value(VoiceTranscribeResponse { text })
         .map_err(|e| BridgeError::server(&e.to_string()))?)
+}
+
+fn transcription_http_client() -> &'static HttpClient {
+    static CLIENT: OnceLock<HttpClient> = OnceLock::new();
+    CLIENT.get_or_init(HttpClient::new)
 }
 
 fn bridge_chatgpt_auth_cache() -> &'static StdRwLock<Option<BridgeChatGptAuthBundle>> {
@@ -8524,7 +8584,7 @@ fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
         ));
     }
 
-    // Path 2: bridge ChatGPT auth (env, cached mobile login, or persisted bridge cache)
+    // Path 2: bridge ChatGPT auth (env, cached legacy mobile login, or persisted bridge cache)
     // → ChatGPT backend.
     if let Some(access_token) = resolve_bridge_chatgpt_access_token_for_transcription() {
         return Ok((
@@ -8581,7 +8641,7 @@ fn resolve_transcription_auth() -> Result<(String, String, bool), BridgeError> {
     Err(BridgeError {
         code: -32002,
         message:
-            "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN, or finish ChatGPT login for Codex in the mobile app"
+            "no transcription credentials found: set OPENAI_API_KEY or BRIDGE_CHATGPT_ACCESS_TOKEN, or finish Codex-managed ChatGPT login so auth.json exists"
                 .to_string(),
         data: None,
     })

@@ -24,11 +24,15 @@ export interface ChatGptAuthTokenBundle {
   planType: string | null;
 }
 
-type ChatGptAuthSessionResult =
+export type ChatGptAuthSessionResult =
   | { kind: 'callback'; callbackUrl: URL; redirectUri: string }
   | { kind: 'cancelled' }
   | { kind: 'dismissed' }
   | { kind: 'error'; message: string };
+
+export interface ChatGptLoopbackAuthSessionOptions {
+  onCallback?: (callbackUrl: URL) => Promise<void>;
+}
 
 type TcpSocketConnection = {
   destroy: () => void;
@@ -374,8 +378,28 @@ async function openAuthSession(
   authorizeUrl: string,
   redirectUri: string
 ): Promise<ChatGptAuthSessionResult> {
+  const result = await openChatGptLoopbackAuthSession(authorizeUrl);
+  if (result.kind === 'callback') {
+    return {
+      ...result,
+      redirectUri,
+    };
+  }
+
+  return result;
+}
+
+export async function openChatGptLoopbackAuthSession(
+  authorizeUrl: string,
+  options: ChatGptLoopbackAuthSessionOptions = {}
+): Promise<ChatGptAuthSessionResult> {
+  ensureSupportedPlatform();
+
   const appRedirectUri = buildChatGptAppRedirectUri();
-  const loopbackServer = await startChatGptLoopbackServer(appRedirectUri);
+  const loopbackServer = await startChatGptLoopbackServer(
+    appRedirectUri,
+    options.onCallback
+  );
   let result: WebBrowser.WebBrowserAuthSessionResult;
   try {
     result = await WebBrowser.openAuthSessionAsync(authorizeUrl, appRedirectUri);
@@ -393,7 +417,7 @@ async function openAuthSession(
     return {
       kind: 'callback',
       callbackUrl: new URL(result.url),
-      redirectUri,
+      redirectUri: buildChatGptRedirectUri(),
     };
   }
   return {
@@ -406,7 +430,10 @@ type ChatGptLoopbackServer = {
   close: () => Promise<void>;
 };
 
-async function startChatGptLoopbackServer(appRedirectUri: string): Promise<ChatGptLoopbackServer> {
+async function startChatGptLoopbackServer(
+  appRedirectUri: string,
+  onCallback?: (callbackUrl: URL) => Promise<void>
+): Promise<ChatGptLoopbackServer> {
   const tcpSocketModule = (await import('react-native-tcp-socket')) as unknown as {
     default?: TcpSocketModule;
     createServer?: TcpSocketModule['createServer'];
@@ -460,7 +487,7 @@ async function startChatGptLoopbackServer(appRedirectUri: string): Promise<ChatG
     });
   };
 
-  const handleRequest = (socket: TcpSocketConnection, request: string) => {
+  const handleRequest = async (socket: TcpSocketConnection, request: string) => {
     const requestLine = request.split('\r\n', 1)[0] ?? '';
     const match = requestLine.match(/^[A-Z]+\s+(\S+)\s+HTTP\/\d\.\d$/i);
     if (!match) {
@@ -478,6 +505,18 @@ async function startChatGptLoopbackServer(appRedirectUri: string): Promise<ChatG
 
     if (callbackUrl.pathname !== '/auth/callback') {
       writeHttpResponse(socket, 404, 'Not Found', 'Unknown path.');
+      return;
+    }
+
+    try {
+      await onCallback?.(callbackUrl);
+    } catch (error) {
+      writeHttpResponse(
+        socket,
+        502,
+        'Bad Gateway',
+        `Could not finish Codex login: ${escapeHtmlText((error as Error).message)}`
+      );
       return;
     }
 
@@ -514,7 +553,7 @@ async function startChatGptLoopbackServer(appRedirectUri: string): Promise<ChatG
       }
 
       handled = true;
-      handleRequest(socket, request);
+      void handleRequest(socket, request);
     });
 
     const cleanup = () => {
@@ -570,7 +609,7 @@ function buildLoopbackSuccessHtml(appCallbackUrl: string): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Return to Claudex</title>
+    <title>Return to Clawdex</title>
     <meta http-equiv="refresh" content="0;url=${escapeHtmlAttribute(appCallbackUrl)}" />
     <style>
       :root { color-scheme: dark; }
@@ -597,7 +636,7 @@ function buildLoopbackSuccessHtml(appCallbackUrl: string): string {
   </head>
   <body>
     <main>
-      <h1>Returning to Claudex…</h1>
+      <h1>Returning to Clawdex…</h1>
       <p>If the app does not open automatically, <a href="${escapeHtmlAttribute(
         appCallbackUrl
       )}">tap here</a>.</p>
@@ -642,6 +681,10 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function escapeHtmlText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function readTokenBundle(value: unknown): ChatGptAuthTokenBundle | null {

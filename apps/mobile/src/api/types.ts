@@ -249,6 +249,13 @@ export type AccountLoginStartResponse =
       type: 'chatgpt';
       loginId: string;
       authUrl: string;
+      userCode?: string | null;
+    }
+  | {
+      type: 'chatgptDeviceCode';
+      loginId: string;
+      verificationUrl: string;
+      userCode: string;
     }
   | {
       type: 'chatgptAuthTokens';

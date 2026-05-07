@@ -6,7 +6,6 @@ import {
   Animated,
   Easing,
   Linking,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,14 +15,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { HostBridgeApiClient } from '../api/client';
+import type { AccountLoginStartResponse } from '../api/types';
 import { HostBridgeWsClient } from '../api/ws';
 import { toBridgeHealthUrl } from '../bridgeUrl';
 import type { BridgeProfile, BridgeProfileDraft } from '../bridgeProfiles';
 import { ChoiceAction } from '../components/ChoiceAction';
-import {
-  getFreshChatGptAuthTokens,
-  isNativeChatGptLoginAvailable,
-} from '../chatGptAuth';
+import { openChatGptLoopbackAuthSession } from '../chatGptAuth';
 import { env } from '../config';
 import {
   loadStoredGitHubAppAuthTokens,
@@ -104,8 +101,14 @@ interface PendingCodexLogin {
   bridgeUrl: string;
   accessToken: string;
   codespaceWebUrl: string | null;
+  codexLoginId: string | null;
+  codexLoginUrl: string | null;
+  codexLoginKind: ManagedCodexLoginKind | null;
+  codexUserCode: string | null;
   profileDraft: BridgeProfileDraft;
 }
+
+type ManagedCodexLoginKind = 'web' | 'device';
 
 const BRIDGE_READY_POLL_MS = 3000;
 const BRIDGE_READY_TIMEOUT_MS = 6 * 60 * 1000;
@@ -237,7 +240,7 @@ function formatRecovery(kind: RecoveryKind): { title: string; body: string } {
     case 'codexLogin':
       return {
         title: 'Codex login required',
-        body: 'Finish ChatGPT login from this phone or open the Codespace as a fallback.',
+        body: 'Open the Codex login once. It is saved inside this Codespace after completion.',
       };
     case 'generic':
       return {
@@ -464,7 +467,6 @@ export function GitHubCodespacesScreen({
   const preferredRepositoryName = env.githubCodespacesPreferredRepositoryName;
   const configuredSourceOwner = env.githubCodespacesSourceRepositoryOwner;
   const configuredRepositoryRef = env.githubCodespacesRepositoryRef;
-  const nativeChatGptLoginAvailable = isNativeChatGptLoginAvailable();
   const reusableBridgeProfile = useMemo(
     () => getReusableGitHubBridgeProfile(bridgeProfiles, activeBridgeProfileId),
     [activeBridgeProfileId, bridgeProfiles]
@@ -722,7 +724,7 @@ export function GitHubCodespacesScreen({
 
       try {
         const account = await withBridgeApiClient(pending.bridgeUrl, pending.accessToken, (api) =>
-          api.readAccount()
+          api.readAccount({ refreshToken: true })
         );
         if (connectFlowRef.current !== pending.runId) {
           return;
@@ -737,11 +739,7 @@ export function GitHubCodespacesScreen({
 
         setConnectionPhase('codexLoginRequired');
         setConnectionMessage(
-          nativeChatGptLoginAvailable
-            ? 'Codex is ready, but ChatGPT login is still needed. Tap Login with ChatGPT to finish setup from this phone, or open the Codespace as a fallback.'
-            : Platform.OS === 'ios' || Platform.OS === 'android'
-              ? 'Codex is ready, but ChatGPT login is still needed. Use the installed native app build to finish that login from this phone, or open the Codespace as a fallback.'
-            : 'Codex is ready, but ChatGPT login is still needed. Finish it from the Codespace on another machine, then return here and tap Check again.'
+          formatCodexManagedLoginInstruction(pending.codexUserCode)
         );
       } catch (error) {
         if (connectFlowRef.current === pending.runId) {
@@ -756,7 +754,7 @@ export function GitHubCodespacesScreen({
     [finalizeConnectedBridgeProfile]
   );
 
-  const loginToCodexWithChatGpt = useCallback(async () => {
+  const openCodexManagedLogin = useCallback(async () => {
     if (!pendingCodexLogin) {
       return;
     }
@@ -765,19 +763,67 @@ export function GitHubCodespacesScreen({
     setConnectionError(null);
 
     try {
+      let loginUrl = pendingCodexLogin.codexLoginUrl;
+      let userCode = pendingCodexLogin.codexUserCode;
+      let loginId = pendingCodexLogin.codexLoginId;
+      let loginKind = pendingCodexLogin.codexLoginKind;
+
+      if (!loginUrl) {
+        setConnectionMessage('Starting Codex login inside the Codespace…');
+        const response = await withBridgeApiClient(
+          pendingCodexLogin.bridgeUrl,
+          pendingCodexLogin.accessToken,
+          startManagedCodexLogin
+        );
+        const loginDetails = readManagedCodexLoginDetails(response);
+        loginUrl = loginDetails.url;
+        userCode = loginDetails.userCode;
+        loginId = loginDetails.loginId;
+        loginKind = loginDetails.kind;
+
+        setPendingCodexLogin((current) =>
+          current && current.runId === pendingCodexLogin.runId
+            ? {
+                ...current,
+                codexLoginId: loginId,
+                codexLoginUrl: loginUrl,
+                codexLoginKind: loginKind,
+                codexUserCode: userCode,
+              }
+            : current
+        );
+      }
+
+      if (loginKind === 'device') {
+        await Linking.openURL(loginUrl);
+        setConnectionMessage(formatCodexManagedLoginInstruction(userCode));
+        return;
+      }
+
       setConnectionMessage('Opening ChatGPT login…');
-      const tokens = await getFreshChatGptAuthTokens();
-      setConnectionMessage('ChatGPT login complete. Sending tokens to Codex…');
-      await withBridgeApiClient(pendingCodexLogin.bridgeUrl, pendingCodexLogin.accessToken, (api) =>
-        api.loginWithChatGptAuthTokens({
-          accessToken: tokens.accessToken,
-          chatgptAccountId: tokens.accountId,
-          chatgptPlanType: tokens.planType,
-        })
-      );
-      setConnectionMessage(
-        'ChatGPT login complete. Verifying Codex account…'
-      );
+      const session = await openChatGptLoopbackAuthSession(loginUrl, {
+        onCallback: async (callbackUrl) => {
+          await withBridgeApiClient(
+            pendingCodexLogin.bridgeUrl,
+            pendingCodexLogin.accessToken,
+            (api) => api.forwardCodexAuthCallback(callbackUrl.toString())
+          );
+        },
+      });
+
+      if (session.kind === 'cancelled') {
+        setConnectionMessage('Codex login was cancelled.');
+        return;
+      }
+      if (session.kind === 'dismissed') {
+        setConnectionMessage('Codex login did not complete.');
+        return;
+      }
+      if (session.kind === 'error') {
+        throw new Error(session.message);
+      }
+
+      setConnectionMessage('Codex login complete. Verifying account…');
       await completeCodexLoginIfReady(pendingCodexLogin);
     } catch (error) {
       setConnectionError((error as Error).message);
@@ -800,7 +846,7 @@ export function GitHubCodespacesScreen({
       }
       await Linking.openURL(pendingCodexLogin.codespaceWebUrl);
       setConnectionMessage(
-        'Open the Codespace on another machine, finish Codex login there if needed, then return here and tap Check again.'
+        'Open the Codespace on another machine if you need to inspect Codex auth there, then return here and tap Check login.'
       );
     } catch (error) {
       setConnectionError((error as Error).message);
@@ -913,7 +959,7 @@ export function GitHubCodespacesScreen({
 
       setConnectionMessage('Codex is up. Checking whether login is still required...');
       const account = await withBridgeApiClient(bridgeUrl, bridgeSession.accessToken, (api) =>
-        api.readAccount()
+        api.readAccount({ refreshToken: true })
       );
       if (connectFlowRef.current !== runId) {
         return 'connected';
@@ -930,22 +976,18 @@ export function GitHubCodespacesScreen({
         bridgeUrl,
         accessToken: bridgeSession.accessToken,
         codespaceWebUrl: codespace.webUrl ?? null,
+        codexLoginId: null,
+        codexLoginUrl: null,
+        codexLoginKind: null,
+        codexUserCode: null,
         profileDraft,
       });
       setConnectionMessage(
-        nativeChatGptLoginAvailable
-          ? 'Codex is ready, but ChatGPT login is still needed. Tap Login with ChatGPT to finish setup from this phone.'
-          : Platform.OS === 'ios' || Platform.OS === 'android'
-            ? 'Codex is ready, but ChatGPT login is still needed. Use the installed native app build to finish that login from this phone.'
-          : 'Codex is ready, but ChatGPT login is still needed. Finish it from the Codespace on another machine, then return here and tap Check again.'
+        'Codex needs ChatGPT sign-in. Open the Codex login once; Codex will save it inside this Codespace for future wakes.'
       );
       return 'codexLogin';
     },
-    [
-      finalizeConnectedBridgeProfile,
-      nativeChatGptLoginAvailable,
-      refreshGitHubSessionForBridge,
-    ]
+    [finalizeConnectedBridgeProfile, refreshGitHubSessionForBridge]
   );
 
   const handleConnectCodespace = useCallback(
@@ -1521,7 +1563,7 @@ export function GitHubCodespacesScreen({
           <>
             <Pressable
               onPress={() => {
-                void loginToCodexWithChatGpt();
+                void openCodexManagedLogin();
               }}
               disabled={codexLoginSubmitting}
               style={({ pressed }) => [
@@ -1534,7 +1576,7 @@ export function GitHubCodespacesScreen({
               ) : (
                 <Ionicons name="log-in-outline" size={15} color={theme.colors.accentText} />
               )}
-              <Text style={styles.primaryButtonText}>Login with ChatGPT</Text>
+              <Text style={styles.primaryButtonText}>Open Codex login</Text>
             </Pressable>
             <Pressable
               onPress={() => {
@@ -1572,7 +1614,7 @@ export function GitHubCodespacesScreen({
                   color={theme.colors.textPrimary}
                 />
               )}
-              <Text style={styles.secondaryButtonText}>Check again</Text>
+              <Text style={styles.secondaryButtonText}>Check login</Text>
             </Pressable>
           </>
         ) : null}
@@ -1647,7 +1689,10 @@ export function GitHubCodespacesScreen({
             }
           : setupStep === 'repositoryChoice'
             ? {
-                icon: repositoryChoice === 'clone' ? 'git-branch-outline' as const : 'folder-open-outline' as const,
+                icon:
+                  repositoryChoice === 'clone'
+                    ? 'git-branch-outline' as const
+                    : 'folder-open-outline' as const,
                 title: repositoryChoice === 'clone' ? 'Choose repository' : 'Project setup',
                 body:
                   repositoryChoice === 'clone'
@@ -1657,13 +1702,15 @@ export function GitHubCodespacesScreen({
                       : 'Choose whether to clone a repository or start fresh.',
               }
             : {
-                icon: connectedProfileDraft ? 'checkmark-circle-outline' as const : 'terminal-outline' as const,
+                icon: connectedProfileDraft
+                  ? 'checkmark-circle-outline' as const
+                  : 'terminal-outline' as const,
                 title: connectedProfileDraft ? 'Codex is ready' : 'Codex login',
                 body: connectedProfileDraft
                   ? 'Your Codespace is connected to Clawdex.'
-                  : selectedCloneRepository
-                    ? `Finish Codex login after cloning ${selectedCloneRepository.fullName}.`
-                    : 'Finish Codex login to use this fresh workspace from your phone.',
+                  : pendingCodexLogin?.codexUserCode
+                    ? `Enter ${pendingCodexLogin.codexUserCode} in ChatGPT. Codex saves this login inside the Codespace.`
+                    : 'Sign in once. Codex saves this login inside the Codespace and keeps it after pause or restart.',
               };
   const setupStatusMessage =
     connectionMessage ??
@@ -1784,19 +1831,23 @@ export function GitHubCodespacesScreen({
         <ChoiceAction
           variant="primary"
           iconName="log-in-outline"
-          title={codexLoginSubmitting ? 'Opening ChatGPT...' : 'Login with ChatGPT'}
-          meta="Use your Codex subscription"
+          title={codexLoginSubmitting ? 'Opening Codex login...' : 'Open Codex login'}
+          meta={
+            pendingCodexLogin.codexUserCode
+              ? `Code ${pendingCodexLogin.codexUserCode}`
+              : 'Saved in this Codespace'
+          }
           loading={codexLoginSubmitting}
           disabled={setupActionLocked}
           onPress={() => {
-            void loginToCodexWithChatGpt();
+            void openCodexManagedLogin();
           }}
         />
         <ChoiceAction
           variant="secondary"
           iconName="checkmark-done-outline"
-          title={codexLoginChecking ? 'Checking...' : 'Check again'}
-          meta="After login completes"
+          title={codexLoginChecking ? 'Checking...' : 'Check login'}
+          meta="After browser confirms"
           loading={codexLoginChecking}
           disabled={setupActionLocked}
           onPress={() => {
@@ -2719,6 +2770,60 @@ async function withBridgeApiClient<T>(
   } finally {
     ws.disconnect();
   }
+}
+
+async function startManagedCodexLogin(
+  api: HostBridgeApiClient
+): Promise<AccountLoginStartResponse> {
+  try {
+    return await api.startChatGptAccountLogin();
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error).toLowerCase();
+    if (
+      !message.includes('unsupported') &&
+      !message.includes('unknown') &&
+      !message.includes('invalid')
+    ) {
+      throw error;
+    }
+  }
+
+  return api.startChatGptDeviceCodeAccountLogin();
+}
+
+function readManagedCodexLoginDetails(response: AccountLoginStartResponse): {
+  kind: ManagedCodexLoginKind;
+  loginId: string;
+  url: string;
+  userCode: string | null;
+} {
+  if (response.type === 'chatgptDeviceCode') {
+    return {
+      kind: 'device',
+      loginId: response.loginId,
+      url: response.verificationUrl,
+      userCode: response.userCode,
+    };
+  }
+
+  if (response.type === 'chatgpt') {
+    return {
+      kind: 'web',
+      loginId: response.loginId,
+      url: response.authUrl,
+      userCode: response.userCode ?? null,
+    };
+  }
+
+  throw new Error('Codex did not return a ChatGPT login URL.');
+}
+
+function formatCodexManagedLoginInstruction(userCode: string | null): string {
+  if (userCode) {
+    return `ChatGPT opened in your browser. Enter code ${userCode}, then return here and tap Check login. Codex saves the login inside this Codespace.`;
+  }
+
+  return 'ChatGPT opened in your browser. Finish the Codex login there; the app will return and verify it automatically. Codex saves the login inside this Codespace.';
 }
 
 async function waitForBridgeReady(bridgeUrl: string, accessToken: string): Promise<void> {

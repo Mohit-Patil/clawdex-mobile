@@ -284,6 +284,10 @@ interface AccountRateLimitsReadOptions {
   forceRefresh?: boolean;
 }
 
+interface AccountReadOptions {
+  refreshToken?: boolean;
+}
+
 interface ChatReadOptions {
   cacheTtlMs?: number;
   forceRefresh?: boolean;
@@ -407,9 +411,9 @@ export class HostBridgeApiClient {
     return request;
   }
 
-  async readAccount(): Promise<AccountSnapshot> {
+  async readAccount(options: AccountReadOptions = {}): Promise<AccountSnapshot> {
     const response = await this.ws.request<AppServerAccountReadResponse>('account/read', {
-      refreshToken: false,
+      refreshToken: options.refreshToken === true,
     });
     return readAccountSnapshot(response);
   }
@@ -419,6 +423,19 @@ export class HostBridgeApiClient {
       type: 'chatgpt',
     });
     return readAccountLoginStartResponse(response);
+  }
+
+  async startChatGptDeviceCodeAccountLogin(): Promise<AccountLoginStartResponse> {
+    const response = await this.ws.request<Record<string, unknown>>('account/login/start', {
+      type: 'chatgptDeviceCode',
+    });
+    return readAccountLoginStartResponse(response);
+  }
+
+  async forwardCodexAuthCallback(callbackUrl: string): Promise<void> {
+    await this.ws.request('bridge/codex/auth/callback/forward', {
+      callbackUrl,
+    });
   }
 
   async loginWithChatGptAuthTokens(input: {

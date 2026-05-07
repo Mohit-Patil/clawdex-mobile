@@ -44,7 +44,7 @@ Status: In progress (first implementation pass completed)
 
 ### Remaining inside Gap 1
 - Native execution of dynamic tool calls (`item/tool/call`) is still not implemented in mobile/bridge; currently returns `success: false`.
-- Token refresh relies on environment variables; no mobile UI flow exists yet for account token refresh.
+- External `chatgptAuthTokens` refresh still relies on environment variables or the legacy bridge token cache. GitHub Codespaces now uses Codex-managed auth in `CODEX_HOME/auth.json` instead of app-side token replay.
 
 ## Remaining Gaps (Beyond Gap 1)
 
@@ -59,12 +59,11 @@ Status: In progress (first implementation pass completed)
 ### Gap 3: Account/Auth UX
 - Status: In progress
 - Mobile Settings now exposes read-only account state via `account/read`, including ChatGPT email + plan type when available.
-- GitHub Codespaces connect flow now pauses after bridge bootstrap when Codex still requires ChatGPT auth, and native iOS/Android app builds can complete ChatGPT login from the phone by using on-device browser auth plus `chatgptAuthTokens` handoff to Codex.
+- GitHub Codespaces connect flow now pauses after bridge bootstrap when Codex still requires ChatGPT auth, starts Codex's managed web login flow, forwards the Codex localhost callback into the Codespace bridge, falls back to device-code login only when web login is unavailable, and verifies the resulting account from the bridge.
 - Remaining:
   - no dedicated standalone account screen outside Settings
-  - Expo Go is still not supported for ChatGPT/Codex login; this requires the installed native app build
   - login/logout is not fully user-driven across the rest of mobile UI yet
-  - auth refresh is still operationally env-driven in bridge, not user-driven in app
+  - external `chatgptAuthTokens` refresh is still operationally env/cache-driven in bridge
   - no API-key entry flow in mobile UI
 
 ### Gap 4: MCP + Tooling UX

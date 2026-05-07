@@ -52,6 +52,22 @@ export function readAccountLoginStartResponse(value: unknown): AccountLoginStart
       type,
       loginId,
       authUrl,
+      userCode: readString(record?.userCode ?? record?.user_code),
+    };
+  }
+
+  if (type === 'chatgptDeviceCode') {
+    const loginId = readString(record?.loginId);
+    const verificationUrl = readString(record?.verificationUrl ?? record?.verification_url);
+    const userCode = readString(record?.userCode ?? record?.user_code);
+    if (!loginId || !verificationUrl || !userCode) {
+      throw new Error('account/login/start returned an incomplete ChatGPT device login response');
+    }
+    return {
+      type,
+      loginId,
+      verificationUrl,
+      userCode,
     };
   }
 
