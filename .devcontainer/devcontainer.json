@@ -16,6 +16,7 @@
       "onAutoForward": "silent"
     }
   },
-  "postCreateCommand": "npm install --include=dev && npm run codespaces:bootstrap -- --prepare-only",
-  "postStartCommand": "npm run codespaces:bootstrap"
+  "updateContentCommand": "npm install --include=dev --prefer-offline --no-audit --fund=false && npm run codespaces:bootstrap -- --prepare-only",
+  "postStartCommand": "npm run codespaces:bootstrap",
+  "waitFor": "postStartCommand"
 }

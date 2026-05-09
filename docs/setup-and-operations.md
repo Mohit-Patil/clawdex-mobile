@@ -84,10 +84,11 @@ gh codespace ports visibility 8787:public 8788:public
 
 ### Codespaces Bootstrap
 
-The repo devcontainer now includes:
+The source repo devcontainer now includes:
 
-- `postCreateCommand`: `npm install --include=dev && npm run codespaces:bootstrap -- --prepare-only`
+- `updateContentCommand`: `npm install --include=dev --prefer-offline --no-audit --fund=false && npm run codespaces:bootstrap -- --prepare-only`
 - `postStartCommand`: `npm run codespaces:bootstrap`
+- `waitFor`: `postStartCommand`
 
 `npm run codespaces:bootstrap` does the following:
 
@@ -99,9 +100,9 @@ The repo devcontainer now includes:
 
 Clawdex-created Codespaces request a 45-minute idle timeout. The bridge emits a lightweight active-turn keepalive while a Codex, OpenCode, or Cursor turn is running, so active work has activity even if a long step is otherwise quiet. When no turn is running, the keepalive stops and GitHub can pause the Codespace normally to save cost.
 
-That means the first Codespace create now front-loads the expensive bridge compile during `postCreateCommand`, so the later `postStartCommand` can usually start the bridge much faster.
+That means prebuild-enabled Codespaces can snapshot the expensive dependency install and bridge compile during `updateContentCommand`, so the later `postStartCommand` can usually start the bridge much faster.
 
-The same bootstrap script is included in the published `clawdex-mobile` npm package. That lets the `clawdex-codespace` template stay minimal: it can install `clawdex-mobile@latest` globally in the devcontainer and invoke the packaged bootstrap against the current workspace instead of copying `scripts/*` and `services/rust-bridge/*` into the template repo.
+The same bootstrap script is included in the published `clawdex-mobile` npm package. That lets the `clawdex-codespace` template stay minimal: it installs `clawdex-mobile@internal` globally in `updateContentCommand` and invokes the packaged bootstrap against the current workspace instead of copying `scripts/*` and `services/rust-bridge/*` into the template repo. Because the published package ships Linux bridge binaries, the template does not need Rust, Cargo, or a local bridge compile.
 
 Manual examples:
 
@@ -115,7 +116,7 @@ CLAWDEX_CODESPACES_ENGINES=codex,opencode,cursor npm run codespaces:bootstrap
 Minimal template equivalent:
 
 ```bash
-npm install -g clawdex-mobile@latest @openai/codex
+npm install -g --no-fund --no-audit clawdex-mobile@internal @openai/codex
 CLAWDEX_WORKSPACE_ROOT="$PWD" node "$(npm root -g)/clawdex-mobile/scripts/codespaces-bootstrap.js" --prepare-only
 CLAWDEX_WORKSPACE_ROOT="$PWD" node "$(npm root -g)/clawdex-mobile/scripts/codespaces-bootstrap.js"
 ```
