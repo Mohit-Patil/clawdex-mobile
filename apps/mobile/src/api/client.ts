@@ -823,7 +823,7 @@ export class HostBridgeApiClient {
     const response = await this.ws.request<AppServerListResponse>('thread/list', {
       cursor: normalizeCursor(options.cursor),
       limit,
-      sortKey: null,
+      sortKey: 'updated_at',
       modelProviders: null,
       sourceKinds: includeSubAgents
         ? CHAT_LIST_SOURCE_KINDS_WITH_SUBAGENTS

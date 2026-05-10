@@ -8202,7 +8202,7 @@ fn thread_list_stream_request_params(include_sub_agents: bool, limit: usize) -> 
     json!({
         "cursor": Value::Null,
         "limit": limit,
-        "sortKey": Value::Null,
+        "sortKey": "updated_at",
         "modelProviders": Value::Null,
         "sourceKinds": source_kinds,
         "archived": false,
@@ -8258,7 +8258,7 @@ async fn list_workspace_roots(
             Some(json!({
                 "cursor": Value::Null,
                 "limit": limit,
-                "sortKey": Value::Null,
+                "sortKey": "updated_at",
                 "modelProviders": Value::Null,
                 "sourceKinds": ["cli", "vscode", "exec", "appServer", "unknown"],
                 "archived": false,

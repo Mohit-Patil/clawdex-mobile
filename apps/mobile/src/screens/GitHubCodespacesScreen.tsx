@@ -115,6 +115,8 @@ type ManagedCodexLoginKind = 'web' | 'device';
 
 const BRIDGE_READY_POLL_MS = 3000;
 const BRIDGE_READY_TIMEOUT_MS = 6 * 60 * 1000;
+const CODESPACES_PRIVATE_PORT_ERROR =
+  'Clawdex cannot reach the Codespace bridge because GitHub kept port 8787 private. Open the Codespace Ports panel and make ports 8787 and 8788 public, then try again.';
 const CODEX_ACCOUNT_READY_POLL_MS = 1_250;
 const CODEX_ACCOUNT_READY_TIMEOUT_MS = 12_000;
 const CODEX_LOGIN_COMPLETION_TIMEOUT_MS = 90_000;
@@ -1189,7 +1191,7 @@ export function GitHubCodespacesScreen({
       setPendingCodexLogin(null);
       setCodexLoginChecking(false);
       setCodexLoginSubmitting(false);
-      setCloningRepositoryFullName(options.cloneRepository?.fullName ?? null);
+      setCloningRepositoryFullName(null);
       setConnectionPhase(
         codespace.state.trim().toLowerCase() === 'available' ? 'codespaceReady' : 'startingCodespace'
       );
@@ -1868,9 +1870,15 @@ export function GitHubCodespacesScreen({
                   icon: selectedCloneRepository
                     ? 'git-branch-outline' as const
                     : 'folder-open-outline' as const,
-                  title: selectedCloneRepository ? 'Cloning repository' : 'Setting up project',
+                  title: cloningRepositoryFullName
+                    ? 'Cloning repository'
+                    : selectedCloneRepository
+                      ? 'Preparing Codespace'
+                      : 'Setting up project',
                   body: selectedCloneRepository
-                    ? `${selectedCloneRepository.fullName} is being prepared inside the Codespace.`
+                    ? cloningRepositoryFullName
+                      ? `${selectedCloneRepository.fullName} is being prepared inside the Codespace.`
+                      : `${selectedCloneRepository.fullName} will be cloned after workspace services start.`
                     : createdCodespace
                       ? `${createdCodespace.name} is being prepared for Clawdex.`
                       : 'Preparing the workspace before sign-in.',
@@ -3154,6 +3162,9 @@ async function waitForBridgeReady(bridgeUrl: string, accessToken: string): Promi
           Authorization: `Bearer ${accessToken}`,
         },
       });
+      if (isCodespacesTunnelAuthResponse(healthResponse, bridgeUrl)) {
+        throw new Error(CODESPACES_PRIVATE_PORT_ERROR);
+      }
       if (healthResponse.ok) {
         const health = await readBridgeHealthPayload(healthResponse);
         if (health?.status === 'ok') {
@@ -3177,6 +3188,31 @@ async function waitForBridgeReady(bridgeUrl: string, accessToken: string): Promi
   throw new Error(
     `Codespace bridge did not become ready in time (${lastErrorMessage}). Open the Codespace in GitHub once and confirm bootstrap finished and ports 8787/8788 are public.`
   );
+}
+
+function isCodespacesTunnelAuthResponse(response: Response, bridgeUrl: string): boolean {
+  const responseUrl = typeof response.url === 'string' ? response.url : '';
+  const location = response.headers.get('location') ?? '';
+  if (responseUrl.includes('/pf-signin') || location.includes('/pf-signin')) {
+    return true;
+  }
+
+  if (!responseUrl) {
+    return false;
+  }
+
+  try {
+    const expectedHost = new URL(bridgeUrl).host;
+    const actualHost = new URL(responseUrl).host;
+    return (
+      expectedHost.endsWith('.app.github.dev') &&
+      actualHost.length > 0 &&
+      actualHost !== expectedHost &&
+      actualHost.endsWith('github.dev')
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function readBridgeHealthPayload(

@@ -484,6 +484,7 @@ describe('HostBridgeApiClient', () => {
     expect(ws.request).toHaveBeenCalledWith(
       'thread/list',
       expect.objectContaining({
+        sortKey: 'updated_at',
         sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'unknown'],
       })
     );
@@ -974,7 +975,7 @@ describe('HostBridgeApiClient', () => {
     expect(ws.request).toHaveBeenCalledWith('thread/list', {
       cursor: null,
       limit: 50,
-      sortKey: null,
+      sortKey: 'updated_at',
       modelProviders: null,
       sourceKinds: [
         'cli',

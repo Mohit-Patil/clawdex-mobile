@@ -16,6 +16,7 @@ const {
 } = require("./bridge-binary");
 
 const DEFAULT_HEALTH_TIMEOUT_MS = 15000;
+const CODESPACES_HEALTH_TIMEOUT_MS = 60000;
 const DEV_HEALTH_TIMEOUT_MS = 60000;
 let qrcodeTerminal = null;
 let qrcodeTerminalLoaded = false;
@@ -346,6 +347,13 @@ function formatCodespacesVisibilityCommand(env, ports) {
   return ["gh", "codespace", "ports", "visibility", ...visibilityArgs, ...selectionArgs].join(" ");
 }
 
+function sleepSync(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return;
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function updateCodespacesBrowseUrls(env, ports) {
   if (!commandExists("gh")) {
     return;
@@ -416,38 +424,57 @@ function ensureCodespacesPortsArePublic(env, ports) {
     return notes;
   }
 
-  const result = spawnSync(
-    "gh",
-    [
-      "codespace",
-      "ports",
-      "visibility",
-      ...uniquePorts.map((port) => `${port}:public`),
-      ...codespaceSelectionArgs(env),
-    ],
-    {
-      encoding: "utf8",
-      env: ghAuthEnv(env),
-      stdio: ["ignore", "pipe", "pipe"],
-    }
-  );
+  const publishedPorts = [];
+  const failedPorts = [];
+  const selectionArgs = codespaceSelectionArgs(env);
 
-  if ((result.status ?? 1) !== 0) {
-    const detail = (result.stderr || result.stdout || "").trim();
-    const suffix = detail ? ` (${detail.split(/\r?\n/, 1)[0]})` : "";
-    notes.push(
-      `Could not set Codespaces forwarded ports public automatically${suffix}. Run '${formatCodespacesVisibilityCommand(
-        env,
-        uniquePorts
-      )}' or update the Ports panel manually.`
-    );
-    return notes;
+  for (const port of uniquePorts) {
+    let lastDetail = "";
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      const result = spawnSync(
+        "gh",
+        ["codespace", "ports", "visibility", `${port}:public`, ...selectionArgs],
+        {
+          encoding: "utf8",
+          env: ghAuthEnv(env),
+          stdio: ["ignore", "pipe", "pipe"],
+        }
+      );
+
+      if ((result.status ?? 1) === 0) {
+        publishedPorts.push(port);
+        lastDetail = "";
+        break;
+      }
+
+      lastDetail = (result.stderr || result.stdout || "").trim();
+      if (attempt < 8) {
+        sleepSync(1_500);
+      }
+    }
+
+    if (lastDetail) {
+      failedPorts.push({ port, detail: lastDetail });
+    }
   }
 
-  updateCodespacesBrowseUrls(env, uniquePorts);
-  notes.push(
-    `Codespaces forwarded ports are set to public for bridge access: ${uniquePorts.join(", ")}.`
-  );
+  if (publishedPorts.length > 0) {
+    updateCodespacesBrowseUrls(env, publishedPorts);
+    notes.push(
+      `Codespaces forwarded ports are set to public for bridge access: ${publishedPorts.join(", ")}.`
+    );
+  }
+
+  for (const failure of failedPorts) {
+    const suffix = failure.detail ? ` (${failure.detail.split(/\r?\n/, 1)[0]})` : "";
+    notes.push(
+      `Could not set Codespaces forwarded port ${failure.port} public automatically${suffix}. Run '${formatCodespacesVisibilityCommand(
+        env,
+        [failure.port]
+      )}' or update the Ports panel manually.`
+    );
+  }
+
   return notes;
 }
 
@@ -752,6 +779,10 @@ function buildBridgeFromSource(packageDir, env, profile) {
 }
 
 function resolveLaunch(workspaceDir, packageDir, env, { devMode, forceSourceBuild }) {
+  const defaultHealthTimeoutMs = isCodespacesMode(env)
+    ? CODESPACES_HEALTH_TIMEOUT_MS
+    : DEFAULT_HEALTH_TIMEOUT_MS;
+
   if (devMode) {
     if (!commandExists("cargo")) {
       console.error("error: missing Rust/Cargo toolchain for dev bridge mode.");
@@ -779,7 +810,7 @@ function resolveLaunch(workspaceDir, packageDir, env, { devMode, forceSourceBuil
       args: [],
       cwd: workspaceDir,
       env,
-      healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+      healthTimeoutMs: defaultHealthTimeoutMs,
     };
   }
 
@@ -792,7 +823,7 @@ function resolveLaunch(workspaceDir, packageDir, env, { devMode, forceSourceBuil
       args: [],
       cwd: workspaceDir,
       env,
-      healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+      healthTimeoutMs: defaultHealthTimeoutMs,
     };
   }
 
@@ -804,7 +835,7 @@ function resolveLaunch(workspaceDir, packageDir, env, { devMode, forceSourceBuil
       args: [],
       cwd: workspaceDir,
       env,
-      healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+      healthTimeoutMs: defaultHealthTimeoutMs,
     };
   }
 
@@ -833,7 +864,7 @@ function resolveLaunch(workspaceDir, packageDir, env, { devMode, forceSourceBuil
     args: [],
     cwd: workspaceDir,
     env,
-    healthTimeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
+    healthTimeoutMs: defaultHealthTimeoutMs,
   };
 }
 

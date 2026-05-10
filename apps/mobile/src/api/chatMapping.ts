@@ -86,7 +86,18 @@ function readStringArray(value: unknown): string[] {
 }
 
 function readNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const numeric = Number(value.trim());
+    if (Number.isFinite(numeric)) {
+      return numeric;
+    }
+  }
+
+  return null;
 }
 
 function readFileChangePaths(item: Record<string, unknown>): string[] {
@@ -123,11 +134,7 @@ export function toPreview(value: string): string {
   return `${collapsed.slice(0, 177)}...`;
 }
 
-function unixSecondsToIso(value: number | undefined): string {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return new Date().toISOString();
-  }
-
+function unixSecondsToIso(value: number): string {
   return new Date(value * 1000).toISOString();
 }
 
@@ -291,8 +298,10 @@ export function mapChatSummary(raw: RawThread): ChatSummary | null {
     return null;
   }
 
-  const createdAt = unixSecondsToIso(raw.createdAt);
-  const updatedAt = unixSecondsToIso(raw.updatedAt);
+  const createdAtSeconds = raw.createdAt ?? raw.updatedAt ?? 0;
+  const updatedAtSeconds = raw.updatedAt ?? raw.createdAt ?? createdAtSeconds;
+  const createdAt = unixSecondsToIso(createdAtSeconds);
+  const updatedAt = unixSecondsToIso(updatedAtSeconds);
   const turns = Array.isArray(raw.turns) ? raw.turns : [];
   const sourceMetadata = readThreadSourceMetadata(raw.source);
 

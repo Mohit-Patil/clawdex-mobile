@@ -1,6 +1,21 @@
 import { mapChat, toRawThread } from '../chatMapping';
 
 describe('chatMapping', () => {
+  it('falls back to createdAt for missing updatedAt instead of using the current time', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_created_only',
+        preview: 'created only',
+        createdAt: 1700000000,
+        status: { type: 'idle' },
+        turns: [],
+      })
+    );
+
+    expect(chat.createdAt).toBe('2023-11-14T22:13:20.000Z');
+    expect(chat.updatedAt).toBe('2023-11-14T22:13:20.000Z');
+  });
+
   it('maps command execution items into system trace messages', () => {
     const chat = mapChat(
       toRawThread({
