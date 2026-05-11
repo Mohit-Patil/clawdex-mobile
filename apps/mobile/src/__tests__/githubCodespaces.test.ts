@@ -470,25 +470,45 @@ describe('githubCodespaces helpers', () => {
   });
 
   it('publishes the bridge ports through the Codespaces tunnel API', async () => {
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        text: jest.fn().mockResolvedValue(JSON.stringify({
-          name: 'octocat-space',
-          connection: {
-            tunnelProperties: {
-              tunnelId: 'tunnel-id',
-              clusterId: 'use',
-              managePortsAccessToken: 'tunnel-token',
+    const fetchMock = jest.fn((url: string, init?: RequestInit) => {
+      if (url === 'https://api.github.com/user/codespaces/octocat%20space?internal=true&refresh=true') {
+        return Promise.resolve({
+          ok: true,
+          text: jest.fn().mockResolvedValue(JSON.stringify({
+            name: 'octocat-space',
+            connection: {
+              tunnelProperties: {
+                tunnelId: 'tunnel-id',
+                clusterId: 'use',
+                managePortsAccessToken: 'tunnel-token',
+              },
             },
-          },
-        })),
-      } as unknown as Response)
-      .mockResolvedValue({
+          })),
+        } as unknown as Response);
+      }
+
+      if (init?.method === 'GET') {
+        return Promise.resolve({
+          ok: true,
+          text: jest.fn().mockResolvedValue(JSON.stringify({
+            accessControl: {
+              entries: [
+                {
+                  type: 'Anonymous',
+                  subjects: [],
+                  scopes: ['connect'],
+                },
+              ],
+            },
+          })),
+        } as unknown as Response);
+      }
+
+      return Promise.resolve({
         ok: true,
         text: jest.fn().mockResolvedValue(''),
       } as unknown as Response);
+    });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await publishGitHubCodespacePorts('ghu_token', 'octocat space', [8787, 8788, 8787]);
@@ -531,12 +551,35 @@ describe('githubCodespaces helpers', () => {
               },
             ],
           },
+          options: {
+            isGloballyAvailable: true,
+          },
           portForwardingUris: null,
           inspectionUri: '',
         }),
       })
     );
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      6,
+      'https://use.rel.tunnels.api.visualstudio.com/tunnels/tunnel-id/ports/8787?includePorts=true&api-version=2023-09-27-preview',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          Authorization: 'Tunnel tunnel-token',
+        }),
+      })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      7,
+      'https://use.rel.tunnels.api.visualstudio.com/tunnels/tunnel-id/ports/8788?includePorts=true&api-version=2023-09-27-preview',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          Authorization: 'Tunnel tunnel-token',
+        }),
+      })
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 
   it('includes the GitHub API status on failed Codespace lookups', async () => {

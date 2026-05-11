@@ -7,6 +7,8 @@ const GITHUB_API_VERSION = '2022-11-28';
 const GITHUB_ACCESS_TOKEN_REFRESH_BUFFER_MS = 90_000;
 const GITHUB_CODESPACE_DEFAULT_IDLE_TIMEOUT_MINUTES = 45;
 const GITHUB_INSTALLATION_TOKEN_TIMEOUT_MS = 30_000;
+const GITHUB_CODESPACES_PORT_PUBLIC_TIMEOUT_MS = 30_000;
+const GITHUB_CODESPACES_PORT_PUBLIC_POLL_MS = 1_000;
 
 export interface GitHubDeviceCodeGrant {
   deviceCode: string;
@@ -544,6 +546,12 @@ export async function publishGitHubCodespacePorts(
       publishGitHubCodespacePort(baseUrl, tunnelId, managePortsAccessToken, port)
     )
   );
+  await waitForGitHubCodespacePortsPublic(
+    baseUrl,
+    tunnelId,
+    managePortsAccessToken,
+    normalizedPorts
+  );
 }
 
 export async function deleteGitHubCodespace(
@@ -1037,10 +1045,93 @@ async function publishGitHubCodespacePort(
           },
         ],
       },
+      options: {
+        isGloballyAvailable: true,
+      },
       portForwardingUris: null,
       inspectionUri: '',
     },
   });
+}
+
+async function waitForGitHubCodespacePortsPublic(
+  baseUrl: string,
+  tunnelId: string,
+  managePortsAccessToken: string,
+  ports: number[]
+): Promise<void> {
+  const pendingPorts = new Set(ports);
+  const lastStatusByPort = new Map<number, string>();
+  const startedAt = Date.now();
+
+  while (pendingPorts.size > 0 && Date.now() - startedAt <= GITHUB_CODESPACES_PORT_PUBLIC_TIMEOUT_MS) {
+    await Promise.all(
+      [...pendingPorts].map(async (port) => {
+        const payload = await fetchGitHubCodespacePort(
+          baseUrl,
+          tunnelId,
+          managePortsAccessToken,
+          port
+        );
+        if (isGitHubCodespaceTunnelPortPublic(payload)) {
+          pendingPorts.delete(port);
+          lastStatusByPort.delete(port);
+          return;
+        }
+        lastStatusByPort.set(port, describeGitHubCodespaceTunnelPortVisibility(payload));
+      })
+    );
+
+    if (pendingPorts.size === 0) {
+      return;
+    }
+
+    await sleep(GITHUB_CODESPACES_PORT_PUBLIC_POLL_MS);
+  }
+
+  const details = [...pendingPorts]
+    .map((port) => `${String(port)} ${lastStatusByPort.get(port) ?? 'was not public'}`)
+    .join(', ');
+  throw new Error(`GitHub did not make Codespaces port(s) public: ${details}.`);
+}
+
+async function fetchGitHubCodespacePort(
+  baseUrl: string,
+  tunnelId: string,
+  managePortsAccessToken: string,
+  port: number
+): Promise<unknown> {
+  const pathname = `/tunnels/${encodeURIComponent(tunnelId)}/ports/${String(port)}?includePorts=true&api-version=2023-09-27-preview`;
+  return await githubTunnelApiRequest(`${baseUrl}${pathname}`, managePortsAccessToken);
+}
+
+function isGitHubCodespaceTunnelPortPublic(payload: unknown): boolean {
+  const record = asRecord(payload);
+  const accessControl = asRecord(record?.accessControl);
+  const entries = Array.isArray(accessControl?.entries) ? accessControl.entries : [];
+  return entries.some((entry) => {
+    const entryRecord = asRecord(entry);
+    if (!entryRecord || entryRecord.type !== 'Anonymous') {
+      return false;
+    }
+    const scopes = Array.isArray(entryRecord.scopes) ? entryRecord.scopes : [];
+    return scopes.includes('connect');
+  });
+}
+
+function describeGitHubCodespaceTunnelPortVisibility(payload: unknown): string {
+  const record = asRecord(payload);
+  const accessControl = asRecord(record?.accessControl);
+  const entries = Array.isArray(accessControl?.entries) ? accessControl.entries : [];
+  if (entries.length === 0) {
+    return 'has no tunnel access-control entries';
+  }
+  const entryTypes = entries
+    .map((entry) => asRecord(entry)?.type)
+    .filter((entryType): entryType is string => typeof entryType === 'string' && entryType.length > 0);
+  return entryTypes.length > 0
+    ? `is still restricted to ${entryTypes.join('/')}`
+    : 'is still restricted';
 }
 
 async function githubTunnelApiRequest(

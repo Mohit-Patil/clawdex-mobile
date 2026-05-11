@@ -3373,6 +3373,9 @@ async function waitForBridgeReady(bridgeUrl: string, accessToken: string): Promi
       }
       if (healthResponse.ok) {
         const health = await readBridgeHealthPayload(healthResponse);
+        if (health?.tunnelAuth === true) {
+          throw new Error(CODESPACES_PRIVATE_PORT_ERROR);
+        }
         if (health?.status === 'ok') {
           await verifyBridgeRpcReady(bridgeUrl, accessToken);
           return;
@@ -3452,13 +3455,31 @@ function isCodespacesTunnelAuthResponse(response: Response, bridgeUrl: string): 
 
 async function readBridgeHealthPayload(
   response: Response
-): Promise<{ status?: unknown } | null> {
+): Promise<{ status?: unknown; tunnelAuth?: boolean } | null> {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (contentType && !contentType.includes('application/json')) {
+    const text = await response.text().catch(() => '');
+    if (isCodespacesPortForwardingHtml(text)) {
+      return { tunnelAuth: true };
+    }
+    return null;
+  }
+
   try {
     const payload = (await response.json()) as { status?: unknown };
     return payload && typeof payload === 'object' ? payload : null;
   } catch {
     return null;
   }
+}
+
+function isCodespacesPortForwardingHtml(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    normalized.includes('github.com/codespaces/auth') ||
+    normalized.includes('pf-signin') ||
+    normalized.includes('connecting to the forwarded port')
+  );
 }
 
 async function verifyBridgeRpcReady(bridgeUrl: string, accessToken: string): Promise<void> {
