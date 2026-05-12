@@ -78,12 +78,12 @@ const SETUP_STAGES = [
   },
 ] as const;
 const INTRO_ENGINE_MARKS = [
-  { label: 'Codex', logo: codexMarkPng },
-  { label: 'Cursor', logo: cursorMarkPng },
-  { label: 'OpenCode', logo: opencodeMarkPng },
+  { label: 'Codex', logo: codexMarkPng, tint: true, wordmark: true },
+  { label: 'Cursor', logo: cursorMarkPng, tint: false, wordmark: false },
+  { label: 'OpenCode', logo: opencodeMarkPng, tint: false, wordmark: false },
 ] as const;
-const INTRO_ENGINE_ROTATION_MS = 2200;
-const INTRO_ENGINE_FADE_MS = 180;
+const INTRO_ENGINE_ROTATION_MS = 1450;
+const INTRO_ENGINE_FADE_MS = 120;
 
 export function OnboardingScreen({
   mode = 'initial',
@@ -539,20 +539,37 @@ export function OnboardingScreen({
                       <Animated.View
                         style={[styles.introHeroEngineWord, introEngineAnimatedStyle]}
                       >
-                        <View style={styles.introHeroEngineLogoFrame}>
+                        <View
+                          style={[
+                            styles.introHeroEngineLogoFrame,
+                            introEngineMark.wordmark
+                              ? styles.introHeroEngineWordmarkFrame
+                              : null,
+                          ]}
+                        >
                           <Image
                             source={introEngineMark.logo}
                             resizeMode="contain"
-                            style={styles.introHeroEngineLogo}
+                            style={[
+                              styles.introHeroEngineLogo,
+                              introEngineMark.wordmark
+                                ? styles.introHeroEngineWordmarkLogo
+                                : null,
+                              introEngineMark.tint
+                                ? { tintColor: theme.colors.textPrimary }
+                                : null,
+                            ]}
                           />
                         </View>
-                        <Text
-                          style={styles.introHeroEngineLabel}
-                          numberOfLines={1}
-                          adjustsFontSizeToFit
-                        >
-                          {introEngineMark.label}
-                        </Text>
+                        {introEngineMark.wordmark ? null : (
+                          <Text
+                            style={styles.introHeroEngineLabel}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                          >
+                            {introEngineMark.label}
+                          </Text>
+                        )}
                       </Animated.View>
                       <Text style={styles.introHeroTitleTail}>on your phone</Text>
                     </View>
@@ -1298,9 +1315,20 @@ const createStyles = (theme: AppTheme) => {
     backgroundColor: theme.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.74)',
     overflow: 'hidden',
   },
+  introHeroEngineWordmarkFrame: {
+    width: 128,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+  },
   introHeroEngineLogo: {
     width: 28,
     height: 28,
+  },
+  introHeroEngineWordmarkLogo: {
+    width: 120,
+    height: 50,
   },
   introHeroEngineLabel: {
     ...theme.typography.largeTitle,
