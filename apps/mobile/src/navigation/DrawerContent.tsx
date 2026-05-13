@@ -19,7 +19,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ChatEngine, ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
-import { getChatEngineLabel, resolveChatEngine } from '../chatEngines';
+import { getChatEngineLabel } from '../chatEngines';
 import { BrandMark } from '../components/BrandMark';
 import { ChatEngineIcon } from '../components/ChatEngineIcon';
 import {
@@ -218,13 +218,6 @@ export const DrawerContent = memo(function DrawerContentComponent({
   const runningChatCount = useMemo(
     () => countDrawerRunningChats(chats, runIndicatorsByThread),
     [chats, runIndicatorsByThread]
-  );
-  const showEngineBadges = useMemo(
-    () =>
-      visibleChatSections.some((section) =>
-        section.data.some((item) => resolveChatEngine(item.chat.engine) !== 'codex')
-      ),
-    [visibleChatSections]
   );
 
   const showAllWorkspaceChats = useCallback(
@@ -1323,9 +1316,6 @@ export const DrawerContent = memo(function DrawerContentComponent({
                 const isRunning = isDrawerChatRunning(chat, runIndicatorsByThread);
                 const isSubAgent = item.indentLevel > 0 || Boolean(chat.parentThreadId);
                 const isPinnedChat = pinnedChatIdSet.has(chat.id);
-                const chatEngine = resolveChatEngine(chat.engine);
-                const showEngineIcon =
-                  showEngineBadges || chatEngine !== 'codex';
                 const chatSubtitle = getDrawerChatSubtitle(chat);
                 const chatIndent = Math.min(item.indentLevel, 4) * 14;
                 return (
@@ -1391,13 +1381,11 @@ export const DrawerContent = memo(function DrawerContentComponent({
                                 style={styles.chatPinnedIcon}
                               />
                             ) : null}
-                            {showEngineIcon ? (
-                              <ChatEngineIcon
-                                engine={chat.engine}
-                                size={16}
-                                style={styles.chatEngineIcon}
-                              />
-                            ) : null}
+                            <ChatEngineIcon
+                              engine={chat.engine}
+                              size={16}
+                              style={styles.chatEngineIcon}
+                            />
                             <Text
                               style={[
                                 styles.chatAge,
