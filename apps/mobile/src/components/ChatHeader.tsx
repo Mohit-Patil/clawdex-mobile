@@ -3,7 +3,7 @@ import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ChatEngine } from '../api/types';
-import { getChatEngineBadgeColors } from '../chatEngines';
+import { ChatEngineIcon } from './ChatEngineIcon';
 import { useAppTheme, type AppTheme } from '../theme';
 
 interface ChatHeaderProps {
@@ -28,10 +28,6 @@ export function ChatHeader({
   const theme = useAppTheme();
   const { colors } = theme;
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const engineBadgeColors = useMemo(
-    () => (engineLabel ? getChatEngineBadgeColors(engine, theme.mode) : null),
-    [engine, engineLabel, theme.mode]
-  );
   const titleDisplay = title.trim() || 'New chat';
 
   return (
@@ -50,26 +46,7 @@ export function ChatHeader({
               <Text numberOfLines={1} style={styles.modelName}>
                 {titleDisplay}
               </Text>
-              {engineLabel ? (
-                <View
-                  style={[
-                    styles.engineBadge,
-                    engineBadgeColors && {
-                      backgroundColor: engineBadgeColors.backgroundColor,
-                      borderColor: engineBadgeColors.borderColor,
-                    },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.engineBadgeText,
-                      engineBadgeColors && { color: engineBadgeColors.textColor },
-                    ]}
-                  >
-                    {engineLabel}
-                  </Text>
-                </View>
-              ) : null}
+              {engineLabel ? <ChatEngineIcon engine={engine} size={18} /> : null}
               <Ionicons name="chevron-down" size={12} color={colors.textMuted} />
             </Pressable>
           ) : (
@@ -77,26 +54,7 @@ export function ChatHeader({
               <Text numberOfLines={1} style={styles.modelName}>
                 {titleDisplay}
               </Text>
-              {engineLabel ? (
-                <View
-                  style={[
-                    styles.engineBadge,
-                    engineBadgeColors && {
-                      backgroundColor: engineBadgeColors.backgroundColor,
-                      borderColor: engineBadgeColors.borderColor,
-                    },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.engineBadgeText,
-                      engineBadgeColors && { color: engineBadgeColors.textColor },
-                    ]}
-                  >
-                    {engineLabel}
-                  </Text>
-                </View>
-              ) : null}
+              {engineLabel ? <ChatEngineIcon engine={engine} size={18} /> : null}
             </View>
           )}
           <View style={{ flex: 1 }} />
@@ -156,21 +114,5 @@ const createStyles = (theme: AppTheme) =>
       fontSize: 17,
       color: theme.colors.textPrimary,
       flexShrink: 1,
-    },
-    engineBadge: {
-      borderRadius: 999,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: theme.isDark ? theme.colors.borderHighlight : theme.colors.border,
-      backgroundColor: theme.isDark ? theme.colors.bgItem : theme.colors.bgInput,
-      paddingHorizontal: theme.spacing.xs + 2,
-      paddingVertical: 2,
-    },
-    engineBadgeText: {
-      ...theme.typography.caption,
-      color: theme.isDark ? theme.colors.textSecondary : theme.colors.textPrimary,
-      fontSize: 10,
-      fontWeight: '600',
-      letterSpacing: 0,
-      textTransform: 'uppercase',
     },
   });

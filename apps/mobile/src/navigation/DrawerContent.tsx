@@ -19,8 +19,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { HostBridgeApiClient } from '../api/client';
 import type { ChatEngine, ChatSummary, RpcNotification } from '../api/types';
 import type { HostBridgeWsClient } from '../api/ws';
-import { getChatEngineBadgeColors, getChatEngineLabel, resolveChatEngine } from '../chatEngines';
+import { getChatEngineLabel, resolveChatEngine } from '../chatEngines';
 import { BrandMark } from '../components/BrandMark';
+import { ChatEngineIcon } from '../components/ChatEngineIcon';
 import {
   DEFAULT_DRAWER_CHAT_ENGINES,
   filterDrawerChats,
@@ -1323,11 +1324,8 @@ export const DrawerContent = memo(function DrawerContentComponent({
                 const isSubAgent = item.indentLevel > 0 || Boolean(chat.parentThreadId);
                 const isPinnedChat = pinnedChatIdSet.has(chat.id);
                 const chatEngine = resolveChatEngine(chat.engine);
-                const showEngineBadge =
+                const showEngineIcon =
                   showEngineBadges || chatEngine !== 'codex';
-                const engineBadgeColors = showEngineBadge
-                  ? getChatEngineBadgeColors(chat.engine, theme.mode)
-                  : null;
                 const chatSubtitle = getDrawerChatSubtitle(chat);
                 const chatIndent = Math.min(item.indentLevel, 4) * 14;
                 return (
@@ -1393,27 +1391,12 @@ export const DrawerContent = memo(function DrawerContentComponent({
                                 style={styles.chatPinnedIcon}
                               />
                             ) : null}
-                            {engineBadgeColors ? (
-                              <View
-                                style={[
-                                  styles.engineBadge,
-                                  {
-                                    backgroundColor: engineBadgeColors.backgroundColor,
-                                    borderColor: engineBadgeColors.borderColor,
-                                  },
-                                ]}
-                              >
-                                <Text
-                                  style={[
-                                    styles.engineBadgeText,
-                                    {
-                                      color: engineBadgeColors.textColor,
-                                    },
-                                  ]}
-                                >
-                                  {getChatEngineLabel(chat.engine)}
-                                </Text>
-                              </View>
+                            {showEngineIcon ? (
+                              <ChatEngineIcon
+                                engine={chat.engine}
+                                size={16}
+                                style={styles.chatEngineIcon}
+                              />
                             ) : null}
                             <Text
                               style={[
@@ -2305,6 +2288,9 @@ const createStyles = (theme: AppTheme) => {
     flexShrink: 0,
     opacity: 0.72,
   },
+  chatEngineIcon: {
+    opacity: 0.92,
+  },
   chatTitle: {
     ...theme.typography.body,
     color: theme.colors.textSecondary,
@@ -2327,20 +2313,6 @@ const createStyles = (theme: AppTheme) => {
   },
   chatSubtitleSelected: {
     color: theme.colors.textSecondary,
-  },
-  engineBadge: {
-    borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    flexShrink: 0,
-  },
-  engineBadgeText: {
-    ...theme.typography.caption,
-    fontSize: 9,
-    fontWeight: '700',
-    letterSpacing: 0,
-    textTransform: 'uppercase',
   },
   chatAge: {
     ...theme.typography.caption,
