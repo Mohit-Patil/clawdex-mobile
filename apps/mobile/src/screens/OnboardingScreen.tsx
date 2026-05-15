@@ -79,6 +79,7 @@ const INTRO_ENGINE_MARKS = [
 ] as const;
 const INTRO_ENGINE_ROTATION_MS = 1450;
 const INTRO_ENGINE_FADE_MS = 120;
+const CONNECTION_CHECK_TIMEOUT_MS = 2_000;
 
 export function OnboardingScreen({
   mode = 'initial',
@@ -310,57 +311,91 @@ export function OnboardingScreen({
 
   const runConnectionCheck = useCallback(
     async (normalized: string, token: string | null): Promise<boolean> => {
-    setCheckingConnection(true);
-    setConnectionCheck({ kind: 'idle' });
+      setCheckingConnection(true);
+      setConnectionCheck({ kind: 'idle' });
 
-    let probeClient: HostBridgeWsClient | null = null;
-    let healthCheckError: string | null = null;
-    try {
-      const headers: Record<string, string> | undefined = token
-        ? { Authorization: `Bearer ${token}` }
-        : undefined;
-      const healthUrl = toBridgeHealthUrl(normalized);
+      let probeClient: HostBridgeWsClient | null = null;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      let timedOut = false;
+      const abortController =
+        typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeoutMessage = 'connection timed out after 2 seconds';
+      const disconnectProbe = () => {
+        const client: HostBridgeWsClient | null = probeClient;
+        client?.disconnect();
+      };
+
       try {
-        const response = await fetch(healthUrl, { method: 'GET', headers });
-        if (response.status !== 200) {
-          healthCheckError = `health returned ${response.status}`;
+        const probe = async (): Promise<string | null> => {
+          let healthCheckError: string | null = null;
+          const headers: Record<string, string> | undefined = token
+            ? { Authorization: `Bearer ${token}` }
+            : undefined;
+          const healthUrl = toBridgeHealthUrl(normalized);
+          try {
+            const response = await fetch(healthUrl, {
+              method: 'GET',
+              headers,
+              signal: abortController?.signal,
+            });
+            if (response.status !== 200) {
+              healthCheckError = `health returned ${response.status}`;
+            }
+          } catch (error) {
+            if (timedOut) {
+              throw new Error(timeoutMessage);
+            }
+            healthCheckError = (error as Error).message || 'network request failed';
+          }
+
+          if (timedOut) {
+            throw new Error(timeoutMessage);
+          }
+
+          probeClient = new HostBridgeWsClient(normalized, {
+            authToken: token,
+            allowQueryTokenAuth,
+            requestTimeoutMs: CONNECTION_CHECK_TIMEOUT_MS,
+          });
+          const rpcHealth = await probeClient.request<{ status?: string }>('bridge/health/read');
+          if (rpcHealth?.status !== 'ok') {
+            throw new Error('authenticated RPC probe returned unexpected response');
+          }
+          return healthCheckError;
+        };
+
+        const healthCheckError = await Promise.race([
+          probe(),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => {
+              timedOut = true;
+              abortController?.abort();
+              disconnectProbe();
+              reject(new Error(timeoutMessage));
+            }, CONNECTION_CHECK_TIMEOUT_MS);
+          }),
+        ]);
+
+        setConnectionCheck({
+          kind: 'success',
+          message: healthCheckError
+            ? 'Connected. Authenticated RPC verified; /health endpoint did not return 200.'
+            : 'Connected. URL and token both verified.',
+        });
+        return true;
+      } catch {
+        setConnectionCheck({
+          kind: 'error',
+          message: 'Connection error. Check the URL and token, then try again.',
+        });
+        return false;
+      } finally {
+        if (timeout) {
+          clearTimeout(timeout);
         }
-      } catch (error) {
-        healthCheckError = (error as Error).message || 'network request failed';
+        disconnectProbe();
+        setCheckingConnection(false);
       }
-
-      probeClient = new HostBridgeWsClient(normalized, {
-        authToken: token,
-        allowQueryTokenAuth,
-        requestTimeoutMs: 10_000,
-      });
-      const rpcHealth = await probeClient.request<{ status?: string }>('bridge/health/read');
-      if (rpcHealth?.status !== 'ok') {
-        throw new Error('authenticated RPC probe returned unexpected response');
-      }
-
-      setConnectionCheck({
-        kind: 'success',
-        message: healthCheckError
-          ? 'Connected. Authenticated RPC verified; /health endpoint did not return 200.'
-          : 'Connected. URL and token both verified.',
-      });
-      return true;
-    } catch (error) {
-      const baseMessage = (error as Error).message || 'request failed';
-      const hint =
-        Platform.OS === 'android' && baseMessage.includes('Network request failed')
-          ? ' (If using Android emulator, use http://10.0.2.2:8787 for localhost bridge.)'
-          : '';
-      setConnectionCheck({
-        kind: 'error',
-      message: `Connection verification failed: ${baseMessage}${hint}`,
-      });
-      return false;
-    } finally {
-      probeClient?.disconnect();
-      setCheckingConnection(false);
-    }
     },
     [allowQueryTokenAuth]
   );
