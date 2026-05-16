@@ -15,6 +15,9 @@ const CALLBACK_PUBLIC_HOST = 'localhost';
 const CALLBACK_PORT = 1455;
 const CALLBACK_TIMEOUT_MS = 10 * 60 * 1000;
 const TOKEN_STORE_KEY = 'chatgpt-auth-tokens-v1';
+const TOKEN_STORE_OPTIONS: SecureStore.SecureStoreOptions = {
+  keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+};
 
 export interface ChatGptAuthTokenBundle {
   accessToken: string;
@@ -233,7 +236,7 @@ function ensureSupportedPlatform() {
 }
 
 async function saveTokenBundle(tokens: ChatGptAuthTokenBundle): Promise<void> {
-  await SecureStore.setItemAsync(TOKEN_STORE_KEY, JSON.stringify(tokens));
+  await SecureStore.setItemAsync(TOKEN_STORE_KEY, JSON.stringify(tokens), TOKEN_STORE_OPTIONS);
 }
 
 async function completeAuthorization(input: {

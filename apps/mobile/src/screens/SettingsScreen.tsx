@@ -271,13 +271,16 @@ export function SettingsScreen({
     () =>
       mergeChatEngines(
         runtimeAvailableEngines,
-        defaultChatEngine,
         bridgeCapabilities?.activeEngine
       ),
-    [bridgeCapabilities?.activeEngine, defaultChatEngine, runtimeAvailableEngines]
+    [bridgeCapabilities?.activeEngine, runtimeAvailableEngines]
   );
   const normalizedDefaultChatEngine =
-    defaultChatEngine ?? bridgeCapabilities?.activeEngine ?? 'codex';
+    defaultChatEngine && availableEngines.includes(defaultChatEngine)
+      ? defaultChatEngine
+      : bridgeCapabilities?.activeEngine && availableEngines.includes(bridgeCapabilities.activeEngine)
+        ? bridgeCapabilities.activeEngine
+        : availableEngines[0] ?? 'codex';
   const selectedEngineDefaults = defaultEngineSettings?.[normalizedDefaultChatEngine] ?? null;
   const normalizedDefaultModelId = normalizeModelId(selectedEngineDefaults?.modelId);
   const normalizedDefaultEffort = normalizeReasoningEffort(selectedEngineDefaults?.effort);

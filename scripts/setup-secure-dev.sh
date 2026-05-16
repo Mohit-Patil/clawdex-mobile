@@ -353,6 +353,7 @@ if has_local_mobile_workspace; then
   upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_MAC_BRIDGE_TOKEN" "$BRIDGE_TOKEN"
   upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_QUERY_TOKEN_AUTH" "true"
   upsert_env_key "$MOBILE_ENV_FILE" "EXPO_PUBLIC_ALLOW_INSECURE_REMOTE_BRIDGE" "true"
+  chmod 600 "$MOBILE_ENV_FILE"
 fi
 
 echo "Secure dev setup complete."

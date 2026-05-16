@@ -738,12 +738,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const persistedDefaultChatEngine = resolveChatEngine(defaultChatEngine ?? 'codex');
     const availableNewChatEngines = mergeChatEngines(
       bridgeCapabilities?.availableEngines ?? [],
-      persistedDefaultChatEngine,
       bridgeCapabilities?.activeEngine
     );
     const preferredNewChatEngine = availableNewChatEngines.includes(pendingChatEngine)
       ? pendingChatEngine
-      : persistedDefaultChatEngine;
+      : availableNewChatEngines.includes(persistedDefaultChatEngine)
+        ? persistedDefaultChatEngine
+        : availableNewChatEngines[0] ?? 'codex';
     const activeChatEngine = selectedChat?.engine
       ? resolveChatEngine(selectedChat.engine)
       : preferredNewChatEngine;
@@ -2223,9 +2224,14 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         : null;
     const activeModel =
       selectedModel ?? preferredDefaultModel ?? serverDefaultModel ?? null;
+    const unresolvedDefaultModelId =
+      !selectedChatId && modelOptions.length === 0
+        ? selectedModelId ?? preferredDefaultModelId
+        : null;
     const activeModelId =
       selectedModel?.id ??
       preferredDefaultModel?.id ??
+      unresolvedDefaultModelId ??
       serverDefaultModelId;
     const effortPickerModel = effortPickerModelId
       ? modelOptions.find((model) => model.id === effortPickerModelId) ?? null
