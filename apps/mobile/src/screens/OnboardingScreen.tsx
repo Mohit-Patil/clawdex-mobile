@@ -79,7 +79,7 @@ const INTRO_ENGINE_MARKS = [
 ] as const;
 const INTRO_ENGINE_ROTATION_MS = 1450;
 const INTRO_ENGINE_FADE_MS = 120;
-const CONNECTION_CHECK_TIMEOUT_MS = 2_000;
+const CONNECTION_CHECK_TIMEOUT_MS = 7_000;
 
 export function OnboardingScreen({
   mode = 'initial',
@@ -319,7 +319,7 @@ export function OnboardingScreen({
       let timedOut = false;
       const abortController =
         typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timeoutMessage = 'connection timed out after 2 seconds';
+      const timeoutMessage = 'connection timed out after 7 seconds';
       const disconnectProbe = () => {
         const client: HostBridgeWsClient | null = probeClient;
         client?.disconnect();
