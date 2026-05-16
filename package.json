@@ -1,7 +1,7 @@
 {
   "name": "clawdex-mobile",
-  "version": "5.1.3-internal.11",
-  "description": "Private-network mobile bridge and CLI for Codex and OpenCode",
+  "version": "5.1.3-internal.12",
+  "description": "Private-network mobile bridge and CLI for Codex, OpenCode, and Cursor",
   "keywords": [
     "codex",
     "opencode",
@@ -20,10 +20,13 @@
     "access": "public"
   },
   "dependencies": {
-    "qrcode-terminal": "^0.12.0"
+    "@cursor/sdk": "1.0.11",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^3.25.0"
   },
   "bin": {
-    "clawdex": "./bin/clawdex.js"
+    "clawdex": "bin/clawdex.js",
+    "cursor-app-server": "services/cursor-app-server/dist/stdio.js"
   },
   "files": [
     "CHANGELOG.md",
@@ -38,6 +41,9 @@
     "scripts/setup-wizard.sh",
     "scripts/start-bridge-secure.js",
     "scripts/stop-services.sh",
+    "services/cursor-app-server/dist",
+    "services/cursor-app-server/README.md",
+    "services/cursor-app-server/package.json",
     "services/rust-bridge/Cargo.lock",
     "services/rust-bridge/Cargo.toml",
     "services/rust-bridge/src",
@@ -67,6 +73,7 @@
     "secure:bridge:dev": "node ./scripts/start-bridge-secure.js --dev",
     "bridge:ts": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/mac-bridge dev",
     "version:sync": "node scripts/sync-versions.js",
+    "prepack": "npm run build -w @clawdex/cursor-app-server",
     "build": "npm run --workspaces build",
     "typecheck": "npm run --workspaces typecheck",
     "lint": "npm run --workspaces lint",

@@ -18,7 +18,7 @@ From a source checkout, the equivalent command is:
 npm run setup:wizard -- --engines codex,opencode,cursor
 ```
 
-That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` into `.env.secure`, so the bridge starts the selected backends and the mobile app can control them from one UI. When Cursor is selected, `clawdex init` asks for the Cursor API key and saves it in `.env.secure`.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` into `.env.secure`, so the bridge starts the selected backends and the mobile app can control them from one UI. When Cursor is selected, `clawdex init` uses the bundled `cursor-app-server`, asks for the Cursor API key, and saves it in `.env.secure`.
 
 If you want only one harness, use `--engine codex`, `--engine opencode`, or `--engine cursor`.
 
@@ -199,7 +199,7 @@ npm run teardown -- --yes
 | `BRIDGE_ACTIVE_ENGINE` | internal preferred routing backend used when multiple harnesses are enabled |
 | `BRIDGE_ENABLED_ENGINES` | selected harnesses to expose (`codex`, `opencode`, `cursor`, or a comma-separated mix) |
 | `OPENCODE_CLI_BIN` | opencode executable for dual-engine startup |
-| `CURSOR_APP_SERVER_BIN` | Cursor app-server executable, usually `cursor-app-server` |
+| `CURSOR_APP_SERVER_BIN` | Cursor app-server executable, usually the `cursor-app-server` binary bundled with `clawdex-mobile` |
 | `CURSOR_API_KEY` | Cursor API key used by the Cursor SDK harness; collected by `clawdex init` when Cursor is selected |
 | `CURSOR_MODEL` | optional Cursor model id for non-interactive host defaults; normal mobile chats send the selected model |
 | `BRIDGE_OPENCODE_HOST` | loopback host for spawned opencode server |

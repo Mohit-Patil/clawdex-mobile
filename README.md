@@ -25,7 +25,7 @@ Before you start:
 - `git`
 - `codex` in `PATH` for the default Codex flow
 - `opencode` in `PATH` if you want the OpenCode flow
-- `cursor-app-server` in `PATH` if you want the Cursor SDK flow
+- Cursor app-server is bundled with `clawdex-mobile` for the Cursor SDK flow
 
 Install the mobile app:
 
@@ -59,12 +59,11 @@ OpenCode and Cursor can run beside Codex from the same bridge.
 
 ```bash
 npm install -g opencode-ai
-npm install -g @clawdex/cursor-app-server
 npm install -g clawdex-mobile@latest
 clawdex init --engines codex,opencode,cursor
 ```
 
-That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` to `.env.secure`, so the mobile app can control the selected harnesses from one bridge. When Cursor is selected, `clawdex init` asks for the Cursor API key and saves it in `.env.secure`.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` to `.env.secure`, so the mobile app can control the selected harnesses from one bridge. When Cursor is selected, `clawdex init` uses the bundled `cursor-app-server`, asks for the Cursor API key, and saves it in `.env.secure`.
 
 Notes:
 

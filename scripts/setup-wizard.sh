@@ -1296,29 +1296,39 @@ ensure_cursor_app_server() {
   local existing_api_key=""
   local existing_model=""
   local provided_api_key="${CURSOR_API_KEY:-}"
+  local bundled_cursor_app_server_bin="$PACKAGE_ROOT/services/cursor-app-server/dist/stdio.js"
+  local resolved_cursor_app_server_bin=""
 
-  if [[ -f "$ROOT_DIR/services/cursor-app-server/package.json" ]]; then
+  if [[ -f "$PACKAGE_ROOT/services/cursor-app-server/src/stdio.ts" ]]; then
     info "Building Cursor app-server package."
     npm run build -w @clawdex/cursor-app-server
     hash -r
   fi
 
-  while ! command -v cursor-app-server >/dev/null 2>&1; do
+  if command -v cursor-app-server >/dev/null 2>&1; then
+    resolved_cursor_app_server_bin="$(command -v cursor-app-server)"
+  elif [[ -x "$bundled_cursor_app_server_bin" ]]; then
+    resolved_cursor_app_server_bin="$bundled_cursor_app_server_bin"
+  fi
+
+  while [[ -z "$resolved_cursor_app_server_bin" ]]; do
     warn "Cursor app-server command not found in PATH."
-    if confirm_prompt "Try installing @clawdex/cursor-app-server via npm now?" "N"; then
-      if npm install -g @clawdex/cursor-app-server; then
-        hash -r
-      else
-        warn "Automatic install failed."
-      fi
+    warn "Cursor app-server is bundled with clawdex-mobile. Reinstall or upgrade clawdex-mobile, then rerun setup."
+
+    if ! confirm_prompt "Retry Cursor app-server check?" "Y"; then
+      abort_wizard "Install or upgrade clawdex-mobile and rerun: clawdex init --engine cursor"
     fi
 
-    if ! command -v cursor-app-server >/dev/null 2>&1 && ! confirm_prompt "Retry Cursor app-server check?" "Y"; then
-      abort_wizard "Install @clawdex/cursor-app-server and rerun: clawdex init --engine cursor"
+    hash -r
+    if command -v cursor-app-server >/dev/null 2>&1; then
+      resolved_cursor_app_server_bin="$(command -v cursor-app-server)"
+    elif [[ -x "$bundled_cursor_app_server_bin" ]]; then
+      resolved_cursor_app_server_bin="$bundled_cursor_app_server_bin"
     fi
   done
 
-  ok "Found cursor-app-server: $(command -v cursor-app-server)"
+  CURSOR_APP_SERVER_BIN="${CURSOR_APP_SERVER_BIN:-$resolved_cursor_app_server_bin}"
+  ok "Found cursor-app-server: $CURSOR_APP_SERVER_BIN"
 
   existing_api_key="$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_API_KEY")"
   existing_model="$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_MODEL")"
