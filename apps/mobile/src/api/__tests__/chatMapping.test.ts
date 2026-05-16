@@ -39,6 +39,29 @@ describe('chatMapping', () => {
     expect(chat.lastError).toBe('model quota exceeded');
   });
 
+  it('maps top-level failed turn detail fields into lastError', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_failed_detail',
+        preview: 'failed',
+        createdAt: 1700000000,
+        updatedAt: 1700000001,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'failed',
+            detail: {
+              reason: 'app-server stream closed unexpectedly',
+            },
+          },
+        ],
+      })
+    );
+
+    expect(chat.status).toBe('error');
+    expect(chat.lastError).toBe('app-server stream closed unexpectedly');
+  });
+
   it('keeps a generic failed-turn fallback when no error detail is reported', () => {
     const chat = mapChat(
       toRawThread({
@@ -285,6 +308,46 @@ describe('chatMapping', () => {
     expect(systemMessages[2].content).toContain('custom output');
   });
 
+  it('maps Codex MCP and search function calls into readable timeline entries', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_function_call_specialized',
+        preview: 'search docs',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'function_call',
+                id: 'call_mcp',
+                name: 'mcp__computer_use__click',
+                arguments: JSON.stringify({ app: 'Simulator', x: 10, y: 20 }),
+              },
+              {
+                type: 'function_call',
+                id: 'call_search',
+                name: 'search_query',
+                arguments: JSON.stringify({
+                  search_query: [{ q: 'React Native FlatList maintainVisibleContentPosition' }],
+                }),
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages).toHaveLength(2);
+    expect(chat.messages[0].content).toContain('• Called tool `computer_use / click`');
+    expect(chat.messages[0].content).toContain('Input:');
+    expect(chat.messages[1].content).toContain(
+      '• Searched web for "React Native FlatList maintainVisibleContentPosition"'
+    );
+  });
+
   it('maps custom apply_patch calls into file change timeline entries', () => {
     const chat = mapChat(
       toRawThread({
@@ -323,6 +386,43 @@ describe('chatMapping', () => {
       '• Applied file changes to MainScreen.tsx'
     );
     expect(chat.messages[0].content).toContain('apps/mobile/src/screens/MainScreen.tsx');
+  });
+
+  it('includes apply_patch move destinations in file change timeline entries', () => {
+    const chat = mapChat(
+      toRawThread({
+        id: 'thr_patch_move',
+        preview: 'move',
+        createdAt: 1700000000,
+        updatedAt: 1700000002,
+        status: { type: 'idle' },
+        turns: [
+          {
+            status: 'completed',
+            items: [
+              {
+                type: 'custom_tool_call',
+                id: 'patch_move_call',
+                name: 'apply_patch',
+                input: [
+                  '*** Begin Patch',
+                  '*** Update File: apps/mobile/src/screens/OldName.tsx',
+                  '*** Move to: apps/mobile/src/screens/NewName.tsx',
+                  '@@',
+                  '-old',
+                  '+new',
+                  '*** End Patch',
+                ].join('\n'),
+              },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(chat.messages[0].content).toContain('OldName.tsx +1 more');
+    expect(chat.messages[0].content).toContain('apps/mobile/src/screens/OldName.tsx');
+    expect(chat.messages[0].content).toContain('apps/mobile/src/screens/NewName.tsx');
   });
 
   it('uses Cursor summary preview instead of generated Cursor chat names', () => {

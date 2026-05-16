@@ -388,7 +388,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       useState<WorkspacePickerPurpose>('default-start');
     const [workspaceRoots, setWorkspaceRoots] = useState<WorkspaceSummary[]>([]);
     const [workspaceBridgeRoot, setWorkspaceBridgeRoot] = useState<string | null>(null);
-    const [loadingWorkspaceRoots, setLoadingWorkspaceRoots] = useState(false);
+    const [, setLoadingWorkspaceRoots] = useState(false);
     const [workspaceBrowsePath, setWorkspaceBrowsePath] = useState<string | null>(null);
     const [workspaceBrowseParentPath, setWorkspaceBrowseParentPath] = useState<string | null>(
       null
@@ -7272,6 +7272,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
                       tone: 'idle',
                       title: 'Ready',
                     };
+              }
+
+              if (resolvedLatest.status === 'error') {
+                const failureDetail = resolvedLatest.lastError?.trim() || prev.detail;
+                return {
+                  tone: 'error',
+                  title: prev.tone === 'error' && prev.title ? prev.title : 'Turn failed',
+                  detail: failureDetail || undefined,
+                };
               }
 
               return {

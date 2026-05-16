@@ -85,6 +85,7 @@ export const ChatTranscriptView = memo(function ChatTranscriptView({
   const previousScrollOffsetYRef = useRef(0);
   const scrollingTowardOlderMessagesRef = useRef(false);
   const autoLoadOlderCheckpointRef = useRef<number | null>(null);
+  const visibleMessageCountRef = useRef(0);
 
   const transcriptView = useMemo(() => {
     const childVisibleMessages = getVisibleTranscriptMessages(
@@ -108,26 +109,19 @@ export const ChatTranscriptView = memo(function ChatTranscriptView({
     () => syncVisibleSubAgentStatuses(transcriptView.messages, agentThreadStatusById),
     [agentThreadStatusById, transcriptView.messages]
   );
-  const transcriptItems = useMemo(
-    () => buildTranscriptDisplayItems(visibleMessages),
-    [visibleMessages]
-  );
   const [visibleStartIndex, setVisibleStartIndex] = useState(() =>
-    getInitialVisibleMessageStartIndex(transcriptItems.length)
+    getInitialVisibleMessageStartIndex(visibleMessages.length)
+  );
+  const paginatedMessages = useMemo(
+    () => visibleMessages.slice(visibleStartIndex),
+    [visibleMessages, visibleStartIndex]
   );
   const paginatedTranscriptItems = useMemo(
-    () => transcriptItems.slice(visibleStartIndex),
-    [transcriptItems, visibleStartIndex]
+    () => buildTranscriptDisplayItems(paginatedMessages),
+    [paginatedMessages]
   );
   const displayMessages = useMemo(
     () => [...paginatedTranscriptItems].reverse(),
-    [paginatedTranscriptItems]
-  );
-  const paginatedMessages = useMemo(
-    () =>
-      paginatedTranscriptItems.flatMap((item) =>
-        item.kind === 'message' ? [item.message] : item.messages
-      ),
     [paginatedTranscriptItems]
   );
   const inlineChoiceSet = useMemo(
@@ -135,15 +129,19 @@ export const ChatTranscriptView = memo(function ChatTranscriptView({
     [inlineChoicesEnabled, paginatedMessages]
   );
   useEffect(() => {
-    setVisibleStartIndex(getInitialVisibleMessageStartIndex(transcriptItems.length));
-  }, [chat.id]);
+    visibleMessageCountRef.current = visibleMessages.length;
+  }, [visibleMessages.length]);
+
+  useEffect(() => {
+    setVisibleStartIndex(getInitialVisibleMessageStartIndex(visibleMessageCountRef.current));
+  }, [chat.id, showToolCalls]);
 
   useEffect(() => {
     setVisibleStartIndex((current) => {
-      const maxStartIndex = Math.max(transcriptItems.length - 1, 0);
+      const maxStartIndex = getInitialVisibleMessageStartIndex(visibleMessages.length);
       return current > maxStartIndex ? maxStartIndex : current;
     });
-  }, [transcriptItems.length]);
+  }, [visibleMessages.length]);
 
   const loadOlderMessages = useCallback(() => {
     setVisibleStartIndex((current) =>
@@ -232,7 +230,7 @@ export const ChatTranscriptView = memo(function ChatTranscriptView({
     [bottomInset, styles.messageListContent]
   );
   const liveTurnActive = chat.status === 'running';
-  const isLargeChat = transcriptItems.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
+  const isLargeChat = visibleMessages.length >= LARGE_CHAT_MESSAGE_COUNT_THRESHOLD;
   const keyExtractor = useCallback(
     (item: TranscriptDisplayItem) => (item.kind === 'message' ? item.renderKey : item.id),
     []

@@ -120,7 +120,7 @@ function isLegacyToolTimelineContent(content: string): boolean {
     return false;
   }
 
-  return !/^(reasoning|thinking|spawned sub-agent|sub-agent|task|compacted conversation context|conversation compacted)\b/i.test(
+  return !/^(reasoning|thinking|spawned sub-agent|spawning sub-agent|sub-agent|waiting on sub-agent|sent follow-up to sub-agent|closed sub-agent thread|updated sub-agent thread|task|compacted conversation context|conversation compacted)\b/i.test(
     title
   );
 }

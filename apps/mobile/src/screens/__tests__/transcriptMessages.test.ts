@@ -240,6 +240,44 @@ describe('buildTranscriptDisplayItems', () => {
     ]);
   });
 
+  it('keeps legacy untyped sub-agent lifecycle rows out of tool groups', () => {
+    const messages = [
+      message('u1', 'user', 'Review this'),
+      message('s1', 'system', '• Waiting on sub-agent\n  └ Thread: child'),
+      message('s2', 'system', '• Sent follow-up to sub-agent\n  └ Thread: child'),
+      message('s3', 'system', '• Closed sub-agent thread\n  └ Thread: child'),
+      message('a1', 'assistant', 'Done.'),
+    ];
+
+    expect(buildTranscriptDisplayItems(messages)).toEqual([
+      {
+        kind: 'message',
+        message: messages[0],
+        renderKey: 'user-1-Review this',
+      },
+      {
+        kind: 'message',
+        message: messages[1],
+        renderKey: 's1',
+      },
+      {
+        kind: 'message',
+        message: messages[2],
+        renderKey: 's2',
+      },
+      {
+        kind: 'message',
+        message: messages[3],
+        renderKey: 's3',
+      },
+      {
+        kind: 'message',
+        message: messages[4],
+        renderKey: 'a1',
+      },
+    ]);
+  });
+
   it('keeps compaction rows separate from grouped tool activity', () => {
     const messages = [
       message('t1', 'system', '• Ran `pwd`', { systemKind: 'tool' }),

@@ -1,4 +1,7 @@
-import { formatGitCloneFailureMessage } from '../mainScreenHelpers';
+import {
+  extractCodexFailureMessage,
+  formatGitCloneFailureMessage,
+} from '../mainScreenHelpers';
 
 describe('mainScreenHelpers', () => {
   it('keeps successful git clone responses quiet', () => {
@@ -35,5 +38,21 @@ describe('mainScreenHelpers', () => {
         'Mohit-Patil/launchkit'
       )
     ).toBe('Git clone failed for Mohit-Patil/launchkit.');
+  });
+
+  it('extracts nested Codex failure details from live event payloads', () => {
+    expect(
+      extractCodexFailureMessage({
+        msg: {
+          status: {
+            error: {
+              details: {
+                stderr: 'model quota exceeded',
+              },
+            },
+          },
+        },
+      })
+    ).toBe('model quota exceeded');
   });
 });

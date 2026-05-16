@@ -19,8 +19,14 @@ export interface RawTurn {
   id?: string;
   status?: string;
   error?: unknown;
-  message?: string;
-  detail?: string;
+  message?: unknown;
+  errorMessage?: unknown;
+  error_message?: unknown;
+  detail?: unknown;
+  details?: unknown;
+  reason?: unknown;
+  description?: unknown;
+  stderr?: unknown;
   items?: RawThreadItem[];
 }
 
@@ -276,8 +282,14 @@ function extractLastError(turns: RawTurn[]): string | null {
 
     const message =
       readErrorMessage(turn.error) ??
-      readString(turn.message)?.trim() ??
-      readString(turn.detail)?.trim();
+      readErrorMessage(turn.message) ??
+      readErrorMessage(turn.errorMessage) ??
+      readErrorMessage(turn.error_message) ??
+      readErrorMessage(turn.detail) ??
+      readErrorMessage(turn.details) ??
+      readErrorMessage(turn.reason) ??
+      readErrorMessage(turn.description) ??
+      readErrorMessage(turn.stderr);
     if (message) {
       return message;
     }
@@ -338,8 +350,14 @@ function toRawTurn(value: unknown): RawTurn | null {
     id: readString(record.id) ?? undefined,
     status: readString(record.status) ?? undefined,
     error: record.error,
-    message: readString(record.message) ?? undefined,
-    detail: readString(record.detail) ?? undefined,
+    message: record.message,
+    errorMessage: record.errorMessage,
+    error_message: record.error_message,
+    detail: record.detail,
+    details: record.details,
+    reason: record.reason,
+    description: record.description,
+    stderr: record.stderr,
     items,
   };
 }
@@ -1279,6 +1297,7 @@ function readPatchTargetPaths(input: string): string[] {
   const seen = new Set<string>();
   const patterns = [
     /^\*\*\* Update File:\s+(.+)$/gm,
+    /^\*\*\* Move to:\s+(.+)$/gm,
     /^\*\*\* Add File:\s+(.+)$/gm,
     /^\*\*\* Delete File:\s+(.+)$/gm,
   ];
