@@ -1293,13 +1293,19 @@ ensure_opencode_cli() {
 }
 
 ensure_cursor_app_server() {
+  local existing_app_server_bin=""
   local existing_api_key=""
   local existing_model=""
+  local provided_app_server_bin="${CURSOR_APP_SERVER_BIN:-}"
   local provided_api_key="${CURSOR_API_KEY:-}"
   local resolved_cursor_app_server_bin=""
 
-  if [[ -n "${CURSOR_APP_SERVER_BIN:-}" ]]; then
+  existing_app_server_bin="$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_APP_SERVER_BIN")"
+
+  if [[ -n "$provided_app_server_bin" ]]; then
     resolved_cursor_app_server_bin="$CURSOR_APP_SERVER_BIN"
+  elif [[ -n "$existing_app_server_bin" ]]; then
+    resolved_cursor_app_server_bin="$existing_app_server_bin"
   elif command -v cursor-app-server >/dev/null 2>&1; then
     resolved_cursor_app_server_bin="$(command -v cursor-app-server)"
   fi
@@ -1308,8 +1314,19 @@ ensure_cursor_app_server() {
     abort_wizard "cursor-app-server was not found. Upgrade clawdex-mobile so npm links the bundled command, then rerun: clawdex init --engine cursor"
   fi
 
+  if [[ "$resolved_cursor_app_server_bin" == */* ]]; then
+    if [[ ! -x "$resolved_cursor_app_server_bin" ]]; then
+      abort_wizard "cursor-app-server was configured as '$resolved_cursor_app_server_bin', but that file is not executable."
+    fi
+  elif ! command -v "$resolved_cursor_app_server_bin" >/dev/null 2>&1; then
+    abort_wizard "cursor-app-server command '$resolved_cursor_app_server_bin' was not found in PATH."
+  fi
+
   CURSOR_APP_SERVER_BIN="$resolved_cursor_app_server_bin"
   ok "Found cursor-app-server: $CURSOR_APP_SERVER_BIN"
+  if [[ "$CURSOR_APP_SERVER_BIN" != "$existing_app_server_bin" ]]; then
+    CURSOR_CONFIG_NEEDS_WRITE="true"
+  fi
 
   existing_api_key="$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_API_KEY")"
   existing_model="$(extract_env_value "$SECURE_ENV_FILE" "CURSOR_MODEL")"
@@ -1340,7 +1357,7 @@ ensure_cursor_app_server() {
     ok "Cursor API key will be saved in $SECURE_ENV_FILE."
   fi
 
-  export CURSOR_API_KEY CURSOR_MODEL
+  export CURSOR_APP_SERVER_BIN CURSOR_API_KEY CURSOR_MODEL
 }
 
 ensure_selected_engine_clis() {

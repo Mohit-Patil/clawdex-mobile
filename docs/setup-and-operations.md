@@ -2,6 +2,8 @@
 
 This guide is the detailed companion to the top-level `README.md`.
 
+For bridge-driven provider UI payloads such as Codex goals, see `docs/bridge-ui-surfaces.md`.
+
 ## Choosing Harnesses
 
 The setup wizard now lets you choose which harnesses the phone should control.
@@ -361,12 +363,17 @@ Automation verifies tag/version consistency and publishes to npm.
 - `bridge/approvals/list`
 - `bridge/approvals/resolve`
 - `bridge/userInput/resolve`
+- `bridge/ui/present`
+- `bridge/ui/update`
+- `bridge/ui/dismiss`
+- `bridge/ui/resolve`
 
 ### Notifications (examples)
 
 - `turn/*`, `item/*`
 - `bridge/approval.*`
 - `bridge/userInput.*`
+- `bridge/ui.*`
 - `bridge/terminal/completed`
 - `bridge/git/updated`
 - `bridge/connection/state`

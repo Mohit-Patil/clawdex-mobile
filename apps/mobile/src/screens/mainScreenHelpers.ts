@@ -5,6 +5,10 @@ import type { ComponentProps } from 'react';
 import type {
   ApprovalMode,
   ApprovalPolicy,
+  BridgeUiAction,
+  BridgeUiBlock,
+  BridgeUiChecklistItem,
+  BridgeUiSurface,
   BridgeQueuedMessage,
   BridgeThreadQueueError,
   BridgeThreadQueueState,
@@ -95,6 +99,7 @@ export interface ThreadRuntimeSnapshot {
   streamingText?: string | null;
   pendingApproval?: PendingApproval | null;
   pendingUserInputRequest?: PendingUserInputRequest | null;
+  bridgeUiSurfaces?: BridgeUiSurface[];
   queuedMessages?: BridgeQueuedMessage[];
   queuedMessageError?: BridgeThreadQueueError | null;
   contextUsage?: ThreadContextUsage | null;
@@ -164,6 +169,8 @@ export const CHAT_MODEL_PREFERENCES_FILE = 'chat-model-preferences.json';
 export const CHAT_MODEL_PREFERENCES_VERSION = 1;
 export const CHAT_PLAN_SNAPSHOTS_FILE = 'chat-plan-snapshots.json';
 export const CHAT_PLAN_SNAPSHOTS_VERSION = 1;
+export const CHAT_BRIDGE_UI_SURFACES_FILE = 'chat-bridge-ui-surfaces.json';
+export const CHAT_BRIDGE_UI_SURFACES_VERSION = 1;
 export const CHAT_NEW_DRAFT_KEY = '__new_chat__';
 export const STREAMING_SCROLL_THROTTLE_MS = 48;
 export const PLAN_IMPLEMENTATION_TITLE = 'Implement this plan?';
@@ -742,6 +749,249 @@ export function buildUserInputDrafts(request: PendingUserInputRequest): Record<s
     drafts[question.id] = '';
   }
   return drafts;
+}
+
+export function toBridgeUiSurface(value: unknown): BridgeUiSurface | null {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const id = readString(record.id);
+  const threadId = readString(record.threadId);
+  const presentation = readString(record.presentation);
+  const title = readString(record.title);
+  if (
+    !id ||
+    !threadId ||
+    !title ||
+    (presentation !== 'workflowCard' && presentation !== 'modal' && presentation !== 'banner')
+  ) {
+    return null;
+  }
+
+  const blocks = parseBridgeUiBlocks(record.blocks);
+  const bodyMarkdown = readString(record.bodyMarkdown) ?? null;
+  const rawActions = Array.isArray(record.actions) ? record.actions : [];
+  const actions = rawActions
+    .map(toBridgeUiAction)
+    .filter((action): action is BridgeUiAction => action !== null);
+  const tone = readString(record.tone);
+
+  return {
+    id,
+    threadId,
+    turnId: readString(record.turnId) ?? null,
+    kind: readString(record.kind) ?? null,
+    presentation,
+    tone:
+      tone === 'info' ||
+      tone === 'success' ||
+      tone === 'warning' ||
+      tone === 'error' ||
+      tone === 'neutral'
+        ? tone
+        : undefined,
+    title,
+    subtitle: readString(record.subtitle) ?? null,
+    bodyMarkdown,
+    blocks,
+    actions,
+    dismissible: readBoolean(record.dismissible) ?? true,
+    createdAt: readString(record.createdAt) ?? null,
+    updatedAt: readString(record.updatedAt) ?? null,
+  };
+}
+
+export function parseGoalSlashObjective(input: string): string | null {
+  const parsed = parseSlashCommand(input);
+  if (!parsed || parsed.name !== 'goal') {
+    return null;
+  }
+
+  const objective = parsed.args.trim();
+  return objective.length > 0 ? objective : null;
+}
+
+export function buildOptimisticGoalBridgeUiSurface(
+  threadId: string,
+  objective: string,
+  updatedAt: string
+): BridgeUiSurface | null {
+  const normalizedThreadId = threadId.trim();
+  const normalizedObjective = objective.trim();
+  if (!normalizedThreadId || !normalizedObjective) {
+    return null;
+  }
+
+  return {
+    id: `goal-${normalizedThreadId}`,
+    threadId: normalizedThreadId,
+    turnId: null,
+    kind: 'goal',
+    presentation: 'workflowCard',
+    tone: 'info',
+    title: 'Goal',
+    subtitle: 'Starting',
+    bodyMarkdown: normalizedObjective,
+    blocks: [
+      {
+        type: 'keyValue',
+        items: [{ label: 'Status', value: 'Starting' }],
+      },
+    ],
+    actions: [{ id: 'dismiss', label: 'Dismiss', style: 'secondary' }],
+    dismissible: true,
+    createdAt: updatedAt,
+    updatedAt,
+  };
+}
+
+function toBridgeUiAction(value: unknown): BridgeUiAction | null {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const id = readString(record.id);
+  const label = readString(record.label);
+  if (!id || !label) {
+    return null;
+  }
+
+  const style = readString(record.style);
+  return {
+    id,
+    label,
+    style:
+      style === 'primary' || style === 'secondary' || style === 'destructive'
+        ? style
+        : undefined,
+    dismissesSurface: readBoolean(record.dismissesSurface) ?? true,
+  };
+}
+
+function parseBridgeUiBlocks(value: unknown): BridgeUiBlock[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(toBridgeUiBlock)
+    .filter((block): block is BridgeUiBlock => block !== null);
+}
+
+function toBridgeUiBlock(value: unknown): BridgeUiBlock | null {
+  const record = toRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const type = readString(record.type);
+  if (type === 'text') {
+    const text = readString(record.text);
+    return text ? { type, text } : null;
+  }
+
+  if (type === 'markdown') {
+    const markdown = readString(record.markdown);
+    return markdown ? { type, markdown } : null;
+  }
+
+  if (type === 'checklist') {
+    const items: BridgeUiChecklistItem[] = Array.isArray(record.items)
+      ? record.items
+          .map((item) => {
+            const itemRecord = toRecord(item);
+            if (!itemRecord) {
+              return null;
+            }
+            const label = readString(itemRecord.label);
+            const status = readString(itemRecord.status);
+            if (!label) {
+              return null;
+            }
+            const normalizedStatus =
+              status === 'pending' || status === 'inProgress' || status === 'completed'
+                ? status
+                : undefined;
+            return {
+              label,
+              status: normalizedStatus,
+              detail: readString(itemRecord.detail) ?? undefined,
+            } satisfies BridgeUiChecklistItem;
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== null)
+      : [];
+    return items.length > 0 ? { type, items } : null;
+  }
+
+  if (type === 'keyValue') {
+    const items = Array.isArray(record.items)
+      ? record.items
+          .map((item) => {
+            const itemRecord = toRecord(item);
+            if (!itemRecord) {
+              return null;
+            }
+            const label = readString(itemRecord.label);
+            const itemValue = readString(itemRecord.value);
+            return label && itemValue ? { label, value: itemValue } : null;
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== null)
+      : [];
+    return items.length > 0 ? { type, items } : null;
+  }
+
+  if (type === 'code') {
+    const text = readString(record.text);
+    return text
+      ? {
+          type,
+          text,
+          language: readString(record.language) ?? null,
+        }
+      : null;
+  }
+
+  if (type === 'progress') {
+    const label = readString(record.label);
+    const progressValue = readNumber(record.value);
+    const max = readNumber(record.max);
+    if (!label || progressValue === null || max === null || max <= 0) {
+      return null;
+    }
+    return {
+      type,
+      label,
+      value: progressValue,
+      max,
+      detail: readString(record.detail) ?? null,
+    };
+  }
+
+  return null;
+}
+
+export function upsertBridgeUiSurfaceList(
+  surfaces: BridgeUiSurface[],
+  surface: BridgeUiSurface
+): BridgeUiSurface[] {
+  const existingIndex = surfaces.findIndex((entry) => entry.id === surface.id);
+  if (existingIndex === -1) {
+    return [...surfaces, surface];
+  }
+
+  const next = surfaces.slice();
+  next[existingIndex] = surface;
+  return next;
+}
+
+export function removeBridgeUiSurfaceFromList(
+  surfaces: BridgeUiSurface[],
+  surfaceId: string
+): BridgeUiSurface[] {
+  return surfaces.filter((surface) => surface.id !== surfaceId);
 }
 
 export function normalizeQuestionAnswers(value: string): string[] {
@@ -1341,6 +1591,15 @@ export function getChatPlanSnapshotsPath(): string | null {
   return `${base}${CHAT_PLAN_SNAPSHOTS_FILE}`;
 }
 
+export function getChatBridgeUiSurfacesPath(): string | null {
+  const base = FileSystem.documentDirectory;
+  if (typeof base !== 'string' || base.trim().length === 0) {
+    return null;
+  }
+
+  return `${base}${CHAT_BRIDGE_UI_SURFACES_FILE}`;
+}
+
 export function getWorkspaceFavoritesPath(): string | null {
   const base = FileSystem.documentDirectory;
   if (typeof base !== 'string' || base.trim().length === 0) {
@@ -1574,6 +1833,47 @@ export function parseChatPlanSnapshots(raw: string): Record<string, ActivePlanSt
         deltaText: readString(entry.deltaText) ?? '',
         updatedAt: readString(entry.updatedAt) ?? new Date(0).toISOString(),
       };
+    }
+
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export function parseChatBridgeUiSurfaces(raw: string): Record<string, BridgeUiSurface[]> {
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const parsedRecord = toRecord(parsed);
+    if (!parsedRecord || parsedRecord.version !== CHAT_BRIDGE_UI_SURFACES_VERSION) {
+      return {};
+    }
+
+    const entries = toRecord(parsedRecord.entries);
+    if (!entries) {
+      return {};
+    }
+
+    const result: Record<string, BridgeUiSurface[]> = {};
+    for (const [chatId, value] of Object.entries(entries)) {
+      const normalizedChatId = chatId.trim();
+      if (!normalizedChatId || !Array.isArray(value)) {
+        continue;
+      }
+
+      const surfaces = value
+        .map(toBridgeUiSurface)
+        .filter(
+          (surface): surface is BridgeUiSurface =>
+            surface !== null && surface.threadId === normalizedChatId
+        );
+      if (surfaces.length > 0) {
+        result[normalizedChatId] = surfaces;
+      }
     }
 
     return result;

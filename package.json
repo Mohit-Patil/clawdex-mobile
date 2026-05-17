@@ -65,6 +65,7 @@
     "stack:lan": "./scripts/start-mobile-stack-lan.sh",
     "stack:tailscale": "./scripts/start-mobile-stack-tailscale.sh",
     "bridge": "BRIDGE_WORKDIR=$(pwd) npm run -w @codex/rust-bridge dev",
+    "bridge:ui:demo": "node ./scripts/send-bridge-ui-demo.js",
     "bridge:package:stage-current": "node ./scripts/bridge-binary.js stage-current",
     "setup:wizard": "./scripts/setup-wizard.sh",
     "stop:services": "./scripts/stop-services.sh",

@@ -22,6 +22,7 @@ import type {
   BridgeThreadQueueActionResponse,
   BridgeThreadQueueSendResponse,
   BridgeThreadQueueState,
+  DismissBridgeUiSurfaceResponse,
   BridgeRuntimeInfo,
   BridgeRestartStartResponse,
   BridgeUpdateStartResponse,
@@ -52,6 +53,8 @@ import type {
   GitUnstageResponse,
   PendingApproval,
   ResolveApprovalResponse,
+  ResolveBridgeUiSurfaceRequest,
+  ResolveBridgeUiSurfaceResponse,
   ResolveUserInputRequest,
   ResolveUserInputResponse,
   SendChatMessageRequest,
@@ -1556,6 +1559,28 @@ export class HostBridgeApiClient {
     return this.ws.request<ResolveUserInputResponse>('bridge/userInput/resolve', {
       id,
       answers: body.answers,
+    });
+  }
+
+  resolveBridgeUiSurface(
+    id: string,
+    body: ResolveBridgeUiSurfaceRequest
+  ): Promise<ResolveBridgeUiSurfaceResponse> {
+    return this.ws.request<ResolveBridgeUiSurfaceResponse>('bridge/ui/resolve', {
+      id,
+      threadId: body.threadId,
+      turnId: body.turnId ?? null,
+      actionId: body.actionId,
+    });
+  }
+
+  dismissBridgeUiSurface(
+    id: string,
+    threadId?: string | null
+  ): Promise<DismissBridgeUiSurfaceResponse> {
+    return this.ws.request<DismissBridgeUiSurfaceResponse>('bridge/ui/dismiss', {
+      id,
+      threadId: threadId ?? null,
     });
   }
 

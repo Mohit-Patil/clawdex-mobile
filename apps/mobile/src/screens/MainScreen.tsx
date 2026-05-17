@@ -40,6 +40,8 @@ import type {
   ApprovalMode,
   ApprovalDecision,
   BridgeCapabilities,
+  BridgeUiAction,
+  BridgeUiSurface,
   BridgeQueuedMessage,
   BridgeThreadQueueState,
   ChatEngine,
@@ -65,6 +67,11 @@ import type {
 import type { HostBridgeWsClient } from '../api/ws';
 import { ActivityBar } from '../components/ActivityBar';
 import { ApprovalBanner } from '../components/ApprovalBanner';
+import {
+  BridgeUiBanner,
+  BridgeUiModal,
+  BridgeUiWorkflowCard,
+} from '../components/BridgeUiSurface';
 import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
 import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
@@ -133,6 +140,7 @@ import {
   CHAT_DRAFTS_VERSION,
   CHAT_MODEL_PREFERENCES_VERSION,
   CHAT_PLAN_SNAPSHOTS_VERSION,
+  CHAT_BRIDGE_UI_SURFACES_VERSION,
   STREAMING_SCROLL_THROTTLE_MS,
   PLAN_IMPLEMENTATION_TITLE,
   PLAN_IMPLEMENTATION_YES,
@@ -189,6 +197,7 @@ import {
   getChatModelPreferencesPath,
   getChatDraftsPath,
   getChatPlanSnapshotsPath,
+  getChatBridgeUiSurfacesPath,
   getWorkspaceFavoritesPath,
   parseWorkspaceFavoritePaths,
   parseChatDrafts,
@@ -196,6 +205,7 @@ import {
   getDraftScopeKey,
   parseChatModelPreferences,
   parseChatPlanSnapshots,
+  parseChatBridgeUiSurfaces,
   formatCollaborationModeLabel,
   isBridgeConnectionErrorMessage,
   buildRateLimitAlertFromMessages,
@@ -235,7 +245,12 @@ import {
   didAssistantMessageProgress,
   extractFirstBoldSnippet,
   toReasoningActivityDetail,
-  toPendingApproval
+  toPendingApproval,
+  toBridgeUiSurface,
+  parseGoalSlashObjective,
+  buildOptimisticGoalBridgeUiSurface,
+  upsertBridgeUiSurfaceList,
+  removeBridgeUiSurfaceFromList
 } from './mainScreenHelpers';
 
 export interface MainScreenHandle {
@@ -334,6 +349,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const [userInputError, setUserInputError] = useState<string | null>(null);
     const [resolvingUserInput, setResolvingUserInput] = useState(false);
     const [activePlan, setActivePlan] = useState<ActivePlanState | null>(null);
+    const [activeBridgeUiSurfaces, setActiveBridgeUiSurfaces] = useState<BridgeUiSurface[]>([]);
     const streamingTextRef = useRef<string | null>(null);
     const setStreamingText = useCallback(
       (
@@ -732,7 +748,11 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const chatModelPreferencesRef = useRef<Record<string, ChatModelPreference>>({});
     const [chatModelPreferencesLoaded, setChatModelPreferencesLoaded] = useState(false);
     const chatPlanSnapshotsRef = useRef<Record<string, ActivePlanState>>({});
+    const bridgeUiSurfaceSnapshotsRef = useRef<Record<string, BridgeUiSurface[]>>({});
     const [, setChatPlanSnapshotsLoaded] = useState(false);
+    const bridgeUiSurfacePersistenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null
+    );
     const preferredStartCwd = normalizeWorkspacePath(defaultStartCwd);
     const draftScopeKey = getDraftScopeKey(selectedChatId);
     const persistedDefaultChatEngine = resolveChatEngine(defaultChatEngine ?? 'codex');
@@ -1154,6 +1174,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       []
     );
 
+    const saveBridgeUiSurfaceSnapshots = useCallback(
+      async (nextSnapshots: Record<string, BridgeUiSurface[]>) => {
+        const snapshotsPath = getChatBridgeUiSurfacesPath();
+        if (!snapshotsPath) {
+          return;
+        }
+
+        const payload = JSON.stringify({
+          version: CHAT_BRIDGE_UI_SURFACES_VERSION,
+          entries: nextSnapshots,
+        });
+
+        try {
+          await FileSystem.writeAsStringAsync(snapshotsPath, payload);
+        } catch {
+          // Best effort persistence only.
+        }
+      },
+      []
+    );
+
+    const scheduleBridgeUiSurfaceSnapshotsPersist = useCallback(
+      (nextSnapshots: Record<string, BridgeUiSurface[]>) => {
+        const existingTimer = bridgeUiSurfacePersistenceTimeoutRef.current;
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+        }
+
+        bridgeUiSurfacePersistenceTimeoutRef.current = setTimeout(() => {
+          bridgeUiSurfacePersistenceTimeoutRef.current = null;
+          void saveBridgeUiSurfaceSnapshots(nextSnapshots);
+        }, 180);
+      },
+      [saveBridgeUiSurfaceSnapshots]
+    );
+
     const saveWorkspaceFavorites = useCallback(async (paths: string[]) => {
       const favoritesPath = getWorkspaceFavoritesPath();
       if (!favoritesPath) {
@@ -1301,6 +1357,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       };
     }, [saveChatDrafts]);
 
+    useEffect(() => {
+      return () => {
+        const existingTimer = bridgeUiSurfacePersistenceTimeoutRef.current;
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          bridgeUiSurfacePersistenceTimeoutRef.current = null;
+        }
+        void saveBridgeUiSurfaceSnapshots(bridgeUiSurfaceSnapshotsRef.current);
+      };
+    }, [saveBridgeUiSurfaceSnapshots]);
+
     const rememberChatPlanSnapshot = useCallback(
       (chatId: string, plan: ActivePlanState | null) => {
         const normalizedChatId = chatId.trim();
@@ -1329,6 +1396,31 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         void saveChatPlanSnapshots(nextSnapshots);
       },
       [saveChatPlanSnapshots]
+    );
+
+    const rememberBridgeUiSurfaceSnapshots = useCallback(
+      (
+        chatId: string,
+        updater: (previous: BridgeUiSurface[]) => BridgeUiSurface[]
+      ) => {
+        const normalizedChatId = chatId.trim();
+        if (!normalizedChatId) {
+          return;
+        }
+
+        const previous = bridgeUiSurfaceSnapshotsRef.current[normalizedChatId] ?? [];
+        const nextSurfaces = updater(previous);
+        const nextSnapshots = { ...bridgeUiSurfaceSnapshotsRef.current };
+        if (nextSurfaces.length > 0) {
+          nextSnapshots[normalizedChatId] = nextSurfaces;
+        } else {
+          delete nextSnapshots[normalizedChatId];
+        }
+
+        bridgeUiSurfaceSnapshotsRef.current = nextSnapshots;
+        scheduleBridgeUiSurfaceSnapshotsPersist(nextSnapshots);
+      },
+      [scheduleBridgeUiSurfaceSnapshotsPersist]
     );
 
     const rememberChatModelPreference = useCallback(
@@ -1634,6 +1726,68 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       [bumpAgentRuntimeRevision, upsertThreadRuntimeSnapshot]
     );
 
+    const cacheThreadBridgeUiSurface = useCallback(
+      (threadId: string, surface: BridgeUiSurface) => {
+        upsertThreadRuntimeSnapshot(threadId, (previous) => ({
+          bridgeUiSurfaces: upsertBridgeUiSurfaceList(
+            previous.bridgeUiSurfaces ?? [],
+            surface
+          ),
+        }));
+        rememberBridgeUiSurfaceSnapshots(threadId, (previous) =>
+          upsertBridgeUiSurfaceList(previous, surface)
+        );
+        bumpAgentRuntimeRevision();
+      },
+      [bumpAgentRuntimeRevision, rememberBridgeUiSurfaceSnapshots, upsertThreadRuntimeSnapshot]
+    );
+
+    const removeThreadBridgeUiSurface = useCallback(
+      (surfaceId: string, threadId?: string | null) => {
+        if (threadId) {
+          upsertThreadRuntimeSnapshot(threadId, (previous) => ({
+            bridgeUiSurfaces: removeBridgeUiSurfaceFromList(
+              previous.bridgeUiSurfaces ?? [],
+              surfaceId
+            ),
+          }));
+          rememberBridgeUiSurfaceSnapshots(threadId, (previous) =>
+            removeBridgeUiSurfaceFromList(previous, surfaceId)
+          );
+        } else {
+          for (const [snapshotThreadId, snapshot] of Object.entries(
+            threadRuntimeSnapshotsRef.current
+          )) {
+            if (!snapshot.bridgeUiSurfaces?.some((surface) => surface.id === surfaceId)) {
+              continue;
+            }
+            upsertThreadRuntimeSnapshot(snapshotThreadId, (previous) => ({
+              bridgeUiSurfaces: removeBridgeUiSurfaceFromList(
+                previous.bridgeUiSurfaces ?? [],
+                surfaceId
+              ),
+            }));
+            rememberBridgeUiSurfaceSnapshots(snapshotThreadId, (previous) =>
+              removeBridgeUiSurfaceFromList(previous, surfaceId)
+            );
+          }
+        }
+        bumpAgentRuntimeRevision();
+      },
+      [bumpAgentRuntimeRevision, rememberBridgeUiSurfaceSnapshots, upsertThreadRuntimeSnapshot]
+    );
+
+    const replaceThreadBridgeUiSurfaces = useCallback(
+      (threadId: string, surfaces: BridgeUiSurface[]) => {
+        upsertThreadRuntimeSnapshot(threadId, () => ({
+          bridgeUiSurfaces: surfaces,
+        }));
+        rememberBridgeUiSurfaceSnapshots(threadId, () => surfaces);
+        bumpAgentRuntimeRevision();
+      },
+      [bumpAgentRuntimeRevision, rememberBridgeUiSurfaceSnapshots, upsertThreadRuntimeSnapshot]
+    );
+
     const cacheThreadQueueState = useCallback(
       (threadId: string, queueState: BridgeThreadQueueState | null) => {
         upsertThreadRuntimeSnapshot(threadId, () => ({
@@ -1752,6 +1906,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (!threadId) {
           setThreadContextUsage(null);
           setActivePlan(null);
+          setActiveBridgeUiSurfaces([]);
           setSelectedCollaborationMode('default');
           return;
         }
@@ -1760,6 +1915,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         if (!snapshot) {
           setThreadContextUsage(null);
           setActivePlan(null);
+          setActiveBridgeUiSurfaces([]);
           setSelectedCollaborationMode('default');
           return;
         }
@@ -1786,6 +1942,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         }
         setThreadContextUsage(snapshot.contextUsage ?? null);
         setActivePlan(snapshot.plan ?? null);
+        setActiveBridgeUiSurfaces(snapshot.bridgeUiSurfaces ?? []);
         if (snapshot.activeTurnId !== undefined) {
           setActiveTurnId(snapshot.activeTurnId);
         }
@@ -1837,6 +1994,57 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         } finally {
           if (!cancelled) {
             setChatPlanSnapshotsLoaded(true);
+          }
+        }
+      };
+
+      void load();
+      return () => {
+        cancelled = true;
+      };
+    }, [applyThreadRuntimeSnapshot, upsertThreadRuntimeSnapshot]);
+
+    useEffect(() => {
+      let cancelled = false;
+
+      const load = async () => {
+        const snapshotsPath = getChatBridgeUiSurfacesPath();
+        if (!snapshotsPath) {
+          return;
+        }
+
+        try {
+          const raw = await FileSystem.readAsStringAsync(snapshotsPath);
+          if (cancelled) {
+            return;
+          }
+
+          const parsedSnapshots = parseChatBridgeUiSurfaces(raw);
+          const nextSnapshots = { ...parsedSnapshots };
+          for (const [threadId, surfaces] of Object.entries(
+            bridgeUiSurfaceSnapshotsRef.current
+          )) {
+            nextSnapshots[threadId] = surfaces.reduce(
+              (merged, surface) => upsertBridgeUiSurfaceList(merged, surface),
+              nextSnapshots[threadId] ?? []
+            );
+          }
+
+          bridgeUiSurfaceSnapshotsRef.current = nextSnapshots;
+          for (const [threadId, surfaces] of Object.entries(nextSnapshots)) {
+            upsertThreadRuntimeSnapshot(threadId, (previous) => ({
+              bridgeUiSurfaces: (previous.bridgeUiSurfaces ?? []).reduce(
+                (merged, surface) => upsertBridgeUiSurfaceList(merged, surface),
+                surfaces
+              ),
+            }));
+          }
+          if (chatIdRef.current) {
+            applyThreadRuntimeSnapshot(chatIdRef.current);
+          }
+        } catch {
+          if (!cancelled && Object.keys(bridgeUiSurfaceSnapshotsRef.current).length === 0) {
+            bridgeUiSurfaceSnapshotsRef.current = {};
           }
         }
       };
@@ -2408,6 +2616,20 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const cached = workspaceBrowseCacheRef.current[cacheKey];
         const requestId = workspaceBrowseRequestRef.current + 1;
         workspaceBrowseRequestRef.current = requestId;
+        const applyResponse = (
+          response: FileSystemListResponse,
+          responseCacheKey = cacheKey
+        ) => {
+          const normalizedPath = normalizeWorkspacePath(response.path);
+          workspaceBrowseCacheRef.current[responseCacheKey] = response;
+          if (normalizedPath) {
+            workspaceBrowseCacheRef.current[getWorkspaceBrowseCacheKey(normalizedPath)] = response;
+          }
+          setWorkspaceBridgeRoot((current) => normalizeWorkspacePath(response.bridgeRoot) ?? current);
+          setWorkspaceBrowsePath(normalizedPath);
+          setWorkspaceBrowseParentPath(normalizeWorkspacePath(response.parentPath));
+          setWorkspaceBrowseEntries(response.entries);
+        };
 
         if (cached) {
           setWorkspaceBridgeRoot((current) => normalizeWorkspacePath(cached.bridgeRoot) ?? current);
@@ -2427,28 +2649,50 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             return;
           }
 
-          const normalizedPath = normalizeWorkspacePath(response.path);
-          workspaceBrowseCacheRef.current[cacheKey] = response;
-          if (normalizedPath) {
-            workspaceBrowseCacheRef.current[getWorkspaceBrowseCacheKey(normalizedPath)] = response;
-          }
-          setWorkspaceBridgeRoot((current) => normalizeWorkspacePath(response.bridgeRoot) ?? current);
-          setWorkspaceBrowsePath(normalizedPath);
-          setWorkspaceBrowseParentPath(normalizeWorkspacePath(response.parentPath));
-          setWorkspaceBrowseEntries(response.entries);
+          applyResponse(response);
           setWorkspaceBrowseError(null);
         } catch (err) {
           if (workspaceBrowseRequestRef.current !== requestId) {
             return;
           }
-          setWorkspaceBrowseError((err as Error).message);
+          const message = (err as Error).message;
+          const missingRequestedWorkspace =
+            normalizedRequestPath !== null &&
+            /workspace directory is invalid or inaccessible|workspace directory must point to a folder/i.test(
+              message
+            );
+
+          if (missingRequestedWorkspace) {
+            try {
+              const rootResponse = await api.listFilesystemEntries({
+                path: null,
+                directoriesOnly: true,
+              });
+              if (workspaceBrowseRequestRef.current !== requestId) {
+                return;
+              }
+              applyResponse(
+                rootResponse,
+                getWorkspaceBrowseCacheKey(normalizeWorkspacePath(rootResponse.path))
+              );
+              if (normalizedRequestPath === preferredStartCwd) {
+                onDefaultStartCwdChange?.(null);
+              }
+              setWorkspaceBrowseError('Saved workspace was not found. Showing start folder.');
+              return;
+            } catch {
+              // Surface the original invalid path error; it names the path the user needs to fix.
+            }
+          }
+
+          setWorkspaceBrowseError(message);
         } finally {
           if (workspaceBrowseRequestRef.current === requestId) {
             setLoadingWorkspaceBrowse(false);
           }
         }
       },
-      [api]
+      [api, onDefaultStartCwdChange, preferredStartCwd]
     );
 
     const openWorkspacePicker = useCallback(
@@ -5344,6 +5588,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         const turnLocalImages =
           options?.localImages ?? pendingLocalImagePaths.map((path) => ({ path }));
         const selectedThreadSnapshot = threadRuntimeSnapshotsRef.current[targetChatId] ?? null;
+        const goalObjective =
+          activeChatEngine === 'codex' ? parseGoalSlashObjective(content) : null;
+        const optimisticGoalSurface = goalObjective
+          ? buildOptimisticGoalBridgeUiSurface(
+              targetChatId,
+              goalObjective,
+              new Date().toISOString()
+            )
+          : null;
+        const previousBridgeUiSurfaces = optimisticGoalSurface
+          ? [
+              ...(selectedThreadSnapshot?.bridgeUiSurfaces ??
+                activeBridgeUiSurfaces.filter((surface) => surface.threadId === targetChatId)),
+            ]
+          : null;
+        const replaceGoalSurfaces = (surface: BridgeUiSurface) => {
+          const nextSurfaces = [
+            ...(previousBridgeUiSurfaces ?? []).filter(
+              (entry) => entry.kind !== 'goal' && !entry.id.startsWith('goal-')
+            ),
+            surface,
+          ];
+          replaceThreadBridgeUiSurfaces(targetChatId, nextSurfaces);
+          if (selectedChatIdRef.current === targetChatId) {
+            setActiveBridgeUiSurfaces(nextSurfaces);
+          }
+        };
+        const restoreGoalSurfaces = () => {
+          if (!previousBridgeUiSurfaces) {
+            return;
+          }
+          replaceThreadBridgeUiSurfaces(targetChatId, previousBridgeUiSurfaces);
+          if (selectedChatIdRef.current === targetChatId) {
+            setActiveBridgeUiSurfaces(previousBridgeUiSurfaces);
+          }
+        };
         const knownQueuedMessages = selectedThreadSnapshot?.queuedMessages ?? [];
         const likelyQueuesLocally =
           knownQueuedMessages.length > 0 ||
@@ -5416,6 +5696,9 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           bumpRunWatchdog();
           if (shouldClearComposer) {
             setDraft('');
+          }
+          if (optimisticGoalSurface) {
+            replaceGoalSurfaces(optimisticGoalSurface);
           }
           if (optimisticSentMessage) {
             queueOptimisticUserMessage(targetChatId, optimisticSentMessage);
@@ -5535,6 +5818,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
               });
               clearRunWatchdog();
             } else if (resolvedUpdated.status === 'error') {
+              restoreGoalSurfaces();
               setActivity({
                 tone: 'error',
                 title: 'Turn failed',
@@ -5551,6 +5835,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             }
           }
         } catch (err) {
+          restoreGoalSurfaces();
           clearOptimisticSentMessage();
           discardOptimisticQueuedMessage(targetChatId, optimisticQueuedMessage?.id);
           if (selectedChatIdRef.current === targetChatId) {
@@ -5566,11 +5851,13 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         return true;
       },
       [
+        activeChatEngine,
         activeEffort,
         activeModelId,
         activeApprovalPolicy,
         activeServiceTier,
         api,
+        activeBridgeUiSurfaces,
         cacheThreadPlan,
         cacheThreadQueueState,
         handleSlashCommand,
@@ -5590,6 +5877,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
         queueOptimisticUserMessage,
         queueOptimisticQueuedMessage,
         registerTurnStarted,
+        replaceThreadBridgeUiSurfaces,
         rememberChatModelPreference,
         scrollToBottomReliable,
       ]
@@ -6973,6 +7261,36 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           return;
         }
 
+        if (event.method === 'bridge/ui.present' || event.method === 'bridge/ui.update') {
+          const surface = toBridgeUiSurface(event.params);
+          if (!surface) {
+            return;
+          }
+
+          cacheThreadBridgeUiSurface(surface.threadId, surface);
+          if (surface.threadId === currentId) {
+            setActiveBridgeUiSurfaces((previous) =>
+              upsertBridgeUiSurfaceList(previous, surface)
+            );
+          }
+          return;
+        }
+
+        if (event.method === 'bridge/ui.dismiss') {
+          const params = toRecord(event.params);
+          const surfaceId = readString(params?.id);
+          const threadId = readString(params?.threadId);
+          if (!surfaceId) {
+            return;
+          }
+
+          removeThreadBridgeUiSurface(surfaceId, threadId);
+          setActiveBridgeUiSurfaces((previous) =>
+            removeBridgeUiSurfaceFromList(previous, surfaceId)
+          );
+          return;
+        }
+
         if (event.method === 'bridge/approval.resolved') {
           const params = toRecord(event.params);
           const resolvedId = readString(params?.id);
@@ -7159,6 +7477,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       cacheThreadActiveCommand,
       cacheThreadActivity,
       cacheThreadContextUsage,
+      cacheThreadBridgeUiSurface,
       cacheThreadPendingApproval,
       cacheThreadPendingUserInputRequest,
       cacheThreadPlan,
@@ -7169,6 +7488,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       clearRunWatchdog,
       readThreadContextUsage,
       refreshPendingApprovalsForThread,
+      removeThreadBridgeUiSurface,
       scheduleDisconnectActivity,
       scheduleExternalStatusFullSync,
       registerTurnStarted,
@@ -7394,6 +7714,42 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       resolvingUserInput,
       userInputDrafts,
     ]);
+
+    const dismissBridgeUiSurface = useCallback(
+      async (surface: BridgeUiSurface) => {
+        removeThreadBridgeUiSurface(surface.id, surface.threadId);
+        setActiveBridgeUiSurfaces((previous) =>
+          removeBridgeUiSurfaceFromList(previous, surface.id)
+        );
+        try {
+          await api.dismissBridgeUiSurface(surface.id, surface.threadId);
+        } catch (err) {
+          setError((err as Error).message);
+        }
+      },
+      [api, removeThreadBridgeUiSurface]
+    );
+
+    const handleBridgeUiAction = useCallback(
+      async (surface: BridgeUiSurface, action: BridgeUiAction) => {
+        try {
+          await api.resolveBridgeUiSurface(surface.id, {
+            threadId: surface.threadId,
+            turnId: surface.turnId ?? null,
+            actionId: action.id,
+          });
+          if (action.dismissesSurface !== false) {
+            removeThreadBridgeUiSurface(surface.id, surface.threadId);
+            setActiveBridgeUiSurfaces((previous) =>
+              removeBridgeUiSurfaceFromList(previous, surface.id)
+            );
+          }
+        } catch (err) {
+          setError((err as Error).message);
+        }
+      },
+      [api, removeThreadBridgeUiSurface]
+    );
 
     const handleOpenGit = useCallback(() => {
       if (!selectedChat) {
@@ -7749,6 +8105,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const selectedThreadRuntimeSnapshot = selectedChat
       ? threadRuntimeSnapshotsRef.current[selectedChat.id] ?? null
       : null;
+    const selectedBridgeUiSurfaces = selectedChat
+      ? activeBridgeUiSurfaces.filter((surface) => surface.threadId === selectedChat.id)
+      : [];
+    const workflowBridgeUiSurfaces = selectedBridgeUiSurfaces.filter(
+      (surface) => surface.presentation === 'workflowCard'
+    );
+    const bannerBridgeUiSurfaces = selectedBridgeUiSurfaces.filter(
+      (surface) => surface.presentation === 'banner'
+    );
+    const modalBridgeUiSurface =
+      selectedBridgeUiSurfaces.find((surface) => surface.presentation === 'modal') ?? null;
     const selectedBridgeQueuedMessages = selectedThreadRuntimeSnapshot?.queuedMessages ?? [];
     const selectedOptimisticQueuedMessages = selectedChat
       ? pendingOptimisticQueuedMessagesRef.current[selectedChat.id] ?? []
@@ -7848,7 +8215,8 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
       hasStructuredPlan: showStructuredPlanCard,
       hasPlanApprovalPrompt: showPlanImplementationPrompt,
     });
-    const showTopCardsRow = !isOpeningChat && workflowCardMode !== null;
+    const showTopCardsRow =
+      !isOpeningChat && (workflowCardMode !== null || workflowBridgeUiSurfaces.length > 0);
     const showFloatingActivity =
       shouldShowComposer &&
       Boolean(selectedChat) &&
@@ -7953,6 +8321,18 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             </View>
           </View>
         ) : null}
+        {!showBridgeRecoveryBanner && !showUsageLimitBanner
+          ? bannerBridgeUiSurfaces.map((surface) => (
+              <BridgeUiBanner
+                key={surface.id}
+                surface={surface}
+                onAction={handleBridgeUiAction}
+                onDismiss={(nextSurface) => {
+                  void dismissBridgeUiSurface(nextSurface);
+                }}
+              />
+            ))
+          : null}
         {pendingApproval ? (
           <ApprovalBanner
             approval={pendingApproval}
@@ -8402,6 +8782,17 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
 
         {showTopCardsRow ? (
           <View style={styles.topCardsRow}>
+            {workflowBridgeUiSurfaces.map((surface) => (
+              <BridgeUiWorkflowCard
+                key={surface.id}
+                surface={surface}
+                scrollMaxHeight={Math.max(176, Math.min(Math.floor(windowHeight * 0.4), 360))}
+                onAction={handleBridgeUiAction}
+                onDismiss={(nextSurface) => {
+                  void dismissBridgeUiSurface(nextSurface);
+                }}
+              />
+            ))}
             {workflowCardMode ? (
               <WorkflowCard
                 mode={workflowCardMode}
@@ -9067,6 +9458,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             </View>
           </View>
         </Modal>
+        {modalBridgeUiSurface ? (
+          <BridgeUiModal
+            surface={modalBridgeUiSurface}
+            onAction={handleBridgeUiAction}
+            onDismiss={(surface) => {
+              void dismissBridgeUiSurface(surface);
+            }}
+          />
+        ) : null}
       </View>
     );
   }

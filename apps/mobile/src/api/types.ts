@@ -540,6 +540,106 @@ export interface ResolveUserInputResponse {
   request: PendingUserInputRequest;
 }
 
+export type BridgeUiPresentation = 'workflowCard' | 'modal' | 'banner';
+export type BridgeUiActionStyle = 'primary' | 'secondary' | 'destructive';
+export type BridgeUiTone = 'neutral' | 'info' | 'success' | 'warning' | 'error';
+
+export interface BridgeUiTextBlock {
+  type: 'text';
+  text: string;
+}
+
+export interface BridgeUiMarkdownBlock {
+  type: 'markdown';
+  markdown: string;
+}
+
+export interface BridgeUiChecklistItem {
+  label: string;
+  status?: 'pending' | 'inProgress' | 'completed';
+  detail?: string;
+}
+
+export interface BridgeUiChecklistBlock {
+  type: 'checklist';
+  items: BridgeUiChecklistItem[];
+}
+
+export interface BridgeUiKeyValueItem {
+  label: string;
+  value: string;
+}
+
+export interface BridgeUiKeyValueBlock {
+  type: 'keyValue';
+  items: BridgeUiKeyValueItem[];
+}
+
+export interface BridgeUiCodeBlock {
+  type: 'code';
+  text: string;
+  language?: string | null;
+}
+
+export interface BridgeUiProgressBlock {
+  type: 'progress';
+  label: string;
+  value: number;
+  max: number;
+  detail?: string | null;
+}
+
+export type BridgeUiBlock =
+  | BridgeUiTextBlock
+  | BridgeUiMarkdownBlock
+  | BridgeUiChecklistBlock
+  | BridgeUiKeyValueBlock
+  | BridgeUiCodeBlock
+  | BridgeUiProgressBlock;
+
+export interface BridgeUiAction {
+  id: string;
+  label: string;
+  style?: BridgeUiActionStyle;
+  dismissesSurface?: boolean;
+}
+
+export interface BridgeUiSurface {
+  id: string;
+  threadId: string;
+  turnId?: string | null;
+  kind?: string | null;
+  presentation: BridgeUiPresentation;
+  tone?: BridgeUiTone;
+  title: string;
+  subtitle?: string | null;
+  bodyMarkdown?: string | null;
+  blocks: BridgeUiBlock[];
+  actions: BridgeUiAction[];
+  dismissible?: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ResolveBridgeUiSurfaceRequest {
+  threadId: string;
+  turnId?: string | null;
+  actionId: string;
+}
+
+export interface ResolveBridgeUiSurfaceResponse {
+  ok: true;
+  id: string;
+  threadId: string;
+  actionId: string;
+}
+
+export interface DismissBridgeUiSurfaceResponse {
+  ok: true;
+  id: string;
+  threadId?: string | null;
+}
+
 export type TurnPlanStepStatus = 'pending' | 'inProgress' | 'completed';
 
 export interface TurnPlanStep {
@@ -583,6 +683,7 @@ export interface BridgeCapabilities {
     commandOutputDelta: boolean;
     selfUpdate: boolean;
     browserPreview: boolean;
+    genericUiSurface: boolean;
   };
 }
 

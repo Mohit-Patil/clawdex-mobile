@@ -72,6 +72,7 @@ export function WorkspacePickerModal({
     selectedPath ?? currentPath ?? bridgeRoot
   );
   const wasVisibleRef = useRef(false);
+  const previousSelectedPathRef = useRef<string | null>(selectedPath);
   const styles = useMemo(() => createStyles(theme), [theme]);
   const topInset = Math.max(insets.top + theme.spacing.lg, 72);
   const bottomInset = Math.max(insets.bottom + theme.spacing.lg, 72);
@@ -103,6 +104,22 @@ export function WorkspacePickerModal({
       setPendingSelectionPath(fallbackPath);
     }
   }, [bridgeRoot, currentPath, pendingSelectionPath, selectedPath, visible]);
+
+  useEffect(() => {
+    const previousSelectedPath = previousSelectedPathRef.current;
+    previousSelectedPathRef.current = selectedPath;
+
+    if (!visible || previousSelectedPath === selectedPath) {
+      return;
+    }
+
+    setPendingSelectionPath((current) => {
+      if (current !== previousSelectedPath) {
+        return current;
+      }
+      return selectedPath ?? currentPath ?? bridgeRoot ?? null;
+    });
+  }, [bridgeRoot, currentPath, selectedPath, visible]);
 
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const favoritePathSet = useMemo(
