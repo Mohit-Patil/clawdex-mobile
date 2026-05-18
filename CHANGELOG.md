@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## 5.2.0 - 2026-05-18
+
+### Added
+- Cursor support alongside Codex and OpenCode.
+- Bundled `cursor-app-server` in the published `clawdex-mobile` package.
+- Bridge-driven mobile UI payload support for richer runtime details.
+
+### Improved
+- `clawdex init` now gives clearer Cursor API key setup guidance.
+- Published-package setup now avoids source-checkout workspace assumptions.
+- Bridge onboarding waits longer for first-start readiness.
+
+### Fixed
+- Cursor setup now fails visibly when the API key or app-server path is missing instead of falling through silently.
+
 ## 5.1.2 - 2026-04-07
 
 ### Added
