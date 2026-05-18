@@ -63,13 +63,13 @@ npm install -g clawdex-mobile@latest
 clawdex init --engines codex,opencode,cursor
 ```
 
-That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` to `.env.secure`, so the mobile app can control the selected harnesses from one bridge. When Cursor is selected, `clawdex init` uses the bundled `cursor-app-server`, asks for the Cursor API key, and saves it in `.env.secure`.
+That writes `BRIDGE_ENABLED_ENGINES=codex,opencode,cursor` to `.env.secure`, so the mobile app can control the selected harnesses from one bridge. When Cursor is selected, `clawdex init` uses the bundled `cursor-app-server`, asks for a Cursor account API key from Cursor Dashboard > Integrations > User API Keys, and saves it in `.env.secure`. Cursor documents this under CLI authentication: https://docs.cursor.com/en/cli/reference/authentication
 
 Notes:
 
 - `clawdex init` without flags now lets you multi-select harnesses in the wizard with Space, then Enter to continue.
 - Use `clawdex init --engine codex`, `clawdex init --engine opencode`, or `clawdex init --engine cursor` if you want a single-harness setup.
-- For non-interactive host automation, set `CURSOR_API_KEY` before running setup. `CURSOR_MODEL` is optional; the app model picker sends the model for normal chats.
+- For non-interactive host automation, set `CURSOR_API_KEY` before running setup. This should be a Cursor account API key for the Cursor agent/SDK, not an OpenAI, Anthropic, or other provider key configured inside the Cursor editor. `CURSOR_MODEL` is optional; the app model picker sends the model for normal chats.
 
 ## Monorepo Development
 

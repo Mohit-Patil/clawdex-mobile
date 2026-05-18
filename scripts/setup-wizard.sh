@@ -1343,12 +1343,20 @@ ensure_cursor_app_server() {
       ok "Cursor API key: configured in secure bridge config."
     fi
     if [[ "$FLOW" == "manual" ]] && confirm_prompt "Replace saved Cursor API key now?" "N"; then
+      print_note_box "Cursor API key" "Create a Cursor account API key from Cursor Dashboard > Integrations > User API Keys, then paste it here.
+Cursor docs: https://docs.cursor.com/en/cli/reference/authentication
+
+This is the Cursor agent/SDK key used by Clawdex. It is not the OpenAI, Anthropic, or other provider key configured inside the Cursor editor."
       CURSOR_API_KEY="$(prompt_secret_value "Enter Cursor API key:")"
       CURSOR_CONFIG_NEEDS_WRITE="true"
       ok "Cursor API key will be updated in $SECURE_ENV_FILE."
     fi
   else
     warn "Cursor requires a Cursor API key on the bridge host."
+    print_note_box "Cursor API key" "Create a Cursor account API key from Cursor Dashboard > Integrations > User API Keys, then paste it here.
+Cursor docs: https://docs.cursor.com/en/cli/reference/authentication
+
+This is the Cursor agent/SDK key used by Clawdex. It is not the OpenAI, Anthropic, or other provider key configured inside the Cursor editor."
     if ! confirm_prompt "Add Cursor API key now?" "Y"; then
       abort_wizard "Cursor was selected but CURSOR_API_KEY is missing. Re-run clawdex init after creating a Cursor API key."
     fi
