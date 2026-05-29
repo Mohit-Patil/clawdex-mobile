@@ -663,6 +663,328 @@ async fn configure_git_credential_store(
     Ok(())
 }
 
+// ---- Push notifications ----------------------------------------------------
+//
+// The mobile app can only run JavaScript (and therefore keep its WebSocket
+// open) while it is foregrounded. The moment it is backgrounded or killed the
+// socket closes, so the *phone* can never observe a turn completing. The bridge
+// is the only component reliably alive at that moment, so it is the sender:
+// devices register an Expo push token, and the bridge POSTs a minimal,
+// content-free payload to the Expo push service when a turn completes or an
+// approval is requested. Expo relays to APNs/FCM, which wakes the app.
+
+const PUSH_REGISTRY_FILE_NAME: &str = ".clawdex-push-registry.json";
+const EXPO_PUSH_SEND_ENDPOINT: &str = "https://exp.host/--/api/v2/push/send";
+const EXPO_PUSH_BATCH_SIZE: usize = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushEventPreferences {
+    #[serde(default = "default_true")]
+    turn_completed: bool,
+    #[serde(default = "default_true")]
+    approval_requested: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for PushEventPreferences {
+    fn default() -> Self {
+        Self {
+            turn_completed: true,
+            approval_requested: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushDeviceRegistration {
+    token: String,
+    #[serde(default)]
+    platform: String,
+    #[serde(default)]
+    device_name: String,
+    #[serde(default)]
+    events: PushEventPreferences,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushRegistry {
+    #[serde(default)]
+    devices: Vec<PushDeviceRegistration>,
+}
+
+struct PushService {
+    registry: RwLock<PushRegistry>,
+    registry_path: PathBuf,
+    project_label: String,
+    http: reqwest::Client,
+    access_token: Option<String>,
+}
+
+impl PushService {
+    async fn load(workdir: &Path, project_label: String) -> Arc<Self> {
+        let registry_path = workdir.join(PUSH_REGISTRY_FILE_NAME);
+        let registry = match tokio::fs::read_to_string(&registry_path).await {
+            Ok(contents) => serde_json::from_str::<PushRegistry>(&contents).unwrap_or_default(),
+            Err(_) => PushRegistry::default(),
+        };
+        let access_token = env::var("EXPO_ACCESS_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        Arc::new(Self {
+            registry: RwLock::new(registry),
+            registry_path,
+            project_label,
+            http: reqwest::Client::new(),
+            access_token,
+        })
+    }
+
+    fn spawn_event_loop(self: &Arc<Self>, hub: &Arc<ClientHub>) {
+        let this = Arc::clone(self);
+        let mut receiver = hub.subscribe_notifications();
+        tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(notification) => {
+                        this.handle_notification(&notification.method, &notification.params)
+                            .await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    async fn persist(&self) {
+        let snapshot = { self.registry.read().await.clone() };
+        match serde_json::to_string_pretty(&snapshot) {
+            Ok(contents) => {
+                if let Err(error) = tokio::fs::write(&self.registry_path, contents).await {
+                    eprintln!("failed to persist push registry: {error}");
+                }
+            }
+            Err(error) => eprintln!("failed to serialize push registry: {error}"),
+        }
+    }
+
+    async fn register(
+        &self,
+        token: String,
+        platform: String,
+        device_name: String,
+        events: PushEventPreferences,
+    ) -> usize {
+        let now = now_iso();
+        let count = {
+            let mut registry = self.registry.write().await;
+            if let Some(existing) = registry
+                .devices
+                .iter_mut()
+                .find(|device| device.token == token)
+            {
+                existing.platform = platform;
+                existing.device_name = device_name;
+                existing.events = events;
+                existing.updated_at = now;
+            } else {
+                registry.devices.push(PushDeviceRegistration {
+                    token,
+                    platform,
+                    device_name,
+                    events,
+                    created_at: now.clone(),
+                    updated_at: now,
+                });
+            }
+            registry.devices.len()
+        };
+        self.persist().await;
+        count
+    }
+
+    async fn unregister(&self, token: &str) -> bool {
+        let removed = {
+            let mut registry = self.registry.write().await;
+            let before = registry.devices.len();
+            registry.devices.retain(|device| device.token != token);
+            registry.devices.len() != before
+        };
+        if removed {
+            self.persist().await;
+        }
+        removed
+    }
+
+    async fn list(&self) -> Vec<Value> {
+        let registry = self.registry.read().await;
+        registry
+            .devices
+            .iter()
+            .map(|device| {
+                json!({
+                    "platform": device.platform,
+                    "deviceName": device.device_name,
+                    "events": device.events,
+                    "createdAt": device.created_at,
+                    "updatedAt": device.updated_at,
+                    // Never echo full tokens back to clients; expose only a short suffix.
+                    "tokenSuffix": token_suffix(&device.token),
+                })
+            })
+            .collect()
+    }
+
+    async fn handle_notification(&self, method: &str, params: &Value) {
+        let event = match method {
+            "turn/completed" => PushEvent::TurnCompleted,
+            "bridge/approval.requested" => PushEvent::ApprovalRequested,
+            _ => return,
+        };
+
+        let thread_id = read_string(params.get("threadId"))
+            .or_else(|| read_string(params.get("thread_id")))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let targets: Vec<String> = {
+            let registry = self.registry.read().await;
+            registry
+                .devices
+                .iter()
+                .filter(|device| match event {
+                    PushEvent::TurnCompleted => device.events.turn_completed,
+                    PushEvent::ApprovalRequested => device.events.approval_requested,
+                })
+                .map(|device| device.token.clone())
+                .collect()
+        };
+        if targets.is_empty() {
+            return;
+        }
+
+        let (title, body) = match event {
+            PushEvent::TurnCompleted => (
+                "Turn finished".to_string(),
+                format!("Codex finished working in {}", self.project_label),
+            ),
+            PushEvent::ApprovalRequested => (
+                "Approval needed".to_string(),
+                format!("Codex is waiting for your approval in {}", self.project_label),
+            ),
+        };
+        let data = json!({
+            "type": event.as_str(),
+            "threadId": thread_id,
+        });
+
+        self.send(&title, &body, &data, targets).await;
+    }
+
+    async fn send(&self, title: &str, body: &str, data: &Value, tokens: Vec<String>) {
+        for chunk in tokens.chunks(EXPO_PUSH_BATCH_SIZE) {
+            let messages: Vec<Value> = chunk
+                .iter()
+                .map(|token| {
+                    json!({
+                        "to": token,
+                        "title": title,
+                        "body": body,
+                        "data": data,
+                        "sound": "default",
+                        "priority": "high",
+                    })
+                })
+                .collect();
+
+            let mut request = self.http.post(EXPO_PUSH_SEND_ENDPOINT).json(&messages);
+            if let Some(token) = &self.access_token {
+                request = request.bearer_auth(token);
+            }
+
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    eprintln!("push send failed: {error}");
+                    continue;
+                }
+            };
+            let payload = match response.json::<Value>().await {
+                Ok(payload) => payload,
+                Err(error) => {
+                    eprintln!("push response parse failed: {error}");
+                    continue;
+                }
+            };
+
+            // Expo returns one receipt per message, in request order. Prune any
+            // token that comes back as DeviceNotRegistered so the registry does
+            // not accumulate dead devices.
+            if let Some(receipts) = payload.get("data").and_then(Value::as_array) {
+                let mut stale: Vec<String> = Vec::new();
+                for (index, receipt) in receipts.iter().enumerate() {
+                    let status = read_string(receipt.get("status"));
+                    if status.as_deref() == Some("error") {
+                        let error_kind = receipt
+                            .get("details")
+                            .and_then(|details| read_string(details.get("error")));
+                        if error_kind.as_deref() == Some("DeviceNotRegistered") {
+                            if let Some(token) = chunk.get(index) {
+                                stale.push(token.clone());
+                            }
+                        }
+                    }
+                }
+                for token in stale {
+                    self.unregister(&token).await;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PushEvent {
+    TurnCompleted,
+    ApprovalRequested,
+}
+
+impl PushEvent {
+    fn as_str(self) -> &'static str {
+        match self {
+            PushEvent::TurnCompleted => "turn_completed",
+            PushEvent::ApprovalRequested => "approval_requested",
+        }
+    }
+}
+
+fn token_suffix(token: &str) -> String {
+    let visible: String = token.chars().rev().take(6).collect::<String>();
+    visible.chars().rev().collect()
+}
+
+fn parse_push_event_preferences(value: Option<&Value>) -> PushEventPreferences {
+    let defaults = PushEventPreferences::default();
+    match value {
+        Some(object) => PushEventPreferences {
+            turn_completed: read_bool(object.get("turnCompleted"))
+                .unwrap_or(defaults.turn_completed),
+            approval_requested: read_bool(object.get("approvalRequested"))
+                .unwrap_or(defaults.approval_requested),
+        },
+        None => defaults,
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     config: Arc<BridgeConfig>,
@@ -675,6 +997,7 @@ struct AppState {
     git: Arc<GitService>,
     updater: Arc<UpdateService>,
     preview: Arc<BrowserPreviewService>,
+    push: Arc<PushService>,
 }
 
 #[allow(dead_code)]
@@ -6880,6 +7203,15 @@ async fn main() {
     ));
     let queue = BridgeQueueService::new(backend.clone(), hub.clone());
 
+    let project_label = config
+        .workdir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Clawdex".to_string());
+    let push = PushService::load(&config.workdir, project_label).await;
+    push.spawn_event_loop(&hub);
+
     let state = Arc::new(AppState {
         config: config.clone(),
         started_at: Instant::now(),
@@ -6891,6 +7223,7 @@ async fn main() {
         git,
         updater,
         preview,
+        push,
     });
 
     let app = Router::new()
@@ -7776,6 +8109,36 @@ async fn handle_bridge_method(
             .map_err(|error| BridgeError::server(&error.to_string())),
         "bridge/runtime/read" => serde_json::to_value(state.updater.runtime_info().await)
             .map_err(|error| BridgeError::server(&error.to_string())),
+        "bridge/push/register" => {
+            let params = params.unwrap_or_else(|| json!({}));
+            let token = read_string(params.get("token"))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| BridgeError::invalid_params("push token is required"))?;
+            let platform = read_string(params.get("platform"))
+                .map(|value| value.trim().to_lowercase())
+                .unwrap_or_else(|| "unknown".to_string());
+            let device_name = read_string(params.get("deviceName"))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "Unknown device".to_string());
+            let events = parse_push_event_preferences(params.get("events"));
+            let count = state
+                .push
+                .register(token, platform, device_name, events)
+                .await;
+            Ok(json!({ "ok": true, "deviceCount": count }))
+        }
+        "bridge/push/unregister" => {
+            let params = params.unwrap_or_else(|| json!({}));
+            let token = read_string(params.get("token"))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| BridgeError::invalid_params("push token is required"))?;
+            let removed = state.push.unregister(&token).await;
+            Ok(json!({ "ok": true, "removed": removed }))
+        }
+        "bridge/push/list" => Ok(json!({ "devices": state.push.list().await })),
         "bridge/cursor/credentials/read" => {
             let status = read_cursor_credential_status(state).await?;
             serde_json::to_value(status).map_err(|error| BridgeError::server(&error.to_string()))
@@ -14012,6 +14375,99 @@ fn normalize_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    #[test]
+    fn token_suffix_masks_all_but_last_six_chars() {
+        assert_eq!(token_suffix("ExponentPushToken[abcdef123456]"), "23456]");
+        assert_eq!(token_suffix("abc"), "abc");
+        assert_eq!(token_suffix(""), "");
+    }
+
+    #[test]
+    fn parse_push_event_preferences_defaults_to_enabled() {
+        let defaults = parse_push_event_preferences(None);
+        assert!(defaults.turn_completed);
+        assert!(defaults.approval_requested);
+
+        let partial = parse_push_event_preferences(Some(&json!({ "approvalRequested": false })));
+        assert!(partial.turn_completed);
+        assert!(!partial.approval_requested);
+    }
+
+    #[test]
+    fn push_registry_round_trips_and_tolerates_missing_fields() {
+        let raw = json!({
+            "devices": [
+                {
+                    "token": "ExponentPushToken[one]",
+                    "platform": "ios",
+                    "deviceName": "iPhone",
+                    "events": { "turnCompleted": true, "approvalRequested": false },
+                    "createdAt": "2026-05-29T00:00:00Z",
+                    "updatedAt": "2026-05-29T00:00:00Z"
+                },
+                {
+                    "token": "ExponentPushToken[two]",
+                    "createdAt": "2026-05-29T00:00:00Z",
+                    "updatedAt": "2026-05-29T00:00:00Z"
+                }
+            ]
+        });
+        let registry: PushRegistry = serde_json::from_value(raw).expect("parse registry");
+        assert_eq!(registry.devices.len(), 2);
+        // Missing event prefs fall back to enabled.
+        assert!(registry.devices[1].events.turn_completed);
+        assert!(registry.devices[1].events.approval_requested);
+
+        let serialized = serde_json::to_string(&registry).expect("serialize");
+        let reparsed: PushRegistry = serde_json::from_str(&serialized).expect("reparse");
+        assert_eq!(reparsed.devices[0].token, "ExponentPushToken[one]");
+        assert!(!reparsed.devices[0].events.approval_requested);
+    }
+
+    #[tokio::test]
+    async fn push_service_registers_dedupes_and_unregisters() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawdex-push-test-{}",
+            std::process::id()
+        ));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let service = PushService::load(&dir, "demo".to_string()).await;
+
+        let prefs = PushEventPreferences::default();
+        let count = service
+            .register(
+                "ExponentPushToken[a]".to_string(),
+                "ios".to_string(),
+                "Phone".to_string(),
+                prefs.clone(),
+            )
+            .await;
+        assert_eq!(count, 1);
+
+        // Re-registering the same token updates in place rather than duplicating.
+        let count = service
+            .register(
+                "ExponentPushToken[a]".to_string(),
+                "ios".to_string(),
+                "Phone Renamed".to_string(),
+                prefs,
+            )
+            .await;
+        assert_eq!(count, 1);
+
+        let listed = service.list().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].get("deviceName").and_then(Value::as_str), Some("Phone Renamed"));
+        // Full tokens are never echoed back.
+        assert!(listed[0].get("token").is_none());
+
+        assert!(service.unregister("ExponentPushToken[a]").await);
+        assert!(!service.unregister("ExponentPushToken[a]").await);
+        assert!(service.list().await.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
     fn bridge_chatgpt_auth_test_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -14208,6 +14664,7 @@ mod tests {
             config.preview_connect_url.clone(),
         ));
         let queue = BridgeQueueService::new(backend.clone(), hub.clone());
+        let push = PushService::load(&config.workdir, "Clawdex".to_string()).await;
 
         Arc::new(AppState {
             config,
@@ -14220,6 +14677,7 @@ mod tests {
             git,
             updater,
             preview,
+            push,
         })
     }
 

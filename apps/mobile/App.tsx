@@ -86,6 +86,13 @@ import {
   type AutoStoreReviewState,
 } from './src/storeReview';
 import { TermsScreen } from './src/screens/TermsScreen';
+import {
+  addNotificationResponseListener,
+  getInitialNotificationTarget,
+  setupNotificationHandler,
+  type PushNavigationTarget,
+} from './src/pushNotifications';
+import { syncPushRegistration } from './src/pushController';
 import { configureRevenueCatIfNeeded } from './src/tips';
 import {
   AppThemeProvider,
@@ -169,6 +176,7 @@ export default function App() {
   );
   const mainRef = useRef<MainScreenHandle>(null);
   const browserRef = useRef<BrowserScreenHandle>(null);
+  const pushSyncedApiRef = useRef<HostBridgeApiClient | null>(null);
   const [currentScreen, setCurrentScreen] = useState<Screen>('Main');
   const [browserReturnScreen, setBrowserReturnScreen] = useState<AppScreen>('Main');
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
@@ -319,6 +327,56 @@ export default function App() {
       setBridgeConnected(connected);
     });
   }, [ws]);
+
+  // Push notifications: suppress banners while foregrounded, and route a tapped
+  // notification to its thread (cold-start taps included).
+  useEffect(() => {
+    setupNotificationHandler();
+    const handleTarget = (target: PushNavigationTarget) => {
+      setCurrentScreen('Main');
+      if (target.threadId) {
+        const threadId = target.threadId;
+        // Defer so MainScreen is mounted (and on cold start, has begun connecting).
+        setTimeout(() => {
+          mainRef.current?.openChat(threadId);
+        }, 400);
+      }
+    };
+    const subscription = addNotificationResponseListener(handleTarget);
+    void getInitialNotificationTarget().then((target) => {
+      if (target) {
+        handleTarget(target);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // Auto-register for push on the first successful bridge connect (skipping
+  // onboarding/pairing). The OS permission dialog is shown once here rather than
+  // requiring the user to find the Settings toggle. Re-runs when the active
+  // bridge changes so a newly paired bridge also learns this device's token.
+  useEffect(() => {
+    if (!api || !ws || currentScreen === 'Onboarding') {
+      return;
+    }
+    const attempt = () => {
+      if (pushSyncedApiRef.current === api) {
+        return;
+      }
+      pushSyncedApiRef.current = api;
+      void syncPushRegistration(api).catch(() => {
+        // Leave it to the next connect; never block the connect flow.
+      });
+    };
+    if (ws.isConnected) {
+      attempt();
+    }
+    return ws.onStatus((connected) => {
+      if (connected) {
+        attempt();
+      }
+    });
+  }, [api, ws, currentScreen]);
 
   useEffect(() => {
     if (!api || !ws || currentScreen === 'Onboarding') {
