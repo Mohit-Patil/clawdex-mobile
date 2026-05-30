@@ -898,14 +898,15 @@ impl PushService {
     }
 
     /// Remove and format the accumulated reply for a thread into a one-line
-    /// preview: first non-empty line, whitespace-collapsed, length-capped.
+    /// preview: last non-empty line (agents usually end with the conclusion),
+    /// whitespace-collapsed, length-capped.
     async fn take_reply_preview(&self, thread_id: &str) -> Option<String> {
         let raw = {
             let mut replies = self.recent_replies.write().await;
             replies.remove(thread_id)?
         };
-        let first_line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
-        let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let last_line = raw.lines().map(str::trim).filter(|line| !line.is_empty()).next_back()?;
+        let collapsed = last_line.split_whitespace().collect::<Vec<_>>().join(" ");
         if collapsed.is_empty() {
             return None;
         }
@@ -14580,14 +14581,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_reply_preview_uses_first_nonempty_line() {
+    async fn take_reply_preview_uses_last_nonempty_line() {
         let dir = std::env::temp_dir().join(format!("clawdex-preview-{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&dir).await;
         let service = PushService::load(&dir, "demo".to_string()).await;
         service
             .accumulate_reply(
                 "item/agentMessage/delta",
-                &json!({ "threadId": "t1", "field": "text", "delta": "  \n Done: fixed the bug\nmore" }),
+                &json!({ "threadId": "t1", "field": "text", "delta": "Working on it\n Done: fixed the bug \n\n" }),
             )
             .await;
         let preview = service.take_reply_preview("t1").await;

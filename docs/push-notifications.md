@@ -29,7 +29,7 @@ Payloads carry:
 - the event type (`turn_completed` or `approval_requested`)
 - the bridge project name (the working directory's folder name)
 - the thread id (in `data`, used for deep-linking when the notification is tapped)
-- for completed turns, a **short preview of the agent's reply** — the first
+- for completed turns, a **short preview of the agent's reply** — the last
   non-empty line, whitespace-collapsed and capped at 140 characters
 
 This means a snippet of the agent's reply text leaves your network (via Expo and
