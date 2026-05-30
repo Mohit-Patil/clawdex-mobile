@@ -22,6 +22,7 @@ Use the existing docs as the source of truth instead of duplicating them in code
 - Troubleshooting and recovery commands: `docs/troubleshooting.md`
 - Realtime/live-sync constraints: `docs/realtime-streaming-limitations.md`
 - Voice transcription architecture: `docs/voice-transcription.md`
+- Push notifications (bridge-sent turn/approval alerts): `docs/push-notifications.md`
 - EAS and native build/release notes: `docs/eas-builds.md`
 - Open-source and notice obligations: `docs/open-source-license-requirements.md`
 - App review template: `docs/app-review-notes.md`

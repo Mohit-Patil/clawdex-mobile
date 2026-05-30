@@ -359,6 +359,21 @@ export class HostBridgeApiClient {
     return this.ws.request<BridgeRuntimeInfo>('bridge/runtime/read');
   }
 
+  registerPushDevice(input: {
+    token: string;
+    platform: string;
+    deviceName: string;
+    events: { turnCompleted: boolean; approvalRequested: boolean };
+  }): Promise<{ ok: boolean; deviceCount: number }> {
+    return this.ws.request<{ ok: boolean; deviceCount: number }>('bridge/push/register', input);
+  }
+
+  unregisterPushDevice(token: string): Promise<{ ok: boolean; removed: boolean }> {
+    return this.ws.request<{ ok: boolean; removed: boolean }>('bridge/push/unregister', {
+      token,
+    });
+  }
+
   async readCursorCredentials(): Promise<CursorCredentialStatus> {
     const response = await this.ws.request<CursorCredentialStatusResponse>(
       'bridge/cursor/credentials/read'

@@ -5,6 +5,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Platform,
   Pressable,
@@ -57,6 +58,13 @@ import {
   formatComposerUsageLimitResetAt,
 } from '../components/usageLimitBadges';
 import { getChatEngineLabel } from '../chatEngines';
+import { type PushEventKey } from '../pushNotifications';
+import {
+  createDefaultPushSettings,
+  loadPushSettings,
+  type PushSettings,
+} from '../pushSettings';
+import { disablePush, enablePush, updatePushEvents } from '../pushController';
 import {
   DEFAULT_FONT_PREFERENCE,
   FONT_PREFERENCE_OPTIONS,
@@ -252,11 +260,76 @@ export function SettingsScreen({
   const [tipActionMessage, setTipActionMessage] = useState<string | null>(null);
   const [tipPurchasingPackageId, setTipPurchasingPackageId] = useState<string | null>(null);
   const [tipPaywallOpening, setTipPaywallOpening] = useState(false);
+  const [pushSettings, setPushSettings] = useState<PushSettings>(createDefaultPushSettings);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushError, setPushError] = useState<string | null>(null);
   const [route, setRoute] = useState<SettingsRoute>('home');
   const [routeTransitionDirection, setRouteTransitionDirection] =
     useState<SettingsRouteTransitionDirection>('forward');
   const routeContentTranslateX = useSharedValue(0);
   const routeContentOpacity = useSharedValue(1);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadPushSettings().then((loaded) => {
+      if (!cancelled) {
+        setPushSettings(loaded);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshPushSettings = useCallback(async () => {
+    const latest = await loadPushSettings();
+    setPushSettings(latest);
+  }, []);
+
+  const handleTogglePush = useCallback(
+    async (enabled: boolean) => {
+      if (pushBusy) {
+        return;
+      }
+      setPushError(null);
+      setPushBusy(true);
+      try {
+        if (enabled) {
+          const result = await enablePush(api);
+          if (result.status === 'unavailable') {
+            setPushError('Notifications permission was not granted.');
+            Alert.alert(
+              'Notifications unavailable',
+              'Allow notifications for Clawdex in your system settings, then try again. Push notifications also require a physical device.'
+            );
+          }
+        } else {
+          await disablePush(api);
+        }
+      } catch (error) {
+        setPushError(error instanceof Error ? error.message : 'Could not update notifications.');
+      } finally {
+        await refreshPushSettings();
+        setPushBusy(false);
+      }
+    },
+    [api, pushBusy, refreshPushSettings]
+  );
+
+  const handleTogglePushEvent = useCallback(
+    async (key: PushEventKey, value: boolean) => {
+      const events = { ...pushSettings.events, [key]: value };
+      setPushSettings((prev) => ({ ...prev, events }));
+      try {
+        await updatePushEvents(api, events);
+      } catch {
+        // Non-fatal; the optimistic update stays and is re-synced below.
+      }
+      await refreshPushSettings();
+    },
+    [api, pushSettings.events, refreshPushSettings]
+  );
+
   const handleReturnToSettingsHome = useCallback(() => {
     setRouteTransitionDirection('backward');
     setRoute('home');
@@ -1479,6 +1552,73 @@ export function SettingsScreen({
           <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
         </Pressable>
       </BlurView>
+
+      <Text style={[styles.sectionLabel, styles.sectionLabelGap]}>Notifications</Text>
+      <BlurView intensity={50} tint={theme.blurTint} style={styles.card}>
+        <View style={styles.settingRow}>
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Push notifications</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              Get pinged when a turn finishes or needs approval, even with the app closed.
+            </Text>
+          </View>
+          {pushBusy ? (
+            <ActivityIndicator color={colors.textMuted} />
+          ) : (
+            <Switch
+              value={!pushSettings.optedOut}
+              onValueChange={(value) => void handleTogglePush(value)}
+              trackColor={{ false: transcriptSwitchTrackColor, true: transcriptSwitchActiveColor }}
+              thumbColor={transcriptSwitchThumbColor}
+              ios_backgroundColor={transcriptSwitchTrackColor}
+            />
+          )}
+        </View>
+        <View style={[styles.settingRow, pushSettings.optedOut && styles.settingRowDisabled]}>
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Turn finished</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              Notify when the agent completes a turn.
+            </Text>
+          </View>
+          <Switch
+            value={pushSettings.events.turnCompleted}
+            disabled={pushSettings.optedOut || pushBusy}
+            onValueChange={(value) => void handleTogglePushEvent('turnCompleted', value)}
+            trackColor={{ false: transcriptSwitchTrackColor, true: transcriptSwitchActiveColor }}
+            thumbColor={transcriptSwitchThumbColor}
+            ios_backgroundColor={transcriptSwitchTrackColor}
+          />
+        </View>
+        <View
+          style={[
+            styles.settingRow,
+            styles.settingRowLast,
+            pushSettings.optedOut && styles.settingRowDisabled,
+          ]}
+        >
+          <View style={styles.settingRowLeft}>
+            <Text style={styles.rowLabel}>Approval needed</Text>
+            <Text style={styles.settingValue} numberOfLines={2}>
+              Notify when the agent is waiting for your approval.
+            </Text>
+          </View>
+          <Switch
+            value={pushSettings.events.approvalRequested}
+            disabled={pushSettings.optedOut || pushBusy}
+            onValueChange={(value) => void handleTogglePushEvent('approvalRequested', value)}
+            trackColor={{ false: transcriptSwitchTrackColor, true: transcriptSwitchActiveColor }}
+            thumbColor={transcriptSwitchThumbColor}
+            ios_backgroundColor={transcriptSwitchTrackColor}
+          />
+        </View>
+      </BlurView>
+      <Text style={styles.subtleHintText}>
+        Notifications are sent by your bridge through Expo&apos;s push service. They include a
+        short preview of the agent&apos;s reply (its first line) plus the project name, so reply
+        text leaves your network via Expo and Apple when notifications are on.
+      </Text>
+      {pushError ? <Text style={styles.errorText}>{pushError}</Text> : null}
 
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
     </>

@@ -76,6 +76,7 @@ import { ChatHeader } from '../components/ChatHeader';
 import { ChatInput } from '../components/ChatInput';
 import { ComposerUsageLimits } from '../components/ComposerUsageLimits';
 import { BrandMark } from '../components/BrandMark';
+import { PromptLibrarySheet } from '../components/PromptLibrarySheet';
 import { SelectionSheet, type SelectionSheetOption } from '../components/SelectionSheet';
 import { WorkspacePickerModal } from '../components/WorkspacePickerModal';
 import {
@@ -104,6 +105,16 @@ import {
   shouldCollapseWorkflowCardForKeyboard,
 } from './planCardState';
 import type { TranscriptDisplayItem } from './transcriptMessages';
+import {
+  createEmptyPromptLibraryStore,
+  loadPromptLibrary,
+  removePrompt,
+  savePromptLibrary,
+  upsertPrompt,
+  type PromptLibraryStore,
+  type SavedPrompt,
+  type SavedPromptDraft,
+} from '../promptLibrary';
 import { useAppTheme } from '../theme';
 import { ChatTranscriptView } from './ChatTranscriptView';
 import { createStyles, createWorkflowMarkdownStyles } from './mainScreenStyles';
@@ -337,6 +348,58 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
     const initialDraftScopeKey = getDraftScopeKey(initialPendingSnapshot?.id ?? pendingOpenChatId);
     const [draft, setDraft] = useState('');
     const [draftOwnerKey, setDraftOwnerKey] = useState(initialDraftScopeKey);
+    const [promptLibrary, setPromptLibrary] = useState<PromptLibraryStore>(
+      createEmptyPromptLibraryStore
+    );
+    const [promptLibraryVisible, setPromptLibraryVisible] = useState(false);
+    const promptIdSeedRef = useRef(0);
+
+    useEffect(() => {
+      let cancelled = false;
+      void loadPromptLibrary().then((store) => {
+        if (!cancelled) {
+          setPromptLibrary(store);
+        }
+      });
+      return () => {
+        cancelled = true;
+      };
+    }, []);
+
+    const handleInsertPrompt = useCallback((prompt: SavedPrompt) => {
+      setDraft((current) => {
+        const trimmed = current.replace(/\s+$/, '');
+        return trimmed.length === 0 ? prompt.body : `${trimmed}\n${prompt.body}`;
+      });
+      setPromptLibraryVisible(false);
+    }, []);
+
+    const handleSavePrompt = useCallback(
+      (draftPrompt: SavedPromptDraft) => {
+        promptIdSeedRef.current += 1;
+        const next = upsertPrompt(
+          promptLibrary,
+          draftPrompt,
+          new Date().toISOString(),
+          promptIdSeedRef.current
+        );
+        setPromptLibrary(next);
+        void savePromptLibrary(next).catch(() => {});
+      },
+      [promptLibrary]
+    );
+
+    const handleDeletePrompt = useCallback(
+      (id: string) => {
+        const next = removePrompt(promptLibrary, id);
+        if (next === promptLibrary) {
+          return;
+        }
+        setPromptLibrary(next);
+        void savePromptLibrary(next).catch(() => {});
+      },
+      [promptLibrary]
+    );
     const [chatDraftsLoaded, setChatDraftsLoaded] = useState(false);
     const [sending, setSending] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -8450,6 +8513,7 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
           isStopping={stoppingTurn}
           onAttachPress={openAttachmentMenu}
           attachDisabled={attachmentControlsDisabled}
+          onPromptLibraryPress={() => setPromptLibraryVisible(true)}
           attachments={composerAttachments}
           onRemoveAttachment={removeComposerAttachment}
           isLoading={isLoading}
@@ -8944,6 +9008,15 @@ export const MainScreen = forwardRef<MainScreenHandle, MainScreenProps>(
             {shouldShowComposer ? renderComposer(false) : null}
           </KeyboardAvoidingView>
         )}
+
+        <PromptLibrarySheet
+          visible={promptLibraryVisible}
+          prompts={promptLibrary.prompts}
+          onClose={() => setPromptLibraryVisible(false)}
+          onInsert={handleInsertPrompt}
+          onSavePrompt={handleSavePrompt}
+          onDeletePrompt={handleDeletePrompt}
+        />
 
         <SelectionSheet
           visible={attachmentMenuVisible}
