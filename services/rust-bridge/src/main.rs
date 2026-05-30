@@ -905,7 +905,11 @@ impl PushService {
             let mut replies = self.recent_replies.write().await;
             replies.remove(thread_id)?
         };
-        let last_line = raw.lines().map(str::trim).filter(|line| !line.is_empty()).next_back()?;
+        let last_line = raw
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .next_back()?;
         let collapsed = last_line.split_whitespace().collect::<Vec<_>>().join(" ");
         if collapsed.is_empty() {
             return None;
@@ -968,7 +972,10 @@ impl PushService {
             ),
             PushEvent::ApprovalRequested => (
                 "Approval needed".to_string(),
-                format!("Codex is waiting for your approval in {}", self.project_label),
+                format!(
+                    "Codex is waiting for your approval in {}",
+                    self.project_label
+                ),
             ),
         };
         let data = json!({
@@ -14671,10 +14678,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_service_registers_dedupes_and_unregisters() {
-        let dir = std::env::temp_dir().join(format!(
-            "clawdex-push-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("clawdex-push-test-{}", std::process::id()));
         let _ = tokio::fs::create_dir_all(&dir).await;
         let service = PushService::load(&dir, "demo".to_string()).await;
 
@@ -14702,7 +14706,10 @@ mod tests {
 
         let listed = service.list().await;
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].get("deviceName").and_then(Value::as_str), Some("Phone Renamed"));
+        assert_eq!(
+            listed[0].get("deviceName").and_then(Value::as_str),
+            Some("Phone Renamed")
+        );
         // Full tokens are never echoed back.
         assert!(listed[0].get("token").is_none());
 
