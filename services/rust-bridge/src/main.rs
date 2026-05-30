@@ -928,6 +928,15 @@ impl PushService {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
 
+        // For approval events, carry the approval id so a notification action can
+        // resolve exactly this approval without opening the conversation first.
+        let approval_id = match event {
+            PushEvent::ApprovalRequested => read_string(params.get("id"))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            PushEvent::TurnCompleted => None,
+        };
+
         let targets: Vec<String> = {
             let registry = self.registry.read().await;
             registry
@@ -965,24 +974,44 @@ impl PushService {
         let data = json!({
             "type": event.as_str(),
             "threadId": thread_id,
+            "approvalId": approval_id,
         });
+        // Only approval pushes get the actionable category; turn-complete pushes
+        // have nothing to act on.
+        let category_id = match event {
+            PushEvent::ApprovalRequested if approval_id.is_some() => Some("approval"),
+            _ => None,
+        };
 
-        self.send(&title, &body, &data, targets).await;
+        self.send(&title, &body, &data, category_id, targets).await;
     }
 
-    async fn send(self: &Arc<Self>, title: &str, body: &str, data: &Value, tokens: Vec<String>) {
+    async fn send(
+        self: &Arc<Self>,
+        title: &str,
+        body: &str,
+        data: &Value,
+        category_id: Option<&str>,
+        tokens: Vec<String>,
+    ) {
         for chunk in tokens.chunks(EXPO_PUSH_BATCH_SIZE) {
             let messages: Vec<Value> = chunk
                 .iter()
                 .map(|token| {
-                    json!({
+                    let mut message = json!({
                         "to": token,
                         "title": title,
                         "body": body,
                         "data": data,
                         "sound": "default",
                         "priority": "high",
-                    })
+                    });
+                    // iOS action buttons are driven by a registered category; the
+                    // app maps this id to its Approve/Deny actions.
+                    if let Some(category) = category_id {
+                        message["categoryId"] = json!(category);
+                    }
+                    message
                 })
                 .collect();
 

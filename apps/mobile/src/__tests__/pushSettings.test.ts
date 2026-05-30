@@ -1,4 +1,4 @@
-import { parsePushNavigationTarget } from '../pushNotifications';
+import { mapResponseAction, parsePushNavigationTarget } from '../pushNotifications';
 import {
   createDefaultPushSettings,
   parsePushSettings,
@@ -43,10 +43,18 @@ describe('parsePushNavigationTarget', () => {
     expect(parsePushNavigationTarget({ type: 'turn_completed', threadId: 't1' })).toEqual({
       type: 'turnCompleted',
       threadId: 't1',
+      approvalId: null,
     });
-    expect(parsePushNavigationTarget({ type: 'approval_requested' })).toEqual({
+    expect(
+      parsePushNavigationTarget({
+        type: 'approval_requested',
+        threadId: 't2',
+        approvalId: 'apr_9',
+      })
+    ).toEqual({
       type: 'approvalRequested',
-      threadId: null,
+      threadId: 't2',
+      approvalId: 'apr_9',
     });
   });
 
@@ -54,5 +62,14 @@ describe('parsePushNavigationTarget', () => {
     expect(parsePushNavigationTarget(null)).toBeNull();
     expect(parsePushNavigationTarget({ type: 'something_else' })).toBeNull();
     expect(parsePushNavigationTarget('nope')).toBeNull();
+  });
+});
+
+describe('mapResponseAction', () => {
+  it('maps action identifiers to approve/deny, default otherwise', () => {
+    expect(mapResponseAction('approve')).toBe('approve');
+    expect(mapResponseAction('deny')).toBe('deny');
+    expect(mapResponseAction('expo.modules.notifications.actions.DEFAULT')).toBe('default');
+    expect(mapResponseAction('whatever')).toBe('default');
   });
 });

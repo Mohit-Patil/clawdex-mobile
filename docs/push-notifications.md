@@ -73,6 +73,13 @@ reply content.
   already watching, and the result also streams in over the WebSocket).
 - **Backgrounded but not quit / killed:** the OS delivers and displays the push.
 - Tapping a notification opens the app and navigates to the relevant thread.
+- **Approval notifications carry Approve / Deny action buttons** (iOS notification
+  category `approval`). The approval push includes the `approvalId`; tapping a
+  button foregrounds the app and resolves that approval over the authenticated
+  bridge WebSocket (`bridge/approval.resolve`). The buttons foreground the app on
+  purpose: resolving needs the WS, which only runs while the app is active, so a
+  fully-background resolve isn't reliable for this transport. The in-app approval
+  banner remains as a fallback if the action can't complete.
 
 ## Build requirements (standalone apps)
 

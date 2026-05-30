@@ -31,6 +31,56 @@ export interface PushRegistrationInfo {
 export interface PushNavigationTarget {
   type: PushEventKey;
   threadId: string | null;
+  approvalId: string | null;
+}
+
+/** iOS notification category that renders the Approve/Deny action buttons. */
+export const APPROVAL_CATEGORY_ID = 'approval';
+export const APPROVE_ACTION_ID = 'approve';
+export const DENY_ACTION_ID = 'deny';
+
+/** A notification response: a plain tap, or an Approve/Deny action button. */
+export type PushResponseAction = 'default' | 'approve' | 'deny';
+
+export interface PushResponseEvent {
+  action: PushResponseAction;
+  target: PushNavigationTarget;
+}
+
+/**
+ * Register the approval notification category so iOS shows Approve/Deny buttons
+ * on approval pushes. Both buttons foreground the app: resolving an approval
+ * needs the authenticated bridge WebSocket, which only runs while the app is
+ * active, so a true background resolve isn't reliable for this transport.
+ */
+export async function registerNotificationCategories(): Promise<void> {
+  try {
+    await Notifications.setNotificationCategoryAsync(APPROVAL_CATEGORY_ID, [
+      {
+        identifier: APPROVE_ACTION_ID,
+        buttonTitle: 'Approve',
+        options: { opensAppToForeground: true },
+      },
+      {
+        identifier: DENY_ACTION_ID,
+        buttonTitle: 'Deny',
+        options: { opensAppToForeground: true, isDestructive: true },
+      },
+    ]);
+  } catch {
+    // Non-fatal: notifications still arrive, just without action buttons.
+  }
+}
+
+/** Map an Expo action identifier to our action enum. */
+export function mapResponseAction(actionIdentifier: string): PushResponseAction {
+  if (actionIdentifier === APPROVE_ACTION_ID) {
+    return 'approve';
+  }
+  if (actionIdentifier === DENY_ACTION_ID) {
+    return 'deny';
+  }
+  return 'default';
 }
 
 export const DEFAULT_PUSH_EVENT_PREFERENCES: PushEventPreferences = {
@@ -132,24 +182,34 @@ export async function requestPushRegistration(): Promise<PushRegistrationInfo | 
 }
 
 export function addNotificationResponseListener(
-  handler: (target: PushNavigationTarget) => void
+  handler: (event: PushResponseEvent) => void
 ): { remove: () => void } {
   return Notifications.addNotificationResponseReceivedListener((response) => {
-    const target = parsePushNavigationTarget(
-      response.notification.request.content.data as unknown
-    );
-    if (target) {
-      handler(target);
+    const event = parsePushResponse(response);
+    if (event) {
+      handler(event);
     }
   });
 }
 
-export async function getInitialNotificationTarget(): Promise<PushNavigationTarget | null> {
+export async function getInitialNotificationResponse(): Promise<PushResponseEvent | null> {
   const response = await Notifications.getLastNotificationResponseAsync();
   if (!response) {
     return null;
   }
-  return parsePushNavigationTarget(response.notification.request.content.data as unknown);
+  return parsePushResponse(response);
+}
+
+function parsePushResponse(
+  response: Notifications.NotificationResponse
+): PushResponseEvent | null {
+  const target = parsePushNavigationTarget(
+    response.notification.request.content.data as unknown
+  );
+  if (!target) {
+    return null;
+  }
+  return { action: mapResponseAction(response.actionIdentifier), target };
 }
 
 /** Pure: map a notification's `data` payload to a navigation target. */
@@ -173,5 +233,10 @@ export function parsePushNavigationTarget(data: unknown): PushNavigationTarget |
     typeof threadIdValue === 'string' && threadIdValue.trim().length > 0
       ? threadIdValue.trim()
       : null;
-  return { type, threadId };
+  const approvalIdValue = record.approvalId;
+  const approvalId =
+    typeof approvalIdValue === 'string' && approvalIdValue.trim().length > 0
+      ? approvalIdValue.trim()
+      : null;
+  return { type, threadId, approvalId };
 }
