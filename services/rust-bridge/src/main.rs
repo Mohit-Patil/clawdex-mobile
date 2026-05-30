@@ -675,7 +675,12 @@ async fn configure_git_credential_store(
 
 const PUSH_REGISTRY_FILE_NAME: &str = ".clawdex-push-registry.json";
 const EXPO_PUSH_SEND_ENDPOINT: &str = "https://exp.host/--/api/v2/push/send";
+const EXPO_PUSH_RECEIPTS_ENDPOINT: &str = "https://exp.host/--/api/v2/push/getReceipts";
 const EXPO_PUSH_BATCH_SIZE: usize = 100;
+const EXPO_RECEIPT_BATCH_SIZE: usize = 1000;
+// Expo asks senders to wait at least ~15 minutes before fetching delivery receipts.
+const RECEIPT_CHECK_DELAY_SECS: u64 = 900;
+const PUSH_SEND_MAX_ATTEMPTS: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -844,7 +849,7 @@ impl PushService {
             .collect()
     }
 
-    async fn handle_notification(&self, method: &str, params: &Value) {
+    async fn handle_notification(self: &Arc<Self>, method: &str, params: &Value) {
         let event = match method {
             "turn/completed" => PushEvent::TurnCompleted,
             "bridge/approval.requested" => PushEvent::ApprovalRequested,
@@ -890,7 +895,7 @@ impl PushService {
         self.send(&title, &body, &data, targets).await;
     }
 
-    async fn send(&self, title: &str, body: &str, data: &Value, tokens: Vec<String>) {
+    async fn send(self: &Arc<Self>, title: &str, body: &str, data: &Value, tokens: Vec<String>) {
         for chunk in tokens.chunks(EXPO_PUSH_BATCH_SIZE) {
             let messages: Vec<Value> = chunk
                 .iter()
@@ -906,47 +911,142 @@ impl PushService {
                 })
                 .collect();
 
-            let mut request = self.http.post(EXPO_PUSH_SEND_ENDPOINT).json(&messages);
-            if let Some(token) = &self.access_token {
-                request = request.bearer_auth(token);
-            }
-
-            let response = match request.send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    eprintln!("push send failed: {error}");
-                    continue;
-                }
-            };
-            let payload = match response.json::<Value>().await {
-                Ok(payload) => payload,
-                Err(error) => {
-                    eprintln!("push response parse failed: {error}");
-                    continue;
-                }
+            let Some(payload) = self
+                .post_with_retry(EXPO_PUSH_SEND_ENDPOINT, &Value::Array(messages))
+                .await
+            else {
+                continue;
             };
 
-            // Expo returns one receipt per message, in request order. Prune any
-            // token that comes back as DeviceNotRegistered so the registry does
-            // not accumulate dead devices.
-            if let Some(receipts) = payload.get("data").and_then(Value::as_array) {
-                let mut stale: Vec<String> = Vec::new();
-                for (index, receipt) in receipts.iter().enumerate() {
-                    let status = read_string(receipt.get("status"));
-                    if status.as_deref() == Some("error") {
-                        let error_kind = receipt
+            // Expo returns one ticket per message, in request order. status="error"
+            // is an immediate failure; status="ok" carries a receipt id that we
+            // re-check later, because DeviceNotRegistered (and APNs/FCM delivery
+            // failures) frequently only surface in the receipt, not the ticket.
+            let Some(tickets) = payload.get("data").and_then(Value::as_array) else {
+                continue;
+            };
+            let mut stale: Vec<String> = Vec::new();
+            let mut pending_receipts: Vec<(String, String)> = Vec::new();
+            for (index, ticket) in tickets.iter().enumerate() {
+                let Some(token) = chunk.get(index).cloned() else {
+                    continue;
+                };
+                match read_string(ticket.get("status")).as_deref() {
+                    Some("ok") => {
+                        if let Some(receipt_id) = read_string(ticket.get("id")) {
+                            pending_receipts.push((receipt_id, token));
+                        }
+                    }
+                    Some("error") => {
+                        let error_kind = ticket
                             .get("details")
                             .and_then(|details| read_string(details.get("error")));
                         if error_kind.as_deref() == Some("DeviceNotRegistered") {
-                            if let Some(token) = chunk.get(index) {
-                                stale.push(token.clone());
-                            }
+                            stale.push(token);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for token in stale {
+                self.unregister(&token).await;
+            }
+            if !pending_receipts.is_empty() {
+                self.spawn_receipt_check(pending_receipts);
+            }
+        }
+    }
+
+    /// POST JSON to Expo, retrying on 429 / 5xx / transport errors with
+    /// exponential backoff (honoring Retry-After). Returns the parsed body, or
+    /// None once attempts are exhausted.
+    async fn post_with_retry(&self, url: &str, body: &Value) -> Option<Value> {
+        let mut delay_ms: u64 = 500;
+        for attempt in 1..=PUSH_SEND_MAX_ATTEMPTS {
+            let mut request = self.http.post(url).json(body);
+            if let Some(token) = &self.access_token {
+                request = request.bearer_auth(token);
+            }
+            match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        if attempt >= PUSH_SEND_MAX_ATTEMPTS {
+                            eprintln!(
+                                "push request to {url} gave up after {attempt} attempts (status {status})"
+                            );
+                            return None;
+                        }
+                        let wait_ms = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .map(|secs| secs.saturating_mul(1000))
+                            .unwrap_or(delay_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        delay_ms = (delay_ms * 2).min(8000);
+                        continue;
+                    }
+                    match response.json::<Value>().await {
+                        Ok(value) => return Some(value),
+                        Err(error) => {
+                            eprintln!("push response parse failed: {error}");
+                            return None;
                         }
                     }
                 }
-                for token in stale {
-                    self.unregister(&token).await;
+                Err(error) => {
+                    if attempt >= PUSH_SEND_MAX_ATTEMPTS {
+                        eprintln!("push request to {url} failed after {attempt} attempts: {error}");
+                        return None;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms = (delay_ms * 2).min(8000);
                 }
+            }
+        }
+        None
+    }
+
+    /// After Expo's recommended delay, fetch delivery receipts for the given
+    /// (receiptId, token) pairs and prune tokens reported DeviceNotRegistered.
+    fn spawn_receipt_check(self: &Arc<Self>, receipts: Vec<(String, String)>) {
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(RECEIPT_CHECK_DELAY_SECS)).await;
+            this.check_receipts(receipts).await;
+        });
+    }
+
+    async fn check_receipts(&self, receipts: Vec<(String, String)>) {
+        for chunk in receipts.chunks(EXPO_RECEIPT_BATCH_SIZE) {
+            let ids: Vec<&str> = chunk.iter().map(|(id, _)| id.as_str()).collect();
+            let Some(payload) = self
+                .post_with_retry(EXPO_PUSH_RECEIPTS_ENDPOINT, &json!({ "ids": ids }))
+                .await
+            else {
+                continue;
+            };
+            let Some(map) = payload.get("data").and_then(Value::as_object) else {
+                continue;
+            };
+            let mut stale: Vec<String> = Vec::new();
+            for (receipt_id, receipt) in map {
+                if read_string(receipt.get("status")).as_deref() != Some("error") {
+                    continue;
+                }
+                let error_kind = receipt
+                    .get("details")
+                    .and_then(|details| read_string(details.get("error")));
+                if error_kind.as_deref() == Some("DeviceNotRegistered") {
+                    if let Some((_, token)) = chunk.iter().find(|(id, _)| id == receipt_id) {
+                        stale.push(token.clone());
+                    }
+                }
+            }
+            for token in stale {
+                self.unregister(&token).await;
             }
         }
     }
