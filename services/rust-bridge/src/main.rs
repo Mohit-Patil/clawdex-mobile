@@ -941,6 +941,17 @@ impl PushService {
             PushEvent::TurnCompleted => None,
         };
 
+        // Drain the accumulated reply buffer on completion regardless of whether
+        // any device is registered, otherwise threads streamed while no device
+        // is subscribed would leak their buffers indefinitely.
+        let reply_preview = match event {
+            PushEvent::TurnCompleted => match thread_id.as_deref() {
+                Some(tid) => self.take_reply_preview(tid).await,
+                None => None,
+            },
+            PushEvent::ApprovalRequested => None,
+        };
+
         let targets: Vec<String> = {
             let registry = self.registry.read().await;
             registry
@@ -956,14 +967,6 @@ impl PushService {
         if targets.is_empty() {
             return;
         }
-
-        let reply_preview = match event {
-            PushEvent::TurnCompleted => match thread_id.as_deref() {
-                Some(tid) => self.take_reply_preview(tid).await,
-                None => None,
-            },
-            PushEvent::ApprovalRequested => None,
-        };
         let (title, body) = match event {
             PushEvent::TurnCompleted => (
                 "Turn finished".to_string(),
@@ -14630,6 +14633,26 @@ mod tests {
         let preview = service.take_reply_preview("t1").await;
         assert_eq!(preview.as_deref(), Some("Done: fixed the bug"));
         // Buffer is consumed.
+        assert!(service.take_reply_preview("t1").await.is_none());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn turn_completed_drains_reply_buffer_with_no_devices() {
+        let dir = std::env::temp_dir().join(format!("clawdex-drain-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let service = PushService::load(&dir, "demo".to_string()).await;
+        // Stream a reply with no devices registered.
+        service
+            .accumulate_reply(
+                "item/agentMessage/delta",
+                &json!({ "threadId": "t1", "field": "text", "delta": "All done" }),
+            )
+            .await;
+        // Completion with an empty registry must still drain the buffer, not leak it.
+        service
+            .handle_notification("turn/completed", &json!({ "threadId": "t1" }))
+            .await;
         assert!(service.take_reply_preview("t1").await.is_none());
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
