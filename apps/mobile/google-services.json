@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "654823102669",
+    "project_id": "clawdex-mobile-push",
+    "storage_bucket": "clawdex-mobile-push.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:654823102669:android:14e0bbdf8c56bd3a723184",
+        "android_client_info": {
+          "package_name": "com.mohitpatil973.clawdexmobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBHNSagvxXZyszZgJnBxTlj467wpiwmNkc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
