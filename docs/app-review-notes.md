@@ -68,6 +68,25 @@ Then:
 - Terminal commands are constrained by server-side allowlist controls and can be disabled entirely.
 - In-app Privacy and Terms screens remain accessible from Settings.
 
+## Push Notifications (new in 5.2.3)
+
+- The user's self-hosted bridge sends push notifications when an agent turn completes or needs approval; the app's WebSocket closes when backgrounded, so the bridge is the sender.
+- Delivery path: bridge → Expo push service → APNs (iOS) / FCM (Android).
+- Notification payloads contain the event type, the bridge project (folder) name, and, for completed turns, a short preview of the agent's reply (last line, max 140 chars). No prompts, code, diffs, or tool output are sent.
+- Notifications are controllable in Settings (master toggle + per-event toggles).
+- Approval notifications include Approve/Deny actions that resolve the approval over the authenticated bridge connection.
+- To exercise notifications during review: enable notifications, background the app, and trigger a turn on the review bridge.
+
+## App Privacy / Data Safety Answers (reply preview)
+
+Because a reply snippet leaves the device via Expo/APNs/FCM when notifications are on, declare:
+
+- Data type: "Other user content" (a truncated snippet of assistant reply text) and a device push token (a non-advertising identifier used solely for notification routing).
+- Linked to identity: No.
+- Used for tracking: No.
+- Purpose: App functionality (delivering notifications the user enabled).
+- Optional: Yes — controlled by the in-app notifications toggle.
+
 ## Guideline Positioning Notes
 
 - The app is for access to user-controlled infrastructure, not a shared cloud shell.
