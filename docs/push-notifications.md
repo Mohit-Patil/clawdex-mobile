@@ -24,14 +24,20 @@ payload.
 
 ## What is sent
 
-Payloads carry only:
+Payloads carry:
 
 - the event type (`turn_completed` or `approval_requested`)
 - the bridge project name (the working directory's folder name)
 - the thread id (in `data`, used for deep-linking when the notification is tapped)
+- for completed turns, a **short preview of the agent's reply** — the first
+  non-empty line, whitespace-collapsed and capped at 140 characters
 
-No code, diffs, prompts, or message content ever leave your network in a
-notification. Metadata transits Expo and Apple/Google push infrastructure.
+This means a snippet of the agent's reply text leaves your network (via Expo and
+Apple/Google push infrastructure) when notifications are enabled. Full diffs,
+prompts, tool output, and the rest of the conversation are never sent. When a
+turn produces no reply text, the notification falls back to a generic "Codex
+finished working in &lt;project&gt;" message. Approval notifications never include
+reply content.
 
 ## Bridge side
 

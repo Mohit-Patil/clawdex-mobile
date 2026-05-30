@@ -677,6 +677,10 @@ const PUSH_REGISTRY_FILE_NAME: &str = ".clawdex-push-registry.json";
 const EXPO_PUSH_SEND_ENDPOINT: &str = "https://exp.host/--/api/v2/push/send";
 const EXPO_PUSH_RECEIPTS_ENDPOINT: &str = "https://exp.host/--/api/v2/push/getReceipts";
 const EXPO_PUSH_BATCH_SIZE: usize = 100;
+// Reply-preview tuning: cap how much streamed text we buffer per thread, and how
+// many characters of the first line we surface in the notification body.
+const PUSH_PREVIEW_ACCUMULATE_CAP: usize = 8000;
+const PUSH_PREVIEW_MAX_CHARS: usize = 140;
 const EXPO_RECEIPT_BATCH_SIZE: usize = 1000;
 // Expo asks senders to wait at least ~15 minutes before fetching delivery receipts.
 const RECEIPT_CHECK_DELAY_SECS: u64 = 900;
@@ -731,6 +735,9 @@ struct PushService {
     project_label: String,
     http: reqwest::Client,
     access_token: Option<String>,
+    // Accumulates the in-flight agent reply text per thread (keyed by threadId),
+    // so a turn/completed push can include a short preview of what the agent said.
+    recent_replies: RwLock<HashMap<String, String>>,
 }
 
 impl PushService {
@@ -750,6 +757,7 @@ impl PushService {
             project_label,
             http: reqwest::Client::new(),
             access_token,
+            recent_replies: RwLock::new(HashMap::new()),
         })
     }
 
@@ -849,7 +857,65 @@ impl PushService {
             .collect()
     }
 
+    /// Pull params.threadId (or thread_id), trimmed and non-empty.
+    fn read_thread_id(params: &Value) -> Option<String> {
+        read_string(params.get("threadId"))
+            .or_else(|| read_string(params.get("thread_id")))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Accumulate streamed agent reply text per thread so a completed turn can
+    /// include a short preview. Handles the app-server delta method and the
+    /// codex-event variant; only text deltas are captured. Returns true if the
+    /// notification was a reply delta (and thus fully handled here).
+    async fn accumulate_reply(&self, method: &str, params: &Value) -> bool {
+        let is_delta = matches!(
+            method,
+            "item/agentMessage/delta" | "codex/event/agent_message_delta"
+        );
+        if !is_delta {
+            return false;
+        }
+        let field_is_text = read_string(params.get("field"))
+            .map(|value| value == "text")
+            .unwrap_or(true);
+        let delta = read_string(params.get("delta"))
+            .or_else(|| read_string(params.get("text")))
+            .unwrap_or_default();
+        if !field_is_text || delta.is_empty() {
+            return true;
+        }
+        if let Some(thread_id) = Self::read_thread_id(params) {
+            let mut replies = self.recent_replies.write().await;
+            let entry = replies.entry(thread_id).or_default();
+            // Cap accumulation so a long turn cannot grow this unbounded.
+            if entry.len() < PUSH_PREVIEW_ACCUMULATE_CAP {
+                entry.push_str(&delta);
+            }
+        }
+        true
+    }
+
+    /// Remove and format the accumulated reply for a thread into a one-line
+    /// preview: first non-empty line, whitespace-collapsed, length-capped.
+    async fn take_reply_preview(&self, thread_id: &str) -> Option<String> {
+        let raw = {
+            let mut replies = self.recent_replies.write().await;
+            replies.remove(thread_id)?
+        };
+        let first_line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
+        let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            return None;
+        }
+        Some(truncate_chars(&collapsed, PUSH_PREVIEW_MAX_CHARS))
+    }
+
     async fn handle_notification(self: &Arc<Self>, method: &str, params: &Value) {
+        if self.accumulate_reply(method, params).await {
+            return;
+        }
         let event = match method {
             "turn/completed" => PushEvent::TurnCompleted,
             "bridge/approval.requested" => PushEvent::ApprovalRequested,
@@ -877,10 +943,18 @@ impl PushService {
             return;
         }
 
+        let reply_preview = match event {
+            PushEvent::TurnCompleted => match thread_id.as_deref() {
+                Some(tid) => self.take_reply_preview(tid).await,
+                None => None,
+            },
+            PushEvent::ApprovalRequested => None,
+        };
         let (title, body) = match event {
             PushEvent::TurnCompleted => (
                 "Turn finished".to_string(),
-                format!("Codex finished working in {}", self.project_label),
+                reply_preview
+                    .unwrap_or_else(|| format!("Codex finished working in {}", self.project_label)),
             ),
             PushEvent::ApprovalRequested => (
                 "Approval needed".to_string(),
@@ -1065,6 +1139,16 @@ impl PushEvent {
             PushEvent::ApprovalRequested => "approval_requested",
         }
     }
+}
+
+/// Truncate to at most `max_chars` characters (char-safe), appending an ellipsis
+/// when content was dropped.
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{}…", truncated.trim_end())
 }
 
 fn token_suffix(token: &str) -> String {
@@ -14480,6 +14564,37 @@ mod tests {
         assert_eq!(token_suffix("ExponentPushToken[abcdef123456]"), "23456]");
         assert_eq!(token_suffix("abc"), "abc");
         assert_eq!(token_suffix(""), "");
+    }
+
+    #[test]
+    fn truncate_chars_caps_and_ellipsizes() {
+        assert_eq!(truncate_chars("short", 140), "short");
+        let long = "a".repeat(200);
+        let out = truncate_chars(&long, 140);
+        assert_eq!(out.chars().count(), 140); // 139 chars + ellipsis
+        assert!(out.ends_with('…'));
+        // Char-safe: must not split a multi-byte char mid-way.
+        let emoji = "🚀".repeat(10);
+        let out = truncate_chars(&emoji, 4);
+        assert_eq!(out.chars().count(), 4);
+    }
+
+    #[tokio::test]
+    async fn take_reply_preview_uses_first_nonempty_line() {
+        let dir = std::env::temp_dir().join(format!("clawdex-preview-{}", std::process::id()));
+        let _ = tokio::fs::create_dir_all(&dir).await;
+        let service = PushService::load(&dir, "demo".to_string()).await;
+        service
+            .accumulate_reply(
+                "item/agentMessage/delta",
+                &json!({ "threadId": "t1", "field": "text", "delta": "  \n Done: fixed the bug\nmore" }),
+            )
+            .await;
+        let preview = service.take_reply_preview("t1").await;
+        assert_eq!(preview.as_deref(), Some("Done: fixed the bug"));
+        // Buffer is consumed.
+        assert!(service.take_reply_preview("t1").await.is_none());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]

@@ -1614,8 +1614,9 @@ export function SettingsScreen({
         </View>
       </BlurView>
       <Text style={styles.subtleHintText}>
-        Notifications are sent by your bridge through Expo&apos;s push service and carry only the
-        event type and the project name — never code or message content.
+        Notifications are sent by your bridge through Expo&apos;s push service. They include a
+        short preview of the agent&apos;s reply (its first line) plus the project name, so reply
+        text leaves your network via Expo and Apple when notifications are on.
       </Text>
       {pushError ? <Text style={styles.errorText}>{pushError}</Text> : null}
 
