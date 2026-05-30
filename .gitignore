@@ -92,3 +92,7 @@ screenshot-preview.png
 /demo/
 /output/
 /apps/clawdex-demo-video/
+
+# Local store-submission credentials (review bridge token etc.) — never commit
+docs/release-notes/*-credentials.local.md
+docs/release-notes/*.local.md
